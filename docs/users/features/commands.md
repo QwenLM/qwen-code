@@ -871,14 +871,47 @@ session registry rather than deriving it.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, refused, expired, or misaddressed (the address changed hands —
-list the agents again) — or released after a hold — a notice appears in
-the sending session's transcript (`Message to <name>: …`). Declined and
-refused are different answers: declined means someone reviewed the
-message and said no, while refused means that session's
-`agents.crossSessionInbound` is `refuse` and nobody saw it at all. The
-model that sent it is not told; if the other session replies, the reply
-arrives as a cross-session message.
+declined, refused, dropped, expired, or misaddressed (the address changed
+hands — list the agents again) — or released after a hold — a notice
+appears in the sending session's transcript (`Message to <name>: …`).
+Declined, refused and dropped are three different answers: declined means
+someone reviewed the message and said no, refused means that session's
+`agents.crossSessionInbound` is `refuse` and nobody saw it at all, and
+dropped means its inbox turned the message away before any of that (see
+below). A burst of drops is answered with one receipt that says how many,
+so a run of them is one line rather than one line each. The model that
+sent it is not told; if the other session replies, the reply arrives as a
+cross-session message.
+
+### Flood protection
+
+A session accepts up to 30 messages at once from one sender and then one
+every two seconds, and up to 60 at once from all senders together and
+then one a second. The second limit exists because a sender names itself:
+rotating that name gets a fresh allowance from the first limit but not
+from the second. A message from another session that repeats that
+sender's previous message word for word within 30 seconds is also turned
+away — a model looping on one sentence mints a fresh message id every
+time, so the text is what catches it. Messages from a script the session
+started and from a trusted controller are exempt from the repeat check,
+because a hook reporting the same line twice is reporting two facts and a
+person saying "continue" twice means it twice; both are still subject to
+the rate limits. Finally, a message that is accepted but cannot be queued
+because the session already has 50 waiting is turned away too.
+
+A message turned away this way is never held, never shown to the model,
+and leaves no record, so the sender can try again later and land. The
+receiving session says so in its transcript at most once a minute per
+sender, with a count of what that line stands for. The sending session
+gets one receipt naming every message the burst cost it, and its
+transcript says to fold what still matters into one later message rather
+than re-sending.
+
+The sending side does not wait to find out. Each session tracks what it
+has sent to each address and refuses a send that the receiver would
+drop, so the model is told to batch before the message is written rather
+than after — and the receiver never spends a connection on a message it
+was going to turn away.
 
 ### Inbox authentication and scripted injection
 
@@ -904,7 +937,10 @@ recognized as the session's own rather than as another session's.
 
 Give every injection a fresh `msgId`. The receiving gate remembers the
 ids it has already settled, so a hook that reuses one is delivered the
-first time and silently deduplicated on every run after that.
+first time and silently deduplicated on every run after that. Repeating
+the same _text_ is fine — the repeat check above does not apply to a
+session's own processes — but the rate limits do apply, so a hook in a
+loop is dropped like any other flood.
 
 An injected message still goes through the inbound gate and is marked as
 not coming from the user, but the gate knows it came from the session's

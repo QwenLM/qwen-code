@@ -15,6 +15,11 @@ import type { ApprovalMode } from '../config/approval-mode.js';
 import { readOwnSessionRecord } from '../services/session-registry.js';
 import { modeClass } from './inbound-gate.js';
 import {
+  PEER_ADMISSION_LIMITS,
+  PEER_BURST_WINDOW_MS,
+  refillBucket,
+} from './peer-admission.js';
+import {
   buildUserFrame,
   canonicalizeMsgId,
   type PeerDeliveryStatus,
@@ -126,16 +131,24 @@ const RECEIPT_TRANSITIONS: Record<
     'refused',
     'expired',
     'misaddressed',
+    'dropped',
   ]),
   // A refusal is decided at admission, so it cannot follow a hold: a
   // message already parked was not turned away. Switching the setting to
   // `refuse` while it sits there settles it as `denied` — someone chose.
+  //
+  // A drop is decided even earlier, before the message is anything to the
+  // receiver at all, so it can only ever follow `pending`. A `dropped`
+  // receipt naming a message this session already saw held or delivered
+  // is answering a *later* frame that reused the id, and applying it
+  // would tell the user a message that did arrive never did.
   held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
   delivered: new Set(['expired', 'misaddressed']),
   denied: new Set(),
   refused: new Set(),
   expired: new Set(),
   misaddressed: new Set(),
+  dropped: new Set(),
 };
 
 /**
@@ -199,6 +212,143 @@ export function trackSentPeerMessageForTest(
 /** Test-only: forget every tracked send. */
 export function resetSentPeerMessagesForTest(): void {
   sentMessages.clear();
+}
+
+/**
+ * Most targets the pacer meters at once. Same shape and reasoning as the
+ * receiver's own sender table.
+ */
+export const MAX_PACED_TARGETS = 256;
+
+/**
+ * This session's model of what each target will accept.
+ *
+ * The receiver drops what arrives too fast and says so, but that answer
+ * comes back over a socket, one round trip later, by which time a model
+ * in a loop has sent five more. Mirroring the receiver's bucket here
+ * turns that into an answer the sender gets *before* it writes: the send
+ * fails, the tool result says to batch, and the receiver never spends a
+ * connection on a message it was going to drop.
+ *
+ * Keyed by socket path rather than by name or session id: the path is
+ * what an inbox is, it is what the receiver meters by (`from` is the
+ * mirror image of this key), and a session that restarts gets a new one —
+ * which is right, because its bucket is new too.
+ *
+ * A mirror can only ever be approximate: this session is not the only one
+ * sending, and the receiver's bucket is shared. It is deliberately no
+ * stricter than the real limit, so it never refuses a send the receiver
+ * would have taken; when it turns out to have been optimistic, a
+ * `rate-limited` receipt empties it (`drainSendPacer`).
+ */
+interface PacedTarget {
+  tokens: number;
+  lastRefill: number;
+  /** Sends in the current burst, for the message the refusal carries. */
+  sentInBurst: number;
+  burstStartedAt: number;
+}
+
+const pacedTargets = new Map<string, PacedTarget>();
+
+function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
+  const existing = pacedTargets.get(ipcPath);
+  if (existing !== undefined) {
+    pacedTargets.delete(ipcPath);
+    pacedTargets.set(ipcPath, existing);
+    return existing;
+  }
+  while (pacedTargets.size >= MAX_PACED_TARGETS) {
+    const oldest = pacedTargets.keys().next().value;
+    if (oldest === undefined) break;
+    pacedTargets.delete(oldest);
+  }
+  const fresh: PacedTarget = {
+    tokens: PEER_ADMISSION_LIMITS.bucketCapacity,
+    lastRefill: now,
+    sentInBurst: 0,
+    burstStartedAt: now,
+  };
+  pacedTargets.set(ipcPath, fresh);
+  return fresh;
+}
+
+/**
+ * Take one token for a send to `ipcPath`, or report that there is none.
+ *
+ * The refund exists because a token stands for a message the receiver
+ * will have to meter, and a frame that was never written is not one. It
+ * is idempotent: a caller that refunds twice must not hand itself an
+ * extra send.
+ */
+function reservePacerToken(
+  ipcPath: string,
+): { ok: true; refund: () => void } | { ok: false; sentInBurst: number } {
+  const now = performance.now();
+  const target = pacedTargetFor(ipcPath, now);
+  target.tokens = refillBucket(
+    target.tokens,
+    target.lastRefill,
+    now,
+    PEER_ADMISSION_LIMITS.bucketCapacity,
+    PEER_ADMISSION_LIMITS.refillPerSecond,
+  );
+  target.lastRefill = now;
+
+  // The burst is over once the bucket is whole again, or once enough time
+  // has passed that it would have been had nothing been sent. Without
+  // this the count in the refusal would grow for the life of the session
+  // and stop describing anything a user could act on.
+  if (
+    target.tokens >= PEER_ADMISSION_LIMITS.bucketCapacity ||
+    now - target.burstStartedAt > PEER_BURST_WINDOW_MS
+  ) {
+    target.sentInBurst = 0;
+    target.burstStartedAt = now;
+  }
+
+  if (target.tokens < 1) {
+    return { ok: false, sentInBurst: target.sentInBurst };
+  }
+  target.tokens -= 1;
+  target.sentInBurst += 1;
+
+  let refunded = false;
+  return {
+    ok: true,
+    refund: () => {
+      if (refunded) return;
+      refunded = true;
+      target.tokens = Math.min(
+        PEER_ADMISSION_LIMITS.bucketCapacity,
+        target.tokens + 1,
+      );
+      target.sentInBurst = Math.max(0, target.sentInBurst - 1);
+    },
+  };
+}
+
+/**
+ * Empty the mirror for `ipcPath`.
+ *
+ * Called when a `rate-limited` receipt arrives: the receiver has just
+ * proved the mirror was reading high — other senders share that bucket,
+ * or the session was already over its limit when this one started. Only
+ * the receiver knows the true level, so the honest thing is to assume
+ * nothing is left and let it refill at the rate the receiver refills at.
+ */
+export function drainSendPacer(ipcPath: string): void {
+  const now = performance.now();
+  const target = pacedTargetFor(ipcPath, now);
+  target.tokens = 0;
+  target.lastRefill = now;
+  target.sentInBurst = PEER_ADMISSION_LIMITS.bucketCapacity;
+  target.burstStartedAt = now;
+}
+
+/** Test-only: forget what every target has been sent. */
+export function resetSendPacerForTest(): void {
+  pacedTargets.clear();
 }
 
 export type PeerSendOutcome =
@@ -321,6 +471,23 @@ export async function sendToPeer(
         'the message is empty — there is nothing to deliver. Say what to send.',
     };
   }
+  // Refused here rather than dropped there. The receiver would turn this
+  // message away, and the only thing writing it anyway buys is a wasted
+  // connection and an answer that arrives too late for a model already
+  // composing the next one. Failing now puts the reason where the caller
+  // will read it: batch, or wait.
+  const reservation = reservePacerToken(peer.ipcPath);
+  if (!reservation.ok) {
+    return {
+      kind: 'failed',
+      peer,
+      address,
+      reason:
+        `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
+        'in the last minute and more would be dropped by its rate limit, so this one was ' +
+        'not sent. Batch what remains into one message, or wait a little before sending more.',
+    };
+  }
   const frame = buildUserFrame({
     content: options.message,
     from: self.ipcPath,
@@ -364,6 +531,10 @@ export async function sendToPeer(
         error.code === 'EBUSY')
     ) {
       sentMessages.delete(canonicalizeMsgId(frame.msgId));
+      // Nothing reached the receiver, so nothing was metered there: give
+      // the token back rather than charging the caller for a send that
+      // never happened.
+      reservation.refund();
     }
     return {
       kind: 'failed',

@@ -16,6 +16,11 @@
  * exists), so messages accepted before then are buffered rather than
  * dropped: a peer that messaged during startup should not have to guess
  * that it needed to wait.
+ *
+ * Rate limiting lives in the gate, but its two reports are wired here:
+ * the receipts that tell a sender it is being dropped travel over the
+ * same socket this owns, and the notices that tell the user go to the
+ * same listeners the held-message notices do.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -28,6 +33,10 @@ import {
   type ApprovalMode,
   canonicalizeMsgId,
   createDebugLogger,
+  drainSendPacer,
+  type DropNotice,
+  DropNoticeThrottle,
+  DropReceiptCoalescer,
   formatPeerDisplay,
   formatPeerEnvelope,
   getPeerControllerRegistryPath,
@@ -35,8 +44,11 @@ import {
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
+  type PeerAdmission,
   type PolicyScope,
+  type PeerControlFrame,
   type PeerDeliveryStatus,
+  type PeerDropReason,
   type PeerFrame,
   type PeerInbox,
   type PeerOrigin,
@@ -96,6 +108,14 @@ export interface PeerReceipt {
   origMsgId: string;
   /** The state the message was in before this receipt. */
   previous: PeerDeliveryStatus | 'pending';
+  /** Which wall a dropped message met. Only set for `status: 'dropped'`. */
+  dropReason?: PeerDropReason;
+  /**
+   * How many of this session's messages this receipt settled, at least
+   * one. A `dropped` receipt stands for a burst, so the transcript says
+   * how many rather than repeating the line — only set for that status.
+   */
+  dropped?: number;
 }
 
 export interface PeerMessagingOptions {
@@ -149,6 +169,14 @@ export interface PeerMessagingOptions {
    * makes a grant apply to whichever sessions the user is running.
    */
   controllerRegistryPath?: string;
+  /**
+   * Meter arrivals with this instead of a fresh one. A test seam: the
+   * limits are minutes wide, so a suite that wants to see a drop injects
+   * a clock rather than sending thirty real messages.
+   */
+  admission?: PeerAdmission;
+  /** How long a dropped-receipt batch waits. A test seam; see the gate. */
+  dropReceiptTrailMs?: number;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
@@ -171,6 +199,9 @@ export class PeerMessaging {
   ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
   private reassertSessionRecord: (() => Promise<void>) | null = null;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
+  private readonly dropListeners = new Set<(notice: DropNotice) => void>();
+  /** Folds dropped receipts so a flood draws few connections, not many. */
+  private dropReceipts: DropReceiptCoalescer | null = null;
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: BufferedDelivery[] = [];
   private controllerRegistryPath: string | null = null;
@@ -207,6 +238,32 @@ export class PeerMessaging {
       options.controllerRegistryPath ?? getPeerControllerRegistryPath();
     messaging.controllerRegistryPath = controllerRegistryPath;
 
+    // Reads `messaging.inbox` at send time rather than capturing it: the
+    // socket is bound below, and a drop can happen before it resolves.
+    const dropReceipts = new DropReceiptCoalescer(
+      ({ frame, reason, droppedMsgIds }) => {
+        if (!frame.from) return;
+        return sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'dropped',
+            origMsgId: frame.msgId,
+            from: messaging.inbox?.socketPath,
+            dropReason: reason,
+            droppedMsgIds,
+          },
+          frame.replyToken,
+        );
+      },
+      options.dropReceiptTrailMs !== undefined
+        ? { trailMs: options.dropReceiptTrailMs }
+        : {},
+    );
+    messaging.dropReceipts = dropReceipts;
+    const dropNotices = new DropNoticeThrottle((notice) =>
+      messaging.emitDropped(notice),
+    );
+
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
@@ -217,8 +274,12 @@ export class PeerMessaging {
         ? { getPolicyScope: options.getPolicyScope }
         : {}),
       isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
+      ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
       deliver: (frame, origin) => messaging.deliver(frame, origin),
+      reportDropped: (frame, reason) => dropReceipts.note(frame, reason),
+      onDropped: (frame, origin, reason) =>
+        dropNotices.note(frame, origin, reason),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
         return sendDeliveryStatus(
@@ -464,6 +525,31 @@ export class PeerMessaging {
     return () => this.receiptListeners.delete(listener);
   }
 
+  /**
+   * Subscribe to notices about messages this session turned away.
+   *
+   * Already throttled when they get here: one per sender per minute,
+   * carrying the count of what it stands for.
+   */
+  onDropped(listener: (notice: DropNotice) => void): () => void {
+    this.dropListeners.add(listener);
+    return () => this.dropListeners.delete(listener);
+  }
+
+  private emitDropped(notice: DropNotice): void {
+    for (const listener of this.dropListeners) {
+      try {
+        listener(notice);
+      } catch (error) {
+        debugLogger.debug(
+          `drop listener threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   private emitReceipt(receipt: PeerReceipt): void {
     for (const listener of this.receiptListeners) {
       try {
@@ -484,8 +570,11 @@ export class PeerMessaging {
     // Settle held messages before the socket goes away: the expiry
     // receipts have to travel over it, and the process exits once close
     // resolves — a receipt still in flight then is one the sender never
-    // receives.
+    // receives. A dropped batch still waiting out its trail is owed the
+    // same, and for the same reason.
     await this.gate?.shutdown();
+    await this.dropReceipts?.flush();
+    this.dropReceipts?.dispose();
     await this.settleUnconsumed();
     await this.inbox?.close();
     // Same pair, same removal as the startup scrub — one writer for it.
@@ -522,12 +611,67 @@ export class PeerMessaging {
   }
 
   /**
+   * Apply a receipt that says a burst of this session's messages was
+   * turned away at the far inbox.
+   *
+   * Every id it names is settled, but only ids this session actually sent
+   * and has not settled already — the same rule every other receipt
+   * follows, applied to a list. A receipt that moves nothing is noise
+   * from a stranger, or a repeat, and says nothing to the user.
+   *
+   * One notice for the whole batch: the point of folding the receipt was
+   * that a flood must not become a flood of lines, and unfolding it here
+   * would undo that.
+   */
+  private onDroppedReceipt(frame: PeerControlFrame): void {
+    const ids = [frame.origMsgId, ...(frame.droppedMsgIds ?? [])];
+    let first: SettledPeerReceipt | undefined;
+    let settledCount = 0;
+    for (const id of ids) {
+      const settled = this.settleSentMessage(id, 'dropped');
+      if (!settled) continue;
+      first ??= settled;
+      settledCount += 1;
+    }
+    if (!first) {
+      debugLogger.debug(
+        `ignoring dropped receipt for ${frame.origMsgId}: unknown message or repeated receipt`,
+      );
+      return;
+    }
+    debugLogger.debug(
+      `dropped receipt from ${first.address} (${frame.dropReason ?? 'unspecified'}) settled ${settledCount} message(s)`,
+    );
+    // The mirror bucket said there was room and the receiver disagreed:
+    // empty it so the next send waits for the rate the receiver actually
+    // refills at rather than for the one this side guessed.
+    if (frame.dropReason === 'rate-limited' && frame.from) {
+      drainSendPacer(frame.from);
+    }
+    this.emitReceipt({
+      status: 'dropped',
+      address: first.address,
+      origMsgId: frame.origMsgId,
+      // A drop can only follow `pending`; the ledger enforced that above.
+      previous: 'pending',
+      ...(frame.dropReason ? { dropReason: frame.dropReason } : {}),
+      dropped: settledCount,
+    });
+  }
+
+  /**
    * `origin` is what the transport established from the connection's auth
    * line — the child token, or a controller grant the user minted. None
    * of it is ever read off the frame.
    */
   private onFrame(frame: PeerFrame, origin: PeerOrigin): void {
     if (frame.type === 'control') {
+      // One dropped receipt can answer for a burst, so it settles a list
+      // of ids and reports once.
+      if (frame.status === 'dropped') {
+        this.onDroppedReceipt(frame);
+        return;
+      }
       // A receipt for a message this session sent. Any process that can
       // reach the socket can write one for any id, so only ids the
       // send-side ledger knows are surfaced; the rest are logged and

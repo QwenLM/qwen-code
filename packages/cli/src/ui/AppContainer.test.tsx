@@ -94,6 +94,8 @@ import {
   type LlmClient,
   type GoalTurnHost,
   describeDeliveryStatus,
+  describeDropReason,
+  type DropNotice,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
@@ -7707,6 +7709,7 @@ describe('AppContainer State Management', () => {
       ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
       emitReceipt: (receipt: PeerReceipt) => void;
+      emitDropped: (notice: DropNotice) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7732,6 +7735,7 @@ describe('AppContainer State Management', () => {
         | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
       let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
+      let dropListener: ((notice: DropNotice) => void) | null = null;
       const value = {
         setSubmitFn: (
           fn: (
@@ -7751,6 +7755,10 @@ describe('AppContainer State Management', () => {
           receiptListener = fn;
           return () => {};
         },
+        onDropped: (fn: (notice: DropNotice) => void) => {
+          dropListener = fn;
+          return () => {};
+        },
         getHeld: () => [],
         decide: vi.fn(),
         reevaluate: vi.fn(),
@@ -7766,6 +7774,10 @@ describe('AppContainer State Management', () => {
         emitReceipt: (receipt) => {
           if (!receiptListener) throw new Error('no receipt listener wired');
           receiptListener(receipt);
+        },
+        emitDropped: (notice) => {
+          if (!dropListener) throw new Error('no drop listener wired');
+          dropListener(notice);
         },
       };
     };
@@ -8223,8 +8235,9 @@ describe('AppContainer State Management', () => {
       expect(notices()).toHaveLength(7);
       expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
 
-      // Expired with no delivery at all: the gate could not queue it
-      // (accept backlog full) — the peer may be alive, so no exit claim.
+      // Expired with no delivery at all now means only that the message
+      // arrived as that session was shutting down: a full queue is a drop
+      // with a reason of its own.
       act(() => {
         peer.emitReceipt({
           status: 'expired',
@@ -8235,7 +8248,151 @@ describe('AppContainer State Management', () => {
       });
       expect(notices()).toHaveLength(8);
       expect(notices()[7]).not.toContain('exited before');
-      expect(notices()[7]).toContain('too busy');
+      expect(notices()[7]).toContain('shutting down');
+    });
+
+    it('says what became of messages the far inbox turned away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+          dropReason: 'duplicate',
+          dropped: 1,
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        "Message to docs-cd: it was dropped at that session's inbox — " +
+          `${describeDropReason('duplicate')}. Treat it as unsent; fold what ` +
+          'still matters into one later message.',
+      );
+
+      // One receipt can stand for a burst, so the line counts rather than
+      // repeating itself.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+          dropReason: 'rate-limited',
+          dropped: 7,
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toBe(
+        "Messages to docs-cd: 7 were dropped at that session's inbox — " +
+          `${describeDropReason('rate-limited')}. Treat them as unsent; fold ` +
+          'what still matters into one later message.',
+      );
+
+      // A receipt from a build that named no reason still says enough.
+      act(() => {
+        peer.emitReceipt({
+          status: 'dropped',
+          address: 'docs-cd',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('it was dropped');
+      expect(notices()[2]).not.toContain('—');
+    });
+
+    it('says when this session is turning a peer away', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Dropped a message'));
+
+      const frame = {
+        msgV: 1,
+        msgId: 'm1',
+        type: 'user' as const,
+        from: '/tmp/peer.sock',
+        fromName: 'docs-cd',
+        priority: 'next' as const,
+        message: { role: 'user' as const, content: 'do a thing' },
+      };
+
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[0]).toBe(
+        'Dropped a message from docs-cd (/tmp/peer.sock): it is sending ' +
+          'faster than this session accepts.',
+      );
+
+      // The count of what one line stands for, so a flood stays one line.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: { selfSent: false },
+          reason: 'duplicate',
+          suppressed: 12,
+        });
+      });
+      expect(notices()[1]).toBe(
+        'Dropped a message from docs-cd (/tmp/peer.sock): it repeated its ' +
+          'previous message within 30 s. (+12 similar dropped)',
+      );
+
+      // A controller is named by the label its user gave it, never by
+      // anything the sender wrote.
+      act(() => {
+        peer.emitDropped({
+          frame,
+          origin: {
+            selfSent: false,
+            controller: { id: 'c_1234abcd', label: 'voice' },
+          },
+          reason: 'queue-full',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[2]).toBe(
+        "Dropped a message from a trusted controller (voice): this session's " +
+          'queue of undelivered peer messages is full.',
+      );
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[3]).toContain('a process this session started');
+
+      act(() => {
+        peer.emitDropped({
+          frame: { ...frame, from: undefined, fromName: undefined },
+          origin: { selfSent: false },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[4]).toContain('from another session');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

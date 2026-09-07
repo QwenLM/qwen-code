@@ -17,8 +17,33 @@ import {
   type InboundPolicy,
   type PolicyScope,
 } from './inbound-gate.js';
+import {
+  PEER_ADMISSION_LIMITS,
+  PeerAdmission,
+  type PeerDropReason,
+} from './peer-admission.js';
 import type { PeerControllerIdentity } from './peer-controllers.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
+
+/**
+ * A meter that admits everything, so a test of the *policy* is not also a
+ * test of the rate limit.
+ *
+ * Most cases here send more messages than a real burst allows, or send
+ * one body repeatedly, and neither is what they are about. The cases that
+ * are about admission build their own meter.
+ */
+function unmeteredAdmission(): PeerAdmission {
+  return new PeerAdmission({
+    limits: {
+      bucketCapacity: 1e6,
+      refillPerSecond: 1e6,
+      globalBucketCapacity: 1e6,
+      globalRefillPerSecond: 1e6,
+      dedupWindowMs: 0,
+    },
+  });
+}
 
 interface Harness {
   gate: InboundGate;
@@ -29,6 +54,14 @@ interface Harness {
   /** The controller grant the gate reported to `deliver`, per delivery. */
   deliveredControllers: Array<PeerControllerIdentity | undefined>;
   statuses: Array<{ msgId: string; status: string }>;
+  /** What the gate told senders it had dropped. */
+  drops: Array<{ msgId: string; reason: PeerDropReason }>;
+  /** What the gate told this session's user it had dropped. */
+  dropNotices: Array<{
+    msgId: string;
+    reason: PeerDropReason;
+    selfSent: boolean;
+  }>;
   heldChanges: number;
   setMode: (mode: ApprovalMode | null) => void;
   setPolicy: (policy: InboundPolicy | undefined) => void;
@@ -50,6 +83,7 @@ function harness(
     heldExpiryMs?: number | null;
     scope?: PolicyScope;
     isControllerValid?: (id: string) => boolean;
+    admission?: PeerAdmission;
   } = {},
 ): Harness {
   let mode: ApprovalMode | null =
@@ -68,10 +102,24 @@ function harness(
   const deliveredAsSelfSent: boolean[] = [];
   const deliveredControllers: Array<PeerControllerIdentity | undefined> = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
+  const drops: Array<{ msgId: string; reason: PeerDropReason }> = [];
+  const dropNotices: Array<{
+    msgId: string;
+    reason: PeerDropReason;
+    selfSent: boolean;
+  }> = [];
   const state = { heldChanges: 0 };
   let deliveryFails = false;
 
   const gate = new InboundGate({
+    admission: initial.admission ?? unmeteredAdmission(),
+    reportDropped: (f, reason) => drops.push({ msgId: f.msgId, reason }),
+    onDropped: (f, origin, reason) =>
+      dropNotices.push({
+        msgId: f.msgId,
+        reason,
+        selfSent: origin.selfSent,
+      }),
     getApprovalMode: () => {
       if (modeThrows) throw new Error('mode getter exploded');
       return mode;
@@ -110,6 +158,8 @@ function harness(
     deliveredAsSelfSent,
     deliveredControllers,
     statuses,
+    drops,
+    dropNotices,
     setHeldExpiryMs: (next) => {
       heldExpiryMs = next;
     },
@@ -149,8 +199,18 @@ function harness(
   } as Harness;
 }
 
+/**
+ * A distinct body per call, so a test that sends several frames is not
+ * incidentally testing the repeat check. Cases about that pass their own
+ * `message`.
+ */
+let bodyCounter = 0;
 function frame(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
-  return { ...buildUserFrame({ content: 'do a thing' }), ...over };
+  bodyCounter += 1;
+  return {
+    ...buildUserFrame({ content: `do a thing ${bodyCounter}` }),
+    ...over,
+  };
 }
 
 describe('mode parity (no explicit setting)', () => {
@@ -613,11 +673,14 @@ describe('settled ids', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.failDelivery();
     const f = frame({ msgId: 'task-0007', fromMode: 'prompting' });
-    expect(h.gate.admit(f)).toBe('refused');
-    expect(h.statuses.at(-1)).toEqual({
+    expect(h.gate.admit(f)).toBe('dropped');
+    // A full queue is a drop with a reason of its own, not an expiry: no
+    // decision was pending, so none can have run out.
+    expect(h.drops.at(-1)).toEqual({
       msgId: 'task-0007',
-      status: 'expired',
+      reason: 'queue-full',
     });
+    expect(h.statuses).toHaveLength(0);
 
     h.recoverDelivery();
     expect(h.gate.admit(f)).toBe('accept');
@@ -665,8 +728,11 @@ describe('a transport that throws', () => {
     expect(calls).toBe(4);
   });
 
-  it('reports expired rather than delivered when delivery fails', () => {
+  it('reports a full queue as a drop rather than as an expiry', () => {
+    // 'expired' would tell the sender a decision ran out; none was ever
+    // pending. The reason says what actually happened.
     const statuses: string[] = [];
+    const drops: string[] = [];
     const gate = new InboundGate({
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
@@ -674,9 +740,11 @@ describe('a transport that throws', () => {
         throw new Error('queue is gone');
       },
       reportStatus: (_frame, status) => statuses.push(status),
+      reportDropped: (_frame, reason) => drops.push(reason),
     });
-    expect(gate.admit(frame({ fromMode: 'prompting' }))).toBe('refused');
-    expect(statuses).toEqual(['expired']);
+    expect(gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(statuses).toEqual([]);
+    expect(drops).toEqual(['queue-full']);
   });
 });
 
@@ -1670,5 +1738,211 @@ describe('parseHeldExpiry', () => {
     expect(parseHeldExpiry('constructor')).toBe(DEFAULT_HELD_EXPIRY_MS);
     expect(parseHeldExpiry(600)).toBe(DEFAULT_HELD_EXPIRY_MS);
     expect(parseHeldExpiry(null)).toBe(DEFAULT_HELD_EXPIRY_MS);
+  });
+});
+
+describe('admission', () => {
+  /** A clock the test drives, so the minute-wide limits stay instant. */
+  function stubClock() {
+    let value = 0;
+    return {
+      now: () => value,
+      advance(ms: number) {
+        value += ms;
+      },
+    };
+  }
+
+  it('drops a sender that outruns its burst, before any policy runs', () => {
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
+    });
+
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+
+    expect(h.delivered).toHaveLength(2);
+    expect(h.drops).toHaveLength(1);
+    expect(h.drops[0]?.reason).toBe('rate-limited');
+    expect(h.dropNotices).toHaveLength(1);
+  });
+
+  it('meters before it looks the id up, so a re-sent id cannot draw a receipt each time', () => {
+    // The settled and held lookups both answer with a receipt, and
+    // receipts are the first thing a flood starves.
+    const h = harness({
+      policy: 'hold',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+    const f = frame({ from: '/tmp/a.sock' });
+
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.admit(f)).toBe('dropped');
+    expect(h.gate.admit(f)).toBe('dropped');
+
+    // One 'held' receipt for the message that landed, and nothing more.
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'held' }]);
+    expect(h.drops).toHaveLength(2);
+  });
+
+  it('meters a sender a refusing session would have turned away anyway', () => {
+    // Otherwise `refuse` is the cheapest way to make a session generate
+    // one outbound connection per inbound frame.
+    const h = harness({
+      policy: 'refuse',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('refused');
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.statuses.filter((s) => s.status === 'refused')).toHaveLength(1);
+  });
+
+  it('leaves no tombstone, so the sender can retry once the burst is over', () => {
+    const clock = stubClock();
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({
+        now: clock.now,
+        // A retry is the same body by definition; this case is about the
+        // tombstone, so the repeat check is out of the way.
+        limits: { bucketCapacity: 1, refillPerSecond: 0.5, dedupWindowMs: 0 },
+      }),
+    });
+
+    h.gate.admit(frame({ from: '/tmp/a.sock', msgId: 'first' }));
+    const rejected = frame({ from: '/tmp/a.sock', msgId: 'second' });
+    expect(h.gate.admit(rejected)).toBe('dropped');
+
+    clock.advance(2000);
+    expect(h.gate.admit(rejected)).toBe('accept');
+    expect(h.delivered).toHaveLength(2);
+  });
+
+  /** The same words twice, under a fresh id each time. */
+  function repeat(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
+    return frame({
+      from: '/tmp/a.sock',
+      message: { role: 'user', content: 'are you done yet' },
+      ...over,
+    });
+  }
+
+  it('drops a peer repeating itself, and says which it was', () => {
+    // A fresh id every time, which is what a model in a retry loop mints:
+    // the id guard cannot see it, so the body is what has to.
+    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+
+    expect(h.gate.admit(repeat())).toBe('accept');
+    expect(h.gate.admit(repeat({ msgId: 'fresh-id' }))).toBe('dropped');
+    expect(h.drops.at(-1)?.reason).toBe('duplicate');
+  });
+
+  it('does not call a repeat from this session own processes a duplicate', () => {
+    // A hook that reports the same line twice is reporting two facts.
+    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+
+    expect(h.gate.admit(repeat(), { selfSent: true })).toBe('accept');
+    expect(
+      h.gate.admit(repeat({ msgId: 'fresh-id' }), { selfSent: true }),
+    ).toBe('accept');
+    expect(h.drops).toHaveLength(0);
+  });
+
+  it('does not call a repeat from a trusted controller a duplicate', () => {
+    const controller = { id: 'c_1234abcd', label: 'voice' };
+    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+
+    expect(h.gate.admit(repeat(), { selfSent: false, controller })).toBe(
+      'accept',
+    );
+    expect(
+      h.gate.admit(repeat({ msgId: 'fresh-id' }), {
+        selfSent: false,
+        controller,
+      }),
+    ).toBe('accept');
+    expect(h.drops).toHaveLength(0);
+  });
+
+  it('still rate limits a sender that is exempt from the repeat check', () => {
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+
+    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
+    expect(
+      h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true }),
+    ).toBe('dropped');
+    expect(h.drops.at(-1)?.reason).toBe('rate-limited');
+  });
+
+  it('meters each sender separately', () => {
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    // A noisy peer must not mute a quiet one.
+    expect(h.gate.admit(frame({ from: '/tmp/b.sock' }))).toBe('accept');
+  });
+
+  it('tells both audiences which origin the dropped message came from', () => {
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+
+    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
+    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
+
+    expect(h.dropNotices.at(-1)?.selfSent).toBe(true);
+  });
+
+  it('does not hold, deliver or announce a dropped message', () => {
+    const h = harness({
+      policy: 'hold',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+    });
+
+    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.delivered).toHaveLength(0);
+    expect(h.heldChanges).toBe(0);
+  });
+
+  it('survives a reporter that throws', () => {
+    const gate = new InboundGate({
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'accept',
+      deliver: () => {},
+      reportDropped: () => {
+        throw new Error('receipt exploded');
+      },
+      onDropped: () => {
+        throw new Error('notice exploded');
+      },
+    });
+
+    expect(() => gate.admit(frame({ from: '/tmp/a.sock' }))).not.toThrow();
+  });
+
+  it('meters with the shipped limits when none is injected', () => {
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'accept',
+      deliver: () => {},
+    });
+
+    for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
+      expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
+    }
+    expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
   });
 });

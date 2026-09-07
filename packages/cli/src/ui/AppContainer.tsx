@@ -44,6 +44,7 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  describeDropReason,
   parseHeldExpiry,
   describeHoldCause,
   describePeerInboxFailure,
@@ -2733,14 +2734,35 @@ export const AppContainer = (props: AppContainerProps) => {
   // them, and nothing here needs to remember what was announced.
   useEffect(() => {
     if (!peerMessaging) return;
-    return peerMessaging.onReceipt(({ status, address, previous }) => {
+    return peerMessaging.onReceipt((receipt) => {
+      const { status, address, previous } = receipt;
       if (status === 'delivered' && previous !== 'held') return;
+      // A dropped receipt can stand for a burst, so it says how many
+      // rather than repeating itself — the whole reason the far side
+      // folded it was to keep a flood from becoming this many lines.
+      if (status === 'dropped') {
+        const count = receipt.dropped ?? 1;
+        const why = receipt.dropReason
+          ? ` — ${describeDropReason(receipt.dropReason)}`
+          : '';
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text:
+              count === 1
+                ? `Message to ${address}: it was dropped at that session's inbox${why}. Treat it as unsent; fold what still matters into one later message.`
+                : `Messages to ${address}: ${count} were dropped at that session's inbox${why}. Treat them as unsent; fold what still matters into one later message.`,
+          },
+          Date.now(),
+        );
+        return;
+      }
       // The wire text for `expired` speaks of a held message, which is
       // only right when the message was held. A delivery corrected to
-      // expired means the session exited with it unread; an expiry with
-      // no delivery at all means the gate could not queue it (its accept
-      // backlog was full) or the session went away — the peer may well be
-      // alive, so the notice must not claim it exited.
+      // expired means the session exited with it unread. An expiry with
+      // no delivery at all now means only that the message arrived as
+      // that session was shutting down — a full queue is reported as a
+      // drop, with its own reason, rather than as an expiry.
       const detail =
         status !== 'expired'
           ? describeDeliveryStatus(status)
@@ -2748,11 +2770,52 @@ export const AppContainer = (props: AppContainerProps) => {
             ? 'That session exited before it read your message; it was not delivered.'
             : previous === 'held'
               ? describeDeliveryStatus(status)
-              : 'Your message expired without being delivered; that session was too busy to queue it, or has exited. Retry once it is idle.';
+              : 'Your message arrived as that session was shutting down; it was not delivered.';
       historyManager.addItem(
         {
           type: MessageType.INFO,
           text: `Message to ${address}: ${detail}`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // Say when a peer is being turned away at this session's own inbox.
+  // Already throttled to one line per sender per minute, carrying the
+  // count of what it stands for: a message about a flood that scaled
+  // with the flood would do to the transcript what the flood was going
+  // to do anyway.
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onDropped(({ frame, origin, reason, suppressed }) => {
+      const name = flattenPeerLabel(frame.fromName ?? '');
+      const address = frame.from ? flattenPeerLabel(frame.from) : '';
+      // Same attribution the delivered envelope uses, and for the same
+      // reason: a controller is named by the label its user gave it, and
+      // a sender's own `fromName` never decides which of the three this
+      // line calls it.
+      const sender = origin.controller
+        ? `a trusted controller (${flattenPeerLabel(origin.controller.label)})`
+        : origin.selfSent
+          ? 'a process this session started'
+          : name.length > 0
+            ? address
+              ? `${name} (${address})`
+              : name
+            : address || 'another session';
+      const cause =
+        reason === 'rate-limited'
+          ? 'it is sending faster than this session accepts'
+          : reason === 'duplicate'
+            ? 'it repeated its previous message within 30 s'
+            : "this session's queue of undelivered peer messages is full";
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Dropped a message from ${sender}: ${cause}.` +
+            (suppressed > 0 ? ` (+${suppressed} similar dropped)` : ''),
         },
         Date.now(),
       );

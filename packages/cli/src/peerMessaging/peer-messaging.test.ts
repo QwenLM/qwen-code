@@ -21,14 +21,17 @@ import {
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  PeerAdmission,
   removePeerController,
   resetPeerControllerRegistryPathForTest,
+  resetSendPacerForTest,
   resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
   trackSentPeerMessageForTest,
   type InboundPolicy,
   type PolicyScope,
+  type PeerControlFrame,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -105,8 +108,10 @@ beforeEach(async () => {
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
-  // The ledger is a module singleton shared by every test in this file.
+  // The ledger and the pacer are module singletons shared by every test
+  // in this file.
   resetSentPeerMessagesForTest();
+  resetSendPacerForTest();
 });
 
 afterEach(async () => {
@@ -131,6 +136,19 @@ async function startSenderInbox(): Promise<PeerInbox> {
   return inbox;
 }
 
+/** A meter that admits everything, so policy tests stay policy tests. */
+function unmeteredAdmission(): PeerAdmission {
+  return new PeerAdmission({
+    limits: {
+      bucketCapacity: 1e6,
+      refillPerSecond: 1e6,
+      globalBucketCapacity: 1e6,
+      globalRefillPerSecond: 1e6,
+      dedupWindowMs: 0,
+    },
+  });
+}
+
 async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
   extra: {
@@ -144,6 +162,8 @@ async function start(
     getHeldExpiryMs?: () => number | null;
     getPolicyScope?: () => PolicyScope | undefined;
     controllerRegistryPath?: string;
+    admission?: PeerAdmission;
+    dropReceiptTrailMs?: number;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -157,6 +177,10 @@ async function start(
     updateSessionRegistryIpcPath: async () => {},
     ipcToken: TEST_TOKEN,
     childToken: TEST_CHILD_TOKEN,
+    // Most cases here send more than a burst, or send one body over and
+    // over, and neither is what they are about. The admission cases build
+    // their own meter.
+    admission: unmeteredAdmission(),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -832,10 +856,11 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(seen).toEqual([1]);
   });
 
-  it('caps the accepted backlog and receipts the overflow as expired', async () => {
+  it('caps the accepted backlog and receipts the overflow as dropped', async () => {
     // Accepted frames drain at one per model turn but arrive at socket
     // speed; once the backlog is full the gate must refuse with an honest
-    // receipt instead of growing the queue without bound.
+    // receipt instead of growing the queue without bound. The receipt is
+    // a drop naming the queue, not an expiry: no decision was pending.
     const sender = await startSenderInbox();
     const started = await PeerMessaging.start({
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
@@ -843,6 +868,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
+      // Short enough that the folded batch lands inside the test.
+      dropReceiptTrailMs: 10,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -872,9 +900,19 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     }
 
     expect(accepted).toBe(MAX_ACCEPTED_BACKLOG);
+    // Five drops, two receipts: the first answers at once and the rest
+    // are folded, so a flood costs the receiver connections it can spare.
+    const dropped = receipts.filter(
+      (r): r is PeerControlFrame =>
+        r.type === 'control' && r.status === 'dropped',
+    );
+    expect(dropped).toHaveLength(2);
+    expect(dropped.every((r) => r.dropReason === 'queue-full')).toBe(true);
+    expect(dropped[0]?.droppedMsgIds).toBeUndefined();
+    expect(dropped[1]?.droppedMsgIds).toHaveLength(overflow - 2);
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
-    ).toHaveLength(overflow);
+    ).toHaveLength(0);
   });
 
   it('bounds the pre-wiring buffer and flushes it in order once wired', async () => {
@@ -885,6 +923,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -915,9 +954,17 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted[MAX_ACCEPTED_BACKLOG - 1]).toContain(
       `early ${MAX_ACCEPTED_BACKLOG - 1}`,
     );
+    // The buffer filling up is the same wall as the queue filling up, so
+    // the overflow is receipted the same way: dropped, naming the queue.
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
-    ).toHaveLength(overflow);
+    ).toHaveLength(0);
+    expect(
+      receipts.filter(
+        (r): r is PeerControlFrame =>
+          r.type === 'control' && r.dropReason === 'queue-full',
+      ).length,
+    ).toBeGreaterThan(0);
   });
 
   it('delivers every shutdown expiry receipt past the send cap', async () => {
@@ -1088,6 +1135,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -1857,5 +1905,143 @@ describe.skipIf(isWindows)('controller grants', () => {
     await settle();
     expect(submitted).toHaveLength(0);
     expect(m.getHeld()).toHaveLength(0);
+  });
+});
+
+describe('PeerMessaging drops', () => {
+  it('answers a flood with one receipt now and one folding the rest', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
+      dropReceiptTrailMs: 10,
+    });
+
+    for (let i = 0; i < 6; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    for (let waits = 0; waits < 50 && receipts.length < 4; waits++) {
+      await settle();
+    }
+
+    expect(submitted).toHaveLength(2);
+    const dropped = receipts.filter(
+      (r): r is PeerControlFrame =>
+        r.type === 'control' && r.status === 'dropped',
+    );
+    expect(dropped).toHaveLength(2);
+    expect(dropped[0]?.dropReason).toBe('rate-limited');
+    expect(dropped[0]?.droppedMsgIds).toBeUndefined();
+    expect(dropped[1]?.droppedMsgIds).toHaveLength(2);
+  });
+
+  it('tells this session user once, with the count it stands for', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+    });
+    const notices: Array<{ reason: string; suppressed: number }> = [];
+    m.onDropped(({ reason, suppressed }) =>
+      notices.push({ reason, suppressed }),
+    );
+
+    for (let i = 0; i < 5; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    await settle();
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toEqual({ reason: 'rate-limited', suppressed: 0 });
+  });
+
+  it('settles every id a folded receipt names, and reports once', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const emitted: Array<{
+      status: string;
+      dropped?: number;
+      dropReason?: string;
+      address: string;
+    }> = [];
+    m.onReceipt(({ status, dropped, dropReason, address }) =>
+      emitted.push({ status, dropped, dropReason, address }),
+    );
+
+    trackSentPeerMessageForTest('sent-a', 'app-ab');
+    trackSentPeerMessageForTest('sent-b', 'app-ab');
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-a',
+        dropReason: 'rate-limited',
+        // One this session never sent: answered for nothing, like every
+        // other receipt naming a stranger's id.
+        droppedMsgIds: ['sent-b', 'never-sent'],
+      }),
+    );
+    await settle();
+
+    expect(emitted).toEqual([
+      {
+        status: 'dropped',
+        dropped: 2,
+        dropReason: 'rate-limited',
+        address: 'app-ab',
+      },
+    ]);
+  });
+
+  it('ignores a dropped receipt for messages it never sent', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const emitted: string[] = [];
+    m.onReceipt(({ status }) => emitted.push(status));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'never-sent',
+        dropReason: 'duplicate',
+      }),
+    );
+    await settle();
+
+    expect(emitted).toHaveLength(0);
+  });
+
+  it('sends a batch still waiting when the session closes', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    await settle();
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped'),
+    ).toHaveLength(1);
+
+    await m.close();
+    messaging = null;
+    for (let waits = 0; waits < 50 && receipts.length < 2; waits++) {
+      await settle();
+    }
+
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped'),
+    ).toHaveLength(2);
   });
 });

@@ -11,7 +11,9 @@ import {
   buildUserFrame,
   canonicalizeMsgId,
   describeDeliveryStatus,
+  describeDropReason,
   encodePeerFrame,
+  MAX_DROPPED_MSG_IDS,
   parsePeerAuthLine,
   parsePeerFrame,
   PEER_FRAME_VERSION,
@@ -339,5 +341,143 @@ describe('auth lines', () => {
         line({ msgV: PEER_FRAME_VERSION + 1, type: 'auth', token: 'tok' }),
       ),
     ).toBeNull();
+  });
+});
+
+describe('dropped receipts', () => {
+  function parseControl(over: Record<string, unknown>) {
+    return parsePeerFrame(
+      JSON.stringify({
+        msgV: 1,
+        msgId: 'a1',
+        type: 'control',
+        action: 'delivery_status',
+        status: 'dropped',
+        origMsgId: 'orig-1',
+        ...over,
+      }),
+    );
+  }
+
+  it('parses a drop with its reason and the ids it folds in', () => {
+    const parsed = parseControl({
+      dropReason: 'rate-limited',
+      droppedMsgIds: ['b2', 'c3'],
+    });
+    expect(parsed).toMatchObject({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      dropReason: 'rate-limited',
+      droppedMsgIds: ['b2', 'c3'],
+    });
+  });
+
+  it('accepts a drop that names neither', () => {
+    const parsed = parseControl({});
+    expect(parsed).toMatchObject({ status: 'dropped' });
+    expect(parsed).not.toHaveProperty('dropReason');
+    expect(parsed).not.toHaveProperty('droppedMsgIds');
+  });
+
+  it('ignores a reason it does not know', () => {
+    expect(parseControl({ dropReason: 'because' })).not.toHaveProperty(
+      'dropReason',
+    );
+  });
+
+  it('skips ids that could not name a message, keeping the rest', () => {
+    // Written by the receiver, but drawn from what senders put on the
+    // wire: an id the parser would refuse at the top of a frame must not
+    // arrive inside one.
+    const parsed = parseControl({
+      droppedMsgIds: ['b2', 'has space', '', 'all', '-leading', 42, 'c3'],
+    });
+    expect(parsed).toMatchObject({ droppedMsgIds: ['b2', 'c3'] });
+  });
+
+  it('ignores a list that is not a list', () => {
+    expect(parseControl({ droppedMsgIds: 'b2' })).not.toHaveProperty(
+      'droppedMsgIds',
+    );
+  });
+
+  it('caps how many ids one receipt can settle', () => {
+    const many = Array.from(
+      { length: MAX_DROPPED_MSG_IDS + 20 },
+      (_, index) => `id${index}`,
+    );
+    const parsed = parseControl({ droppedMsgIds: many });
+    expect((parsed as { droppedMsgIds?: string[] }).droppedMsgIds).toHaveLength(
+      MAX_DROPPED_MSG_IDS,
+    );
+  });
+
+  it('reads the two fields off no other status', () => {
+    // A peer must not be able to settle a list of messages by attaching
+    // it to a receipt that says nothing about them.
+    const parsed = parseControl({
+      status: 'delivered',
+      dropReason: 'rate-limited',
+      droppedMsgIds: ['b2'],
+    });
+    expect(parsed).toMatchObject({ status: 'delivered' });
+    expect(parsed).not.toHaveProperty('dropReason');
+    expect(parsed).not.toHaveProperty('droppedMsgIds');
+  });
+
+  it('writes the two fields only when they are given', () => {
+    const bare = buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+    });
+    expect(bare).not.toHaveProperty('dropReason');
+    expect(bare).not.toHaveProperty('droppedMsgIds');
+
+    const full = buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      dropReason: 'queue-full',
+      droppedMsgIds: ['b2'],
+    });
+    expect(full).toMatchObject({
+      dropReason: 'queue-full',
+      droppedMsgIds: ['b2'],
+    });
+  });
+
+  it('leaves an empty list off the wire', () => {
+    const frame = buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      droppedMsgIds: [],
+    });
+    expect(frame).not.toHaveProperty('droppedMsgIds');
+  });
+
+  it('round-trips a folded receipt', () => {
+    const built = buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      from: '/tmp/a.sock',
+      dropReason: 'duplicate',
+      droppedMsgIds: ['b2', 'c3'],
+    });
+    expect(parsePeerFrame(encodePeerFrame(built).trim())).toEqual(built);
+  });
+
+  it('explains each reason to the sending session', () => {
+    expect(describeDropReason('rate-limited')).toBe(
+      'you sent faster than that session accepts',
+    );
+    expect(describeDropReason('duplicate')).toBe(
+      'it repeated your previous message',
+    );
+    expect(describeDropReason('queue-full')).toBe(
+      'its queue of undelivered peer messages was full',
+    );
+  });
+
+  it('tells a sender not to re-send', () => {
+    expect(describeDeliveryStatus('dropped')).toContain('Treat it as unsent');
   });
 });

@@ -71,17 +71,28 @@
  * sessions from surprising each other, not an access control; the
  * envelope's authority notice and the classifier are what stand up to a
  * hostile peer.
+ *
+ * Before any of that, a message has to get past the admission meter
+ * (`peer-admission.ts`): a fourth outcome, **dropped**, for a sender that
+ * is arriving faster than this session can take, repeating itself, or
+ * writing into a queue with no room left. A drop happens before policy,
+ * so it carries no policy verdict; it also leaves no tombstone, because
+ * nobody decided anything about the message and an honest retry later
+ * should still be able to land. The sender is told once per burst rather
+ * than once per message — see `peer-drop-reports.ts` for why a report
+ * about a flood must not scale with it.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
+import { PeerAdmission, type PeerDropReason } from './peer-admission.js';
 import type { PeerControllerIdentity } from './peer-controllers.js';
 import { canonicalizeMsgId, type PeerUserFrame } from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_INBOUND');
 
 export type InboundPolicy = 'accept' | 'hold' | 'refuse';
-export type GateDecision = 'accept' | 'held' | 'refused';
+export type GateDecision = 'accept' | 'held' | 'refused' | 'dropped';
 
 /**
  * Why a message ended up where it did. Surfaced to the user so a held
@@ -192,6 +203,27 @@ export interface PeerOrigin {
 }
 
 /**
+ * The identity rate limiting and drop reporting meter a sender by.
+ *
+ * The reply address when the sender gave one. It is self-asserted, which
+ * is why a global limit sits behind the per-sender one — but it is also
+ * the only thing that distinguishes two peers, and metering every peer
+ * together would let one noisy session mute the rest.
+ *
+ * A sender with no reply address is metered by what the transport could
+ * establish instead, so a script and a controller do not share one
+ * anonymous bucket with every stranger.
+ */
+export function peerSenderKey(
+  frame: Pick<PeerUserFrame, 'from'>,
+  origin: PeerOrigin,
+): string {
+  if (frame.from) return frame.from;
+  if (origin.controller) return `controller:${origin.controller.id}`;
+  return origin.selfSent ? 'own-process' : 'unknown';
+}
+
+/**
  * setTimeout's 32-bit ceiling. Above it Node clamps the delay to 1 ms and
  * warns, so an unclamped re-arm becomes a busy loop.
  */
@@ -246,6 +278,24 @@ export interface InboundGateOptions {
   getPolicyScope?: () => PolicyScope | undefined;
   /** Whether a controller grant still exists. Absent means valid. */
   isControllerValid?: (id: string) => boolean;
+  /**
+   * Rate and duplicate control, applied before policy. A gate without one
+   * meters with the default limits; sharing one across gates would make
+   * two sessions in one process compete for the same allowance.
+   */
+  admission?: PeerAdmission;
+  /**
+   * Tell the sender its message was dropped. Best-effort, like
+   * `reportStatus`, and expected to fold a burst into few receipts rather
+   * than answering each drop.
+   */
+  reportDropped?: (frame: PeerUserFrame, reason: PeerDropReason) => void;
+  /** Tell this session's user. Absent means nobody is told. */
+  onDropped?: (
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ) => void;
   /** Deliver an accepted message into the session's input queue. */
   deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
   /** Report a terminal outcome back to the sender. Best-effort. */
@@ -356,8 +406,12 @@ export class InboundGate {
    * them, all firing to do the same sweep.
    */
   private expiryTimer: NodeJS.Timeout | null = null;
+  /** How fast senders may arrive. See `peer-admission.ts`. */
+  private readonly admission: PeerAdmission;
 
-  constructor(private readonly options: InboundGateOptions) {}
+  constructor(private readonly options: InboundGateOptions) {
+    this.admission = options.admission ?? new PeerAdmission();
+  }
 
   /** Messages currently parked, oldest first. */
   getHeld(): readonly HeldMessage[] {
@@ -544,6 +598,24 @@ export class InboundGate {
     // trusting the timer to have fired.
     this.expireOverdue();
 
+    // Metered before the id lookups below, not after: those two answer a
+    // re-sent id with a receipt each, so a peer looping on one id would
+    // draw one outbound connection per message — and receipts share a
+    // ceiling with everything else this session sends, so the messages
+    // that lose their receipt first would be the legitimate ones. A drop
+    // is reported through a path that folds a burst instead.
+    const verdict = this.admission.admit({
+      senderKey: peerSenderKey(frame, origin),
+      body: frame.message.content,
+      // A hook reporting the same line twice, or a user repeating
+      // themselves to a controller, is not the model-driven repetition
+      // the duplicate check exists to stop. Both are still rate limited.
+      exemptFromDedup: origin.selfSent || origin.controller !== undefined,
+    });
+    if (!verdict.admitted) {
+      return this.drop(frame, origin, verdict.reason);
+    }
+
     // An id that is already settled has a final answer: repeat its
     // receipt and stop. This is what keeps a re-send from re-parking a
     // swapped body under a handle the user already reviewed.
@@ -602,14 +674,17 @@ export class InboundGate {
     }
 
     if (policy === 'accept') {
-      const ok = this.tryDeliver(frame, origin);
-      if (ok) {
-        this.recordSettled(frame.msgId, 'delivered');
+      if (!this.tryDeliver(frame, origin)) {
+        // The only way delivery throws in production is the accepted
+        // backlog being full, so this is a queue-full drop rather than an
+        // expiry: 'expired' would tell the sender a decision ran out when
+        // no decision was ever pending. The id is deliberately not
+        // settled, so an honest retry once the queue drains can land.
+        return this.drop(frame, origin, 'queue-full');
       }
-      // A failed delivery is transient (the input queue is full); the id
-      // is deliberately not settled, so an honest sender retry can land.
-      void this.report(frame, ok ? 'delivered' : 'expired');
-      return ok ? 'accept' : 'refused';
+      this.recordSettled(frame.msgId, 'delivered');
+      void this.report(frame, 'delivered');
+      return 'accept';
     }
 
     if (this.held.length >= MAX_HELD_MESSAGES) {
@@ -871,6 +946,38 @@ export class InboundGate {
     }
   }
 
+  /**
+   * Turn a message away before it reaches policy, and say so to both
+   * audiences.
+   *
+   * No tombstone: `recordSettled` exists so a re-sent id cannot be
+   * decided twice, and nothing was decided here. A sender that waits and
+   * retries once the burst is over should find the same gate it would
+   * have found if it had waited in the first place.
+   *
+   * Both reporters are best-effort and neither may take the gate down,
+   * for the same reason `report` is wrapped: this runs on the arrival
+   * path of every message.
+   */
+  private drop(
+    frame: PeerUserFrame,
+    origin: PeerOrigin,
+    reason: PeerDropReason,
+  ): GateDecision {
+    debugLogger.debug(`dropped peer message ${frame.msgId} (${reason})`);
+    try {
+      this.options.reportDropped?.(frame, reason);
+    } catch (error) {
+      debugLogger.debug(`reportDropped(${reason}) threw: ${describe(error)}`);
+    }
+    try {
+      this.options.onDropped?.(frame, origin, reason);
+    } catch (error) {
+      debugLogger.debug(`onDropped(${reason}) threw: ${describe(error)}`);
+    }
+    return 'dropped';
+  }
+
   /** Hand a message to the session, reporting whether it landed. */
   private tryDeliver(frame: PeerUserFrame, origin: PeerOrigin): boolean {
     try {
@@ -997,6 +1104,10 @@ export class InboundGate {
       );
     }
   }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function originOf(entry: HeldMessage): PeerOrigin {

@@ -36,14 +36,18 @@ vi.mock('./peer-directory.js', async () => {
 
 const {
   describeSendFailure,
+  drainSendPacer,
   getOwnPeerIdentity,
   lookupSentPeerMessageForTest,
   MAX_TRACKED_SENDS,
+  resetSendPacerForTest,
   resetSentPeerMessagesForTest,
   senderModeClass,
   sendToPeer,
   settleSentPeerMessage,
+  trackSentPeerMessageForTest,
 } = await import('./peer-send.js');
+const { PEER_ADMISSION_LIMITS } = await import('./peer-admission.js');
 const { advertisablePeerAddress, peerRef, resolvePeerTarget } = await import(
   './peer-directory.js'
 );
@@ -82,6 +86,9 @@ const SELF = {
 
 beforeEach(() => {
   resetSentPeerMessagesForTest();
+  // The mirror buckets are process-global like the ledger, so a test that
+  // sends a lot would otherwise pace the one after it.
+  resetSendPacerForTest();
   readOwnSessionRecord.mockReset();
   listMessageablePeers.mockReset();
   sendPeerFrame.mockReset();
@@ -613,6 +620,10 @@ describe('lookupSentPeerMessageForTest', () => {
   it('forgets the oldest send past the cap', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     for (let i = 0; i <= MAX_TRACKED_SENDS; i += 1) {
+      // Two hundred sends to one target is far past what its mirror
+      // bucket allows in a burst; this case is about the ledger's own
+      // cap, so the pacer is kept out of the way.
+      resetSendPacerForTest();
       await sendToPeer({
         target: 'app-ab',
         message: `m${i}`,
@@ -739,5 +750,120 @@ describe('settleSentPeerMessage', () => {
   it('matches ids the way the receiving gate does', async () => {
     const id = await sendOne();
     expect(settleSentPeerMessage(id.toUpperCase(), 'held')).toBeDefined();
+  });
+});
+
+describe('sender-side pacing', () => {
+  const target = peer('p1', 'app-a');
+
+  beforeEach(() => {
+    listMessageablePeers.mockResolvedValue([target]);
+  });
+
+  async function send(message: string) {
+    return sendToPeer({
+      target: 'app-a',
+      message,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+  }
+
+  it('refuses the send that would be dropped, and says what to do instead', async () => {
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      expect((await send(`message ${index}`)).kind).toBe('sent');
+    }
+
+    const refused = await send('one too many');
+    expect(refused.kind).toBe('failed');
+    expect(refused.kind === 'failed' && refused.reason).toContain(
+      `${PEER_ADMISSION_LIMITS.bucketCapacity} were sent`,
+    );
+    expect(refused.kind === 'failed' && refused.reason).toContain(
+      'Batch what remains into one message',
+    );
+  });
+
+  it('does not write, or remember, a send it refused', async () => {
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      await send(`message ${index}`);
+    }
+    const writes = sendPeerFrame.mock.calls.length;
+
+    await send('one too many');
+    // No frame, so no id, so nothing for a receipt to answer for.
+    expect(sendPeerFrame.mock.calls).toHaveLength(writes);
+  });
+
+  it('gives the token back when the frame provably never left', async () => {
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      await send(`message ${index}`);
+    }
+    // Spend nothing: this one never reached the peer.
+    sendPeerFrame.mockRejectedValueOnce(
+      new PeerSendError('gone', 'ECONNREFUSED'),
+    );
+    expect((await send('never arrived')).kind).toBe('failed');
+
+    sendPeerFrame.mockResolvedValue(undefined);
+    expect((await send('next one')).kind).toBe('failed');
+  });
+
+  it('keeps a separate mirror per target', async () => {
+    const other = peer('p2', 'app-b');
+    listMessageablePeers.mockResolvedValue([target, other]);
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      await send(`message ${index}`);
+    }
+    expect((await send('one too many')).kind).toBe('failed');
+
+    // A quiet peer is not paced by a noisy one.
+    const toOther = await sendToPeer({
+      target: 'app-b',
+      message: 'hello',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    expect(toOther.kind).toBe('sent');
+  });
+
+  it('empties the mirror when the receiver says it was already over', async () => {
+    expect((await send('first')).kind).toBe('sent');
+    // Other senders share that bucket, so the receiver is the authority.
+    drainSendPacer(target.ipcPath);
+    expect((await send('second')).kind).toBe('failed');
+  });
+});
+
+describe('dropped receipts on the send side', () => {
+  it('settles a pending message', () => {
+    trackSentPeerMessageForTest('sent-1', 'app-a');
+    expect(settleSentPeerMessage('sent-1', 'dropped')).toEqual({
+      address: 'app-a',
+      previous: 'pending',
+    });
+  });
+
+  it('does not un-hold a message that was already parked', () => {
+    // A drop is decided before the message is anything to the receiver,
+    // so one naming a held message is answering a later frame that reused
+    // the id — applying it would say a delivered message never arrived.
+    trackSentPeerMessageForTest('sent-2', 'app-a');
+    settleSentPeerMessage('sent-2', 'held');
+    expect(settleSentPeerMessage('sent-2', 'dropped')).toBeUndefined();
+  });
+
+  it('does not un-deliver a message that already landed', () => {
+    trackSentPeerMessageForTest('sent-3', 'app-a');
+    settleSentPeerMessage('sent-3', 'delivered');
+    expect(settleSentPeerMessage('sent-3', 'dropped')).toBeUndefined();
+  });
+
+  it('is terminal', () => {
+    trackSentPeerMessageForTest('sent-4', 'app-a');
+    settleSentPeerMessage('sent-4', 'dropped');
+    expect(settleSentPeerMessage('sent-4', 'expired')).toBeUndefined();
+  });
+
+  it('answers for nothing a stranger names', () => {
+    expect(settleSentPeerMessage('never-sent', 'dropped')).toBeUndefined();
   });
 });
