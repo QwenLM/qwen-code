@@ -196,6 +196,31 @@ describe('browser-use builtin resources', () => {
     expect(browserUseIndex).toBeLessThan(script.indexOf("'packages/core'"));
   });
 
+  it('keeps the pinned Playwright installable as a workspace dependency', () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        new URL('../../packages/browser-use/package.json', import.meta.url),
+        'utf8',
+      ),
+    );
+    const lock = JSON.parse(
+      fs.readFileSync(
+        new URL('../../package-lock.json', import.meta.url),
+        'utf8',
+      ),
+    );
+    const workspace = lock.packages['packages/browser-use'];
+    const playwright =
+      lock.packages['packages/browser-use/node_modules/playwright-core'];
+
+    expect(manifest.dependencies['playwright-core']).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(manifest.bundledDependencies).toBeUndefined();
+    expect(manifest.bundleDependencies).toBeUndefined();
+    expect(workspace.bundleDependencies).toBeUndefined();
+    expect(playwright.inBundle).not.toBe(true);
+    expect(playwright.version).toBe(manifest.dependencies['playwright-core']);
+  });
+
   function write(relativePath, contents) {
     const file = path.join(root, relativePath);
     fs.mkdirSync(path.dirname(file), { recursive: true });

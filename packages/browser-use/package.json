@@ -50,8 +50,5 @@
   },
   "dependencies": {
     "playwright-core": "1.62.1"
-  },
-  "bundledDependencies": [
-    "playwright-core"
-  ]
+  }
 }
