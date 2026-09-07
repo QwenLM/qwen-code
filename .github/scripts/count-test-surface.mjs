@@ -606,21 +606,26 @@ function sameContent(a, b) {
   return readFileSync(a).equals(readFileSync(b));
 }
 
-// Nothing was read from this file: no registration of either kind and no
-// assertion, which is what the instrument reports for a shape it does not
-// parse and for a file that declares nothing alike.
+// Nothing the COMPARISON below can see was read from this file: no
+// assertion and no enabled registration, which is what the instrument
+// reports for a shape it does not parse and for a file that declares
+// nothing alike. Disabled registrations do not count as content here,
+// because `sameSurface` cannot see them either -- calling a skips-only
+// file non-empty would route it to a comparator blind to the only thing
+// in it, and no rewrite of it would ever read as movement.
 function isEmptySurface(c) {
-  return (
-    c.declared === 0 && c.enabledTitles.length === 0 && c.disabled.length === 0
-  );
+  return c.declared === 0 && c.enabledTitles.length === 0;
 }
 
 // Two counts describe the same CHARGEABLE surface: the assertion totals
-// and the enabled-registration multiset. Nothing else is compared, because
-// nothing else can be charged -- `enabled` is the count of `test:` keys in
-// that same multiset, and a side's DISABLED registrations reach no signal
-// (only the tip's do), so reading either as movement would raise the
-// baseline for a change the gate can never charge.
+// and the enabled-registration multiset. `enabled` is the count of `test:`
+// keys in that same multiset, so comparing it adds nothing. A side's
+// DISABLED registrations are left out on purpose: they reach no signal --
+// only the tip's do -- so main moving them alone is not coverage arriving,
+// and treating it as such would re-charge a deletion an earlier round
+// already answered for. A file that is NOTHING BUT disabled registrations
+// is not compared here at all; `isEmptySurface` sends it to the bytes,
+// where its rewrites are visible.
 function sameSurface(a, b) {
   const same = (x, y) => {
     if (x.size !== y.size) return false;

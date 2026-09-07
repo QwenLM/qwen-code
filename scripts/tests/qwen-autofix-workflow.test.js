@@ -26753,6 +26753,125 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- a file that is NOTHING BUT disabled registrations, rewritten
+    //    wholesale by main while the round keeps an earlier deletion. The
+    //    surface comparison cannot see disabled registrations, so such a
+    //    file has to reach the bytes or no rewrite of it would ever read
+    //    as main contributing.
+    'preround-absent-main-rewrites-skips-only': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/s.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      seed: ['git rm -q pkg/s.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/s.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S renamed', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-rewrites-s',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/s.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the assertion total: it plants an early return
+    //    ahead of the body, so the registrations and the declared total
+    //    stand while the live count falls.
+    'preround-absent-main-guards': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/g.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/g.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/g.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+          ),
+        }),
+        'git commit -qam main-guards-g',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/g.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the DECLARED total: it deletes an assertion that
+    //    already sat behind a guard, so the live count cannot fall further.
+    'preround-absent-main-drops-behind-guard': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/d.test.ts': testA(
+          "it('a', () => {",
+          '  return;',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      },
+      files: {},
+      seed: ['git rm -q pkg/d.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/d.test.ts': testA(
+            "it('a', () => {",
+            '  return;',
+            '  expect(one()).toBe(1);',
+          ),
+        }),
+        'git commit -qam main-drops-guarded',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/d.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves ONLY the enabled-title multiset: same counts, a
+    //    different test name.
+    'preround-absent-main-renames-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/r.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/r.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/r.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it('a renamed'"),
+          ),
+        }),
+        'git commit -qam main-renames-test',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/r.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
     'main-directory-swap': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -27895,6 +28014,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // Main moving only DISABLED registrations is no coverage and reaches
       // no signal, so it does not put the file back in the baseline.
       acceptsWithoutCharge('preround-absent-main-adds-skip');
+      // ...but a file that is NOTHING BUT disabled registrations is not
+      // compared that way at all: the comparison cannot see its only
+      // content, so it reaches the bytes and a rewrite counts.
+      const skipsOnly = rejectsWeakening(
+        'preround-absent-main-rewrites-skips-only',
+        'test file deleted',
+      );
+      expect(skipsOnly.rejection).toContain('pkg/s.test.ts');
+      // Each field the comparison reads is load-bearing on its own: the
+      // live assertion total, the declared total behind a guard, and the
+      // enabled-title multiset.
+      for (const [shape, path] of [
+        ['preround-absent-main-guards', 'pkg/g.test.ts'],
+        ['preround-absent-main-drops-behind-guard', 'pkg/d.test.ts'],
+        ['preround-absent-main-renames-test', 'pkg/r.test.ts'],
+      ]) {
+        const moved = rejectsWeakening(shape, 'test file deleted');
+        expect(moved.rejection).toContain(path);
+      }
       // Two equally valid merge bases holding the SAME blob cannot change
       // the verdict, so the file is measured...
       acceptsWithoutCharge('crisscross-bases-agree');
@@ -27914,6 +28052,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(crossedPresence.rejection).toContain(
         'test surface could not be measured',
       );
+      expect(crossedPresence.rejection).toContain('pkg/a.test.ts');
       // ...but a path MAIN also added during the round is the baseline's,
       // and dropping it after the merge is the round's deletion.
       const addAdd = rejectsWeakening(
