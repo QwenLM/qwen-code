@@ -176,6 +176,7 @@ interface WebShellSidebarOptions {
   defaultCollapsed?: boolean; // initial collapsed state (persisted in localStorage)
   showCompactToggle?: boolean; // show the collapse button in the chat area (default: true)
   showSessionSourceSwitch?: boolean; // show the Tasks/Channels switch (default: true)
+  showLive?: boolean; // show daemon-owned Live conversations (default: false)
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean; // hide "Projects" header row (default: false = shown)
@@ -198,6 +199,20 @@ sidebar={{
 This removes the Tasks/Channels switch and fixes every active, archived, primary,
 and secondary session query to `sourceType: "default"`. Omitting the option keeps
 the current switch and channel-session access unchanged.
+
+### Live conversations — `showLive`
+
+Live conversations are hidden from embedded hosts by default. Opt in when the
+host should expose the daemon-owned Live group:
+
+Previous releases displayed this group without an explicit option, so hosts
+that rely on it must set `showLive: true` when upgrading.
+
+```tsx
+sidebar={{
+  showLive: true,
+}}
+```
 
 ### ③ Project Header — `hideProjectHeader`
 
@@ -320,11 +335,11 @@ desktop collapse preference.
 
 ## Source locations
 
-| Component           | File                                                                      |
-| ------------------- | ------------------------------------------------------------------------- |
-| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`        |
-| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`    |
-| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`       |
-| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css` |
-| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)            |
-| Entry point (dev)   | `packages/web-shell/client/main.tsx` (`sidebar: true`)                    |
+| Component           | File                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                  |
+| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`              |
+| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`                 |
+| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`           |
+| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)                      |
+| Entry point (dev)   | `packages/web-shell/client/main.tsx` (`sidebar: { enabled: true, showLive: true }`) |

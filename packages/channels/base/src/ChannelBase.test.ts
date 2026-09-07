@@ -92,6 +92,7 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     segment?: unknown;
   }> = [];
+  retiringSessions: string[] = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
@@ -228,6 +229,10 @@ class TestChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.promptStarts.push({ chatId, sessionId, messageId });
+  }
+
+  protected override onSessionRetiring(sessionId: string): void {
+    this.retiringSessions.push(sessionId);
   }
 
   protected override onPromptEnd(
@@ -4822,6 +4827,23 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('retires a closed named task so buffered output is drained', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.retiringSessions = [];
+
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+
+        expect(ch.sent.at(-1)!.text).toContain('Closed task "review"');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps a named task busy for the full shell command', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishShell!: (result: {
@@ -4857,6 +4879,9 @@ describe('ChannelBase', () => {
         expect(ch.sent.at(-1)!.text).toContain(
           'still running or waiting for permission',
         );
+        // A refused close must not retire the task: draining a live task's
+        // buffer would flush output the turn has not finished producing.
+        expect(ch.retiringSessions).toEqual([]);
 
         finishShell({ exitCode: 0, output: 'ok', aborted: false });
         await running;
@@ -5046,9 +5071,13 @@ describe('ChannelBase', () => {
           expect.anything(),
         );
 
+        ch.retiringSessions = [];
         await ch.handleInbound(envelope({ text: '/clear' }));
         expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        // /clear of a named task retires it through the removedIds loop, the
+        // only path that lets an adapter drain what the task had buffered.
+        expect(ch.retiringSessions).toEqual(['s-1']);
 
         await ch.handleInbound(envelope({ text: '/session use feature' }));
         await ch.handleInbound(envelope({ text: '/session use review' }));
@@ -8882,6 +8911,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
       expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+      expect(ch.retiringSessions).toEqual(['s-1']);
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -10611,6 +10641,55 @@ describe('ChannelBase', () => {
         registerBridgeEvents: true,
       } as unknown as ChannelBaseOptions);
       ch.proactiveSupported = true;
+      const dispatch = vi.spyOn(ch, 'dispatchBackgroundResponse');
+      const context = {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent' as const,
+        turnComplete: true,
+      };
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+        context,
+      );
+
+      await vi.waitFor(() => {
+        expect(dispatch).toHaveBeenCalledWith(
+          's-1',
+          'Background final answer.',
+          context,
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactiveTargets).toEqual([target]);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('drops a background response whose route disappeared during resolution', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi
+          .fn()
+          .mockReturnValueOnce(target)
+          .mockReturnValue(undefined),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+      ch.proactiveSupported = true;
 
       (bridge as unknown as EventEmitter).emit(
         'backgroundResponse',
@@ -10618,12 +10697,10 @@ describe('ChannelBase', () => {
         'Background final answer.',
       );
 
-      await vi.waitFor(() => {
-        expect(ch.proactive).toEqual([
-          { chatId: 'chat1', text: 'Background final answer.' },
-        ]);
-      });
-      expect(ch.proactiveTargets).toEqual([target]);
+      await vi.waitFor(() =>
+        expect(router.getTarget.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
+      expect(ch.proactive).toEqual([]);
       expect(ch.sent).toEqual([]);
     });
 
@@ -21260,6 +21337,7 @@ describe('ChannelBase', () => {
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
         expect(btwSignal?.aborted).toBe(true);
         expect(
           (
