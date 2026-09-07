@@ -349,8 +349,28 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return this.loadedSkillContents;
   }
 
-  restoreLoadedSkillsFromHistory(history: Content[]): void {
+  async restoreLoadedSkillsFromHistory(history: Content[]): Promise<void> {
     this.clearLoadedSkills();
+
+    // Restore is keyed off the committed skill cache, and nothing sequences it
+    // against the discovery the SkillTool constructor kicks off — that is a
+    // fire-and-forget `refreshSkills()`, so a resume that reaches this point
+    // first would find `null` and decline every skill in the history, gate
+    // included. `getCachedSkills()` returning `null` means specifically "no
+    // refresh has committed yet", so await one rather than treating a cold
+    // cache as an empty one. A warm cache makes this a no-op; only the
+    // genuinely-cold case pays for a scan.
+    if (this.skillManager.getCachedSkills() === null) {
+      try {
+        await this.skillManager.listSkills();
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to load skills while restoring a resumed session; ' +
+            'skills carried by the history will not be re-armed:',
+          error,
+        );
+      }
+    }
 
     const skillByName = new Map<
       string,
@@ -468,6 +488,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // state ("gated by path-based activation"), and this is the same check
     // that backs `pendingConditionalSkillNames` — read from the manager
     // directly so restore does not race the async `refreshSkills`.
+    // Hooks are refused here alongside the `allowedTools` grant, rather than
+    // split off as "a gate is a restriction, so re-arming it is always safe".
+    // A `PreToolUse` hook is not purely a restriction: it runs an arbitrary
+    // command and its output can carry `permissionDecision: 'allow'` (and
+    // `updatedPermissions`), so restoring one for a skill this session has not
+    // activated can widen permissions as easily as narrow them — and it would
+    // leave the hook armed for the whole session while the `paths:` scope that
+    // was supposed to bound it never fired. Refusing both keeps restore's rule
+    // to exactly what the live paths grant.
     if (!this.skillManager.isSkillActive(skill)) {
       this.logSkillNotRestored(skill, 'its `paths:` activation has not fired');
       return;

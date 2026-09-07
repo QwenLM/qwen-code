@@ -567,7 +567,7 @@ export class LlmClient {
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
+      await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
@@ -599,7 +599,7 @@ export class LlmClient {
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(resumedHistory);
+      await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -660,11 +660,17 @@ export class LlmClient {
     }
   }
 
-  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+  private async restoreLoadedSkillsFromHistory(
+    history: Content[],
+  ): Promise<void> {
     const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
-      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | {
+          restoreLoadedSkillsFromHistory?: (
+            history: Content[],
+          ) => void | Promise<void>;
+        }
       | undefined;
-    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+    await skillTool?.restoreLoadedSkillsFromHistory?.(history);
   }
 
   async addHistory(content: Content) {
