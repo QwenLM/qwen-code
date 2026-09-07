@@ -189,8 +189,9 @@ envelope now states that an at-sign address books work, forbids it in status or
 result prose unless another wake is intended, and states that child completion
 already reports to the parent. A fresh run with that wording completed without
 the extra bookings. A separate draft containing the literal word `@mentions`
-was correctly rejected as an unknown agent name; creation-time routing preview
-is not implemented yet.
+was correctly rejected as an unknown agent name. The new-thread form now runs
+the selected assignee through the same admission rule before creation, so a
+full queue or disabled/unknown target is visible before the durable write.
 
 The same live daemon then covered the remaining visible step-9 paths. A fresh
 run recorded transcript offsets `16990..22071`; opening its history row showed

@@ -523,6 +523,97 @@ export function registerMeshRoutes(
     },
   );
 
+  app.post(`${prefix}/threads/preview`, async (req, res) => {
+    const runtime = runtimeFor(req, res);
+    if (!runtime) return;
+    try {
+      const assigneeName = String(
+        (req.body as { assignee?: unknown } | undefined)?.assignee ?? '',
+      )
+        .replace(/^@/, '')
+        .trim();
+      if (!assigneeName) {
+        res.json({
+          targets: [
+            {
+              agentName: 'nobody',
+              willWake: false,
+              reason: 'no_target',
+              unknown: false,
+            },
+          ],
+        });
+        return;
+      }
+      const [agents, { threads }] = await Promise.all([
+        readMeshAgents(runtime.workspaceCwd),
+        listThreads(runtime.workspaceCwd),
+      ]);
+      const target = agents.find(
+        (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
+      );
+      const now = Date.now();
+      const thread: Thread = {
+        schemaVersion: 1,
+        id: 'preview',
+        title: 'preview',
+        body: '',
+        status: 'open',
+        ...(target ? { assigneeAgentId: target.id } : {}),
+        createdAt: now,
+        createdBy: HUMAN_AUTHOR_ID,
+        rootThreadId: 'preview',
+        messages: [],
+        runs: [],
+        nextMessageSequence: 1,
+        deliveryByAgent: {},
+        outbox: [],
+        autoTurnsUsed: 0,
+        tokensUsed: 0,
+      };
+      const decision = decideDispatch({
+        thread,
+        message: {
+          id: 'preview',
+          sequence: 1,
+          authorKind: 'human',
+          from: HUMAN_AUTHOR_ID,
+          authorNameSnapshot: HUMAN_AUTHOR_ID,
+          triggerKind: 'assignment',
+          text: `Assigned to @${assigneeName}.`,
+          mentions: target ? [target.id] : [],
+          outcomes: [],
+          at: now,
+        },
+        target,
+        budget: { autoTurnsUsed: 0, tokensUsed: 0 },
+        agentQueuedElsewhere: target
+          ? threads.reduce(
+              (count, candidate) =>
+                count +
+                candidate.runs.filter(
+                  (run) =>
+                    run.agentId === target.id && run.status === 'queued',
+                ).length,
+              0,
+            )
+          : 0,
+      });
+      res.json({
+        targets: [
+          {
+            agentName: target?.name ?? assigneeName,
+            willWake: decision.kind !== 'skip',
+            ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
+            unknown: !target,
+          },
+        ],
+      });
+    } catch (error) {
+      fail(res, error);
+    }
+  });
+
   /**
    * What a draft reply would do, without doing it.
    *

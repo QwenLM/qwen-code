@@ -38,6 +38,9 @@ export interface ThreadsApi {
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   createThread(input: NewMeshThread): Promise<CreateThreadResult>;
+  previewThread(
+    assignee?: string,
+  ): Promise<{ targets: RoutingPreviewTarget[] }>;
   assignThread(id: string, assignee?: string): Promise<unknown>;
   previewReply(
     id: string,
@@ -88,6 +91,7 @@ function createThreadsHttpApi(
         body: JSON.stringify({ enabled }),
       }),
     createThread: (input) => post('/threads', input),
+    previewThread: (assignee) => post('/threads/preview', { assignee }),
     assignThread: (id, assignee) =>
       request(`/threads/${encodeURIComponent(id)}`, {
         method: 'PATCH',
@@ -138,6 +142,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
   const [draft, setDraft] = useState('');
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
+  const [createPreview, setCreatePreview] = useState<
+    RoutingPreviewTarget[] | undefined
+  >();
   const [transcript, setTranscript] = useState<
     TranscriptSliceView | undefined
   >();
@@ -147,6 +154,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
   const error = actionError ?? refreshError;
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const createAssigneeRef = useRef<string | undefined>();
 
   const refresh = useCallback(async () => {
     if (!client) return;
@@ -187,6 +195,27 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
     }, PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [client, draft, openId]);
+
+  const previewThread = useCallback(
+    (assignee?: string) => {
+      createAssigneeRef.current = assignee;
+      setCreatePreview(undefined);
+      if (!client) return;
+      void client
+        .previewThread(assignee)
+        .then((result) => {
+          if (createAssigneeRef.current === assignee) {
+            setCreatePreview(result.targets);
+          }
+        })
+        .catch(() => {
+          if (createAssigneeRef.current === assignee) {
+            setCreatePreview(undefined);
+          }
+        });
+    },
+    [client],
+  );
 
   const mutate = useCallback(
     async (action: () => Promise<unknown>) => {
@@ -291,6 +320,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
       <ThreadsPage
         agents={agents}
         threads={threads}
+        createPreview={createPreview}
         pending={pending}
         onOpenThread={setOpenId}
         onCreateAgent={(input) => void mutate(() => client.createAgent(input))}
@@ -301,10 +331,12 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
         onCreateThread={(input) =>
           void mutate(async () => {
             const created = await client.createThread(input);
+            setCreatePreview(undefined);
             setOpenId(created.id);
             return created;
           })
         }
+        onPreviewThread={previewThread}
       />
     </>
   );

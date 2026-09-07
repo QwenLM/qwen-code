@@ -9,8 +9,11 @@ import { PlusIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import {
+  explainSkip,
   groupThreads,
   needsAttention,
+  summarizePreview,
+  type RoutingPreviewTarget,
   type ThreadGroup,
   type ThreadSummaryView,
 } from './mesh-view-logic';
@@ -24,6 +27,8 @@ export interface ThreadsPageProps {
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onCreateThread: (input: NewMeshThread) => void;
+  onPreviewThread?: (assignee?: string) => void;
+  createPreview?: readonly RoutingPreviewTarget[];
   pending?: boolean;
   loading?: boolean;
 }
@@ -129,6 +134,8 @@ export function ThreadsPage({
   onDeleteAgent,
   onSetAgentEnabled,
   onCreateThread,
+  onPreviewThread,
+  createPreview,
   pending,
   loading,
 }: ThreadsPageProps) {
@@ -157,6 +164,7 @@ export function ThreadsPage({
       body: String(data.get('body') ?? '').trim(),
       ...(assignee ? { assignee } : {}),
     });
+    onPreviewThread?.(undefined);
     setCreating(undefined);
   };
 
@@ -173,7 +181,13 @@ export function ThreadsPage({
             <PlusIcon data-icon="inline-start" />
             Agent
           </Button>
-          <Button size="sm" onClick={() => setCreating('thread')}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setCreating('thread');
+              onPreviewThread?.(undefined);
+            }}
+          >
             <PlusIcon data-icon="inline-start" />
             Thread
           </Button>
@@ -200,14 +214,47 @@ export function ThreadsPage({
             <strong>New shared thread</strong>
             <input className={styles.field} name="title" placeholder="What needs to be done?" required />
             <textarea className={styles.field} name="body" placeholder="Give the team the full task" required />
-            <select className={styles.field} name="assignee" defaultValue="">
+            <select
+              className={styles.field}
+              name="assignee"
+              defaultValue=""
+              onChange={(event) =>
+                onPreviewThread?.(event.target.value || undefined)
+              }
+            >
               <option value="">No assignee</option>
               {agents.filter((agent) => agent.enabled).map((agent) => (
                 <option key={agent.id} value={agent.name}>{agent.name}</option>
               ))}
             </select>
+            {createPreview ? (
+              <div role="status" className="space-y-1 text-xs text-muted-foreground">
+                <strong>{summarizePreview(createPreview)}</strong>
+                {createPreview
+                  .filter((target) => !target.willWake)
+                  .map((target) => {
+                    const explained = explainSkip(
+                      target.reason ?? '',
+                      target.agentName,
+                    );
+                    return (
+                      <p key={`${target.agentName}:${target.reason ?? 'unknown'}`}>
+                        {explained.what}. {explained.fix}
+                      </p>
+                    );
+                  })}
+              </div>
+            ) : null}
             <div className={styles.formActions}>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setCreating(undefined)}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setCreating(undefined);
+                  onPreviewThread?.(undefined);
+                }}
+              >
                 Cancel
               </Button>
               <Button type="submit" size="sm" disabled={pending}>Create thread</Button>
