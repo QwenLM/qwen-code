@@ -39,12 +39,13 @@ pnpm lockfile, while the checked-in manifests and npm lockfile remain untouched.
 The compatibility hook can be removed when the manifests adopt `workspace:`
 during the final cutover.
 
-New worktrees use `node scripts/setup-worktree.js`. The script prefers Corepack
-so an existing pnpm cache can stay fully offline, and falls back to npm's
-bundled `npx` on Node versions that no longer include Corepack. Both paths use
-the exact pnpm package declared by `packageManager`. The script freezes the
-lockfile and first attempts an offline install from the shared local store. It
-retries with registry access only when that cache-only attempt is incomplete.
+New worktrees use `node scripts/setup-worktree.js`. The script uses Corepack so
+an existing pnpm cache can stay fully offline and the integrity-pinned pnpm
+package declared by `packageManager` is verified before execution. It fails
+closed when Corepack is unavailable; Node versions that no longer bundle it
+must install it separately. The script freezes the lockfile and first
+attempts an offline install from the shared local store. It retries with
+registry access only when that cache-only attempt is incomplete.
 This avoids waiting for pnpm to prefetch optional binaries for other platforms
 on the common warm-store path. The script sets `QWEN_SKIP_PREPARE=1` plus a
 bootstrap-private notice-generation guard, keeping dependency install scripts

@@ -256,8 +256,8 @@ describe('package scripts', () => {
         );
 
         // Native shells expose the path variable as `Path`; a case-sensitive
-        // `env.PATH` read on the spread object would miss it and fall back
-        // to npx.
+        // `env.PATH` read on the spread object would miss it and report
+        // Corepack unavailable.
         const env = { ...process.env, WORKTREE_SETUP_LOG: logFile };
         delete env.PATH;
         delete env.Path;
@@ -283,22 +283,45 @@ describe('package scripts', () => {
     },
   );
 
+  it('fails closed when Corepack is unavailable', () => {
+    const binDir = mkdtempSync(
+      path.join(tmpdir(), 'qwen-worktree-no-corepack-'),
+    );
+    const env = { ...process.env, PATH: binDir };
+    for (const name of Object.keys(env)) {
+      if (name !== 'PATH' && name.toUpperCase() === 'PATH') delete env[name];
+    }
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        { cwd: root, encoding: 'utf8', env },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Corepack is required');
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('falls back to registry access when the pnpm store is incomplete', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
-    const logFile = path.join(binDir, 'npx.log');
+    const logFile = path.join(binDir, 'corepack.log');
 
     try {
       if (process.platform === 'win32') {
         writeFileSync(
-          path.join(binDir, 'npx.cmd'),
-          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%5"=="--offline" exit /b 1\r\n',
+          path.join(binDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%4"=="--offline" exit /b 1\r\n',
         );
       } else {
         writeFileSync(
-          path.join(binDir, 'npx'),
-          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$5" != "--offline" ]\n',
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$4" != "--offline" ]\n',
         );
-        chmodSync(path.join(binDir, 'npx'), 0o755);
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
       }
 
       const result = spawnSync(
@@ -316,15 +339,9 @@ describe('package scripts', () => {
       );
 
       expect(result.status).toBe(0);
-      // The npx spec is the packageManager pin minus the corepack-only
-      // integrity suffix.
-      const pnpmSpec = getPinnedPnpmPackage(readPackageJson()).replace(
-        /\+sha512\.[0-9a-f]{128}$/,
-        '',
-      );
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
-        `1 1 --yes ${pnpmSpec} install --frozen-lockfile --offline`,
-        `1 1 --yes ${pnpmSpec} install --frozen-lockfile --prefer-offline`,
+        '1 1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm install --frozen-lockfile --prefer-offline',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });

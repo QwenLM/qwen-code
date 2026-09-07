@@ -13,16 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { getPinnedPnpmPackage } from './pnpm-package.js';
 
 const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack';
-const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 // The script lives in <repo>/scripts, so it bootstraps the checkout it
 // belongs to no matter which directory the caller runs it from.
 const rootDir = fileURLToPath(new URL('..', import.meta.url));
-const packageManager = getPinnedPnpmPackage(
+getPinnedPnpmPackage(
   JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')),
 );
-// The pin may carry a corepack integrity hash (+sha512.<hex>). Corepack
-// consumes it, but an npx spec only needs name@version.
-const npxPnpmSpec = packageManager.replace(/\+sha512\.[0-9a-f]{128}$/, '');
 const env = {
   ...process.env,
   QWEN_SKIP_PREPARE: '1',
@@ -49,28 +45,20 @@ function findOnPath(command) {
 }
 
 const corepackPath = findOnPath(corepack);
+if (!corepackPath) {
+  console.error(
+    'worktree setup failed: Corepack is required to verify the pinned pnpm package',
+  );
+  process.exit(1);
+}
 
 function runPnpm(args) {
-  const runner = corepackPath
-    ? [corepack, ['pnpm', ...args]]
-    : [npx, ['--yes', npxPnpmSpec, ...args]];
-  let result = spawnSync(runner[0], runner[1], {
+  return spawnSync(corepack, ['pnpm', ...args], {
     cwd: rootDir,
     env,
     shell: process.platform === 'win32',
     stdio: 'inherit',
   });
-
-  if (corepackPath && result.error?.code === 'ENOENT') {
-    result = spawnSync(npx, ['--yes', npxPnpmSpec, ...args], {
-      cwd: rootDir,
-      env,
-      shell: process.platform === 'win32',
-      stdio: 'inherit',
-    });
-  }
-
-  return result;
 }
 
 function install(cacheMode) {
