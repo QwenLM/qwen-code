@@ -256,6 +256,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
 - [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
 - [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
+- [155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-155)
 
 ---
 
@@ -2775,11 +2776,14 @@ In `review-scan` · `Scan for PRs with new feedback`.
 ```text
 Delay-window fallback: a review run parked BEFORE its job
 starts (the 10-minute environment wait) has no review-pr
-check-run yet, but a push now would still cancel it via
-synchronize. Only pull_request_target runs are cancelable —
-comment/review-triggered runs use per-run concurrency groups
-that a synchronize never cancels, so holding the round for
-one would defer autofix for nothing (R2-1). Match against the
+check-run yet, but a push now would still supersede it
+(#10110): a parked or pre-threshold run yields to the push
+and its work is discarded exactly as the old synchronize
+cancel did. Only pull_request_target runs share the PR-scoped
+concurrency group — comment/review-triggered runs use per-run
+groups that a push never queues behind or supersedes, so
+holding the round for one would defer autofix for nothing
+(R2-1). Match against the
 scan's REVIEW_RUNS_JSON fetch — one page of the review
 workflow's runs, empty on lookup failure — by immutable head
 SHA or PR number, never by fork-controlled bare branch name.
@@ -4199,4 +4203,63 @@ sites stay in one lockstep pin — and skips update-branch while the
 reading holds, exactly like the conflict verdict's skip above it. A
 skipped retry reports the gate failure honestly instead; the park's own
 notice is still the scan's job.
+```
+
+<a id="af-155"></a>
+
+### 155. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+The scan's dispatch gate (#8888/#8899) already refuses to start a round
+while review-pr is live, but the loop had one more head-moving write
+outside that hold: this step's stale-base retry calls update-branch at
+REPORT time, hours after the dispatch gate last looked. A review can
+start in that window — a human /review comment, a bot re-request, or a
+run the scan's fail-open probe missed — and the merge push would then
+supersede a lifecycle review run mid-flight (#10110; before the salvage
+threshold that discards its work exactly as the old cancel did), or
+invalidate a command run's posting: every review pins the head it
+reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
+final post when the head moved, so even the uncancellable per-run-group
+reviews lose their whole run to a head move.
+
+So the retry probes for a live review first, with the scan gate's probe
+pair: the statusCheckRollup filter (any live review-pr check from the
+review workflow), then the runs-API fallback for runs still parked in
+the 10-minute delay window with no check-run yet. The probe sees
+LIFECYCLE runs only: a command-triggered run executes against the base
+branch, so its review-pr check attaches to main's commit and never
+shows under the PR's rollup (the review ack comment says the same), and
+the runs fallback is event-scoped to pull_request_target exactly like
+the scan gate's (af-099). An in-flight command review therefore does
+NOT hold the refresh, and the merge push can still invalidate its
+posting — the second hazard named above, still open. Giving command
+runs a PR-head-visible signal (a pending check posted at the ack step,
+matched here) is the mechanism fix; it is deliberately deferred — it
+needs a completion/TTL story for stranded pendings and a lockstep
+decision with the scan gate, whose exclusion of command runs (R2-1)
+this probe copies — so this text scopes the hold to what it actually
+sees.
+On a live review the update is DEFERRED, not skipped: the same 9999
+sentinel MARK_TS the retry branch uses keeps the feedback live, the
+next scan re-runs the round (itself held while the review is still in
+flight), and that round's report step performs the refresh once the
+review has landed. One extra round of latency, bounded by MAX_ROUNDS,
+against hours of discarded review work. At the cap itself (MARK_ROUND ==
+MAX_ROUNDS) the hold yields to the refresh: no later round exists to
+inherit it, and a deferral there would promise a retry the scan's round
+gate forbids — so the last permitted round refreshes the base exactly as
+it did before #10110 (R32-1).
+
+Fail-open on probe errors, deliberately: the probe is an optimization,
+and failing closed would wedge stale-base recovery — the path that
+un-sticks red PRs — on any transient API error. A probe error therefore
+reads as "no review live" and the update proceeds, which is exactly the
+pre-#10110 behavior. The deferred headline joins CONSEC_FAIL's
+streak-reset needles ("deferred a stale-base refresh"): like the
+updated-a-stale-base round it defers to, the round's failure is not
+evidence about the PR, and counting it toward the cap would park a PR
+for having been reviewed at the wrong moment.
 ```

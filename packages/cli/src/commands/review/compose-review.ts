@@ -136,6 +136,7 @@ import {
   stripFooterSpans,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
@@ -729,18 +730,26 @@ function collapseToLine(text: string): string {
 
 /**
  * The per-entry bound the deferred, relocated, duplicate-dropped, AND
- * cannot-tell exits apply: collapse line endings, cap at
- * MAX_DEFERRED_SUGGESTION_CHARS
- * without splitting a surrogate pair, mark a trim with an ellipsis. The
- * relocation exit once bypassed all of it (round-9 finding): twenty-five
- * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
- * the body — the whole review lost at GitHub's 65,536 limit, precisely what
- * the cap on the deferred exit was added to prevent. The free-form
- * bodyCriticals exit is the exception: its entries are the review's only
- * copy of their Criticals, quoted as-is and left unbounded.
+ * cannot-tell exits apply: collapse line endings, strip a trailing footer
+ * the collapse exposed, cap at MAX_DEFERRED_SUGGESTION_CHARS without
+ * splitting a surrogate pair, mark a trim with an ellipsis. The relocation
+ * exit once bypassed all of it (round-9 finding): twenty-five relocated
+ * 4,000-char titles spliced ~100 KB of unbounded model text into the body
+ * — the whole review lost at GitHub's 65,536 limit, precisely what the cap
+ * on the deferred exit was added to prevent. The free-form bodyCriticals
+ * exit is the exception: its entries are the review's only copy of their
+ * Criticals, quoted as-is and left unbounded.
+ *
+ * The footer strip is the folded line's OWN guarantee, applied here so no
+ * exit can reach the fold without it: the multi-line strip keeps a footer
+ * that sits in quoted code, and the collapse flattens that code shape into
+ * a posted line — the duplicates entries reach this fold through
+ * `quotedProse` alone, with no ingest-time line strip ahead of them. It
+ * runs BEFORE the cap, whose ellipsis would break the `$`-anchored match
+ * when the cut lands inside the footer.
  */
 function boundDeferredLine(rendered: string): string {
-  const collapsed = collapseToLine(rendered);
+  const collapsed = stripReviewFooterLine(collapseToLine(rendered));
   let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
   // The cap slices UTF-16 code units; a cut landing inside a surrogate pair
   // leaves a lone high surrogate that serializes as U+FFFD into the posted
@@ -776,9 +785,16 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
     }
     const o = raw as Record<string, unknown>;
     const file = typeof o['file'] === 'string' ? o['file'].trim() : '';
+    // Strip again AFTER the fold: the one-line render flattens a footer
+    // the strip kept as quoted code (an unclosed fence, an indented block)
+    // into a single line, destroying the shape that justified keeping it
+    // — a trailing footer is still trailing once collapsed, so the folded
+    // line is the shape to strip.
     const title =
       typeof o['title'] === 'string'
-        ? stripReviewFooter(o['title']).trim()
+        ? stripReviewFooterLine(
+            collapseToLine(stripReviewFooter(o['title'])),
+          ).trim()
         : '';
     const source = o['source'];
     const severity = o['severity'];
@@ -1156,8 +1172,12 @@ export function floorEnforcedReroute(
     const record = critical
       ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
       : first;
-    const title = collapseToLine(
-      stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+    // Strip again AFTER the fold — the collapsed line is the shape that
+    // posts, for the reason toDeferredEntries states.
+    const title = stripReviewFooterLine(
+      collapseToLine(
+        stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+      ),
     );
     indices.push(i);
     entries.push({
@@ -3392,8 +3412,10 @@ function ingestEntryList(value: unknown, field: string): string[] {
   }
   // No emptiness filter: an entry that normalizes to nothing must reach
   // the renders-nothing gates and fail the draft, not vanish — see the
-  // invariant at the gates below.
-  return raw.map(collapseEntry).map(stripReviewFooter);
+  // invariant at the gates below. The collapsed entry is ONE line the
+  // channel posts as-is, so it strips as a line: an indented entry is not
+  // the code block the multi-line strip would keep a footer inside.
+  return raw.map(collapseEntry).map(stripReviewFooterLine);
 }
 
 /**
