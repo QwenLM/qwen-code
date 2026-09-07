@@ -1286,7 +1286,15 @@ jobs:
         needs.test.outputs.ci_profile == 'full'
       }}
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    timeout-minutes: 20
+    # Routed like test's and lint's, so it needs their allowance too — it was
+    # the last job on the pool still priced flat, and one commit lost it twice:
+    # on hk3-9 `npm ci` alone ran 19m46s of the 20 and never finished, and on
+    # hk4-23 install took 10m33s against 4m53s on hk5-2, leaving the browser
+    # smoke 8m15s before the job died against 2m29s warm. Both phases 2-3x is
+    # the pool, not the diff: the same job passed on the previous commit, which
+    # touches no web-shell file. Hosted runners keep 20 for the reason lint's
+    # copy gives — a genuine hang there should not burn the ECS allowance.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''40'' || ''20'') }}'
     permissions:
       contents: 'read'
     steps:

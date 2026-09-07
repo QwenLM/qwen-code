@@ -9,8 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
-  applySkillAllowedTools,
-  canApplySkillSideEffects,
+  applySkillSideEffects,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
@@ -154,18 +153,12 @@ export class SkillCommandLoader implements ICommandLoader {
                 content: `Skill "${skill.name}" is disabled.`,
               };
             }
-            // Auto-approve the skill's declared allowedTools before its body is submitted.
-            if (this.config && canApplySkillSideEffects(skill, this.config)) {
-              applySkillAllowedTools(
-                this.config.getPermissionManager(),
-                skill.allowedTools,
-                { trustGated: skill.level === 'project' },
-              );
-            } else if (skill.allowedTools?.length) {
-              debugLogger.warn(
-                `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools.`,
-              );
-            }
+            // Apply the skill's declared side effects — allowedTools and
+            // frontmatter hooks — before its body is submitted, exactly as the
+            // Skill tool does when the model invokes it. Registering only the
+            // allowedTools here let a skill's PreToolUse gate silently fail
+            // open on this path (#11067).
+            applySkillSideEffects(this.config, skill);
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),
