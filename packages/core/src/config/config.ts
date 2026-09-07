@@ -9689,27 +9689,27 @@ export class Config {
 
     if (options?.forSubAgent) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
-        const { ThreadPostTool } = await import('../tools/mesh-thread.js');
+        const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);
       });
       await registerLazy(ToolNames.THREAD_WAIT, async () => {
-        const { ThreadWaitTool } = await import('../tools/mesh-thread.js');
+        const { ThreadWaitTool } = await import('../tools/thread-tools.js');
         return new ThreadWaitTool(this);
       });
       await registerLazy(ToolNames.THREAD_BLOCK, async () => {
-        const { ThreadBlockTool } = await import('../tools/mesh-thread.js');
+        const { ThreadBlockTool } = await import('../tools/thread-tools.js');
         return new ThreadBlockTool(this);
       });
       await registerLazy(ToolNames.THREAD_REVIEW, async () => {
-        const { ThreadReviewTool } = await import('../tools/mesh-thread.js');
+        const { ThreadReviewTool } = await import('../tools/thread-tools.js');
         return new ThreadReviewTool(this);
       });
       await registerLazy(ToolNames.THREAD_CREATE, async () => {
-        const { ThreadCreateTool } = await import('../tools/mesh-thread.js');
+        const { ThreadCreateTool } = await import('../tools/thread-tools.js');
         return new ThreadCreateTool(this);
       });
       await registerLazy(ToolNames.THREAD_READ, async () => {
-        const { ThreadReadTool } = await import('../tools/mesh-thread.js');
+        const { ThreadReadTool } = await import('../tools/thread-tools.js');
         return new ThreadReadTool(this);
       });
     }

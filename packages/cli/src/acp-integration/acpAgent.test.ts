@@ -85,12 +85,15 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
-const { mockLaunchMeshAgent, mockReadMeshAgents, mockReadMeshWorkspace } =
-  vi.hoisted(() => ({
-    mockLaunchMeshAgent: vi.fn(),
-    mockReadMeshAgents: vi.fn(),
-    mockReadMeshWorkspace: vi.fn(),
-  }));
+const {
+  mockLaunchWorkspaceAgent,
+  mockReadWorkspaceAgents,
+  mockReadAgentWorkspace,
+} = vi.hoisted(() => ({
+  mockLaunchWorkspaceAgent: vi.fn(),
+  mockReadWorkspaceAgents: vi.fn(),
+  mockReadAgentWorkspace: vi.fn(),
+}));
 
 const { mockExecuteGeneration } = vi.hoisted(() => ({
   mockExecuteGeneration: vi.fn(),
@@ -255,9 +258,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
-  launchMeshAgent: mockLaunchMeshAgent,
-  readMeshAgents: mockReadMeshAgents,
-  readMeshWorkspace: mockReadMeshWorkspace,
+  launchWorkspaceAgent: mockLaunchWorkspaceAgent,
+  readWorkspaceAgents: mockReadWorkspaceAgents,
+  readAgentWorkspace: mockReadAgentWorkspace,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -1105,7 +1108,7 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../runtime/mesh-session-source.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
 import type {
   Agent,
   LoadSessionResponse,
@@ -1288,9 +1291,9 @@ describe('runAcpAgent shutdown cleanup', () => {
   beforeEach(() => {
     resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
-    mockLaunchMeshAgent.mockReset();
-    mockReadMeshAgents.mockReset();
-    mockReadMeshWorkspace.mockReset();
+    mockLaunchWorkspaceAgent.mockReset();
+    mockReadWorkspaceAgents.mockReset();
+    mockReadAgentWorkspace.mockReset();
     delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
     delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
@@ -7137,7 +7140,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it.each(['standalone', MESH_HOST_SESSION_SOURCE_TYPE])(
+  it.each(['standalone', AGENT_HOST_SESSION_SOURCE_TYPE])(
     'rejects direct mutation to the reserved %s source',
     async (sourceType) => {
       const sessionId = 'session-A';
@@ -7157,7 +7160,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         sourceType === 'standalone'
           ? '`standalone` is reserved for daemon-owned session creation'
-          : '`mesh` is reserved for daemon-owned host creation',
+          : '`agent-host` is reserved for daemon-owned host creation',
       );
 
       expect(recording.recordSessionSource).not.toHaveBeenCalled();
@@ -7194,7 +7197,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects forged mesh host creation from an untrusted parent', async () => {
+  it('rejects forged agent host creation from an untrusted parent', async () => {
     await setupSessionMocks('11111111-1111-4111-8111-111111111111');
     const { agent, agentPromise } = await bootInitializedAcpAgent(
       makeSessionSettings(),
@@ -7206,11 +7209,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         mcpServers: [],
         _meta: {
           [SESSION_SOURCE_META_KEY]: {
-            sourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+            sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
           },
         },
       }),
-    ).rejects.toThrow('`mesh` is reserved for daemon-owned host creation');
+    ).rejects.toThrow(
+      '`agent-host` is reserved for daemon-owned host creation',
+    );
     expect(loadCliConfig).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
@@ -7261,20 +7266,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('launches a configured agent only from a trusted mesh host session', async () => {
+  it('launches a configured agent only from a trusted agent host session', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
-    const meshAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
+    const workspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getSessionSourceType = vi
       .fn()
-      .mockReturnValue(MESH_HOST_SESSION_SOURCE_TYPE);
+      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
     innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadMeshWorkspace.mockResolvedValue({ hostSessionId: sessionId });
-    mockReadMeshAgents.mockResolvedValue([meshAgent]);
-    mockLaunchMeshAgent.mockResolvedValue({
+    mockReadAgentWorkspace.mockResolvedValue({ hostSessionId: sessionId });
+    mockReadWorkspaceAgents.mockResolvedValue([workspaceAgent]);
+    mockLaunchWorkspaceAgent.mockResolvedValue({
       status: 'started',
-      runtimeId: 'local:mesh-ag_alice',
-      backgroundAgentId: 'mesh-ag_alice',
+      runtimeId: 'local:agent-ag_alice',
+      backgroundAgentId: 'agent-ag_alice',
       sessionId,
     });
     const { agent, agentPromise } = await bootInitializedAcpAgent(
@@ -7284,17 +7289,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch, {
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
         sessionId,
-        agentId: meshAgent.id,
+        agentId: workspaceAgent.id,
         prompt: 'go',
       }),
     ).resolves.toMatchObject({ status: 'started', sessionId });
-    expect(mockReadMeshWorkspace).toHaveBeenCalledWith('/tmp');
-    expect(mockReadMeshAgents).toHaveBeenCalledWith('/tmp');
-    expect(mockLaunchMeshAgent).toHaveBeenCalledWith(
+    expect(mockReadAgentWorkspace).toHaveBeenCalledWith('/tmp');
+    expect(mockReadWorkspaceAgents).toHaveBeenCalledWith('/tmp');
+    expect(mockLaunchWorkspaceAgent).toHaveBeenCalledWith(
       innerConfig,
-      meshAgent,
+      workspaceAgent,
       'go',
     );
 
@@ -7302,14 +7307,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects a labelled session that is not the claimed mesh host', async () => {
+  it('rejects a labelled session that is not the claimed agent host', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getSessionSourceType = vi
       .fn()
-      .mockReturnValue(MESH_HOST_SESSION_SOURCE_TYPE);
+      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
     innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadMeshWorkspace.mockResolvedValue({ hostSessionId: 'other-host' });
+    mockReadAgentWorkspace.mockResolvedValue({ hostSessionId: 'other-host' });
     const { agent, agentPromise } = await bootInitializedAcpAgent(
       makeSessionSettings(),
       'trusted-capability',
@@ -7317,27 +7322,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch, {
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
         sessionId,
         agentId: 'ag_alice',
         prompt: 'go',
       }),
-    ).rejects.toThrow(/claimed mesh host/);
-    expect(mockReadMeshAgents).not.toHaveBeenCalled();
-    expect(mockLaunchMeshAgent).not.toHaveBeenCalled();
+    ).rejects.toThrow(/claimed agent host/);
+    expect(mockReadWorkspaceAgents).not.toHaveBeenCalled();
+    expect(mockLaunchWorkspaceAgent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('returns launch_failed when the mesh store cannot be read', async () => {
+  it('returns launch_failed when the agent store cannot be read', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getSessionSourceType = vi
       .fn()
-      .mockReturnValue(MESH_HOST_SESSION_SOURCE_TYPE);
+      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
     innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadMeshWorkspace.mockRejectedValue(new Error('mesh store busy'));
+    mockReadAgentWorkspace.mockRejectedValue(new Error('agent store busy'));
     const { agent, agentPromise } = await bootInitializedAcpAgent(
       makeSessionSettings(),
       'trusted-capability',
@@ -7345,13 +7350,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch, {
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
         sessionId,
         agentId: 'ag_alice',
         prompt: 'go',
       }),
-    ).resolves.toEqual({ status: 'launch_failed', error: 'mesh store busy' });
-    expect(mockLaunchMeshAgent).not.toHaveBeenCalled();
+    ).resolves.toEqual({ status: 'launch_failed', error: 'agent store busy' });
+    expect(mockLaunchWorkspaceAgent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -22632,7 +22637,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
-          excludeSourceType: 'mesh',
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -22676,7 +22681,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
-          excludeSourceType: 'mesh',
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -22717,7 +22722,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: expected,
-          excludeSourceType: 'mesh',
+          excludeSourceType: 'agent-host',
         });
       }
     } finally {
@@ -22774,7 +22779,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       expect(listSessions).toHaveBeenCalledWith({
         cursor: 1_797_860_000_000.5,
         size: 2,
-        excludeSourceType: 'mesh',
+        excludeSourceType: 'agent-host',
       });
     } finally {
       mockConnectionState.resolve();
@@ -23320,8 +23325,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   it.each([
     ['load', 'standalone'],
     ['resume', 'standalone'],
-    ['load', MESH_HOST_SESSION_SOURCE_TYPE],
-    ['resume', MESH_HOST_SESSION_SOURCE_TYPE],
+    ['load', AGENT_HOST_SESSION_SOURCE_TYPE],
+    ['resume', AGENT_HOST_SESSION_SOURCE_TYPE],
   ] as const)(
     '%s rejects a %s restore without a trusted daemon parent',
     async (action, sourceType) => {
@@ -23350,7 +23355,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).rejects.toThrow(
           sourceType === 'standalone'
             ? '`standalone` is reserved for daemon-owned session restore'
-            : '`mesh` is reserved for daemon-owned host restore',
+            : '`agent-host` is reserved for daemon-owned host restore',
         );
       } finally {
         mockConnectionState.resolve();

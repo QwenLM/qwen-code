@@ -24,8 +24,8 @@ import type {
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
-import type { MeshRunContext } from '../../agents/mesh/run-context.js';
-import { runMeshTurn } from '../../agents/mesh/runtime-bridge.js';
+import type { AgentRunContext } from '../../agents/workspace-agents/run-context.js';
+import { runAgentTurn } from '../../agents/workspace-agents/runtime-bridge.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
@@ -281,8 +281,8 @@ export type ProgrammaticBackgroundAgentLaunchResult =
 
 interface ProgrammaticBackgroundAgentLaunchOptions {
   agentId: string;
-  meshAgentId: string;
-  meshRun?: MeshRunContext;
+  workspaceAgentId: string;
+  agentRun?: AgentRunContext;
   subagentConfig: SubagentConfig;
   toolConfig: ToolConfig;
 }
@@ -3170,12 +3170,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
-      if (this.programmatic?.meshRun) {
+      if (this.programmatic?.agentRun) {
         contextState.set('external_inputs_override', [
           {
             kind: 'message',
             text: taskPrompt,
-            deliveryId: this.programmatic.meshRun.runId,
+            deliveryId: this.programmatic.agentRun.runId,
           },
         ]);
       }
@@ -3240,9 +3240,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
             agentName: subagentConfig.name,
             agentColor: subagentConfig.color,
-            // Mesh launch input is recorded by its correlated external-input
+            // Agent launch input is recorded by its correlated external-input
             // event; ordinary launches still need this transcript seed.
-            ...(this.programmatic?.meshRun
+            ...(this.programmatic?.agentRun
               ? {}
               : { initialUserPrompt: this.params.prompt }),
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
@@ -3351,9 +3351,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentId: hookOpts.agentId,
           ...(this.programmatic
             ? {
-                meshAgentId: this.programmatic.meshAgentId,
-                ...(this.programmatic.meshRun
-                  ? { meshRun: this.programmatic.meshRun }
+                workspaceAgentId: this.programmatic.workspaceAgentId,
+                ...(this.programmatic.agentRun
+                  ? { agentRun: this.programmatic.agentRun }
                   : {}),
               }
             : {}),
@@ -3826,7 +3826,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           turnAbortController: AbortController,
           fireStartHook: boolean,
         ) => {
-          const meshRun = readAgentMeta(metaPath)?.meshRun;
+          const agentRun = readAgentMeta(metaPath)?.agentRun;
           const framedBgBody = () =>
             this.runWithSubagentSpan(
               this.buildSubagentSpanSpec(
@@ -3845,11 +3845,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   );
                 return runWithAgentContext(
                   hookOpts.agentId,
-                  meshRun
+                  agentRun
                     ? () =>
-                        runMeshTurn({
+                        runAgentTurn({
                           projectRoot: this.config.getProjectRoot(),
-                          context: meshRun,
+                          context: agentRun,
                           emitter: bgEventEmitter,
                           abortController: turnAbortController,
                           metaPath,

@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import type {
   ListSessionsResult,
   SessionListItem,
@@ -265,7 +265,7 @@ export function useSessionPicker({
       try {
         const result: ListSessionsResult = await sessionService.listSessions({
           size: SESSION_PAGE_SIZE,
-          excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+          excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
         });
         setSessionState({
           sessions: result.items,
@@ -290,7 +290,7 @@ export function useSessionPicker({
       const result: ListSessionsResult = await sessionService.listSessions({
         size: SESSION_PAGE_SIZE,
         cursor: sessionState.nextCursor,
-        excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
       setSessionState((prev) => ({
         sessions: [...prev.sessions, ...result.items],

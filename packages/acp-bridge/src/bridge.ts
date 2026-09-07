@@ -230,8 +230,8 @@ import type {
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
-  BridgeMeshDispatchRecord,
-  BridgeMeshAgentLaunchResult,
+  BridgeAgentDispatchRecord,
+  BridgeWorkspaceAgentLaunchResult,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -12361,18 +12361,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
-    async launchMeshAgent(sessionId, agentId, prompt) {
-      return requestSessionStatus<BridgeMeshAgentLaunchResult>(
+    async launchWorkspaceAgent(sessionId, agentId, prompt) {
+      return requestSessionStatus<BridgeWorkspaceAgentLaunchResult>(
         sessionId,
-        SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch,
+        SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch,
         { agentId, prompt },
       );
     },
 
-    async dispatchMeshRuns(sessionId) {
+    async dispatchAgentRuns(sessionId) {
       const result = await requestSessionStatus<{
-        records: BridgeMeshDispatchRecord[];
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch);
+        records: BridgeAgentDispatchRecord[];
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch);
       return result.records;
     },
 

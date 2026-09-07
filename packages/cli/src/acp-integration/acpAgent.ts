@@ -147,14 +147,14 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
-  createMeshDispatchPort,
+  createAgentDispatchPort,
   dispatchOnce,
-  launchMeshAgent,
+  launchWorkspaceAgent,
   readAgentMeta,
-  readMeshAgents,
-  readMeshWorkspace,
-  type MeshAgent,
-  type MeshAgentLaunchResult,
+  readWorkspaceAgents,
+  readAgentWorkspace,
+  type WorkspaceAgent,
+  type WorkspaceAgentLaunchResult,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -409,7 +409,7 @@ import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge/sessionSource';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../runtime/mesh-session-source.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -5001,12 +5001,12 @@ class QwenAgent implements Agent {
       initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
       if (
-        sessionSource?.sourceType === MESH_HOST_SESSION_SOURCE_TYPE &&
+        sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
         !this.isTrustedManagedParent()
       ) {
         throw RequestError.invalidParams(
           undefined,
-          '`mesh` is reserved for daemon-owned host creation',
+          '`agent-host` is reserved for daemon-owned host creation',
         );
       }
       const provisionalStandalone = isReservedStandaloneSessionSourceType(
@@ -5135,12 +5135,12 @@ class QwenAgent implements Agent {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     if (
-      sessionSource?.sourceType === MESH_HOST_SESSION_SOURCE_TYPE &&
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
       !this.isTrustedManagedParent()
     ) {
       throw RequestError.invalidParams(
         undefined,
-        '`mesh` is reserved for daemon-owned host restore',
+        '`agent-host` is reserved for daemon-owned host restore',
       );
     }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
@@ -5623,12 +5623,12 @@ class QwenAgent implements Agent {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     if (
-      sessionSource?.sourceType === MESH_HOST_SESSION_SOURCE_TYPE &&
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
       !this.isTrustedManagedParent()
     ) {
       throw RequestError.invalidParams(
         undefined,
-        '`mesh` is reserved for daemon-owned host restore',
+        '`agent-host` is reserved for daemon-owned host restore',
       );
     }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
@@ -5879,7 +5879,7 @@ class QwenAgent implements Agent {
       return sessionService.listSessions({
         cursor: numericCursor,
         size,
-        excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
     });
 
@@ -8497,8 +8497,8 @@ class QwenAgent implements Agent {
           : params;
       if (
         (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch) &&
+          method === SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -10449,14 +10449,14 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         if (
-          source.sourceType === MESH_HOST_SESSION_SOURCE_TYPE &&
+          source.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
           (!this.isTrustedManagedParent() ||
             session.getConfig().getSessionSourceType() !==
-              MESH_HOST_SESSION_SOURCE_TYPE)
+              AGENT_HOST_SESSION_SOURCE_TYPE)
         ) {
           throw RequestError.invalidParams(
             undefined,
-            '`mesh` is reserved for daemon-owned host creation',
+            '`agent-host` is reserved for daemon-owned host creation',
           );
         }
         if (isCompatibleLiveSessionSource(source)) {
@@ -12261,47 +12261,47 @@ class QwenAgent implements Agent {
         );
         return result;
       }
-      case SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch: {
+      case SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid mesh dispatch request',
+            'Invalid agent dispatch request',
           );
         }
         const config = this.sessionOrThrow(sessionId).getConfig();
-        if (config.getSessionSourceType() !== MESH_HOST_SESSION_SOURCE_TYPE) {
+        if (config.getSessionSourceType() !== AGENT_HOST_SESSION_SOURCE_TYPE) {
           throw RequestError.invalidParams(
             undefined,
-            'Mesh dispatch requires a mesh host session',
+            'Dispatch requires an agent host session',
           );
         }
-        const workspace = await readMeshWorkspace(config.getProjectRoot());
+        const workspace = await readAgentWorkspace(config.getProjectRoot());
         if (workspace.hostSessionId !== config.getSessionId()) {
           throw RequestError.invalidParams(
             undefined,
-            'Mesh dispatch requires the claimed mesh host session',
+            'Dispatch requires the claimed agent host session',
           );
         }
-        const agents = await readMeshAgents(config.getProjectRoot());
+        const agents = await readWorkspaceAgents(config.getProjectRoot());
         const agentIds = new Set(agents.map((agent) => agent.id));
         const registry = config.getBackgroundTaskRegistry();
         for (const entry of registry.getAll()) {
-          const meshAgentId = entry.metaPath
-            ? readAgentMeta(entry.metaPath)?.meshAgentId
+          const workspaceAgentId = entry.metaPath
+            ? readAgentMeta(entry.metaPath)?.workspaceAgentId
             : undefined;
-          if (meshAgentId && !agentIds.has(meshAgentId)) {
+          if (workspaceAgentId && !agentIds.has(workspaceAgentId)) {
             registry.forget(entry.agentId);
           }
         }
         return {
           records: await dispatchOnce(
             config.getProjectRoot(),
-            createMeshDispatchPort(config),
+            createAgentDispatchPort(config),
           ),
         };
       }
-      case SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch: {
+      case SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch: {
         const sessionId = params['sessionId'];
         const agentId = params['agentId'];
         const prompt = params['prompt'];
@@ -12315,50 +12315,50 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid mesh agent launch request',
+            'Invalid workspace agent launch request',
           );
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        if (config.getSessionSourceType() !== MESH_HOST_SESSION_SOURCE_TYPE) {
+        if (config.getSessionSourceType() !== AGENT_HOST_SESSION_SOURCE_TYPE) {
           throw RequestError.invalidParams(
             undefined,
-            'Mesh agents require a mesh host session',
+            'Workspace agents require an agent host session',
           );
         }
         const projectRoot = config.getProjectRoot();
-        let workspace: Awaited<ReturnType<typeof readMeshWorkspace>>;
+        let workspace: Awaited<ReturnType<typeof readAgentWorkspace>>;
         try {
-          workspace = await readMeshWorkspace(projectRoot);
+          workspace = await readAgentWorkspace(projectRoot);
         } catch (error) {
           return {
             status: 'launch_failed',
             error: error instanceof Error ? error.message : String(error),
-          } satisfies MeshAgentLaunchResult;
+          } satisfies WorkspaceAgentLaunchResult;
         }
         if (workspace.hostSessionId !== config.getSessionId()) {
           throw RequestError.invalidParams(
             undefined,
-            'Mesh agents require the claimed mesh host session',
+            'Workspace agents require the claimed agent host session',
           );
         }
-        let agents: MeshAgent[];
+        let agents: WorkspaceAgent[];
         try {
-          agents = await readMeshAgents(projectRoot);
+          agents = await readWorkspaceAgents(projectRoot);
         } catch (error) {
           return {
             status: 'launch_failed',
             error: error instanceof Error ? error.message : String(error),
-          } satisfies MeshAgentLaunchResult;
+          } satisfies WorkspaceAgentLaunchResult;
         }
         const agent = agents.find((candidate) => candidate.id === agentId);
         if (!agent) {
           return {
             status: 'agent_unavailable',
-            error: `Mesh agent "${agentId}" is unavailable.`,
-          } satisfies MeshAgentLaunchResult;
+            error: `Agent "${agentId}" is unavailable.`,
+          } satisfies WorkspaceAgentLaunchResult;
         }
-        return launchMeshAgent(config, agent, prompt);
+        return launchWorkspaceAgent(config, agent, prompt);
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const request = readRuntimeMcpAddRequest(params);

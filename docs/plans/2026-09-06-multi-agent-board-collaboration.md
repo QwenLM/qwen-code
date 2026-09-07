@@ -48,7 +48,7 @@ continuation message. The working path is the same three-way split used by
 `continueResidentAgent` for a completed resident runtime, and cold resume/revive
 otherwise. `queueMessage` returning `false` during finishing is a delivery miss,
 not success; §4 requires durable reconciliation before this design may claim an
-advantage over Multica. Mesh delivery uses the lower-level
+advantage over Multica. Workspace agents delivery uses the lower-level
 `queueExternalInput` with a correlated delivery id; the existing string-only
 `queueMessage` wrapper is insufficient for a durable consumed watermark.
 
@@ -68,7 +68,7 @@ Re-check `BackgroundTaskRegistry.queueMessage`, `AgentEventType.EXTERNAL_MESSAGE
 `PriorSessionID`, `taskWakeupLoop`, `ReasonAlreadyActive`, and
 `decidePostMergeMiss` before changing the execution model.
 
-**Verified in the mesh foundation commit.** Targeted tests, core typecheck, and
+**Verified in this subsystem foundation commit.** Targeted tests, core typecheck, and
 targeted lint found and checked concrete defects that source review predicted:
 `blocked` was absent from store validation, an unknown `@name` fell back to the
 assignee, child budget fallback failed open, running work counted against the
@@ -84,7 +84,7 @@ result instead of a boolean. These contracts were merged from the draft
 #11200/#11202/#11204 branches into #11206. Source and runtime
 tests also disproved one round-2 premise: ordinary resident `task_prompt`
 continuations already emit `EXTERNAL_MESSAGE`, and cold revival explicitly
-seeds the continuation prompt in the transcript. Mesh still uses structured
+seeds the continuation prompt in the transcript. Workspace agents still uses structured
 input because correlation, not transcript presence, is the missing contract.
 
 **Verified locally in steps 2-4.** The capability table denies shell and MCP
@@ -208,7 +208,7 @@ written:
   when it is set. That is the per-session prompt hook the paragraph said did not
   exist.
 - **Tools.** `deriveConfig` already overrides `getToolRegistry` and
-  `getToolInvocationGuard`; #11224 built the mesh read-only guard on exactly
+  `getToolInvocationGuard`; #11224 built this subsystem read-only guard on exactly
   that seam for subagents, and it applies unchanged to a session.
 - **Model.** `getModel` is overridable the same way, and the roster already
   carries a per-agent model.
@@ -216,11 +216,11 @@ written:
 So the persona machinery does not have to be rebuilt. It has to be pointed at a
 session instead of a subagent.
 
-`BridgeSpawnRequest` genuinely has no persona field. But the mesh host session
+`BridgeSpawnRequest` genuinely has no persona field. But the agent host session
 already proves the mechanism that closes that gap: it is spawned with
-`sourceType: 'mesh'` and the child _recognises itself_ at `newSession` and
+`sourceType: 'agent-host'` and the child _recognises itself_ at `newSession` and
 behaves accordingly. An agent session uses the same mechanism with
-`sourceType: 'mesh-agent'` and `sourceId: <agent id>`: the child reads the
+`sourceType: 'agent'` and `sourceId: <agent id>`: the child reads the
 workspace roster, finds its own identity, and applies that agent's definition to
 its own `Config` before the session goes live. No new bridge field, and the
 persona machinery is used where it already works.
@@ -230,20 +230,20 @@ persona machinery is used where it already works.
 The layering was built so that this swap is possible, and it holds. Unchanged:
 the store and its transaction protocol, admission and the budget gates, the
 status aggregate, run close and the outbox, the six thread tools, the prompt
-envelope, REST and Web Shell. All of it addresses agents by `MeshAgent.id` and
+envelope, REST and Web Shell. All of it addresses agents by `WorkspaceAgent.id` and
 threads by file, and none of it knows how a body is started.
 
 What changes is the runtime seam, and only it:
 
-| Concern                | Was                                                   | Becomes                                                                               |
-| ---------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| A body                 | background agent `mesh-<id>` inside the host session  | a session process with `sourceType: 'mesh-agent'`, `sourceId: <id>`                   |
-| Persona                | `convertToRuntimeConfig` into a subagent `toolConfig` | the same conversion, applied by the child to its own session `Config` at `newSession` |
-| Start a turn           | `launchProgrammaticBackgroundAgent`                   | `bridge.spawnOrAttach` then a prompt into that session                                |
-| Inspect                | `registry.get('mesh-<id>')`                           | the bridge's live-session record for that agent                                       |
-| Mid-run steering       | `registry.queueExternalInput`                         | the session's existing mid-prompt input path                                          |
-| Per-turn binding       | `AgentMeta.meshRun` read at the in-process turn seam  | the same record, read by the agent's own process                                      |
-| Usage and drain events | `AgentEventEmitter` in the host process               | the session's own event stream                                                        |
+| Concern                | Was                                                              | Becomes                                                                               |
+| ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| A body                 | background agent `workspace agents-<id>` inside the host session | a session process with `sourceType: 'agent'`, `sourceId: <id>`                        |
+| Persona                | `convertToRuntimeConfig` into a subagent `toolConfig`            | the same conversion, applied by the child to its own session `Config` at `newSession` |
+| Start a turn           | `launchProgrammaticBackgroundAgent`                              | `bridge.spawnOrAttach` then a prompt into that session                                |
+| Inspect                | `registry.get('workspace agents-<id>')`                          | the bridge's live-session record for that agent                                       |
+| Mid-run steering       | `registry.queueExternalInput`                                    | the session's existing mid-prompt input path                                          |
+| Per-turn binding       | `AgentMeta.agentRun` read at the in-process turn seam            | the same record, read by the agent's own process                                      |
+| Usage and drain events | `AgentEventEmitter` in the host process                          | the session's own event stream                                                        |
 
 `dispatch-port.ts` is the whole of it: the dispatcher, its rules, and every
 outcome it can record are unchanged, because the port was always the only thing
@@ -278,7 +278,7 @@ Recorded so implementation does not relitigate them.
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **v1 agents are read-only.** No file writes, no worktrees, no branches.                                                                                                             | Removes all concurrent-write design. The deliverable of a thread is a conclusion, not a diff.                                                                                                                                                 |
 | 2   | Read-only means **workspace file-reading tools only**. Shell, MCP, `save_memory`, context-file writes, and every other persistent-write or host-wide tool are outside that ceiling. | A read-only shell classifier does not confine absolute paths, so it cannot protect secrets outside the workspace. Shell stays denied until execution has a real filesystem sandbox. Agent definitions may narrow the ceiling, never widen it. |
-| 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                         | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                                                                                                     |
+| 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                         | No second permission model. An enabled workspace agent with a missing definition is unavailable, never silently replaced by a generic persona.                                                                                                |
 | 4   | Agents are **scoped to one workspace**.                                                                                                                                             | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                                                                                                    |
 
 The owner settled the v1 MCP policy: every MCP tool fails closed. A later
@@ -291,7 +291,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 5   | **One long-lived execution body per agent**, with memory continuous across threads.                                                                                                                                                                                                                             | Deliberate divergence from Multica's per-(agent, issue) session. Makes the agent serial and makes old threads a persistent trust input.                                                                                                                                                 |
 | 6   | Context growth uses runtime **auto-compaction**, but every run prompt remains self-contained.                                                                                                                                                                                                                   | Compaction exists but is lossy; it invalidates any assumption that an earlier thread frame or delivery is still remembered.                                                                                                                                                             |
-| 7   | The **host session is hidden and kept alive** while mesh agents exist.                                                                                                                                                                                                                                          | The user's model stays "agents and threads". Losing the host degrades resident continuation to transcript-backed cold revive and must be observable.                                                                                                                                    |
+| 7   | The **host session is hidden and kept alive** while workspace agents exist.                                                                                                                                                                                                                                     | The user's model stays "agents and threads". Losing the host degrades resident continuation to transcript-backed cold revive and must be observable.                                                                                                                                    |
 | 8   | **Disabling stops new work; deleting retires the identity and never rewrites history.** Deletion refuses while any run is non-terminal, then closes the agent's session and marks the roster entry retired: it stops being addressable, its status reads `offline`, and every post it ever made keeps its name. | Multica's shape, and the honest one. An agent's posts are evidence another agent reasoned from; erasing the author would make a thread unreadable after the fact. Disable-and-drain remains the reversible middle: already-booked work drains, new work is refused, the session may go. |
 
 ### Conversation
@@ -312,7 +312,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 16  | Two gates: **12 unattended agent deliveries per thread / 1M accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                  | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
 | 17  | A child **inherits the parent's current turn count** and charges tokens to the root.                                                                                                                                                                                                                                                          | Creating a child does not mint immediate unattended turns; a child created at the limit may be gated immediately. Later human input resets only the child being supervised.                                         |
-| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                            | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
+| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Workspace agents reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                | A legitimate long-running tool is never killed for being slow, and workspace agents does not invent a second watchdog policy.                                                                                       |
 | 19  | A stuck run, and any run still `running` after a **daemon restart**, is reconciled once. Restart-recovered registry entries are `paused` and use `resumeBackgroundAgent`; completed entries use resident continue or cold revive. A second execution failure is terminal. A launch failure is typed and terminal unless classified transient. | Recovery follows the runtime's actual state machine and replays only work not committed by the delivery watermark; queued launch failures cannot poison the backlog indefinitely.                                   |
 
 ### Surfaces
@@ -326,11 +326,11 @@ read-only; a private server or trusted-looking name is not evidence.
 ## 3. Data model
 
 ```
-MeshWorkspaceState  schemaVersion, workspaceId, hostSessionId,
+AgentWorkspaceState  schemaVersion, workspaceId, hostSessionId,
                     nextRunSequence
-MeshAgentsFile      schemaVersion, agents[]
+AgentAgentsFile      schemaVersion, agents[]
 
-MeshAgent           id, name, description, color, agentType, model,
+WorkspaceAgent           id, name, description, color, agentType, model,
                     queueLimit, enabled, createdAt,
                     backgroundAgentId, runtimeId              ← execution binding
 
@@ -419,13 +419,13 @@ durable `blocked`/`review` close marker likewise lets restart reconciliation
 finish the workflow close without pretending an accepted-but-undrained message
 was read.
 
-Exact retries of mutating mesh tools are deduplicated by a runtime-derived action
+Exact retries of mutating workspace agents tools are deduplicated by a runtime-derived action
 key `(runId, attempt, invocationSequence)`; the invocation sequence is assigned
 outside model arguments. This does not make a full model replay exactly-once: a
 crash after a visible post may produce a semantically duplicate post on the next
 attempt. That product trade-off remains explicit in §9.
 
-A mesh agent owns one append-only JSONL transcript across threads, so a run is a
+A workspace agent owns one append-only JSONL transcript across threads, so a run is a
 byte range within that file, captured after writer flush. The whole transcript
 is never presented as one run's log.
 
@@ -464,7 +464,7 @@ migrated under the workspace lock with atomic replacement; an unknown newer
 version or failed migration is a fail-closed error, never treated as empty
 state. The pre-migration file is retained until the replacement validates.
 
-Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/mesh/`),
+Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/workspace agents/`),
 not the working tree — the reasoning the durable scheduled-tasks file records,
 plus one more: thread text is written by one agent and fed to another, so it is
 a prompt-injection surface and must never be committed, pulled, or reviewed as
@@ -489,7 +489,7 @@ returns { outcomes, dispatched[] } ───────────────
 dispatcher (daemon)
   scan durable dirty runs/events; process-result notifications are only hints
   choose each agent's oldest queued run by (queueSequence, runId)
-    running on THIS thread → registry.queueExternalInput(mesh delivery)
+    running on THIS thread → registry.queueExternalInput(agent delivery)
        true  → record accepted ids on the run
        false → atomically detach/rebook unaccepted ids
        drain → correlated EXTERNAL_MESSAGE records consumed ids
@@ -574,7 +574,7 @@ or terminal launch failure. `thread_wait()` is unrelated: it is an explicit,
 durable workflow close after delegation, not a scheduler prediction about when
 an already-booked run can start.
 
-All mesh mutations take one workspace lock in v1. At this scale, serial writes
+All workspace agents mutations take one workspace lock in v1. At this scale, serial writes
 are cheaper and safer than a lock hierarchy across agent, root, child, and
 outbox files. It makes cross-thread pending counts and root-token reads
 authoritative at the instant they are read; it does not provide cross-file crash
@@ -650,24 +650,24 @@ action on the child caused it.
 Implemented through the step-6 stacked branch; the shared runtime turn seam is
 kept in the next isolated child PR:
 
-| File                                      | Responsibility                                         |
-| ----------------------------------------- | ------------------------------------------------------ |
-| `core/src/agents/mesh/types.ts`           | Entities and limits                                    |
-| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD, singleton host claim |
-| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                                    |
-| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                                |
-| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock         |
-| `core/src/agents/mesh/thread-status.ts`   | Aggregate status over every run's close obligation     |
-| `core/src/agents/mesh/run-lifecycle.ts`   | Run close, terminal state, status application, outbox  |
-| `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding        |
-| `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers         |
-| `core/src/agents/mesh/capability.ts`      | Read-only name and invocation boundary                 |
-| `core/src/agents/mesh/launcher.ts`        | Persona conversion and typed local launch              |
-| `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only            |
-| `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports    |
-| `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime        |
-| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
-| `acp-bridge` + `cli/src/acp-integration/` | Private daemon-to-host launch control                  |
+| File                                                   | Responsibility                                         |
+| ------------------------------------------------------ | ------------------------------------------------------ |
+| `core/src/agents/workspace-agents/types.ts`            | Entities and limits                                    |
+| `core/src/agents/workspace-agents/store.ts`            | Paths, validation, locking, CRUD, singleton host claim |
+| `core/src/agents/workspace-agents/mentions.ts`         | `@name` → agent ids                                    |
+| `core/src/agents/workspace-agents/dispatch-policy.ts`  | `decideDispatch` — pure                                |
+| `core/src/agents/workspace-agents/thread-actions.ts`   | `postMessage` — append and book under one lock         |
+| `core/src/agents/workspace-agents/thread-status.ts`    | Aggregate status over every run's close obligation     |
+| `core/src/agents/workspace-agents/run-lifecycle.ts`    | Run close, terminal state, status application, outbox  |
+| `core/src/agents/workspace-agents/run-context.ts`      | Per-turn ambient `(agent, run, thread)` binding        |
+| `core/src/agents/workspace-agents/prompt.ts`           | Turn envelope: thread frame, delta, gap, peers         |
+| `core/src/agents/workspace-agents/capability.ts`       | Read-only name and invocation boundary                 |
+| `core/src/agents/workspace-agents/launcher.ts`         | Persona conversion and typed local launch              |
+| `core/src/tools/thread-tools.ts`                       | The six thread tools; ambient identity only            |
+| `core/src/agents/workspace-agents/dispatcher.ts`       | FIFO selection, runtime entry point, parent reports    |
+| `core/src/agents/workspace-agents/dispatch-port.ts`    | The one binding to the background-agent runtime        |
+| `cli/src/serve/workspace-agents/agent-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
+| `acp-bridge` + `cli/src/acp-integration/`              | Private daemon-to-host launch control                  |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -713,8 +713,8 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    scheduled-task keepalive resume deadline; its stacked step remains subject
    to the #11206 whole-branch CI gate and live-model validation in step 7.
 5. **Run envelope and tools** — populate the §3 delivery/provenance fields, add
-   the prompt assembler, correlated mesh external-input/consumed events,
-   per-turn ambient mesh context, incremental run usage recording, and minimal `thread_post`,
+   the prompt assembler, correlated workspace agents external-input/consumed events,
+   per-turn ambient workspace agents context, incremental run usage recording, and minimal `thread_post`,
    `thread_wait`, `thread_block`, `thread_review`, and `thread_read` tools. No
    model-supplied mutation thread, author, run, or idempotency id.
    Split for review: **5a** is the ambient binding and the prompt envelope,
@@ -726,7 +726,7 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
 6. **Minimal in-process dispatcher, no recovery** — pick and atomically claim
    one queued run per agent by `queueSequence`; launch, continue resident,
    resume `paused`, or cold revive; bind the session on success; record runtime
-   delivery and usage events; finish the mesh run when the body returns; and
+   delivery and usage events; finish the agent run when the body returns; and
    consume the parent-report outbox. Handle `capacity_wait` by releasing the
    claim without spending the attempt. This is intentionally the smallest
    dispatcher that can make the next step executable.
@@ -766,9 +766,9 @@ Evidence for the committed admission foundation only:
 
 ```bash
 cd packages/core
-npx vitest run src/agents/mesh/mentions.test.ts \
-  src/agents/mesh/dispatch-policy.test.ts \
-  src/agents/mesh/thread-actions.test.ts
+npx vitest run src/agents/workspace-agents/mentions.test.ts \
+  src/agents/workspace-agents/dispatch-policy.test.ts \
+  src/agents/workspace-agents/thread-actions.test.ts
 # 3 files, 38 tests passed
 ```
 
@@ -777,7 +777,7 @@ child PR merges:
 
 ```bash
 cd packages/core
-npx vitest run src/agents/mesh/capability.test.ts
+npx vitest run src/agents/workspace-agents/capability.test.ts
 # 1 file, 12 tests passed (step 4 adds invocation and definition-narrowing checks)
 ```
 
@@ -786,11 +786,11 @@ child PR merges:
 
 ```bash
 cd packages/core
-npx vitest run src/agents/mesh/mesh-store.test.ts \
-  src/agents/mesh/workspace-lock.test.ts \
-  src/agents/mesh/thread-actions.test.ts \
-  src/agents/mesh/dispatch-policy.test.ts \
-  src/agents/mesh/mentions.test.ts
+npx vitest run src/agents/workspace-agents/store.test.ts \
+  src/agents/workspace-agents/workspace-lock.test.ts \
+  src/agents/workspace-agents/thread-actions.test.ts \
+  src/agents/workspace-agents/dispatch-policy.test.ts \
+  src/agents/workspace-agents/mentions.test.ts
 # 5 files, 59 tests passed
 ```
 
@@ -800,8 +800,8 @@ Supporting local evidence for step 4; #11206 CI remains its gate:
 cd packages/core
 npx vitest run src/agents/background-agent-resume.test.ts \
   src/agents/background-tasks.test.ts \
-  src/agents/mesh/capability.test.ts \
-  src/agents/mesh/launcher.test.ts
+  src/agents/workspace-agents/capability.test.ts \
+  src/agents/workspace-agents/launcher.test.ts
 # 4 files, 218 tests passed
 
 cd packages/acp-bridge
@@ -812,7 +812,7 @@ cd packages/cli
 npx vitest run src/acp-integration/acpAgent.test.ts
 # 1 file, 629 tests passed
 npx vitest run src/serve/scheduled-task-keepalive.test.ts \
-  src/serve/mesh/mesh-host-session.test.ts
+  src/serve/workspace-agents/agent-host-session.test.ts
 # 2 files, 34 tests passed; in-process bridge reload 4.3 ms after a 20 ms reap
 ```
 
@@ -917,7 +917,7 @@ you need input. A plain final answer is not a thread hand-off.
 Eight rules:
 
 - **The binding is structural.** At the actual background-turn seam, wrap each
-  invocation in `runWithMeshRunContext({agentId, runId, threadId}, fn)`. The
+  invocation in `runWithAgentRunContext({agentId, runId, threadId}, fn)`. The
   existing resident continuation re-enters `runBackgroundTurn` and
   `runWithAgentContext` for every turn, so a nested `AsyncLocalStorage` frame is
   valid here. Do not wrap the lifetime launch once, and do not use a mutable
@@ -936,13 +936,13 @@ Eight rules:
   unexplained fragment.
 - **Gaps and replays are explicit.** Retention loss, an unknown watermark, or a
   retry is labelled. Message ids/sequences make duplicate input recognisable.
-- **Mesh turns use structured external input.** The dispatcher supplies one
+- **Workspace agents turns use structured external input.** The dispatcher supplies one
   `{kind: 'message', text, deliveryId}` envelope rather than a bare
   `task_prompt` for launch, resident continuation, paused resume, and cold
   revival. The correlated consumed event and transcript record retain the
   delivery id.
   Ordinary background-agent continuations may keep their legacy string path;
-  they are not durable mesh deliveries.
+  they are not durable workspace agents deliveries.
 - **Trust comes from runtime binding, not a heading.** Today's resident chat has
   no per-turn system-role injection seam. Product must choose between a fixed
   user-role prefix whose authority is established by the ambient binding plus
@@ -981,7 +981,7 @@ cross-thread confusion and trust surface Multica structurally avoids.
 
 **Potentially lower steering latency, once reconciled.** Multica reports
 `ReasonAlreadyActive` and relies on completion reconciliation. Qwen Code can use
-`registry.queueExternalInput` to land correlated mesh input at the next
+`registry.queueExternalInput` to land correlated workspace agents input at the next
 tool-round boundary. That is an advantage only after queue acceptance, consumed
 events, finishing races, failures, and restart paths meet the at-least-once
 contract in §4.
@@ -1027,7 +1027,7 @@ difference, not a backlog.
 **Measured against multi-agent collaboration itself — hand-off, observability,
 steering, guardrails — the target reaches roughly 80%**, which is the part that
 was actually asked for. The implementation is at §5.2 step 3 and has still not
-launched or dispatched a mesh agent.
+launched or dispatched a workspace agent.
 
 ### 7.1 Relationship to the Agent Board (#9402)
 
@@ -1036,25 +1036,25 @@ files, both have an owner, a status, and a question/answer flow, and both were
 written by the same author within a month. They are nonetheless different
 layers, and the difference is structural, not cosmetic:
 
-|                                                                | Agent Board (#9402)                                                                        | Mesh threads (this design)                                                       |
+|                                                                | Agent Board (#9402)                                                                        | Workspace agents threads (this design)                                           |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
 | Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | agents Qwen Code hosts itself, on the background-agent layer                     |
 | Actor identity                                                 | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc)                    | derived from the ambient run; never model- or caller-supplied (§6)               |
 | Delivery                                                       | pull: a participant sees work only when it reads the board                                 | push: admission books a run, the dispatcher wakes the body (§4)                  |
-| Storage scope                                                  | global named boards, `~/.qwen/boards/<board>/`                                             | one workspace, `~/.qwen/tmp/<project-hash>/mesh/` (§3)                           |
+| Storage scope                                                  | global named boards, `~/.qwen/boards/<board>/`                                             | one workspace, `~/.qwen/tmp/<project-hash>/workspace agents/` (§3)               |
 | Roster, launcher, wake, budgets, provenance, sequences, outbox | none by design (its PR body lists each as absent)                                          | all present (§2, §3)                                                             |
 | Question flow                                                  | `ask` with TTL and exit codes; any label may answer                                        | `thread_block` ends the run; a person answers; aggregate status (§4)             |
 | Item model                                                     | task `pending → in_progress → completed`, `notes[]`; asks `open/answered/declined/timeout` | thread `open → in_progress → blocked/in_review → done`, sequenced messages, runs |
 
 The Board is a **passive interoperability surface for processes Qwen Code
-does not host**. The mesh is an **active collaboration runtime for agents it
+does not host**. The workspace agents is an **active collaboration runtime for agents it
 does host**. Making one the storage of the other fails in both directions:
 
 - _Board as the thread store_ would force label actors, global boards, and
-  no sequences or outbox onto the mesh — every property §3 and §6 exist to
-  provide. Not viable without rewriting the Board into the mesh store.
-- _Mesh as the Board_ would require Codex or a shell script to speak the
-  mesh REST surface (§5.2 step 9) and be admitted as a _runtime_. Runtime is
+  no sequences or outbox onto this subsystem — every property §3 and §6 exist to
+  provide. Not viable without rewriting the Board into this subsystem store.
+- _Workspace agents as the Board_ would require Codex or a shell script to speak the
+  workspace agents REST surface (§5.2 step 9) and be admitted as a _runtime_. Runtime is
   now a first-class binding, but a foreign claimer remains a v2 adapter and not
   a v1 storage choice.
 
@@ -1064,12 +1064,12 @@ stores, with the convergence path recorded.**
 1. The two v1 stores stay separate and neither imports the other. The
    user-facing
    names stay distinct: _board_ is the foreign-process surface, _threads_
-   (with _agents_) is the orchestrated one. Do not call mesh threads a board.
+   (with _agents_) is the orchestrated one. Do not call workspace agents threads a board.
 2. The Board does not ship as a standalone user surface while this design is
    in flight. Its own PR body already says a standalone merge needs a concrete
-   native consumer; the mesh is not that consumer in v1.
+   native consumer; this subsystem is not that consumer in v1.
 3. Runtime is now first-class. If the owner chooses convergence, the v2
-   foreign-runtime claimer — a process that claims mesh runs through REST —
+   foreign-runtime claimer — a process that claims workspace agents runs through REST —
    replaces the Board's use case, and the Board's `claim / done / ask / answer`
    CLI is the natural shape of that claimer's command surface. The Board's code
    is then the seed of a runtime adapter, not a parallel store.
@@ -1157,7 +1157,7 @@ remain genuinely open:
    Another session can change them while a resident body keeps the old prompt.
    Each run needs a version stamp covering all three inputs plus a visible gap
    when the source cannot be reconstructed; hashing only the agent definition is
-   insufficient. V1 prevents mesh agents from writing auto-memory but cannot
+   insufficient. V1 prevents workspace agents from writing auto-memory but cannot
    prevent other sessions from changing it.
 9. **Per-turn envelope role (C3; product decision).** Keep the envelope as a
    fixed prefix in the user-role structured input, with authority established by
@@ -1202,7 +1202,7 @@ write code, which decision 1 defers until isolation is settled.
 
 **这是什么**：持久的 Agent 身份在共享线程上协作。人开一个线程、指派一个 agent，之后 agent 们自己读、发帖、互相 @、拆子线程、干完交回验收，人随时可以插话。就是 Multica 那套形态，但建立在 qwen 已有的机器上。Agent Team 原封不动保留，作为单次 run 内部的紧耦合协作手段。
 
-**源码纠错**：Multica 的延续会话是 `(agent, issue)` 维度，WebSocket 唤醒同时保留 HTTP polling fallback；active run 收不到新评论，但完成时会 reconcile，并不是丢弃。Qwen 的运行中送信也不能调用 `resumeBackgroundAgent`，而要走 registry 的直接输入队列；mesh 需用带 delivery id 的 `queueExternalInput`，分别记录「队列接受」和 `EXTERNAL_MESSAGE` 的「实际消费」，并处理 finishing 窗口返回 `false`。真实 daemon 已证明队列接受与实际消费的直接路径，且模型把中途追加要求纳入同一个 run 的最终结论；finishing 竞态返回 `false` 后的持久重订仍未端到端证明，因此完整投递可靠性不能先假定。
+**源码纠错**：Multica 的延续会话是 `(agent, issue)` 维度，WebSocket 唤醒同时保留 HTTP polling fallback；active run 收不到新评论，但完成时会 reconcile，并不是丢弃。Qwen 的运行中送信也不能调用 `resumeBackgroundAgent`，而要走 registry 的直接输入队列；workspace agents 需用带 delivery id 的 `queueExternalInput`，分别记录「队列接受」和 `EXTERNAL_MESSAGE` 的「实际消费」，并处理 finishing 窗口返回 `false`。真实 daemon 已证明队列接受与实际消费的直接路径，且模型把中途追加要求纳入同一个 run 的最终结论；finishing 竞态返回 `false` 后的持久重订仍未端到端证明，因此完整投递可靠性不能先假定。
 
 **执行模型**：本方案仍选择「每工作空间每 agent 一个跨线程长期后台执行体」，这是主动区别于 Multica 的产品选择。好处是同事式长期记忆；代价是串行吞吐、跨线程串台和持久化 prompt 注入。每次 turn 都必须在真正的 background-turn 调用点重新绑定 `(agent, run, thread)`，工具只信 ambient binding，prompt 每次都带完整线程帧、最近消息、确认水位后的增量和明确 gap。
 

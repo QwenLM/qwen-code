@@ -87,10 +87,10 @@ import type {
   NotificationRecordPayload,
 } from '../services/chatRecordingService.js';
 import {
-  buildMeshToolConfig,
-  createMeshToolInvocationGuard,
-} from './mesh/capability.js';
-import { runMeshTurn } from './mesh/runtime-bridge.js';
+  buildAgentToolConfig,
+  createAgentToolInvocationGuard,
+} from './agent/capability.js';
+import { runAgentTurn } from './agent/runtime-bridge.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -926,10 +926,10 @@ export class BackgroundAgentResumeService {
         { persistedCliFlags: meta.persistedCliFlags },
       );
       const approvalConfig = approvalOverride.config;
-      const activeAgentConfig = meta.meshAgentId
+      const activeAgentConfig = meta.workspaceAgentId
         ? deriveConfig(approvalConfig, {
             getToolInvocationGuard: () =>
-              createMeshToolInvocationGuard(
+              createAgentToolInvocationGuard(
                 approvalConfig.getToolInvocationGuard(),
               ),
           })
@@ -981,8 +981,7 @@ export class BackgroundAgentResumeService {
         promptInputs
           .map((input) => (typeof input === 'string' ? input : input.text))
           .join('\n\n')
-          .trim() ||
-        DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+          .trim() || DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
       const initialExternalInputs = promptInputs.some(
         (input) => typeof input !== 'string',
       )
@@ -1035,13 +1034,13 @@ export class BackgroundAgentResumeService {
           launchModel && meta.persistedCliFlags?.authType
             ? { ...target.subagentConfig!, model: 'inherit' }
             : target.subagentConfig!;
-        const meshRuntimeConfig = meta.meshAgentId
+        const agentRuntimeConfig = meta.workspaceAgentId
           ? await this.config
               .getSubagentManager()
               .convertToRuntimeConfig(target.subagentConfig!, activeAgentConfig)
           : undefined;
-        const meshToolConfig = meta.meshAgentId
-          ? buildMeshToolConfig(meshRuntimeConfig?.toolConfig)
+        const agentToolConfig = meta.workspaceAgentId
+          ? buildAgentToolConfig(agentRuntimeConfig?.toolConfig)
           : undefined;
         const result = await this.config
           .getSubagentManager()
@@ -1067,7 +1066,7 @@ export class BackgroundAgentResumeService {
                   },
                 }
               : {}),
-            ...(meshToolConfig ? { toolConfigOverride: meshToolConfig } : {}),
+            ...(agentToolConfig ? { toolConfigOverride: agentToolConfig } : {}),
           });
         subagent = result.subagent;
         // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
@@ -1431,17 +1430,17 @@ export class BackgroundAgentResumeService {
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
-        const meshRun = readAgentMeta(metaPath)?.meshRun;
+        const agentRun = readAgentMeta(metaPath)?.agentRun;
         const body = () =>
           runBody(turnContextState, turnAbortController, fireStartHook);
         const framedRunBody = () =>
           runWithAgentContext(
             meta.agentId,
-            meshRun
+            agentRun
               ? () =>
-                  runMeshTurn({
+                  runAgentTurn({
                     projectRoot: this.config.getProjectRoot(),
-                    context: meshRun,
+                    context: agentRun,
                     emitter: bgEmitter,
                     abortController: turnAbortController,
                     metaPath,

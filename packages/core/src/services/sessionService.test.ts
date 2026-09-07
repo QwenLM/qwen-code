@@ -7704,14 +7704,14 @@ describe('SessionService', () => {
         userLine(hiddenId, 'hidden'),
         {
           ...sessionSourceLine(hiddenId),
-          systemPayload: { sourceType: 'mesh' },
+          systemPayload: { sourceType: 'agent-host' },
         },
       ]);
       fs.utimesSync(visibleFile, new Date(1), new Date(1));
       fs.utimesSync(hiddenFile, new Date(2), new Date(2));
 
       await expect(
-        service.listSessions({ size: 1, excludeSourceType: 'mesh' }),
+        service.listSessions({ size: 1, excludeSourceType: 'agent-host' }),
       ).resolves.toMatchObject({
         items: [{ sessionId: visibleId }],
         hasMore: false,
@@ -7731,7 +7731,7 @@ describe('SessionService', () => {
           userLine(hiddenId, 'hidden'),
           {
             ...sessionSourceLine(hiddenId),
-            systemPayload: { sourceType: 'mesh' },
+            systemPayload: { sourceType: 'agent-host' },
           },
         ]
           .map((line) => JSON.stringify(line))
@@ -7739,7 +7739,7 @@ describe('SessionService', () => {
       );
 
       await expect(
-        service.getSessionInfoCounts({ excludeSourceType: 'mesh' }),
+        service.getSessionInfoCounts({ excludeSourceType: 'agent-host' }),
       ).resolves.toEqual({
         active: 1,
         archived: 0,

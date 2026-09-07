@@ -24,7 +24,7 @@ import {
   subagentNameContext,
 } from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
-import { isMeshRun } from '../mesh/run-context.js';
+import { isAgentRun } from '../agent/run-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -304,7 +304,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.THREAD_READ,
 ]);
 
-const MESH_THREAD_TOOLS = [
+const THREAD_TOOLS = [
   ToolNames.THREAD_POST,
   ToolNames.THREAD_WAIT,
   ToolNames.THREAD_BLOCK,
@@ -313,26 +313,24 @@ const MESH_THREAD_TOOLS = [
   ToolNames.THREAD_READ,
 ] as const;
 
-function exposeMeshThreadTools(
-  excluded: ReadonlySet<string>,
-): ReadonlySet<string> {
-  if (!isMeshRun()) return excluded;
+function exposeThreadTools(excluded: ReadonlySet<string>): ReadonlySet<string> {
+  if (!isAgentRun()) return excluded;
   const current = new Set(excluded);
-  for (const name of MESH_THREAD_TOOLS) current.delete(name);
+  for (const name of THREAD_TOOLS) current.delete(name);
   return current;
 }
 
 function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
   if (!isTeammate()) {
-    return exposeMeshThreadTools(EXCLUDED_TOOLS_FOR_SUBAGENTS);
+    return exposeThreadTools(EXCLUDED_TOOLS_FOR_SUBAGENTS);
   }
   if (!isPlanRequiredTeammateContext()) {
-    return exposeMeshThreadTools(EXCLUDED_TOOLS_FOR_TEAMMATES);
+    return exposeThreadTools(EXCLUDED_TOOLS_FOR_TEAMMATES);
   }
 
   const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
   excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return exposeMeshThreadTools(excluded);
+  return exposeThreadTools(excluded);
 }
 
 /**

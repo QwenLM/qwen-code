@@ -138,7 +138,7 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -735,9 +735,9 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
-  if (body['sourceType'] === MESH_HOST_SESSION_SOURCE_TYPE) {
+  if (body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE) {
     res.status(400).json({
-      error: 'The requested session source is reserved for mesh hosts.',
+      error: 'The requested session source is reserved for agent hosts.',
       code: 'reserved_session_source',
     });
     return null;
@@ -1491,7 +1491,7 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
-        excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -3024,7 +3024,7 @@ export function registerSessionRoutes(
           .listWorkspaceSessions(workspaceCwd)
           .find(
             (session) =>
-              session.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE &&
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
               !session.worktree &&
               session.clientCount > 0,
           );
@@ -7726,7 +7726,7 @@ export function registerSessionRoutes(
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
         .filter(
-          (session) => session.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE,
+          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
         )
         .map((session) => ({
           sessionId: session.sessionId,

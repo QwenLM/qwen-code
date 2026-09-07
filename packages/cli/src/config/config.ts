@@ -52,7 +52,7 @@ import {
   stripAnsiAndControl,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../runtime/mesh-session-source.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
@@ -1966,7 +1966,7 @@ export async function loadCliConfig(
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
       sessionData = await sessionService.loadLastSession({
-        excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;

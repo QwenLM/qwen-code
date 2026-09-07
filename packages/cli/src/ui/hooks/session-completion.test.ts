@@ -50,7 +50,7 @@ describe('getSessionSuggestions', () => {
     const out = await getSessionSuggestions('/proj', '');
     expect(mockListSessions).toHaveBeenCalledWith({
       size: 20,
-      excludeSourceType: 'mesh',
+      excludeSourceType: 'agent-host',
     });
     expect(out).toHaveLength(2);
     expect(out[0]).toMatchObject({

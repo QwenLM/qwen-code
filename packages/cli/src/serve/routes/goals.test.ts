@@ -106,12 +106,12 @@ describe('GET /goals', () => {
     expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 0 });
   });
 
-  it('does not probe or expose the hidden mesh host', async () => {
+  it('does not probe or expose the hidden agent host', async () => {
     const getSessionGoal = vi.fn(async () => noGoal);
     const app = makeApp({
       listWorkspaceSessions: () => [
         summary('visible'),
-        summary('mesh-host', { sourceType: 'mesh' }),
+        summary('agent-host', { sourceType: 'agent-host' }),
       ],
       getSessionGoal,
     });

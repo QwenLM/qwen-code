@@ -12734,7 +12734,7 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
-    it('rejects the reserved mesh host source', async () => {
+    it('rejects the reserved agent host source', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -12744,7 +12744,7 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ sourceType: 'mesh' });
+        .send({ sourceType: 'agent-host' });
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('reserved_session_source');
@@ -14454,16 +14454,16 @@ describe('createServeApp', () => {
       }
     });
 
-    it('allows branch creation when only the hidden mesh host shares the workspace', async () => {
+    it('allows branch creation when only the hidden agent host shares the workspace', async () => {
       const bridge = fakeBridge({
         listImpl: () => [
           {
-            sessionId: 'mesh-host',
+            sessionId: 'agent-host',
             workspaceCwd: WS_BOUND,
             createdAt: '2026-01-01T00:00:00.000Z',
             clientCount: 1,
             hasActivePrompt: false,
-            sourceType: 'mesh',
+            sourceType: 'agent-host',
           },
         ],
       });
@@ -18863,7 +18863,7 @@ describe('createServeApp', () => {
           archiveState: 'active',
           size: 1,
           signal: preflightSignal,
-          excludeSourceType: 'mesh',
+          excludeSourceType: 'agent-host',
         });
         catalogRequest.abort();
         await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
@@ -20407,7 +20407,7 @@ describe('createServeApp', () => {
           cursor: 1000123.456,
           size: 20,
           archiveState: 'active',
-          excludeSourceType: 'mesh',
+          excludeSourceType: 'agent-host',
         });
       } finally {
         listSessionsSpy.mockRestore();

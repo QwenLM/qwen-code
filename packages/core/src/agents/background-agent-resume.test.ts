@@ -814,14 +814,14 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
-  it('restores the mesh capability ceiling on cold resume', async () => {
-    const sessionId = 'session-mesh-resume';
-    const agentId = 'mesh-ag_alice';
+  it('restores this subsystem capability ceiling on cold resume', async () => {
+    const sessionId = 'session-agent-resume';
+    const agentId = 'agent-ag_alice';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
     writeAgentMeta(metaPath, {
       agentId,
-      meshAgentId: 'ag_alice',
+      workspaceAgentId: 'ag_alice',
       agentType: 'researcher',
       description: 'Review',
       parentSessionId: sessionId,

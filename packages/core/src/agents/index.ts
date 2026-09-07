@@ -31,55 +31,52 @@ export {
 } from './agent-transcript.js';
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
 export {
-  claimMeshHostSession,
+  claimAgentHostSession,
   createThread,
   generateAgentId,
   generateEventId,
   isValidAgentName,
   listThreads,
-  readMeshAgents,
-  readMeshWorkspace,
+  readWorkspaceAgents,
+  readAgentWorkspace,
   readThread,
-  releaseMeshHostSession,
-  removeMeshAgent,
-  setMeshAgentEnabled,
-  updateMeshAgents,
+  releaseAgentHostSession,
+  removeWorkspaceAgent,
+  setWorkspaceAgentEnabled,
+  updateWorkspaceAgents,
   updateThread,
-  withMeshStoreTransaction,
-  setMeshNotifyTarget,
-} from './mesh/mesh-store.js';
-export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
-export { parseMentions } from './mesh/mentions.js';
+  withAgentStoreTransaction,
+  setAgentNotifyTarget,
+} from './agent/agent-store.js';
+export { decideDispatch, resolveTargets } from './agent/dispatch-policy.js';
+export { parseMentions } from './agent/mentions.js';
 export {
   assignThread,
   createAssignedThread,
   finishRun,
   postMessage,
-} from './mesh/thread-actions.js';
-export { resolveThreadStatus } from './mesh/thread-status.js';
+} from './agent/thread-actions.js';
+export { resolveThreadStatus } from './agent/thread-status.js';
 export {
   finishRunInTransaction,
   hasLiveDescendant,
-} from './mesh/run-lifecycle.js';
-export {
-  createMeshDispatchPort,
-  meshBackgroundAgentId,
-} from './mesh/dispatch-port.js';
-export { dispatchOnce } from './mesh/dispatcher.js';
-export { deliverNotifications, notificationText } from './mesh/dispatcher.js';
-export type { MeshNotificationSender } from './mesh/dispatcher.js';
-export { launchMeshAgent } from './mesh/launcher.js';
-export type { MeshAgentLaunchResult } from './mesh/launcher.js';
-export type { DispatchRecord } from './mesh/dispatcher.js';
+} from './agent/run-lifecycle.js';
+export { createAgentDispatchPort, agentBodyId } from './agent/dispatch-port.js';
+export { dispatchOnce } from './agent/dispatcher.js';
+export { deliverNotifications, notificationText } from './agent/dispatcher.js';
+export type { AgentNotificationSender } from './agent/dispatcher.js';
+export { launchWorkspaceAgent } from './agent/launcher.js';
+export type { WorkspaceAgentLaunchResult } from './agent/launcher.js';
+export type { DispatchRecord } from './agent/dispatcher.js';
 export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
   HUMAN_AUTHOR_ID,
-} from './mesh/types.js';
+} from './agent/types.js';
 export type {
-  MeshAgent,
-  MeshWorkspaceState,
+  WorkspaceAgent,
+  AgentWorkspaceState,
   Thread,
   ThreadRun,
-} from './mesh/types.js';
+} from './agent/types.js';
 export * from './tasks/types.js';

@@ -147,7 +147,7 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
-import { registerMeshRoutes } from './routes/mesh.js';
+import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -3136,7 +3136,7 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
-  registerMeshRoutes(app, {
+  registerWorkspaceAgentRoutes(app, {
     workspaceRegistry,
     mutate,
     ...(deps.deliverChannelMessage

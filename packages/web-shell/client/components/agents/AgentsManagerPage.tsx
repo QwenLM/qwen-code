@@ -25,7 +25,7 @@ import {
   type AgentLevelFilter,
 } from './agents-manager-logic';
 import { AgentCreatePage } from './AgentCreatePage';
-import { ThreadsRoute } from '../mesh/ThreadsRoute';
+import { ThreadsRoute } from '../agent/ThreadsRoute';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -151,7 +151,7 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
-  const [meshOpen, setMeshOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -174,9 +174,9 @@ export function AgentsManagerPage({
 
   useEffect(() => {
     embedded?.onDetailChange(
-      Boolean(selectedName || createOpen || editOpen || meshOpen),
+      Boolean(selectedName || createOpen || editOpen || agentsOpen),
     );
-  }, [createOpen, editOpen, embedded, meshOpen, selectedName]);
+  }, [createOpen, editOpen, embedded, agentsOpen, selectedName]);
 
   useEffect(() => {
     if (!selection) {
@@ -212,7 +212,7 @@ export function AgentsManagerPage({
   }, [initialCreateScope]);
 
   function returnToList(): void {
-    setMeshOpen(false);
+    setAgentsOpen(false);
     setCreateOpen(false);
     setEditOpen(false);
     setSelection(null);
@@ -253,7 +253,7 @@ export function AgentsManagerPage({
     : (selectedName ??
       (createOpen
         ? t('agent.create.button')
-        : meshOpen
+        : agentsOpen
           ? 'Shared threads'
           : null));
 
@@ -319,7 +319,7 @@ export function AgentsManagerPage({
     standaloneNavigation
   );
 
-  if (meshOpen) {
+  if (agentsOpen) {
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
@@ -636,7 +636,7 @@ export function AgentsManagerPage({
             </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setMeshOpen(true)}>
+            <Button variant="outline" onClick={() => setAgentsOpen(true)}>
               Shared threads
             </Button>
             <Button
