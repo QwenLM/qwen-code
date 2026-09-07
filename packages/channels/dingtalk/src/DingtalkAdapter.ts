@@ -617,6 +617,7 @@ const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
 const EMOTION_FETCH_TIMEOUT_MS = 15_000;
+const EMOTION_FINISH_MAX_ATTEMPTS = 3;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -807,6 +808,10 @@ interface DingtalkReactionState {
   /** Set when a finish attempt could not clear both transient tags; the
    * state stays registered so a later finish trigger retries the cleanup. */
   finishBlocked?: boolean;
+  /** Blocked finish attempts so far; at EMOTION_FINISH_MAX_ATTEMPTS the
+   * state is dropped so a permanently failing emotion API does not hold the
+   * entry for the process lifetime. */
+  finishAttempts?: number;
   /** The last failed drain transition. Identical repeat requests are skipped
    * so a failing emotion API is not re-hit once per streamed chunk. */
   failedTransition?: { from: string | undefined; to: string };
@@ -2424,17 +2429,30 @@ export class DingtalkChannel extends ChannelBase {
       (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
         false;
     if (eyeCleared) state.eyeAttached = false;
+    let terminalAttached = true;
     if (state.terminalTag && statusCleared && eyeCleared) {
-      await this.attachReaction(
-        state.messageId,
-        state.chatId,
-        state.terminalTag,
-      );
+      terminalAttached =
+        (await this.attachReaction(
+          state.messageId,
+          state.chatId,
+          state.terminalTag,
+        )) !== false;
     }
-    if (!statusCleared || !eyeCleared) {
+    if (!statusCleared || !eyeCleared || !terminalAttached) {
       // Keep the state registered: forgetting it here would leave a stale
       // phase tag nothing can ever recall. finishReaction re-arms the drain
       // (disconnect, session death) so the cleanup gets a second chance.
+      state.finishAttempts = (state.finishAttempts ?? 0) + 1;
+      if (state.finishAttempts >= EMOTION_FINISH_MAX_ATTEMPTS) {
+        // A permanently failing emotion API (robot removed, expired token)
+        // would otherwise hold the entry for the process lifetime.
+        this.logReactionFailure(
+          'reaction cleanup',
+          `abandoned after ${state.finishAttempts} attempts`,
+        );
+        this.forgetReactionState(state);
+        return;
+      }
       state.finishBlocked = true;
       return;
     }

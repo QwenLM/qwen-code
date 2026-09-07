@@ -2087,6 +2087,122 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('✅ Done');
   });
 
+  it('retries a failed terminal tag attach instead of forgetting the state', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const reactionStates = (
+      channel as unknown as { reactionStates: Map<string, unknown> }
+    ).reactionStates;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-terminal-attach-fail',
+      sessionId: 'session-terminal-attach-fail',
+      messageId: 'message-terminal-attach-fail',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    attachReaction.mockResolvedValueOnce(false);
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(3));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Both recalls succeeded but the ✅ Done attach failed: forgetting the
+    // state here would leave the message badge-less with no path to retry.
+    expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('✅ Done');
+    expect(reactionStates.size).toBe(1);
+
+    // A later finish trigger retries only the failed terminal attach; the
+    // tags already recalled are not recalled again.
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(4));
+    expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('✅ Done');
+    await vi.waitFor(() => expect(reactionStates.size).toBe(0));
+    expect(recallReaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a permanently blocked terminal cleanup after bounded retries', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(false);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const reactionStates = (
+      channel as unknown as { reactionStates: Map<string, unknown> }
+    ).reactionStates;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-blocked-forever',
+      sessionId: 'session-blocked-forever',
+      messageId: 'message-blocked-forever',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    // The recall fails permanently (robot removed from the group): every
+    // finish trigger blocks again, but the entry must not be retained for
+    // the process lifetime.
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reactionStates.size).toBe(1);
+
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(4));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reactionStates.size).toBe(1);
+
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(reactionStates.size).toBe(0));
+
+    // Once dropped, later finish triggers are no-ops and the give-up was
+    // logged instead of silently carried into the shutdown snapshot.
+    lifecycle({ ...base, type: 'completed' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(recallReaction).toHaveBeenCalledTimes(6);
+    expect(
+      stderr.mock.calls.some(([text]) =>
+        String(text).includes('reaction cleanup'),
+      ),
+    ).toBe(true);
+  });
+
   it('aborts a stuck emotion request so disconnect settles', async () => {
     const channel = createChannel();
     (
