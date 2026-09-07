@@ -686,6 +686,10 @@ That scoping is why there is no host allowlist here: you already chose the
 endpoint when you wrote the provider's `baseUrl`, and providers that should not
 send the header simply do not carry it.
 
+If a provider entry has a placeholder while this is off, the header is dropped
+and a warning naming both is printed at startup — so a gateway rejecting your
+requests should never be a silent mystery.
+
 **Privacy note:** an expanded value is a stable per-conversation identifier.
 Only put one on a provider you already send your prompt content to.
 

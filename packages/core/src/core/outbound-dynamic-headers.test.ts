@@ -11,7 +11,9 @@ import {
   expandDynamicHeaders,
   hasDynamicPlaceholder,
   resolveDynamicHeaderValue,
+  warnIfDynamicHeadersDisabled,
 } from './outbound-dynamic-headers.js';
+import { wrapFetchWithSessionId } from './outbound-session-id.js';
 
 function config({
   sessionId = 'session-1',
@@ -135,5 +137,135 @@ describe('expandDynamicHeaders', () => {
 
   it('returns an empty object for no customHeaders', () => {
     expect(expandDynamicHeaders(undefined, config())).toEqual({});
+  });
+});
+
+describe('warnIfDynamicHeadersDisabled', () => {
+  // #10995 treats writing the placeholder into a provider entry as the
+  // opt-in, so a user can reasonably arrive with the gate still off.
+  // Their symptom is otherwise a gateway rejecting every request with
+  // nothing on screen to explain it.
+  it('names the header and the switch when the gate is closed', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      warnIfDynamicHeadersDisabled(
+        { 'x-opencode-session': '${session_id}' },
+        config({ allow: false }),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('x-opencode-session'),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('outboundCorrelation.allowDynamicHeaderValues'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('stays quiet when the gate is open or nothing has a placeholder', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      warnIfDynamicHeadersDisabled(
+        { 'x-only-here-open': '${session_id}' },
+        config({ allow: true }),
+      );
+      warnIfDynamicHeadersDisabled(
+        { 'x-static': 'req-123' },
+        config({ allow: false }),
+      );
+      warnIfDynamicHeadersDisabled(undefined, config({ allow: false }));
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not throw on a Config that cannot answer', () => {
+    const broken = {} as unknown as Config;
+    expect(() =>
+      warnIfDynamicHeadersDisabled({ 'x-a': '${session_id}' }, broken),
+    ).not.toThrow();
+  });
+});
+
+// End-to-end through the seam the providers actually construct, which is
+// the part that makes the issue's config work rather than just the
+// resolver in isolation.
+describe('placeholder expansion through the provider fetch wrapper', () => {
+  async function send(
+    customHeaders: Record<string, string>,
+    cliConfig: Config,
+  ): Promise<Headers> {
+    const baseFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const wrapped = wrapFetchWithSessionId(baseFetch, cliConfig, customHeaders);
+    // The SDK merges `defaultHeaders` into each request before calling
+    // the custom fetch, so the placeholder arrives here in `init`.
+    await wrapped('https://opencode.ai/zen/go/v1/chat/completions', {
+      headers: customHeaders,
+    });
+    return new Headers(baseFetch.mock.calls[0][1]?.headers);
+  }
+
+  it('sends the expanded value to a non-first-party gateway', async () => {
+    const headers = await send(
+      { 'x-opencode-session': '${session_id}', 'x-static': 'req-123' },
+      config(),
+    );
+    expect(headers.get('x-opencode-session')).toBe('session-1');
+    expect(headers.get('x-static')).toBe('req-123');
+  });
+
+  it('drops the header, never the literal, when the gate is closed', async () => {
+    const headers = await send(
+      { 'x-opencode-session': '${session_id}' },
+      config({ allow: false }),
+    );
+    expect(headers.has('x-opencode-session')).toBe(false);
+  });
+
+  it('rotates the value when the session changes, without a new client', async () => {
+    const cliConfig = config();
+    const baseFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const custom = { 'x-opencode-session': '${session_id}' };
+    const wrapped = wrapFetchWithSessionId(baseFetch, cliConfig, custom);
+
+    await wrapped('https://opencode.ai/v1', { headers: custom });
+    vi.mocked(cliConfig.getSessionId).mockReturnValue('session-2');
+    await wrapped('https://opencode.ai/v1', { headers: custom });
+
+    expect(
+      new Headers(baseFetch.mock.calls[0][1]?.headers).get(
+        'x-opencode-session',
+      ),
+    ).toBe('session-1');
+    expect(
+      new Headers(baseFetch.mock.calls[1][1]?.headers).get(
+        'x-opencode-session',
+      ),
+    ).toBe('session-2');
+  });
+
+  it('leaves a provider with no placeholder on the untouched path', async () => {
+    const baseFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const wrapped = wrapFetchWithSessionId(
+      baseFetch,
+      config({ allow: false }),
+      {
+        'x-static': 'req-123',
+      },
+    );
+    await wrapped('https://api.openai.com/v1');
+    // Same early return as before this feature existed: init passed through.
+    expect(baseFetch.mock.calls[0][1]).toBeUndefined();
   });
 });

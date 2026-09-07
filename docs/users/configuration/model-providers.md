@@ -588,13 +588,26 @@ rejects requests without `x-opencode-session`:
 Because the value is resolved per request rather than baked into the SDK client,
 `/new` and `/resume` rotate it without a restart.
 
-⚠️ **This is off by default and must be enabled explicitly** with
-[`outboundCorrelation.allowDynamicHeaderValues`](settings.md#outboundcorrelation).
-Until you do, a value containing a placeholder is dropped rather than sent — the
-header is never sent with a literal `${session_id}` in it. The switch is global
-because it is a consent decision: an expanded value carries live session state to
-whoever receives it, and the switch also stops a provider preset or an extension
-from quietly turning a `customHeaders` entry it ships into an identity header.
+⚠️ **Two steps are required.** The provider entry above is only half of it — a
+placeholder is inert until you also switch on
+[`outboundCorrelation.allowDynamicHeaderValues`](settings.md#outboundcorrelation):
+
+```json
+{
+  "outboundCorrelation": {
+    "allowDynamicHeaderValues": true
+  }
+}
+```
+
+Until you do, a value containing a placeholder is **dropped** rather than sent,
+and Qwen Code prints a warning at startup naming the header and this setting.
+The header is never sent with a literal `${session_id}` in it.
+
+The switch is global because it is a consent decision, separate from _where_ the
+value goes: an expanded value carries live session state to whoever receives it,
+and the switch also stops a provider preset or an extension from quietly turning
+a `customHeaders` entry it ships into an identity header.
 
 **Privacy note:** the session ID is a stable identifier for the life of a
 conversation, so any host you send it to can group every request of that

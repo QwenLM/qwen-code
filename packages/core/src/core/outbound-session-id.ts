@@ -9,6 +9,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   applyDynamicHeaderValues,
   hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
 } from './outbound-dynamic-headers.js';
 
 const debugLogger = createDebugLogger('OUTBOUND_CORRELATION');
@@ -72,6 +73,7 @@ export function wrapFetchWithSessionId<TFetch>(
   const expandsHeaders = Object.values(customHeaders ?? {}).some(
     (value) => typeof value === 'string' && hasDynamicPlaceholder(value),
   );
+  if (expandsHeaders) warnIfDynamicHeadersDisabled(customHeaders, config);
   const wrapped: FetchLike = async (input, init) => {
     const sessionHeaders = buildSessionIdHeaders(config, input);
     const sessionId = sessionHeaders[SESSION_ID_HEADER];

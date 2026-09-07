@@ -32,6 +32,49 @@ const PLACEHOLDERS: ReadonlyArray<{
   readonly resolve: (config: Config) => string | undefined;
 }> = [{ token: '${session_id}', resolve: (config) => config.getSessionId() }];
 
+/**
+ * Reports a configured placeholder that the gate is currently refusing,
+ * once per distinct header set, on the console.
+ *
+ * The issue this feature answers (#10995) treats writing the placeholder
+ * into a provider entry as the opt-in, so a user following the docs can
+ * reasonably arrive here with the gate still off. Their symptom would
+ * otherwise be a gateway rejecting every request with nothing to explain
+ * it — the failure has to name the switch to flip, and a debug log that
+ * is normally off does not count.
+ *
+ * Never throws: it is called while building a provider client, and a
+ * partial `Config` must not be able to break client construction.
+ */
+const warnedGateOff = new Set<string>();
+export function warnIfDynamicHeadersDisabled(
+  customHeaders: Record<string, string> | undefined,
+  config: Config,
+): void {
+  try {
+    const names = Object.entries(customHeaders ?? {})
+      .filter(
+        ([, value]) =>
+          typeof value === 'string' && hasDynamicPlaceholder(value),
+      )
+      .map(([name]) => name);
+    if (names.length === 0) return;
+    if (config.getOutboundAllowDynamicHeaderValues()) return;
+    const key = names.slice().sort().join(',');
+    if (warnedGateOff.has(key)) return;
+    warnedGateOff.add(key);
+    // eslint-disable-next-line no-console -- operator-facing misconfiguration breadcrumb; the alternative symptom is a gateway rejecting every request
+    console.warn(
+      `customHeaders ${names.join(', ')} contain a runtime placeholder, but ` +
+        `outboundCorrelation.allowDynamicHeaderValues is not enabled — the ` +
+        `header(s) will not be sent. Set it to true in settings.json to ` +
+        `allow the value to be filled in per request.`,
+    );
+  } catch {
+    // A Config that cannot answer is not worth failing client construction.
+  }
+}
+
 /** True when `value` asks for at least one runtime-resolved placeholder. */
 export function hasDynamicPlaceholder(value: string): boolean {
   return PLACEHOLDERS.some(({ token }) => value.includes(token));
