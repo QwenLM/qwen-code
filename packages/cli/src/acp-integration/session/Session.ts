@@ -13247,9 +13247,16 @@ export class Session implements SessionContext {
             executionStatus = 'error';
             executeAttempted = true;
             try {
+              // Pass the shell execution config through, as the TUI scheduler
+              // does (coreToolScheduler). Without it ShellToolInvocation falls
+              // back to `{}` and the PTY is sized 80x30 from
+              // shellExecutionService's own defaults — not even Config's 80x24
+              // — while `pager`, `showColor` and `maxBufferedOutputBytes` are
+              // silently ignored for every ACP tool call.
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
+                this.config.getShellExecutionConfig(),
               );
               executeReturned = true;
               try {
