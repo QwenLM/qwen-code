@@ -34,6 +34,7 @@ export { assembleAgentPrompt } from '${repo}/${src}/prompt.js';
 export { decideDispatch, resolveTargets } from '${repo}/${src}/dispatch-policy.js';
 export * from '${repo}/${src}/thread-actions.js';
 export { resolveThreadStatus } from '${repo}/${src}/thread-status.js';
+export * from '${repo}/${src}/run-lifecycle.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
@@ -483,6 +484,131 @@ ok(
   'an unacknowledged review close reads in_review',
   st(review) === 'in_review',
   st(review),
+);
+
+console.log('\n11. a run through its whole life');
+await M.updateWorkspaceAgents(ROOT, () => [
+  { id: 'ag_c', name: 'carol', createdAt: 1 },
+]);
+const lt = await M.createThread(ROOT, {
+  title: 'Lifecycle',
+  assigneeAgentId: 'ag_c',
+});
+const booked = await M.postMessage(ROOT, lt.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'go',
+});
+const rid = booked.dispatched[0].id;
+ok(
+  'a fresh run is queued and unclaimed',
+  booked.dispatched[0].status === 'queued',
+);
+
+const claimed = await M.claimRun(ROOT, { threadId: lt.id, runId: rid });
+ok(
+  'claiming moves it to running',
+  claimed?.run.status === 'running',
+  claimed?.run.status,
+);
+ok(
+  'and stamps the attempt',
+  claimed?.run.attempts === 1,
+  String(claimed?.run.attempts),
+);
+ok(
+  'claiming twice is refused',
+  (await M.claimRun(ROOT, { threadId: lt.id, runId: rid })) === undefined,
+);
+
+await M.bindRunSession(ROOT, {
+  threadId: lt.id,
+  runId: rid,
+  attempt: 1,
+  sessionId: 'agent-ag_c',
+  contextThroughSequence: 1,
+  consumedOnStart: true,
+  usageBaselineTokens: 40,
+});
+const bound = (await M.readThread(ROOT, lt.id)).runs.find((r) => r.id === rid);
+ok('the session id is recorded', bound.sessionId === 'agent-ag_c');
+ok(
+  'the usage baseline is recorded',
+  bound.usageBaselineTokens === 40,
+  String(bound.usageBaselineTokens),
+);
+ok(
+  'binding commits the opening delivery',
+  ((await M.readThread(ROOT, lt.id)).deliveryByAgent['ag_c']
+    ?.committedThroughSequence ?? 0) >= 1,
+);
+
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: lt.id,
+    runId: rid,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+const done = (await M.readThread(ROOT, lt.id)).runs.find((r) => r.id === rid);
+ok('finishing makes it terminal', done.status === 'completed', done.status);
+ok('and stamps an end time', typeof done.endedAt === 'number');
+ok(
+  'a terminal run cannot be claimed again',
+  (await M.claimRun(ROOT, { threadId: lt.id, runId: rid })) === undefined,
+);
+ok(
+  'finishing a run that is already terminal does not resurrect it',
+  (
+    await M.withAgentStoreTransaction(ROOT, (tx) =>
+      M.finishRunInTransaction(tx, {
+        threadId: lt.id,
+        runId: rid,
+        outcome: { status: 'failed', attempt: 1 },
+      }),
+    )
+  ).runs.find((r) => r.id === rid).status === 'completed',
+);
+
+console.log('\n12. budgets actually refuse');
+const agentPost = (used) =>
+  M.decideDispatch({
+    thread: thr('b', undefined, []),
+    message: post({ from: 'ag_other', authorKind: 'agent' }),
+    target: BOB,
+    budget: { autoTurnsUsed: used, tokensUsed: 0 },
+    agentQueuedElsewhere: 0,
+  });
+ok(
+  'one turn below the limit still dispatches',
+  agentPost(11).kind === 'dispatch',
+);
+ok('at the limit it refuses', agentPost(12).reason === 'turn_budget_exhausted');
+const spend = (t) =>
+  M.decideDispatch({
+    thread: thr('b', undefined, []),
+    message: post(),
+    target: BOB,
+    budget: { autoTurnsUsed: 0, tokensUsed: t },
+    agentQueuedElsewhere: 0,
+  });
+ok(
+  'one token below the cap still dispatches',
+  spend(999_999).kind === 'dispatch',
+);
+ok(
+  'at the cap it refuses even a person',
+  spend(1_000_000).reason === 'token_budget_exhausted',
+);
+ok(
+  'a caller-supplied limit overrides the default',
+  M.decideDispatch({
+    thread: thr('b', undefined, []),
+    message: post(),
+    target: BOB,
+    budget: { autoTurnsUsed: 0, tokensUsed: 10 },
+    agentQueuedElsewhere: 0,
+    limits: { tokens: 10 },
+  }).reason === 'token_budget_exhausted',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });
