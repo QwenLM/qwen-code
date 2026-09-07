@@ -144,6 +144,10 @@ Undelivered triggers are rebooked only from a running, finishing, or completed
 attempt where delivery can genuinely have raced completion. Failed and
 cancelled runs remain terminal, so a later dispatcher pass cannot undo an
 explicit cancellation or retry a definition/start failure forever.
+Cancellation admission now reads and changes the run under one workspace lock.
+A queued run cannot be claimed between the route's observation and its write,
+and the response is based on the stored post-dispatch state rather than the
+stale status that initiated the request.
 The hidden host owner is also bound to the selected workspace runtime
 generation. A replaced or drained generation stops its keepalive loop and is
 rejected before later launch or dispatch; generation checks bracket host claims

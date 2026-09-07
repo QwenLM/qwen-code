@@ -37,7 +37,7 @@ import {
   createAssignedThread,
   createThread,
   decideDispatch,
-  finishRun,
+  finishRunInTransaction,
   generateAgentId,
   generateEventId,
   listThreads,
@@ -49,7 +49,6 @@ import {
   resolveThreadStatus,
   setMeshAgentEnabled,
   updateMeshAgents,
-  updateThread,
   withMeshStoreTransaction,
   resolveTargets,
   hasLiveDescendant,
@@ -838,50 +837,48 @@ export function registerMeshRoutes(
       const threadId = String(req.params['id']);
       const runId = String(req.params['runId']);
       try {
-        const thread = await readThread(runtime.workspaceCwd, threadId);
-        const run = thread?.runs.find((candidate) => candidate.id === runId);
-        if (!thread || !run) {
+        const requested = await withMeshStoreTransaction(
+          runtime.workspaceCwd,
+          async (transaction) => {
+            const thread = await transaction.readThread(threadId);
+            const run = thread?.runs.find(
+              (candidate) => candidate.id === runId,
+            );
+            if (!thread || !run) return 'run_not_found' as const;
+            if (run.status === 'queued') {
+              await finishRunInTransaction(transaction, {
+                threadId,
+                runId,
+                outcome: {
+                  status: 'cancelled',
+                  attempt: run.attempts,
+                },
+              });
+              return 'cancelled' as const;
+            }
+            if (run.status === 'cancelling') return 'cancelling' as const;
+            if (run.status !== 'running' && run.status !== 'finishing') {
+              return 'run_not_cancellable' as const;
+            }
+            await transaction.writeThread({
+              ...thread,
+              runs: thread.runs.map((candidate) =>
+                candidate.id === runId
+                  ? { ...candidate, status: 'cancelling' as const }
+                  : candidate,
+              ),
+            });
+            return 'cancelling' as const;
+          },
+        );
+        if (requested === 'run_not_found') {
           res.status(404).json({ error: 'run_not_found' });
           return;
         }
-        if (run.status === 'queued') {
-          await finishRun(runtime.workspaceCwd, threadId, runId, {
-            status: 'cancelled',
-            attempt: run.attempts,
-          });
-          const dispatchError = await startBookedRuns(runtime);
-          res.json({
-            runId,
-            cancelled: true,
-            status: 'cancelled',
-            ...(dispatchError ? { dispatchError } : {}),
-          });
-          return;
-        }
-        if (run.status === 'cancelling') {
-          const dispatchError = await startBookedRuns(runtime);
-          res.json({
-            runId,
-            cancelled: true,
-            status: 'cancelling',
-            ...(dispatchError ? { dispatchError } : {}),
-          });
-          return;
-        }
-        if (run.status !== 'running' && run.status !== 'finishing') {
+        if (requested === 'run_not_cancellable') {
           res.status(409).json({ error: 'run_not_cancellable' });
           return;
         }
-        await updateThread(runtime.workspaceCwd, threadId, (current) => ({
-          ...current,
-          runs: current.runs.map((candidate) =>
-            candidate.id === runId &&
-            (candidate.status === 'running' ||
-              candidate.status === 'finishing')
-              ? { ...candidate, status: 'cancelling' as const }
-              : candidate,
-          ),
-        }));
         const dispatchError = await startBookedRuns(runtime);
         const settled = await readThread(runtime.workspaceCwd, threadId);
         const status = settled?.runs.find(
@@ -890,7 +887,7 @@ export function registerMeshRoutes(
         res.json({
           runId,
           cancelled: status === 'cancelling' || status === 'cancelled',
-          status: status ?? run.status,
+          status: status ?? requested,
           ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {

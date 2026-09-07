@@ -792,6 +792,11 @@ has just completed. `failed` and `cancelled` are true terminal states: their
 unaccepted trigger ids remain audit evidence and are never turned into a new run
 by a later dispatcher sweep.
 
+Cancellation admission reads and transitions the run under the workspace lock.
+The dispatcher therefore cannot claim a queued run between a route's stale read
+and its attempted cancellation, and the route reports the state read back after
+dispatch rather than claiming cancellation from its initial snapshot.
+
 The human `done` transition is one workspace transaction: it scans the full
 descendant tree, refuses any non-done child, marks the target terminal, and
 cancels its queued or active work while holding the same lock. It therefore
