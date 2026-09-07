@@ -1,6 +1,19 @@
+# Mirrors the workspaces list in package.json exactly; a new channel must be
+# added to both files, the same as under npm. A glob here would let a
+# channel join the pnpm layout silently while npm still ignores it.
 packages:
   - 'packages/*'
-  - 'packages/channels/*'
+  - 'packages/channels/base'
+  - 'packages/channels/dingtalk'
+  - 'packages/channels/dws'
+  - 'packages/channels/feishu'
+  - 'packages/channels/github'
+  - 'packages/channels/gitlab'
+  - 'packages/channels/plugin-example'
+  - 'packages/channels/qqbot'
+  - 'packages/channels/telegram'
+  - 'packages/channels/wecom'
+  - 'packages/channels/weixin'
   - 'integrations/external-context'
   - 'integrations/external-context-mem0'
   - '!packages/desktop-shell'

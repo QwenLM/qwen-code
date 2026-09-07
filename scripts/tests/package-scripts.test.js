@@ -6,8 +6,10 @@
 
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -19,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { hooks as pnpmHooks } from '../../.pnpmfile.mjs';
+import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
@@ -40,9 +42,25 @@ describe('package scripts', () => {
     expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
       'pnpm@11.24.0',
     );
+    // `corepack use pnpm@x.y.z` appends the tarball's integrity hash; the
+    // bootstrap must accept the string corepack itself writes.
+    const hashed =
+      'pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000';
+    expect(getPinnedPnpmPackage({ packageManager: hashed })).toBe(hashed);
     expect(() =>
       getPinnedPnpmPackage({ packageManager: 'pnpm@latest' }),
     ).toThrow('packageManager must pin an exact pnpm version');
+    expect(() =>
+      getPinnedPnpmPackage({
+        packageManager: 'pnpm@11.24.0+sha512.not-hex',
+      }),
+    ).toThrow('packageManager must pin an exact pnpm version');
+  });
+
+  it('pins pnpm with the corepack integrity hash', () => {
+    expect(readPackageJson().packageManager).toMatch(
+      /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/,
+    );
   });
 
   it('keeps internal pnpm workspaces independent of manifest versions', () => {
@@ -73,6 +91,60 @@ describe('package scripts', () => {
         '@qwen-code/sdk': 'workspace:*',
       },
     });
+  });
+
+  it('keeps the pnpm rewrite set in sync with the workspace manifests', () => {
+    const { workspaces } = readPackageJson();
+    const negated = workspaces
+      .filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1));
+    const directories = [];
+    for (const pattern of workspaces) {
+      if (pattern.startsWith('!')) continue;
+      if (pattern.endsWith('/*')) {
+        const parent = pattern.slice(0, -2);
+        for (const entry of readdirSync(path.join(root, parent))) {
+          directories.push(`${parent}/${entry}`);
+        }
+      } else {
+        directories.push(pattern);
+      }
+    }
+    const names = directories
+      .filter((directory) => !negated.includes(directory))
+      .map((directory) => {
+        const manifestPath = path.join(root, directory, 'package.json');
+        if (!existsSync(manifestPath)) return undefined;
+        return JSON.parse(readFileSync(manifestPath, 'utf8')).name;
+      })
+      .filter((name) => name !== undefined);
+
+    // A member missing from the set keeps its release version or file:
+    // specifier under pnpm, which is exactly the lockfile staleness the
+    // rewrite exists to prevent.
+    expect([...workspacePackageNames].sort()).toEqual(
+      [...new Set(names)].sort(),
+    );
+  });
+
+  it('mirrors the npm workspace boundaries in pnpm-workspace.yaml', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect([...workspace.packages].sort()).toEqual(
+      [...readPackageJson().workspaces].sort(),
+    );
+  });
+
+  it('checks both lockfiles for integrity', () => {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts/check-lockfile.js')],
+      { cwd: root, encoding: 'utf8' },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Lockfile check passed.');
+    expect(result.stdout).toContain('pnpm lockfile check passed.');
   });
 
   it('keeps the internal release-age exception independent of the version', () => {
@@ -244,9 +316,15 @@ describe('package scripts', () => {
       );
 
       expect(result.status).toBe(0);
+      // The npx spec is the packageManager pin minus the corepack-only
+      // integrity suffix.
+      const pnpmSpec = getPinnedPnpmPackage(readPackageJson()).replace(
+        /\+sha512\.[0-9a-f]{128}$/,
+        '',
+      );
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
-        '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --offline',
-        '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --prefer-offline',
+        `1 1 --yes ${pnpmSpec} install --frozen-lockfile --offline`,
+        `1 1 --yes ${pnpmSpec} install --frozen-lockfile --prefer-offline`,
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
@@ -326,29 +404,50 @@ describe('package scripts', () => {
       )?.run,
     ).toBe('node scripts/setup-worktree.js');
 
-    expect(
-      job.steps.find(
-        (step) => step.name === 'Ensure bootstrap keeps the worktree clean',
-      )?.run,
-    ).toBe('git diff --exit-code');
+    // The pnpm linker only materializes declared dependencies, so a
+    // workspace import that npm's hoisting hides breaks typecheck and tests
+    // in the bootstrapped tree; resolve one through the worst offender.
+    const resolveCheck = job.steps.find(
+      (step) => step.name === 'Verify workspace links resolve',
+    );
+    expect(resolveCheck?.run).toContain(
+      '@qwen-code/qwen-code-core/package.json',
+    );
+    expect(resolveCheck?.run).toContain('packages/vscode-ide-companion');
 
-    // The clean check only means anything after the install; pin the order.
+    // `git diff --exit-code` misses untracked files; the install must leave
+    // the porcelain output empty on every host, including Windows (hence
+    // the explicit POSIX shell).
+    const cleanCheck = job.steps.find(
+      (step) => step.name === 'Ensure bootstrap keeps the worktree clean',
+    );
+    expect(cleanCheck?.shell).toBe('bash');
+    expect(cleanCheck?.run).toContain('git status --porcelain');
+
+    // The checks only mean anything after the install; pin the order.
     const stepNames = job.steps.map((step) => step.name);
     expect(
       stepNames.indexOf('Install frozen pnpm worktree dependencies'),
-    ).toBeLessThan(
+    ).toBeLessThan(stepNames.indexOf('Verify workspace links resolve'));
+    expect(stepNames.indexOf('Verify workspace links resolve')).toBeLessThan(
       stepNames.indexOf('Ensure bootstrap keeps the worktree clean'),
+    );
+
+    // A post-merge run is the only witness of a regression on main, so
+    // consecutive merges must not cancel each other.
+    expect(workflow.concurrency['cancel-in-progress']).toBe(
+      "${{ github.event_name == 'pull_request' }}",
     );
 
     // Substring check on the raw job text: an exact `step.run` match is
     // bypassed by any other spelling of a build step (block scalar,
     // compound command).
-    expect(
-      getWorkflowJob(
-        readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
-        'install',
-      ),
-    ).not.toContain('npm run build');
+    const installJob = getWorkflowJob(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+      'install',
+    );
+    expect(installJob).not.toContain('npm run build');
+    expect(installJob).not.toContain('node scripts/build.js');
   });
 
   it('runs the pnpm smoke workflow when a dependency input changes', () => {

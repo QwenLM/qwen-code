@@ -87,6 +87,14 @@ the run and names the fix; build once from the repository root:
 npm run build
 ```
 
+**pnpm worktree bootstrap (opt-in):** an additional Git worktree can install
+dependencies with `node scripts/setup-worktree.js`, which runs the pinned
+pnpm with `--frozen-lockfile` (warm store ≈ 99 MiB instead of ≈ 1.44 GiB
+under npm). npm remains the authoritative path for build, CI, packaging, and
+release; the pnpm layout is install-only for now. When dependencies change,
+regenerate the pnpm lockfile with `corepack pnpm install` (no
+`--frozen-lockfile`) and commit both lockfiles together.
+
 **Run individual test files** (always preferred):
 
 ```bash

@@ -22,6 +22,11 @@ contain assumptions inherited from npm's layout.
 The committed pnpm lockfile is the source of dependency resolution for this
 bootstrap only. pnpm-specific overrides preserve the dependency versions used
 by the current npm installation without changing npm's manifest or lockfile.
+Two versions cannot be preserved by overrides alone and are pinned in
+manifests instead: `packages/core` declares the exact `@types/node` release
+it compiles against under npm (20.19.1, previously supplied only by
+hoisting), and every package `vscode-ide-companion` imports at runtime is
+declared in its manifest so the pnpm linker materializes it.
 Dependency install scripts are denied unless they are explicitly listed in
 `allowBuilds`; the allowlist contains only packages whose scripts run in the
 current npm installation.

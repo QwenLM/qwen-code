@@ -51,8 +51,10 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # Post-merge runs must not cancel each other: a cancelled push run would
+  # silently erase the only post-merge witness of a regression.
   group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: 'read'
@@ -81,5 +83,18 @@ jobs:
       - name: 'Install frozen pnpm worktree dependencies'
         run: 'node scripts/setup-worktree.js'
 
+      - name: 'Verify workspace links resolve'
+        shell: bash
+        run: >-
+          node -e "require.resolve('@qwen-code/qwen-code-core/package.json',
+          { paths: ['packages/vscode-ide-companion'] })"
+
       - name: 'Ensure bootstrap keeps the worktree clean'
-        run: 'git diff --exit-code'
+        shell: bash
+        run: |
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            echo 'Bootstrap left the worktree dirty:'
+            echo "$status"
+            exit 1
+          fi
