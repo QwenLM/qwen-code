@@ -28,9 +28,6 @@ import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
   stripDisplayControlChars,
-  TERMINAL_CSI_REGEX,
-  TERMINAL_OSC_REGEX,
-  TERMINAL_SHIFT_DCS_REGEX,
   truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
@@ -40,14 +37,29 @@ const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
 export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 
+/* eslint-disable no-control-regex */
+// Tail-local ECMA-48 byte classes: a string sequence can never cross a
+// control byte or a newline, so an unterminated leader (a log line cut
+// mid-escape, a child killed mid-sequence) swallows at most the
+// remainder of its own line instead of every real line up to the next
+// terminator. Scoped to this strip rather than the shared
+// TERMINAL_*_REGEX constants, whose banner/label consumers replace with
+// a space and pin the narrower grammar.
+const TAIL_OSC_REGEX = /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=\x1b)|$)/g;
+const TAIL_STRING_REGEX = /\x1b[PX^_][^\x1b\n\r]*(?:\x1b\\|(?=\x1b)|$)/g;
+const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
+const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]*[\x30-\x7e]/g;
+/* eslint-enable no-control-regex */
+
 function stripOutputControlChars(text: string): string {
   // Whole sequences first: the per-character loop below only deletes the
   // ESC byte, so a sequence reaching it would leave its bracket,
   // parameters, and final letter behind as readable text.
   const withoutSequences = text
-    .replace(TERMINAL_OSC_REGEX, '')
-    .replace(TERMINAL_CSI_REGEX, '')
-    .replace(TERMINAL_SHIFT_DCS_REGEX, '');
+    .replace(TAIL_OSC_REGEX, '')
+    .replace(TAIL_STRING_REGEX, '')
+    .replace(TAIL_CSI_REGEX, '')
+    .replace(TAIL_FE_ESC_REGEX, '');
   let out = '';
   for (let i = 0; i < withoutSequences.length; i++) {
     const code = withoutSequences.charCodeAt(i);

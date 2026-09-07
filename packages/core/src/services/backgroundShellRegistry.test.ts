@@ -91,6 +91,44 @@ describe('readTaskOutputTail', () => {
     });
   });
 
+  it('keeps real lines after an OSC leader whose terminator was lost', () => {
+    // An OSC payload can never cross a newline, so a leader whose BEL was
+    // lost can no longer swallow the real lines that follow it; only the
+    // malformed leader's ESC and the stray BEL are removed.
+    const outputFile = makeOutputFile(
+      '\u001b]2;stale line1\nline2\nline3\n\u0007after\n',
+    );
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: '2;stale line1\nline2\nline3\nafter',
+      truncated: false,
+    });
+  });
+
+  it('strips CSI byte-class forms, string payloads, and Fe escapes', () => {
+    // ECMA-48 parameter bytes (private and colon sub-parameters) and
+    // intermediate bytes, DCS/SOS/PM/APC payloads with their ST, and
+    // two-byte Fe escapes (charset designations, RIS).
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('build ok\n\u001b[1 q\u001b[>4;2mvim exited\n'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'build ok\nvim exited', truncated: false });
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('abc\u001bPq#0;2;0;0;0!~\u001b\\def'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'abcdef', truncated: false });
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('plain\n\u001b(B)done\n'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'plain\n)done', truncated: false });
+  });
+
   it('collapses carriage-return redraw frames to the latest frame per line', () => {
     const outputFile = makeOutputFile(
       'frame 10%\rframe 45%\rframe 99%\ndone\n',

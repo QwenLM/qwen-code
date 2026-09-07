@@ -73,12 +73,16 @@ const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
-// The trailing escape sequence a pipe chunk can end in the middle of: an
-// unterminated OSC, a CSI still waiting for its final letter, a lone ESC,
-// or an SS2/SS3/DCS leader byte.
+// The trailing escape sequence a pipe chunk can end in the middle of,
+// bounded by ECMA-48 byte classes so a string sequence can never cross a
+// control byte or a newline: an unterminated OSC holds only printable
+// bytes, so a lost BEL releases the hold at the next newline instead of
+// swallowing every real line that follows it; a CSI still waiting for
+// its final byte; an Fe escape (charset designation et al.) waiting for
+// its final byte; a lone ESC; or an SS2/SS3/DCS/SOS/PM/APC leader.
 /* eslint-disable no-control-regex */
 const TRAILING_PARTIAL_ESCAPE_REGEX =
-  /\x1b(?:\][^\x07\x1b]*|\[[\d;?]*|[NOP]?)$/;
+  /\x1b(?:\][\x20-\x7e]*|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NOPX^_])$/;
 /* eslint-enable no-control-regex */
 // The extra byte preserves readTaskOutputTail's `truncated` signal after the
 // capture starts discarding older output.

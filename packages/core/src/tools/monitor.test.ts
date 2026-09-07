@@ -759,6 +759,43 @@ describe('MonitorTool', () => {
       });
     });
 
+    it('releases a held unterminated OSC leader when a newline arrives', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // An OSC leader whose BEL terminator was lost (a log line cut
+      // mid-escape, a child killed mid-sequence): the hold-back is bounded
+      // to printable bytes, so the real output after the leader is
+      // captured and emitted instead of swallowed waiting for a
+      // terminator that never arrives.
+      mockChild.stdout.emit('data', Buffer.from('\u001b]0;deploy started'));
+      mockChild.stdout.emit('data', Buffer.from('\nINFO build ok\n'));
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toContain(
+          'INFO build ok',
+        );
+      });
+      expect(task.eventCount).toBeGreaterThan(0);
+      mockChild._emitClose(0);
+    });
+
+    it('strips a charset designation split across stdout chunks from the capture', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      // ESC ( B designates the ASCII charset; split after ESC (, the first
+      // chunk must be held back so the reassembled sequence is stripped
+      // whole rather than persisted raw.
+      mockChild.stdout.emit('data', Buffer.from('plain\n\u001b('));
+      mockChild.stdout.emit('data', Buffer.from('B)done\n'));
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('plain\n)done\n');
+      });
+    });
+
     it('does not hold back a trailing partial escape longer than the cap', async () => {
       const invocation = createInvocation({ command: 'tail -f app.log' });
 
