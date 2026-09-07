@@ -14695,6 +14695,125 @@ describe('ChannelBase', () => {
       ).not.toBe(sessionId);
     });
 
+    it('does not rotate a session out from under an in-flight /btw question', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+      let settleBtw!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      const btw = vi.fn().mockImplementation(
+        (_sessionId: string) =>
+          new Promise<{ sessionId: string; answer: string | null }>(
+            (resolve) => {
+              settleBtw = resolve;
+            },
+          ),
+      );
+      (bridge as unknown as Record<string, unknown>)['btw'] = btw;
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The side question resolves the same session (rotation defers to
+      // the running turn) and stays in flight on it.
+      const btwTurn = ch.handleInbound(envelope({ text: '/btw what is up?' }));
+      await vi.waitFor(() => expect(btw).toHaveBeenCalledTimes(1));
+      expect(btw.mock.calls[0]![0]).toBe(sessionId);
+
+      // Once the turn drains, a message at the bound must still defer to
+      // the in-flight side question instead of retiring its session.
+      settleFirst('done');
+      await firstTurn;
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(sessionId);
+
+      // Releasing the side question settles it: the answer is delivered
+      // and the lease is given back, so the next message rotates the spent
+      // session.
+      settleBtw({ sessionId, answer: 'side answer' });
+      await btwTurn;
+      await vi.waitFor(() =>
+        expect(ch.sent.some((m) => m.text.includes('side answer'))).toBe(true),
+      );
+      // The deferred release rides the delivery's settle, a few microtasks
+      // behind the answer send: let it land before the next message.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('aborts an in-flight /btw question when its session is rotated', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const ch = createChannel({}, { router });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+      let btwSignal: AbortSignal | undefined;
+      const btw = vi
+        .fn()
+        .mockImplementation(
+          (_sessionId: string, _question: string, signal?: AbortSignal) => {
+            btwSignal = signal;
+            return new Promise<{ sessionId: string; answer: string | null }>(
+              (_resolve, reject) => {
+                signal?.addEventListener('abort', () =>
+                  reject(new Error('The operation was aborted')),
+                );
+              },
+            );
+          },
+        );
+      (bridge as unknown as Record<string, unknown>)['btw'] = btw;
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const btwTurn = ch.handleInbound(envelope({ text: '/btw what is up?' }));
+      await vi.waitFor(() => expect(btw).toHaveBeenCalledTimes(1));
+
+      // Force the retirement past the lease gate — the race the cancel
+      // guards: the in-flight side question must be aborted, not left
+      // running against the discarded session.
+      (
+        router as unknown as {
+          rotateRoute(
+            key: string,
+            sessionId: string,
+            channelName: string,
+            target: SessionTarget | undefined,
+          ): void;
+        }
+      ).rotateRoute('test-chan:user1:chat1', sessionId, 'test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+      });
+
+      expect(btwSignal?.aborted).toBe(true);
+
+      settleFirst('done');
+      await firstTurn;
+      await btwTurn;
+      // No late answer is delivered for the aborted side question.
+      expect(ch.sent.some((m) => m.text.includes('side answer'))).toBe(false);
+    });
+
     it('collect: buffered messages count once against maxTurns', async () => {
       let settleFirst!: (value: string) => void;
       let callCount = 0;

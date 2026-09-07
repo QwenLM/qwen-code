@@ -637,7 +637,7 @@ export abstract class ChannelBase {
     sessionId: string,
     question: string,
     sourceLabel?: string,
-  ): Promise<void> {
+  ): Promise<{ delivery: Promise<void> } | undefined> {
     const target = this.router.getTarget(sessionId);
     if (!target || target.channelName !== this.name) {
       await this.sendThreadMessage(
@@ -690,11 +690,16 @@ export abstract class ChannelBase {
       }
       return;
     }
-    void this.deliverBtw(sessionId, question, request).catch((error) => {
-      process.stderr.write(
-        `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
-      );
-    });
+    // Boxed so the async return cannot flatten it: the caller must be able
+    // to ride the delivery's settle without blocking the inbound handler
+    // on the answer.
+    return {
+      delivery: this.deliverBtw(sessionId, question, request).catch((error) => {
+        process.stderr.write(
+          `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+        );
+      }),
+    };
   }
 
   private async deliverBtw(
@@ -2746,6 +2751,9 @@ export abstract class ChannelBase {
     target: SessionTarget | undefined,
   ): void {
     if (target?.channelName !== this.name) return;
+    // Mirror onSessionDied: a retirement racing an in-flight side question
+    // aborts it instead of leaving it running against the discarded session.
+    this.cancelBtw(sessionId);
     this.purgeSessionState(sessionId);
     // Rotation retires the ID permanently and defers until no turn is
     // running or queued, so it reclaims what the death path must keep: a
@@ -6515,13 +6523,32 @@ export abstract class ChannelBase {
     }
 
     if (btwQuestion !== undefined) {
-      try {
-        await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
-      } finally {
-        // A side question starts no turn: give the resolve-time count back
-        // and release the routing lease, like the bang-shell path below.
+      // A side question starts no turn: give the resolve-time count back
+      // and release the routing lease, like the bang-shell path below — but
+      // only once the delivery settles, so a rotation cannot discard the
+      // session while bridge.btw is still in flight on it. The release
+      // rides the delivery promise instead of being awaited here: the
+      // inbound handler must not block on the answer.
+      const releaseRoute = (): void => {
         this.router.uncountTurn(this.name, sessionId);
         this.router.releaseRoutingLease(sessionId);
+      };
+      let btw: { delivery: Promise<void> } | undefined;
+      try {
+        btw = await this.handleBtw(
+          envelope,
+          sessionId,
+          btwQuestion,
+          sourceLabel,
+        );
+      } catch (error) {
+        releaseRoute();
+        throw error;
+      }
+      if (btw === undefined) {
+        releaseRoute();
+      } else {
+        void btw.delivery.then(releaseRoute, releaseRoute);
       }
       return;
     }

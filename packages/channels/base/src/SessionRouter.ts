@@ -984,6 +984,15 @@ export class SessionRouter {
       this.tombstoneSuspendedKey(key);
       changed = true;
     }
+    // A restore holding this session's route wiped leaves nothing in
+    // toSession to find: stop its in-flight load and tombstone the key, the
+    // same as removeSession's in-flight branch, or the restore re-installs
+    // and persists the forgotten route.
+    for (const [key, wiped] of [...this.wipedRouteState]) {
+      if (wiped.wipedSessionId !== sessionId) continue;
+      this.invalidateRouteOperation(key);
+      this.tombstoneSuspendedKey(key);
+    }
     changed = this.toTarget.delete(sessionId) || changed;
     changed = this.toCwd.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
@@ -1060,6 +1069,12 @@ export class SessionRouter {
         this.tombstoneSuspendedKey(key);
         removed = true;
       }
+    }
+    // A restore holding this session's route wiped leaves nothing in
+    // toSession to find: tombstone from the wipe captures so the restore's
+    // settle honours the removal instead of re-planting the route.
+    for (const [key, wiped] of this.wipedRouteState) {
+      if (wiped.wipedSessionId === sessionId) this.tombstoneSuspendedKey(key);
     }
     if (this.toTarget.delete(sessionId)) {
       removed = true;
@@ -1303,19 +1318,27 @@ export class SessionRouter {
             // a rotation, a validation drop, or another restore's failed
             // load of the same key) reaches disk only at the flush: the
             // settle must not resurrect the route. Invalidating here routes
-            // through the same discard-and-reject path as a /clear.
+            // through the same discard-and-reject path as a /clear — but
+            // only this restore's own operation: a successor already
+            // registered on the key (a message that created its own session
+            // after the removal) must survive the settle.
             if (this.suspendedDeletionKeys.has(key)) {
-              this.invalidateRouteOperation(key);
+              if (this.creatingSessions.get(key) === operation) {
+                this.invalidateRouteOperation(key);
+              } else {
+                this.invalidateOperation(operation);
+              }
             }
             try {
               this.assertOperationCurrent(operation);
             } catch (error) {
-              // A successor operation owns the key when a later restore
+              // A successor restore owns the key's wipe state when it
               // superseded this one, and it is loading the same persisted
               // session ID: discarding here could close the very session the
-              // successor is about to route. Removals leave no successor, so
-              // their discard still runs.
-              if (!this.creatingSessions.has(key)) {
+              // successor is about to route. A removal deletes the wipe
+              // state (a fresh creation never re-sets it), so those discards
+              // still run.
+              if (!this.wipedRouteState.has(key)) {
                 this.scheduleDiscardInvalidatedSession(sessionId, operation);
               }
               throw error;
@@ -1354,10 +1377,7 @@ export class SessionRouter {
               // the wipe state here instead of leaking it. Reject either way
               // so this restore's waiters re-route or fail deliberately.
               reservation.reject(operation.invalidationError);
-              if (
-                !this.creatingSessions.has(key) &&
-                !this.toSession.has(key)
-              ) {
+              if (!this.creatingSessions.has(key) && !this.toSession.has(key)) {
                 this.wipedRouteState.delete(key);
                 if (reserved.wipedSessionId) {
                   this.rotationDeltas.delete(reserved.wipedSessionId);
@@ -1387,7 +1407,11 @@ export class SessionRouter {
               const leases =
                 (reserved.liveRotation?.leases ?? 0) +
                 (this.rotationDeltas.get(wipedId)?.leases ?? 0);
-              if (reserved.wipedBridgeLive && leases > 0) {
+              // A key removed mid-restore has nothing riding on it: reclaim
+              // below instead of re-planting (and, via the flush, persisting)
+              // the route the user just retired.
+              const removed = this.suspendedDeletionKeys.has(key);
+              if (!removed && reserved.wipedBridgeLive && leases > 0) {
                 // Messages routed to the wiped session before this restore
                 // took the key are still in flight on it: keep the route so
                 // they are not killed mid-turn. If the failed load means the
@@ -1496,7 +1520,10 @@ export class SessionRouter {
       liveTarget?: SessionTarget;
     },
   ): void {
-    if (!this.toSession.has(key)) {
+    // A route removed mid-restore (/clear, a rotation) only reaches disk at
+    // the last restore's flush: honour its tombstone here, or the re-add
+    // undoes the removal in memory and the flush writes it back.
+    if (!this.suspendedDeletionKeys.has(key) && !this.toSession.has(key)) {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, reserved.liveTarget ?? entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
@@ -1650,10 +1677,18 @@ export class SessionRouter {
       this.toStartedAt.set(sessionId, liveRotation.startedAt);
     }
     const leases = (liveRotation.leases ?? 0) + (delta?.leases ?? 0);
-    if (leases > 0) {
-      this.sessionRoutingLeases.set(sessionId, leases);
-    } else {
-      this.sessionRoutingLeases.delete(sessionId);
+    // releaseRoutingLease is always called with the id the routed message
+    // resolved — the wiped one. Re-key the lease onto the loaded id only
+    // when they match; otherwise leave it under the wiped id so the release
+    // still finds it instead of deferring rotation on this route forever.
+    if (sessionId === wipedSessionId) {
+      if (leases > 0) {
+        this.sessionRoutingLeases.set(sessionId, leases);
+      } else {
+        this.sessionRoutingLeases.delete(sessionId);
+      }
+    } else if (leases > 0) {
+      this.sessionRoutingLeases.set(wipedSessionId, leases);
     }
   }
 
