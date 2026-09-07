@@ -19,11 +19,17 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
 
 // Mock child components to isolate ToolGroupMessage behavior
-vi.mock('./ToolMessage.js', () => ({
+// Spread the real module so non-component exports (TOOL_ARGS_INLINE_MAX_LINES,
+// which ToolGroupMessage reserves height with) keep their real values — a
+// hand-written literal here would let the two drift apart silently.
+vi.mock('./ToolMessage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ToolMessage.js')>()),
   ToolMessage: vi.fn(
     ({
       callId,
@@ -34,6 +40,7 @@ vi.mock('./ToolMessage.js', () => ({
       resultDisplay,
       isFocused,
       forceShowResult,
+      showToolCallArgs,
     }: {
       callId: string;
       name: string;
@@ -43,6 +50,7 @@ vi.mock('./ToolMessage.js', () => ({
       resultDisplay?: unknown;
       isFocused?: boolean;
       forceShowResult?: boolean;
+      showToolCallArgs?: boolean;
     }) => {
       // Use the same constants as the real component
       const statusSymbolMap: Record<ToolCallStatus, string> = {
@@ -74,6 +82,7 @@ vi.mock('./ToolMessage.js', () => ({
         <Text>
           MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
           {forceShowResult ? ' [forceShow]' : ''}
+          {showToolCallArgs ? ' [args]' : ''}
         </Text>
       );
     },
@@ -123,6 +132,225 @@ describe('<ToolGroupMessage />', () => {
         {component}
       </ConfigContext.Provider>,
     );
+
+  const renderWithToolCallArgs = (component: React.ReactElement) =>
+    render(
+      <SettingsContext.Provider
+        value={
+          {
+            merged: { ui: { showToolCallArgs: true } },
+          } as LoadedSettings
+        }
+      >
+        <ConfigContext.Provider value={mockConfig}>
+          {component}
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+  describe('ui.showToolCallArgs', () => {
+    const readBatch = [
+      createToolCall({
+        callId: 'r1',
+        name: 'ReadFile',
+        description: 'a.ts',
+        args: { absolute_path: 'a.ts' },
+      }),
+      createToolCall({
+        callId: 'r2',
+        name: 'ReadFile',
+        description: 'b.ts',
+        args: { absolute_path: 'b.ts' },
+      }),
+      createToolCall({
+        callId: 'g1',
+        name: 'Grep',
+        description: 'pattern',
+        args: { pattern: 'pattern' },
+      }),
+    ];
+
+    it('keeps the compact partition summary when the setting is off', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders every collapsible tool individually when the setting is on', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[r2]');
+      expect(frame).toContain('MockTool[g1]');
+      expect(frame).not.toContain('read a.ts, b.ts');
+    });
+
+    it('forwards showToolCallArgs down to each ToolMessage', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('[args]');
+    });
+
+    it('does not force result output open (that stays Ctrl+O)', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').not.toContain('[forceShow]');
+    });
+
+    it('keeps the compact partition when no tool carries args (daemon path)', () => {
+      // Daemon-built groups never carry args across the boundary. Expanding
+      // them would give a noisier transcript and zero args rows, reading as
+      // "these tools were called with no arguments".
+      const daemonShaped = readBatch.map(({ args: _args, ...rest }) => rest);
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={daemonShaped} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('treats an empty args object as nothing to render', () => {
+      const emptyArgs = readBatch.map((t) => ({ ...t, args: {} }));
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={emptyArgs} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+
+    it('expands a memory-only group instead of collapsing to the badge', () => {
+      // "Wrote 1 memory" would hide the very parameters the setting exists to
+      // surface.
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md', content: 'remember this' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).not.toContain('Wrote 1 memory');
+    });
+
+    it('keeps the memory badge when the setting is off', () => {
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('Wrote 1 memory');
+    });
+
+    it('keeps the dense panel for a pure parallel-agent group', () => {
+      // The deliberate carve-out: ToolGroupMessage documents that rendering
+      // running agents inline while LiveAgentPanel also lists them overflows
+      // the viewport and triggers ink's clear-screen scroll-snap loop (#5798).
+      // The setting must not reach that gate — this pins the exemption so a
+      // later "make it consistent" edit cannot silently reintroduce the bug.
+      const agent = (name: string): AgentResultDisplay => ({
+        type: 'task_execution',
+        subagentName: name,
+        taskDescription: `${name} task`,
+        taskPrompt: `Run ${name}`,
+        status: 'completed',
+        toolCalls: [],
+      });
+      const agents = [
+        createToolCall({
+          callId: 'agent-1',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'review the diff' },
+          resultDisplay: agent('reviewer'),
+        }),
+        createToolCall({
+          callId: 'agent-2',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          args: { prompt: 'plan the work' },
+          resultDisplay: agent('planner'),
+        }),
+      ];
+      // InlineParallelAgentsDisplay reads the registry off config; the bare
+      // `{}` mockConfig would make `getBackgroundTaskRegistry` throw, ink
+      // would swallow it, and the frame would be empty — which a negative
+      // assertion alone would pass vacuously. Mirrors `registryConfig` below.
+      const registryConfig = {
+        getBackgroundTaskRegistry: () => ({ get: () => undefined }),
+      } as unknown as Config;
+      const { lastFrame } = render(
+        <SettingsContext.Provider
+          value={
+            { merged: { ui: { showToolCallArgs: true } } } as LoadedSettings
+          }
+        >
+          <ConfigContext.Provider value={registryConfig}>
+            <ToolGroupMessage
+              {...baseProps}
+              contentWidth={120}
+              toolCalls={agents}
+              isPending={false}
+            />
+          </ConfigContext.Provider>
+        </SettingsContext.Provider>,
+      );
+      const frame = lastFrame() ?? '';
+      // Positive first: the dense panel really rendered (an empty frame would
+      // satisfy the negation below on its own).
+      expect(frame).toContain('Parallel agents');
+      // And not per-agent ToolMessages. Ctrl+O (fullDetail) is the documented
+      // way to expand these — covered by its own test above.
+      expect(frame).not.toContain('MockSubagent[agent-1]');
+    });
+
+    it('renders without a SettingsProvider (defaults to off)', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+  });
 
   describe('Golden Snapshots', () => {
     it('renders single successful tool call', () => {

@@ -1,5 +1,10 @@
 import { useRef, useState } from 'react';
-import { FolderClosedIcon, FolderPlusIcon, LockIcon } from 'lucide-react';
+import {
+  CircleDashedIcon,
+  FolderClosedIcon,
+  FolderPlusIcon,
+  LockIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   DropdownMenu,
@@ -35,11 +40,18 @@ interface WorkspaceSelectorProps {
   busy?: boolean;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
+  /** Offer a projectless (standalone) target alongside the workspaces. */
+  standaloneSupported?: boolean;
+  selectedStandalone?: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
 }
+
+/** Radio-group value that stands for the projectless target. */
+const STANDALONE_OPTION_ID = '__standalone__';
 
 /**
  * Composer workspace menu. Capability-gated creation actions and disabled
@@ -52,8 +64,11 @@ export function WorkspaceSelector({
   busy,
   scratchSupported,
   existingFolderSupported,
+  standaloneSupported,
+  selectedStandalone,
   className,
   onSelectWorkspace,
+  onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
 }: WorkspaceSelectorProps) {
@@ -68,7 +83,15 @@ export function WorkspaceSelector({
       : workspace.primary,
   );
   const canCreate = scratchSupported || existingFolderSupported;
-  if (workspaces.length <= 1 && !canCreate) return null;
+  const standaloneSelectable = Boolean(
+    standaloneSupported && onSelectStandalone,
+  );
+  if (workspaces.length <= 1 && !canCreate && !standaloneSelectable) {
+    return null;
+  }
+  const triggerLabel = selectedStandalone
+    ? t('sidebar.noWorkspace')
+    : (selected?.label ?? '');
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -114,17 +137,25 @@ export function WorkspaceSelector({
                   }
                 }}
               >
-                <FolderClosedIcon size={16} strokeWidth={1.2} />
-                <span data-slot="select-value">{selected?.label ?? ''}</span>
+                {selectedStandalone ? (
+                  <CircleDashedIcon size={16} strokeWidth={1.2} />
+                ) : (
+                  <FolderClosedIcon size={16} strokeWidth={1.2} />
+                )}
+                <span data-slot="select-value">{triggerLabel}</span>
               </button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent side="top">{selected?.label}</TooltipContent>
+          <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent align="start" className="min-w-56">
           <DropdownMenuRadioGroup
-            value={selected?.id}
+            value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
+              if (id === STANDALONE_OPTION_ID) {
+                onSelectStandalone?.();
+                return;
+              }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
               onSelectWorkspace(next.primary ? undefined : next.cwd);
@@ -148,6 +179,13 @@ export function WorkspaceSelector({
                 )}
               </DropdownMenuRadioItem>
             ))}
+            {standaloneSelectable && (
+              <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>
+                <span className="min-w-0 flex-1 truncate">
+                  {t('sidebar.noWorkspace')}
+                </span>
+              </DropdownMenuRadioItem>
+            )}
           </DropdownMenuRadioGroup>
           {canCreate && (
             <>

@@ -9,8 +9,10 @@ and the existing permission lifecycle.
 ## Rollout
 
 `experimental.sessionWorkflow` is disabled by default. When disabled, Core,
-the ACP session, and the Web Shell retain their existing Todo, Agent, approval,
-and split-view behavior. No Workflow marker or revision context is created.
+the ACP session, and the Web Shell do not create Workflow markers, revision
+context, approval gates, or visualization surfaces. Todo updates preserve an
+active item's dependencies when `blockedBy` is omitted in every mode; this
+shared update behavior is not gated by the setting.
 
 When enabled, the existing `plan` mode is presented as **Plan & Review**. Plan
 Mode remains the execution gate: read-only investigation is allowed, mutating

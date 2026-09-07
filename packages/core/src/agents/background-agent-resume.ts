@@ -1615,10 +1615,13 @@ export class BackgroundAgentResumeService {
       },
     );
     if (entry.metaPath) {
+      const meta = readAgentMeta(entry.metaPath);
       patchAgentMeta(entry.metaPath, {
         lastError: undefined,
         status: 'completed',
-        ...getAgentMetaTerminalSummary(entry.stats, entry.recentActivities),
+        ...(meta?.sessionWorkflow === true
+          ? getAgentMetaTerminalSummary(entry.stats, entry.recentActivities)
+          : {}),
       });
     }
     return restored;

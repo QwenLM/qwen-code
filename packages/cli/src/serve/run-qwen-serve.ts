@@ -80,6 +80,10 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import {
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+} from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -4207,6 +4211,10 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
+    // The Conversations marker is enable-only and scoped to the
+    // live-conversation bridge below; every other runtime's child must not
+    // inherit it from the daemon's own environment.
+    [PRIVATE_CONVERSATIONS_RUNTIME_ENV]: undefined,
     [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
     [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
       ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
@@ -5160,6 +5168,17 @@ async function runQwenServeImpl(
       }
       return source;
     };
+    let mcpAuthenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (mcpAuthenticationActive) return undefined;
+      mcpAuthenticationActive = true;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        mcpAuthenticationActive = false;
+      };
+    };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -5553,6 +5572,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace,
         runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
+        acquireMcpAuthentication,
         // Prompt terminal ledger: persisted beside the transcript so a
         // restarted daemon can reconcile dangling prompts on cold load.
         promptLedger: runtime.createPromptLedgerSink(
@@ -6123,6 +6143,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace: workspaceInput.cwd,
         runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
+        acquireMcpAuthentication,
         promptLedger: runtime.createPromptLedgerSink(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -6798,6 +6819,7 @@ async function runQwenServeImpl(
             : {}),
           boundWorkspace: cwd,
           runtimeEpochSource: runtimeEpochSourceFor(cwd),
+          acquireMcpAuthentication,
           // Live-conversation workspaces keep transcripts outside the
           // runtime storage layout, so no ledger sink is wired there.
           ...(provenance === 'live-conversation'
@@ -6809,7 +6831,17 @@ async function runQwenServeImpl(
                 ),
               }),
           sessionShellCommandEnabled,
-          childEnvOverrides,
+          // Only the Conversations runtime's children carry the private
+          // provenance marker; every other workspace keeps the shared
+          // overrides' explicit removal.
+          childEnvOverrides:
+            provenance === 'live-conversation'
+              ? {
+                  ...childEnvOverrides,
+                  [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+                }
+              : childEnvOverrides,
           channelFactory: wsChannelFactory,
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
@@ -7265,7 +7297,9 @@ async function runQwenServeImpl(
             runtimeToDrain.provenance !== 'live-conversation'
           ) {
             await channelWorkerManager
-              .removeWorkspace(runtimeToDrain.workspaceCwd)
+              .removeWorkspace(runtimeToDrain.workspaceCwd, {
+                permanent: reason === 'workspace_removed',
+              })
               .catch((err) => {
                 daemonLog.error(
                   'workspace channel worker cleanup error',

@@ -11,6 +11,7 @@ import {
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
   sanitizeSenderName,
+  startsWithMessagePrefix,
 } from '@qwen-code/channel-base';
 import {
   buildCardContent,
@@ -141,6 +142,39 @@ const escapeFeishuMarkdown = (value: string) =>
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+/**
+ * Consume the leading `@name` mention run so prefix matching starts at the
+ * payload.
+ *
+ * Only the leading run: a mention the user typed after the prefix is part of
+ * the message and has to survive into the dispatched prompt. Display names
+ * are matched literally because Feishu renders them verbatim -- a name
+ * containing spaces is one token here, which the shared mention skip in
+ * `stripMessagePrefix` cannot recognize. The loop stops as soon as the
+ * remainder starts with the configured prefix, so a prefix that itself
+ * begins with `@` is never eaten as a mention.
+ */
+function stripLeadingMentionNames(
+  text: string,
+  names: readonly string[],
+  prefix: string | undefined,
+): string {
+  let rest = text.trimStart();
+  const tokens = [
+    ...new Set(names.filter(Boolean).map((name) => `@${name}`)),
+  ].sort((a, b) => b.length - a.length);
+  let consumed = true;
+  while (consumed && !(prefix && startsWithMessagePrefix(rest, prefix))) {
+    consumed = false;
+    for (const token of tokens) {
+      if (!rest.startsWith(token)) continue;
+      rest = rest.slice(token.length).trimStart();
+      consumed = true;
+      break;
+    }
+  }
+  return rest;
+}
 const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
@@ -2628,29 +2662,35 @@ export class FeishuChannel extends ChannelBase {
       // Check @mention
       let isMentioned = false;
       let cleanText = content.text;
+      const mentionNames = [...(content.mentionNames ?? [])];
       if (msg.mentions && msg.mentions.length > 0) {
+        const mentionReplacements = new Map<string, string>();
         for (const mention of msg.mentions) {
           const mentionId =
             mention.id.open_id || mention.id.user_id || mention.id.union_id;
-          if (mentionId === this.botOpenId) {
+          const isBotMention = mentionId === this.botOpenId;
+          if (isBotMention) {
             isMentioned = true;
           }
-          // Replace @mention placeholder in text
-          cleanText = cleanText.replaceAll(
+          // Resolve the structured placeholder directly. Removing the bot by
+          // rendered display name would corrupt a preceding member whose name
+          // merely starts with the bot's name.
+          mentionReplacements.set(
             mention.key,
-            () => `@${mention.name}`,
+            isBotMention ? '' : `@${mention.name}`,
           );
+          if (!isBotMention && mention.name) mentionNames.push(mention.name);
         }
-        // Strip bot @mention from text — use replace (not replaceAll) to
-        // avoid removing literal occurrences of the bot's name the user typed.
-        if (isMentioned && this.botOpenId) {
-          for (const mention of msg.mentions) {
-            const mentionId =
-              mention.id.open_id || mention.id.user_id || mention.id.union_id;
-            if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
-            }
-          }
+        const mentionKeys = [...mentionReplacements.keys()].sort(
+          (a, b) => b.length - a.length,
+        );
+        if (mentionKeys.length > 0) {
+          cleanText = cleanText
+            .replace(
+              new RegExp(mentionKeys.map(escapeRegExp).join('|'), 'gu'),
+              (key) => mentionReplacements.get(key) ?? key,
+            )
+            .trim();
         }
       }
 
@@ -2662,6 +2702,15 @@ export class FeishuChannel extends ChannelBase {
         return;
       }
 
+      // Matching-only text: the prefix follows the leading mention run, and
+      // only that run is consumed. Mentions inside the payload survive into
+      // the dispatched prompt, as they do with no prefix configured.
+      const messagePrefixText = stripLeadingMentionNames(
+        cleanText,
+        mentionNames,
+        this.configuredMessagePrefix(),
+      );
+
       // Parent authorship is resolved under the named-session preparation lock;
       // replies run the full preflight again before they can be processed.
       const envelope: Envelope = {
@@ -2671,6 +2720,11 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
+        // A media message carries only an adapter-synthesized placeholder,
+        // which no user action can prefix -- gating it would drop every
+        // image, file, audio and video with the prefix configured.
+        ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
+        messagePrefixText: messagePrefixText.trim(),
         messageId: msgId,
         threadId: msg.root_id || undefined,
         isGroup,
@@ -2870,17 +2924,41 @@ export class FeishuChannel extends ChannelBase {
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
+    /**
+     * Display names this method rendered as `@name` mention markers.
+     *
+     * A `post` message carries its mentions as at-nodes, so the message-level
+     * `mention.key` tokens never appear in `text` and stripping them for
+     * prefix matching is a no-op. Reporting the rendered names lets the
+     * caller consume the leading mention run the same way.
+     */
+    mentionNames?: string[];
+    /**
+     * Whether `text` is something the user typed.
+     *
+     * Feishu delivers media as its own message type with no caption
+     * field, so an image or file carries only an adapter-synthesized
+     * placeholder. Gating that on `messagePrefix` would drop every media
+     * message with no action the user could take, so the caller bypasses
+     * the filter when this is false -- the same contract DingTalk and
+     * WeCom already implement.
+     */
+    userAuthoredText: boolean;
   } {
     try {
       const content = JSON.parse(contentJson);
 
       switch (messageType) {
         case 'text':
-          return { text: (content.text as string) || '' };
+          return {
+            text: (content.text as string) || '',
+            userAuthoredText: true,
+          };
 
         case 'post': {
           // Rich text (post) format: extract text from nested structure
           const lines: string[] = [];
+          const mentionNames: string[] = [];
           const post = content as Record<string, unknown>;
           // Post can have multiple language versions like {"zh_cn": {title, content}}
           // or be directly {title, content} (no language wrapper).
@@ -2909,19 +2987,25 @@ export class FeishuChannel extends ChannelBase {
                   ];
                   if (typeof userName === 'string' && userName) {
                     parts.push(`@${userName}`);
+                    mentionNames.push(userName);
                   }
                 }
               }
               lines.push(parts.join(''));
             }
           }
-          return { text: lines.join('\n').trim() || '' };
+          return {
+            text: lines.join('\n').trim() || '',
+            mentionNames,
+            userAuthoredText: true,
+          };
         }
 
         case 'image':
           return {
             text: '(image)',
             imageKey: (content.image_key as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'file':
@@ -2929,29 +3013,34 @@ export class FeishuChannel extends ChannelBase {
             text: `(file: ${(content.file_name as string) || 'file'})`,
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'audio':
-          return { text: '(audio)' };
+          return { text: '(audio)', userAuthoredText: false };
 
         case 'media':
           return {
             text: '(video)',
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'interactive':
-          return { text: '(card message — not supported)' };
+          return {
+            text: '(card message — not supported)',
+            userAuthoredText: false,
+          };
 
         default:
-          return { text: '' };
+          return { text: '', userAuthoredText: false };
       }
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] extractContent parse error (type=${messageType}): ${err instanceof Error ? err.message : err}\n`,
       );
-      return { text: '' };
+      return { text: '', userAuthoredText: false };
     }
   }
 }

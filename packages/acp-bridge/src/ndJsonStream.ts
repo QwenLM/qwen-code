@@ -80,17 +80,25 @@ export class NdJsonFrameTooLargeError extends Error {
   }
 }
 
+export type NdJsonQueueBudget =
+  | 'decoded'
+  | 'inbound_request'
+  | 'outbound_request'
+  | 'prepared_response'
+  | 'outbound_operation';
+
 export class NdJsonQueueLimitError extends Error {
   readonly code = 'ndjson_queue_limit_exceeded';
 
   constructor(
+    readonly budget: NdJsonQueueBudget,
     readonly maxQueuedMessages: number,
     readonly maxQueuedBytes: number,
     readonly requiredBytes: number,
     readonly availableBytes: number,
   ) {
     super(
-      `NDJSON decoded queue is full ` +
+      `NDJSON ${budget} queue limit exceeded ` +
         `(required ${requiredBytes} bytes, available ${availableBytes} bytes)`,
     );
     this.name = 'NdJsonQueueLimitError';
@@ -290,6 +298,7 @@ function createBoundedReadable(
   ): Promise<void> => {
     const queueLimitError = (available: number) =>
       new NdJsonQueueLimitError(
+        'decoded',
         limits.maxQueuedMessages,
         limits.maxQueuedBytes,
         queueCharge,
@@ -733,6 +742,7 @@ class BoundedInboundRequestLedger {
       frameBytes > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'inbound_request',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         frameBytes,
@@ -774,6 +784,7 @@ class BoundedOutstandingRequestLedger {
       frameBytes > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'outbound_request',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         frameBytes,

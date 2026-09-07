@@ -98,17 +98,8 @@ jobs:
             exit 1
           fi
 
-      # Runner instances on one self-hosted machine share $HOME and therefore
-      # ~/.m2/toolchains.xml. setup-java merges its JDK entry into that file
-      # with a non-atomic read-modify-write, so two concurrent jobs can tear
-      # it — and once torn, every later job on the machine fails Set up Java
-      # with "Cannot insert a text node as a child of a document node". The
-      # build never reads toolchains.xml (no maven-toolchains-plugin), so
-      # dropping it is free and setup-java rewrites it from scratch.
-      - name: 'Drop shared Maven toolchains.xml (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: 'rm -f "${HOME}/.m2/toolchains.xml"'
-
+      # setup-java updates Maven files non-atomically. Keep them job-local
+      # because runner instances on one ECS host share HOME.
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -116,6 +107,7 @@ jobs:
           java-version: '${{ matrix.java }}'
           cache: 'maven'
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -129,6 +121,8 @@ jobs:
       - name: 'Run Java SDK tests (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
@@ -141,22 +135,35 @@ jobs:
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
-    timeout-minutes: 30
+    # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
+    # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
+    # about a minute. On the shared pool that setup is what stretches: npm ci
+    # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
+    # that died, which is the whole difference between them. At that factor the
+    # setup alone needs ~44 min, so 30 cancelled the job before a single
+    # assertion ran. Matches the 45 tier release.yml's quality_build uses.
+    timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -205,12 +212,6 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
 
-      # Same shared-$HOME hazard as the unit job above: drop the torn-prone
-      # toolchains.xml so a corrupt leftover cannot fail Set up Java.
-      - name: 'Drop shared Maven toolchains.xml (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: 'rm -f "${HOME}/.m2/toolchains.xml"'
-
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -218,6 +219,7 @@ jobs:
           java-version: '11'
           cache: 'maven'
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -238,4 +240,6 @@ jobs:
         run: 'npm run bundle'
 
       - name: 'Run Java daemon E2E'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'

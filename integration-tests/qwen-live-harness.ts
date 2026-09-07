@@ -72,7 +72,7 @@ const SERVE_TOKEN = 'qwen-live-e2e-token';
 const LIVE_LISTENING_RE = /qwen-live listening on http:\/\/127\.0\.0\.1:(\d+)/;
 const DISPOSE_GRACE_MS = 10_000;
 const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
-const LIVE_HOST_PROTOCOL_VERSION = 6;
+const LIVE_HOST_PROTOCOL_VERSION = 7;
 const LIVE_INPUT_AUDIO_EPOCH_BYTES = 8;
 
 // -- small async utilities ----------------------------------------------------

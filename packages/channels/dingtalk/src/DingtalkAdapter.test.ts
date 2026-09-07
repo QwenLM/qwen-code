@@ -10,6 +10,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { inspect } from 'node:util';
+import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
@@ -34,6 +36,9 @@ const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
   nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
+  // Stands in for the gateway stream ticket that the SDK's ungated connect
+  // logging writes to stdout (dist/client.mjs, getEndpoint).
+  streamTicket: 'stream-ticket-1a2b3c',
 }));
 
 const PNG_DATA = Buffer.from([
@@ -44,6 +49,13 @@ function createTempPng(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-image-'));
   const path = join(dir, 'image.png');
   writeFileSync(path, PNG_DATA);
+  return { dir, path };
+}
+
+function createTempFile(name = 'report.txt'): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-file-'));
+  const path = join(dir, name);
+  writeFileSync(path, 'report');
   return { dir, path };
 }
 
@@ -86,6 +98,18 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
     );
     send = vi.fn();
     connect = vi.fn(() => {
+      // Reproduces the SDK's ungated getEndpoint() logging (dist/client.mjs):
+      // the resolved config, then the gateway response carrying the ticket.
+      /* eslint-disable no-console -- this is the SDK behaviour under test */
+      console.log({ ...this.options });
+      console.log(
+        'res.data',
+        JSON.stringify({
+          endpoint: 'wss://wss-open-connection.dingtalk.test/connect',
+          ticket: dingtalkSdkMock.streamTicket,
+        }),
+      );
+      /* eslint-enable no-console */
       const connect = dingtalkSdkMock.nextConnect;
       dingtalkSdkMock.nextConnect = undefined;
       return connect?.() ?? Promise.resolve();
@@ -315,7 +339,7 @@ it('rejects a non-boolean useConnectionManager value', () => {
   );
 });
 
-it('adds outbound image instructions without replacing custom instructions', () => {
+it('adds outbound media instructions without replacing custom instructions', () => {
   const channel = createChannel({ instructions: 'Keep the answer concise.' });
   const instructions = (
     channel as unknown as { config: { instructions: string } }
@@ -323,6 +347,16 @@ it('adds outbound image instructions without replacing custom instructions', () 
 
   expect(instructions).toContain('Keep the answer concise.');
   expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
+  expect(instructions).toContain('[FILE: /absolute/path/to/file]');
+});
+
+it('does not advertise file delivery in block streaming', () => {
+  const channel = createChannel({ blockStreaming: 'on' });
+  const instructions = (
+    channel as unknown as { config: { instructions: string } }
+  ).config.instructions;
+
+  expect(instructions).not.toContain('[FILE:');
 });
 
 it('validates interactive card config in the adapter', () => {
@@ -2020,6 +2054,75 @@ describe('DingtalkChannel status cards', () => {
     expect(body.markdown.text).toContain('final answer');
     expect(body.markdown.text).toContain('[File delivery unavailable]');
     expect(body.markdown.text).not.toContain('/workspace/a.txt');
+  });
+
+  it('delivers a projected file before finalizing the status card', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const order: string[] = [];
+      const closeOutput = vi.fn(async () => {
+        order.push('finalize');
+        return true;
+      });
+      const appendOutput = vi.fn();
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            appendOutput: typeof appendOutput;
+            closeOutput: typeof closeOutput;
+          };
+        }
+      ).interactionPresenter = { appendOutput, closeOutput };
+      const context = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.includes('/gettoken?')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+            ),
+          );
+        }
+        if (url.includes('/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+            ),
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as { msgtype: string };
+        if (body.msgtype === 'file') order.push('file');
+        return Promise.resolve(new Response('{}'));
+      });
+      const response = `before\n[FILE: ${file.path}]\nafter`;
+
+      getChunkHook(channel)('cid-1', response, 'session-1', context);
+      await getCompleteHook(channel)('cid-1', response, 'session-1', context);
+
+      expect(appendOutput).toHaveBeenCalledWith(context, 'before\n\nafter');
+      expect(closeOutput.mock.calls[0]?.[1]).toBe('before\n\nafter');
+      expect(order).toEqual(['file', 'finalize']);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
   });
 
   it('uploads a final status card image before closing output', async () => {
@@ -4296,6 +4399,140 @@ describe('DingtalkChannel quoted media', () => {
     ).onMessage(downstream);
   }
 
+  function sendDirectText(
+    channel: DingtalkChannelInstance,
+    content: string,
+  ): void {
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'direct-text',
+        conversationType: '1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-1',
+        msgtype: 'text',
+        text: { content },
+      }),
+      headers: { messageId: 'direct-text' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+  }
+
+  it('keeps user-authored DingTalk text behind the configured prefix', async () => {
+    // The mirror of the media exemption: text the user typed must never be
+    // exempted, or the configured prefix is defeated for the whole adapter.
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectText(channel, '/review inspect this');
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.text).toBe('/review inspect this');
+    expect(envelope.syntheticText).toBeUndefined();
+    expect(envelope.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('exempts a captionless DingTalk media message from the prefix', async () => {
+    mockMediaDownload('image/png', new Uint8Array([1, 2, 3]));
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    sendDirectMedia(channel, 'picture', { downloadCode: 'direct-picture' });
+
+    await vi.waitFor(() => {
+      expect(channel.handleInbound).toHaveBeenCalledOnce();
+    });
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(envelope.syntheticText).toBe(true);
+  });
+
+  it('marks readable chat records as user text and exempts only the empty placeholder', async () => {
+    const readable = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(readable, 'chatRecord', {
+      chatRecord: [{ senderName: 'Alice', content: 'inspect production' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(readable.handleInbound).toHaveBeenCalledOnce();
+    });
+    const readableEnvelope = vi.mocked(readable.handleInbound).mock
+      .calls[0]![0];
+    expect(readableEnvelope.syntheticText).toBeUndefined();
+
+    const empty = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(empty, 'chatRecord', {});
+
+    await vi.waitFor(() => {
+      expect(empty.handleInbound).toHaveBeenCalledOnce();
+    });
+    const emptyEnvelope = vi.mocked(empty.handleInbound).mock.calls[0]![0];
+    expect(emptyEnvelope.text).toBe('(chat record)');
+    expect(emptyEnvelope.syntheticText).toBe(true);
+  });
+
+  it.each([
+    ['an empty rich-text message', 'richText', { richText: [] }],
+    ['a picture without a download code', 'picture', {}],
+  ])(
+    'does not exempt %s from the configured prefix',
+    async (_label, msgtype, content) => {
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, msgtype, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.syntheticText).toBeUndefined();
+    },
+  );
+
+  it.each([
+    {
+      label: 'a transcribed voice message stays gated',
+      content: {
+        downloadCode: 'direct-audio',
+        recognition: 'please review the build failure',
+      },
+      text: 'please review the build failure',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      content: { downloadCode: 'direct-audio' },
+      // The placeholder is cleared once the attachment is downloaded.
+      text: '',
+      synthetic: true,
+    },
+  ])(
+    'under a configured prefix, $label',
+    async ({ content, text, synthetic }) => {
+      // A transcript is the user's own words, so it carries the prefix like
+      // any other message; only the `(audio)` placeholder is adapter text.
+      mockMediaDownload('audio/amr', new Uint8Array([1, 2, 3]));
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, 'audio', content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      const filePath = envelope.attachments?.[0]?.filePath;
+      if (filePath) tempDirs.add(dirname(filePath));
+      expect(envelope.text).toBe(text);
+      expect(envelope.syntheticText).toBe(synthetic);
+    },
+  );
+
   it('downloads every picture in one richText callback', async () => {
     const downloadCodes: string[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(
@@ -4622,6 +4859,7 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope).toMatchObject({
       text: '(image)',
       referencedText: '[image]',
+      syntheticText: true,
     });
     expect(envelope.attachments).toHaveLength(2);
     expect(envelope.attachments).toEqual([
@@ -5055,6 +5293,140 @@ describe('DingtalkChannel downstream logging', () => {
     expect(client.onCallback).not.toHaveBeenCalled();
   });
 });
+
+function formatLoggedArgs(calls: unknown[][]): string {
+  return calls
+    .map((call) => call.map((arg) => inspect(arg)).join(' '))
+    .join('\n');
+}
+
+/* eslint-disable no-console -- console.log is the subject of these tests */
+describe('DingtalkChannel connect logging', () => {
+  afterEach(() => {
+    dingtalkSdkMock.nextConnect = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it('keeps clientSecret and the stream ticket off console.log on connect', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await channel.connect();
+    } finally {
+      channel.disconnect();
+    }
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('keeps a connection-manager replacement client silent on reconnect', async () => {
+    const firstIndex = dingtalkSdkMock.instances.length;
+    const channel = createChannel();
+    await channel.connect();
+    const firstClient = mockClientAt(firstIndex);
+
+    const replacementGate = deferredPromise<void>();
+    let replacementConnectStarted = false;
+    dingtalkSdkMock.nextConnect = () => {
+      replacementConnectStarted = true;
+      return replacementGate.promise;
+    };
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      firstClient.onDownStream(
+        JSON.stringify({
+          type: 'SYSTEM',
+          headers: { topic: 'disconnect', messageId: 'system-message' },
+          data: '',
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(replacementConnectStarted).toBe(true);
+      });
+      replacementGate.resolve();
+      await vi.waitFor(() => {
+        expect(firstClient.disconnect).toHaveBeenCalledOnce();
+      });
+    } finally {
+      replacementGate.resolve();
+      channel.disconnect();
+    }
+
+    expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log once overlapping connects settle', async () => {
+    createChannel({ useConnectionManager: false });
+    const client = latestMockClient() as { connect(): Promise<void> };
+    const originalConsoleLog = console.log;
+
+    const firstGate = deferredPromise<void>();
+    const secondGate = deferredPromise<void>();
+    dingtalkSdkMock.nextConnect = () => firstGate.promise;
+    const firstConnect = client.connect();
+    dingtalkSdkMock.nextConnect = () => secondGate.promise;
+    const secondConnect = client.connect();
+
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    dingtalkSdkMock.nextConnect = undefined;
+    firstGate.resolve();
+    await firstConnect;
+    // The second connect is still in flight, so logging must stay suppressed:
+    // restoring here would reopen the leak for the remainder of that connect.
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    secondGate.resolve();
+    await secondConnect;
+
+    expect(console.log).toBe(originalConsoleLog);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    console.log('logging works again');
+    expect(logSpy).toHaveBeenCalledWith('logging works again');
+  });
+
+  it('models the ungated SDK connect logging the guards rely on', async () => {
+    // Control for the guard tests above: the mocked SDK client, bypassing the
+    // adapter's wrapping, must leak what the guards assert absent. Without
+    // this, deleting the mock's console.log lines would leave them green
+    // while guarding nothing.
+    const rawClient = new DWClient({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await rawClient.connect();
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).toContain('client-secret');
+    expect(logged).toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log when connect rejects', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    dingtalkSdkMock.nextConnect = () =>
+      Promise.reject(new Error('gateway down'));
+    const originalConsoleLog = console.log;
+
+    try {
+      await expect(channel.connect()).rejects.toThrow('gateway down');
+    } finally {
+      channel.disconnect();
+    }
+
+    expect(console.log).toBe(originalConsoleLog);
+  });
+});
+/* eslint-enable no-console */
 
 describe('DingtalkChannel sender attribution', () => {
   it('falls back to senderStaffId when senderNick is absent', () => {
@@ -6360,7 +6732,7 @@ describe('DingtalkChannel outbound image delivery', () => {
   });
 });
 
-describe('DingtalkChannel outbound file projection', () => {
+describe('DingtalkChannel outbound file delivery', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -6381,25 +6753,180 @@ describe('DingtalkChannel outbound file projection', () => {
     };
   }
 
-  it('redacts reserved file output from plain replies', async () => {
+  it('sends a local file attachment and path-free text reply', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((input) => {
+          const url = String(input);
+          if (url.includes('/gettoken?')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: 'proactive-token',
+                  expires_in: 7200,
+                }),
+              ),
+            );
+          }
+          if (url.includes('/media/upload')) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+              ),
+            );
+          }
+          return Promise.resolve(new Response('{}'));
+        });
+
+      await channel.sendMessage(
+        'cid123',
+        `before\n[FILE: ${file.path}]\nafter`,
+      );
+
+      const webhookCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/robot/send?'),
+      );
+      expect(webhookCalls).toHaveLength(2);
+      const fileBody = JSON.parse(
+        String((webhookCalls[0]![1] as RequestInit).body),
+      );
+      expect(fileBody).toEqual({
+        msgtype: 'file',
+        file: {
+          mediaId: '@file-media-id',
+          fileName: 'report.txt',
+          fileType: 'txt',
+        },
+      });
+      expect((webhookCalls[0]![1] as RequestInit).redirect).toBe('error');
+      const textBody = JSON.parse(
+        String((webhookCalls[1]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(textBody.markdown.text).toContain('before\n\nafter');
+      expect(textBody.markdown.text).not.toContain('[FILE:');
+      expect(textBody.markdown.text).not.toContain(file.path);
+
+      fetchSpy.mockClear();
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      const pureFileWebhookCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/robot/send?'),
+      );
+      expect(pureFileWebhookCalls).toHaveLength(1);
+      expect(
+        JSON.parse(String((pureFileWebhookCalls[0]![1] as RequestInit).body)),
+      ).toMatchObject({ msgtype: 'file' });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes the token and retries one expired file upload', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      let uploadCall = 0;
+      let tokenCall = 0;
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((input) => {
+          const url = String(input);
+          if (url.includes('/gettoken?')) {
+            tokenCall++;
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  errcode: 0,
+                  access_token: `proactive-token-${tokenCall}`,
+                  expires_in: 7200,
+                }),
+              ),
+            );
+          }
+          if (url.includes('/media/upload')) {
+            return Promise.resolve(
+              uploadCall++ === 0
+                ? new Response(
+                    JSON.stringify({
+                      errcode: 42001,
+                      errmsg: 'token expired',
+                    }),
+                  )
+                : new Response(
+                    JSON.stringify({
+                      errcode: 0,
+                      media_id: '@file-media-id',
+                    }),
+                  ),
+            );
+          }
+          return Promise.resolve(new Response('{}'));
+        });
+
+      await channel.sendMessage('cid123', `[FILE: ${file.path}]`);
+
+      expect(
+        fetchSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('/media/upload'),
+        ),
+      ).toHaveLength(2);
+      expect(
+        fetchSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('/gettoken?'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an invalid local file without exposing its path', async () => {
     const channel = createChannel();
     seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
 
-    await channel.sendMessage(
-      'cid123',
-      'before\n[FILE: /workspace/report.txt]\nafter',
-    );
+    await channel.sendMessage('cid123', `[FILE: ${process.execPath}]`);
 
+    expect(fetchSpy).toHaveBeenCalledOnce();
     const body = JSON.parse(
       String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
     ) as { markdown: { text: string } };
-    expect(body.markdown.text).toContain('before\n\nafter');
-    expect(body.markdown.text).toContain('[File delivery unavailable]');
-    expect(body.markdown.text).not.toContain('[FILE:');
-    expect(body.markdown.text).not.toContain('/workspace/report.txt');
+    expect(body.markdown.text).toContain('[File delivery failed:');
+    expect(body.markdown.text).not.toContain(process.execPath);
+  });
+
+  it('does not upload a file for an untrusted session webhook', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      (channel as unknown as { webhooks: Map<string, string> }).webhooks.set(
+        'cid123',
+        'https://oapi.dingtalk.com.evil.test/robot/send',
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const prepare = (
+        channel as unknown as {
+          prepareReplyOutput(chatId: string, text: string): Promise<string>;
+        }
+      ).prepareReplyOutput.bind(channel);
+
+      await expect(prepare('cid123', `[FILE: ${file.path}]`)).resolves.toBe(
+        '[File delivery failed: report.txt]',
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
   });
 
   it.each([
@@ -6723,7 +7250,7 @@ describe('DingtalkChannel outbound file projection', () => {
 
     expect(projected.join('')).toBe('before\n\nafter');
     expect(closeOutput.mock.calls[0]?.[1]).toBe(
-      'before\n\nafter\n[File delivery unavailable]',
+      'before\n\nafter\n[File delivery failed: report.txt]',
     );
     expect(JSON.stringify(closeOutput.mock.calls)).not.toContain(
       '/workspace/report.txt',
@@ -7004,15 +7531,16 @@ describe('DingtalkChannel outbound file projection', () => {
     const channel = createChannel();
     const prepare = (
       channel as unknown as {
-        prepareOutgoingText(text: string): Promise<string>;
+        prepareReplyOutput(chatId: string, text: string): Promise<string>;
       }
-    ).prepareOutgoingText.bind(channel);
+    ).prepareReplyOutput.bind(channel);
 
     const out = await prepare(
+      'cid123',
       'before\n[FILE: /workspace/report.txt]\n[IMAGE: /workspace/missing.png]\nafter',
     );
 
-    expect(out).toContain('[File delivery unavailable]');
+    expect(out).toContain('[File delivery failed: report.txt]');
     expect(out).not.toContain('[FILE:');
     expect(out).not.toContain('/workspace/report.txt');
     expect(out).toContain('[Image delivery failed: missing.png]');
@@ -7257,6 +7785,66 @@ describe('DingtalkChannel proactive send', () => {
       rmSync(image.dir, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    ['group', groupTarget],
+    ['direct', directTarget],
+  ])('sends proactive %s files with sampleFile', async (_name, target) => {
+    const file = createTempFile('report.pdf');
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      const { sendCalls, directSendCalls, mediaCalls } = stubProactiveFetch(
+        () =>
+          new Response(JSON.stringify({ processQueryKey: 'message-key' }), {
+            status: 200,
+          }),
+      );
+
+      await channel.pushProactive(target, `[FILE: ${file.path}]`);
+
+      expect(mediaCalls()).toHaveLength(1);
+      expect(String(mediaCalls()[0]![0])).toContain('type=file');
+      const sends = target.isGroup ? sendCalls() : directSendCalls();
+      expect(sends).toHaveLength(1);
+      const body = JSON.parse(String((sends[0]![1] as RequestInit).body)) as {
+        msgKey: string;
+        msgParam: string;
+      };
+      expect(body.msgKey).toBe('sampleFile');
+      expect(JSON.parse(body.msgParam)).toEqual({
+        mediaId: '@lAL-proactive-media-id',
+        fileName: 'report.pdf',
+        fileType: 'pdf',
+      });
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['group', groupTarget],
+    ['direct', directTarget],
+  ])(
+    'reports a proactive %s file response without a delivery verdict',
+    async (_name, target) => {
+      const file = createTempFile('report.pdf');
+      try {
+        const channel = proactive(createChannel({ cwd: file.dir }));
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const { sendCalls, directSendCalls } = stubProactiveFetch();
+
+        await channel.pushProactive(target, `[FILE: ${file.path}]`);
+
+        const sends = target.isGroup ? sendCalls() : directSendCalls();
+        expect(sends).toHaveLength(2);
+        expect(msgParamOf(sends[1]!).text).toBe(
+          '[File delivery failed: report.pdf]',
+        );
+      } finally {
+        rmSync(file.dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rejects direct messages when DingTalk reports an invalid recipient', async () => {
     const channel = proactive(createChannel());

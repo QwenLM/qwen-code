@@ -13,7 +13,7 @@
 
 import type { ApprovalMode } from '../config/approval-mode.js';
 import { readOwnSessionRecord } from '../services/session-registry.js';
-import { receiverReviewsActions } from './inbound-gate.js';
+import { modeClass } from './inbound-gate.js';
 import {
   buildUserFrame,
   canonicalizeMsgId,
@@ -62,14 +62,13 @@ export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
 /**
  * The approval-mode class this session asserts to a receiver.
  *
- * The receiver's parity rule asks one question — does the sender still
- * put a human in front of each action? — so the class is the answer to
- * exactly that, using the same predicate the receiving gate applies to
- * itself. Two sessions in the same mode therefore always agree on which
- * class they are in.
+ * The receiver's parity rule asks whether the two sessions are in the
+ * same review class, so this is the same classification the receiving
+ * gate applies to itself. Two sessions in the same mode therefore always
+ * agree on which class they are in.
  */
 export function senderModeClass(mode: ApprovalMode): 'bypass' | 'prompting' {
-  return receiverReviewsActions(mode) ? 'prompting' : 'bypass';
+  return modeClass(mode);
 }
 
 /** What this session remembers about a message it sent. */
@@ -120,10 +119,21 @@ const RECEIPT_TRANSITIONS: Record<
   PeerDeliveryStatus | 'pending',
   ReadonlySet<PeerDeliveryStatus>
 > = {
-  pending: new Set(['held', 'delivered', 'denied', 'expired', 'misaddressed']),
+  pending: new Set([
+    'held',
+    'delivered',
+    'denied',
+    'refused',
+    'expired',
+    'misaddressed',
+  ]),
+  // A refusal is decided at admission, so it cannot follow a hold: a
+  // message already parked was not turned away. Switching the setting to
+  // `refuse` while it sits there settles it as `denied` — someone chose.
   held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
   delivered: new Set(['expired', 'misaddressed']),
   denied: new Set(),
+  refused: new Set(),
   expired: new Set(),
   misaddressed: new Set(),
 };

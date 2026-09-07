@@ -13,24 +13,52 @@
  *
  * The explicit `crossSessionInbound` setting wins when set. When it is
  * unset the policy is derived from **approval-mode parity**, which
- * encodes one idea: a message may auto-deliver only when acting on it
- * cannot do more than the sender could already have done itself.
+ * encodes one idea: a message auto-delivers only between sessions of
+ * the same review class. Every approval mode falls in one of two
+ * classes — `prompting`, where a person still inspects each action, and
+ * `bypass`, where some actions can be applied with no one looking — and
+ * the sender asserts its class on the frame.
  *
- *   receiver not fully reviewed + sender bypass     → accept
- *   receiver not fully reviewed + sender prompting  → hold
- *   receiver not fully reviewed + sender unasserted → hold
- *   receiver fully reviewed     + anything          → accept
- *   receiver mode unknown/unrecognized      → hold  (fail closed)
- *   policy setting unreadable               → hold  (fail closed)
+ *   sender is a process this session started → accept
+ *   receiver mode unknown/unrecognized        → hold  (fail closed)
+ *   sender asserts no class                   → hold
+ *   sender class equals receiver class        → accept
+ *   sender class differs from receiver class  → hold
+ *   policy setting unreadable                 → hold  (fail closed)
  *
- * A fully reviewed receiver can accept freely because every consequential
- * action still faces its own gate; the message is a suggestion, not an
- * execution. A receiver that can apply any action without review lacks that
- * universal backstop, which is why an unverified sender has to be reviewed
- * first. These modes are YOLO, AUTO_EDIT, and AUTO:
- * auto-edit approves every edit-shaped tool call outright, while AUTO's
- * in-workspace edit fast path runs before its classifier. In either mode,
- * a peer can ask for a file change that no human or classifier sees.
+ * The first row is the one case where the sender is known: a connection
+ * that authenticated with the child token was opened by a script or hook
+ * this session itself ran, and whatever it can ask for, the session
+ * already chose to run the thing that is asking. Parity has nothing to
+ * weigh there. The explicit setting still wins over it — a user who said
+ * `hold` reviews everything, own processes included.
+ *
+ * The rule holds in both directions on purpose. A bypassing receiver has
+ * to be careful about a prompting sender because a peer can ask it for a
+ * file change that no human or classifier sees: auto-edit approves every
+ * edit-shaped tool call outright, and AUTO's in-workspace edit fast path
+ * runs before its classifier. A prompting receiver has a per-action
+ * backstop, but that backstop guards single actions, not the session's
+ * agenda: a message from a session nobody is watching is model-authored
+ * input, and a user who chose to review everything did not choose to
+ * have their model steered by it one benign-looking step at a time.
+ * Per-action prompts are also exactly the surface that fatigue turns
+ * into rubber stamps. So the prompting receiver holds it too, and the
+ * user releases it from `/peers` if they want it.
+ *
+ * A frame that asserts no class comes from a script, an older build, or
+ * an external process. The receiver has nothing to pair it with, so it
+ * is held for every receiver; an external process the user wants driving
+ * their session earns delivery through explicit trust, not through the
+ * receiver guessing.
+ *
+ * A hold is not open-ended. The sender is blocked on a decision that
+ * only a person can give, so a parked message expires after
+ * `agents.crossSessionHeldExpiry` (five minutes by default) and the
+ * sender is told, rather than being left unable to distinguish "still
+ * waiting" from "never coming". The two negative receipts stay distinct
+ * for the same reason: `refused` means this session's policy turns peer
+ * messages away and nobody looked, `denied` means somebody did.
  *
  * The sender's half of the parity is self-asserted and unverifiable —
  * nothing authenticates `fromMode`, and any process running as this user
@@ -97,6 +125,26 @@ export function receiverReviewsActions(mode: ApprovalMode): boolean {
   );
 }
 
+/**
+ * The two review classes the parity rule compares. This is the vocabulary
+ * of `fromMode` on the wire, and the one predicate above decides both
+ * sides of the comparison, so two sessions in the same mode always land
+ * in the same class.
+ */
+export type ModeClass = 'prompting' | 'bypass';
+
+export function modeClass(mode: ApprovalMode): ModeClass {
+  return receiverReviewsActions(mode) ? 'prompting' : 'bypass';
+}
+
+/**
+ * Which settings scope produced the explicit policy. Only used to word the
+ * hold cause: "your setting" is wrong when the repository or the machine
+ * set it, and a user who never touched the key should be told where to
+ * look.
+ */
+export type PolicyScope = 'user' | 'workspace' | 'system';
+
 /** Narrow an untyped setting value; anything else is unreadable. */
 function isInboundPolicy(value: unknown): value is InboundPolicy {
   return value === 'accept' || value === 'hold' || value === 'refuse';
@@ -111,13 +159,50 @@ function isInboundPolicy(value: unknown): value is InboundPolicy {
  * messages that sailed straight through on mode parity.
  */
 export type PolicyDecision =
-  | { policy: 'hold'; cause: HoldCause }
+  | { policy: 'hold'; cause: HoldCause; scope?: PolicyScope }
   | { policy: 'accept' | 'refuse' };
+
+/**
+ * What the transport could establish about a frame's sender. Kept apart
+ * from the frame because it is not on the wire: a peer writes the frame,
+ * the inbox determines this.
+ */
+export interface PeerOrigin {
+  /**
+   * The connection authenticated with the child token, so the frame came
+   * from a process this session started.
+   */
+  selfSent: boolean;
+}
+
+/**
+ * setTimeout's 32-bit ceiling. Above it Node clamps the delay to 1 ms and
+ * warns, so an unclamped re-arm becomes a busy loop.
+ */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 export interface HeldMessage {
   frame: PeerUserFrame;
   cause: HoldCause;
+  /** For the setting-driven causes: which scope set the policy, if known. */
+  policyScope?: PolicyScope;
   heldAt: number;
+  /**
+   * Monotonic counterpart of `heldAt`, from `performance.now()`.
+   *
+   * `heldAt` is wall-clock because the UI renders a countdown from it,
+   * but expiry must not move when the system clock steps. A backward NTP
+   * correction would otherwise stretch a 5-minute hold to over an hour
+   * with no receipt, and a step past ~24.8 days would push the delay
+   * beyond setTimeout's 32-bit range, where Node clamps it to 1 ms and
+   * the re-arm spins at ~1 kHz.
+   *
+   * Optional so entries built by hand (tests, older callers) still work;
+   * those fall back to the wall clock.
+   */
+  monotonicAt?: number;
+  /** Set when the message came from one of this session's own processes. */
+  selfSent?: true;
 }
 
 export interface InboundGateOptions {
@@ -128,12 +213,24 @@ export interface InboundGateOptions {
   getApprovalMode: () => ApprovalMode | null;
   /** Explicit user setting, if any. */
   getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * Which scope the explicit setting came from, when the host can tell.
+   * Read only to word a hold cause; absent or throwing means the cause is
+   * worded without a scope.
+   */
+  getPolicyScope?: () => PolicyScope | undefined;
   /** Deliver an accepted message into the session's input queue. */
-  deliver: (frame: PeerUserFrame) => void;
+  deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
   /** Report a terminal outcome back to the sender. Best-effort. */
   reportStatus?: (
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
   ) => void;
   /**
    * The session id this process holds now, when pinning is wired. A
@@ -143,8 +240,69 @@ export interface InboundGateOptions {
    * into the session that replaced its addressee.
    */
   getSessionId?: () => string | undefined;
+  /**
+   * How long a message may sit parked before it expires, in
+   * milliseconds, or null to keep it until the session ends. Read on
+   * every reschedule rather than captured once, so changing the setting
+   * takes effect on messages already waiting.
+   */
+  getHeldExpiryMs?: () => number | null;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
+}
+
+/**
+ * How long a held message waits for a decision by default.
+ *
+ * A hold is a question put to a person who may not be at the keyboard,
+ * and the sender is blocked on the answer. Five minutes is long enough
+ * for someone who is there to notice `/peers` and short enough that a
+ * sender is not left indefinitely unable to tell "still waiting" from
+ * "never coming".
+ */
+export const DEFAULT_HELD_EXPIRY_MS = 5 * 60 * 1000;
+
+/** The hold lifetimes `agents.crossSessionHeldExpiry` accepts. */
+const HELD_EXPIRY_VALUES: Record<string, number | null> = {
+  '1m': 60 * 1000,
+  '5m': DEFAULT_HELD_EXPIRY_MS,
+  '10m': 10 * 60 * 1000,
+  never: null,
+};
+
+/**
+ * The accepted `crossSessionHeldExpiry` values, in schema order.
+ *
+ * Exported so the settings schema's option list can be asserted against
+ * this table rather than kept in step by hand. An option added there
+ * without an entry here does not fail anywhere: `parseHeldExpiry` takes
+ * its unrecognized branch, logs at debug level, and silently returns the
+ * five-minute default -- so a user who asked for thirty minutes gets a
+ * review window six times shorter, with no error and a green suite.
+ */
+export const HELD_EXPIRY_OPTIONS: readonly string[] =
+  Object.keys(HELD_EXPIRY_VALUES);
+
+/**
+ * Turn the configured hold lifetime into milliseconds, or null for
+ * "never".
+ *
+ * An unset or unrecognized value is the default rather than "never":
+ * this setting decides how long a *sender* waits without an answer, and
+ * failing closed here means bounding that wait, not extending it
+ * indefinitely on a typo.
+ */
+export function parseHeldExpiry(value: unknown): number | null {
+  if (value === undefined) return DEFAULT_HELD_EXPIRY_MS;
+  if (typeof value !== 'string' || !Object.hasOwn(HELD_EXPIRY_VALUES, value)) {
+    debugLogger.debug(
+      `unrecognized crossSessionHeldExpiry value (using the default): ${String(
+        value,
+      )}`,
+    );
+    return DEFAULT_HELD_EXPIRY_MS;
+  }
+  return HELD_EXPIRY_VALUES[value] ?? null;
 }
 
 /**
@@ -162,9 +320,15 @@ export class InboundGate {
    */
   private readonly settled = new Map<
     string,
-    'delivered' | 'denied' | 'expired' | 'misaddressed'
+    'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed'
   >();
   private shuttingDown = false;
+  /**
+   * One timer for the whole buffer, armed for the message that expires
+   * first. A timer per message would be up to `MAX_HELD_MESSAGES` of
+   * them, all firing to do the same sweep.
+   */
+  private expiryTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: InboundGateOptions) {}
 
@@ -174,12 +338,36 @@ export class InboundGate {
   }
 
   /**
+   * The current hold lifetime in milliseconds, or null when holds do not
+   * expire. Exposed so `/peers` can tell the user how long a message has
+   * left rather than making them guess.
+   */
+  getHeldExpiryMs(): number | null {
+    if (this.options.getHeldExpiryMs === undefined) {
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
+    try {
+      return this.options.getHeldExpiryMs();
+    } catch (error) {
+      debugLogger.debug(
+        `held-expiry getter threw; falling back to the default: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
+  }
+
+  /**
    * Resolve the policy for a frame, and explain it.
    *
    * Exposed for tests and for the UI, which shows the cause next to a
    * held message.
    */
-  resolvePolicy(frame?: Pick<PeerUserFrame, 'fromMode'>): PolicyDecision {
+  resolvePolicy(
+    frame?: Pick<PeerUserFrame, 'fromMode'>,
+    origin?: PeerOrigin,
+  ): PolicyDecision {
     // The setting is read from user configuration, so it can be missing,
     // misspelled, or backed by a getter that throws mid-teardown. None of
     // those are "the user asked for accept".
@@ -192,7 +380,7 @@ export class InboundGate {
             configured,
           )}`,
         );
-        return { policy: 'hold', cause: 'policy-unreadable' };
+        return this.hold('policy-unreadable', this.policyScope());
       }
       explicit = configured;
     } catch (error) {
@@ -203,8 +391,17 @@ export class InboundGate {
       );
       return { policy: 'hold', cause: 'policy-unreadable' };
     }
+    if (explicit === 'hold') {
+      return this.hold('explicit-setting', this.policyScope());
+    }
     if (explicit !== undefined) {
-      return { policy: explicit, cause: 'explicit-setting' };
+      return { policy: explicit };
+    }
+
+    // Known sender: parity compares what two sessions may do, and a
+    // process this session ran is not another session.
+    if (origin?.selfSent) {
+      return { policy: 'accept' };
     }
 
     let mode: ApprovalMode | null;
@@ -225,22 +422,54 @@ export class InboundGate {
       return { policy: 'hold', cause: 'mode-unknown' };
     }
 
-    if (receiverReviewsActions(mode)) {
-      return { policy: 'accept' };
-    }
-
-    // Not every action this session takes is reviewed from here down.
+    // Same class, either class, auto-delivers; anything else waits for
+    // the user. A sender that says nothing gives the receiver nothing to
+    // compare, so it waits too.
     const sender = frame?.fromMode;
     if (sender === undefined) {
       return { policy: 'hold', cause: 'no-mode-asserted' };
     }
-    return sender === 'bypass'
+    return sender === modeClass(mode)
       ? { policy: 'accept' }
       : { policy: 'hold', cause: 'mode-mismatch' };
   }
 
-  /** Run a freshly-arrived message through the gate. */
-  admit(frame: PeerUserFrame): GateDecision {
+  private hold(
+    cause: HoldCause,
+    scope: PolicyScope | undefined,
+  ): PolicyDecision {
+    return scope === undefined
+      ? { policy: 'hold', cause }
+      : { policy: 'hold', cause, scope };
+  }
+
+  /** The scope is decoration on a cause; a broken getter must not change the verdict. */
+  private policyScope(): PolicyScope | undefined {
+    try {
+      return this.options.getPolicyScope?.();
+    } catch (error) {
+      debugLogger.debug(
+        `policy-scope getter threw (ignored): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Run a freshly-arrived message through the gate. `origin` defaults to
+   * an ordinary peer — the transport asserts self-sent, never the frame.
+   */
+  admit(
+    frame: PeerUserFrame,
+    origin: PeerOrigin = { selfSent: false },
+  ): GateDecision {
+    // Timers can be starved or slept through (a suspended laptop), so
+    // every entry point sweeps before it reads the buffer rather than
+    // trusting the timer to have fired.
+    this.expireOverdue();
+
     // An id that is already settled has a final answer: repeat its
     // receipt and stop. This is what keeps a re-send from re-parking a
     // swapped body under a handle the user already reviewed.
@@ -273,12 +502,16 @@ export class InboundGate {
       return 'held';
     }
 
-    const decision = this.resolvePolicy(frame);
+    const decision = this.resolvePolicy(frame, origin);
     const { policy } = decision;
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
-      void this.report(frame, 'denied');
+      // Not 'denied': nobody looked at it. A sender told its message was
+      // declined waits for a person to change their mind; one told the
+      // session refuses peer messages knows to stop.
+      this.recordSettled(frame.msgId, 'refused');
+      void this.report(frame, 'refused');
       return 'refused';
     }
 
@@ -295,7 +528,7 @@ export class InboundGate {
     }
 
     if (policy === 'accept') {
-      const ok = this.tryDeliver(frame);
+      const ok = this.tryDeliver(frame, origin);
       if (ok) {
         this.recordSettled(frame.msgId, 'delivered');
       }
@@ -315,12 +548,21 @@ export class InboundGate {
     }
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
-    this.held.push({ frame, cause, heldAt: Date.now() });
+    const scope = decision.policy === 'hold' ? decision.scope : undefined;
+    this.held.push({
+      frame,
+      cause,
+      ...(scope === undefined ? {} : { policyScope: scope }),
+      heldAt: Date.now(),
+      monotonicAt: performance.now(),
+      ...(origin.selfSent ? { selfSent: true } : {}),
+    });
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
     );
     void this.report(frame, 'held');
     this.notifyHeldChange();
+    this.rescheduleExpiry();
     return 'held';
   }
 
@@ -340,6 +582,9 @@ export class InboundGate {
     msgId: string,
     decision: 'approve' | 'deny',
   ): 'done' | 'failed' | 'gone' {
+    // Before the lookup: an expired message must read as 'gone' rather
+    // than be released by a user acting on a listing that has gone stale.
+    this.expireOverdue();
     const index = this.held.findIndex((entry) => entry.frame.msgId === msgId);
     if (index === -1) return 'gone';
     const [entry] = this.held.splice(index, 1);
@@ -353,12 +598,17 @@ export class InboundGate {
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         this.notifyHeldChange();
+        this.rescheduleExpiry();
         return 'gone';
       }
-      if (!this.tryDeliver(entry.frame)) {
+      if (!this.tryDeliver(entry.frame, originOf(entry))) {
+        // Parked again at its old position, keeping its original
+        // `heldAt`: a failed release does not restart the clock, or a
+        // full input queue could keep a message alive indefinitely.
         this.held.splice(index, 0, entry);
         void this.report(entry.frame, 'held');
         this.notifyHeldChange();
+        this.rescheduleExpiry();
         return 'failed';
       }
       this.recordSettled(entry.frame.msgId, 'delivered');
@@ -368,6 +618,7 @@ export class InboundGate {
       void this.report(entry.frame, 'denied');
     }
     this.notifyHeldChange();
+    this.rescheduleExpiry();
     return 'done';
   }
 
@@ -382,6 +633,11 @@ export class InboundGate {
    * Returns the number of messages released.
    */
   reevaluate(reason: string): number {
+    // Runs on every settings change, which is also how a changed hold
+    // lifetime reaches the buffer: sweep against the new one, then re-arm
+    // the timer for whatever survives.
+    this.expireOverdue();
+    this.rescheduleExpiry();
     if (this.held.length === 0) return 0;
 
     const stillHeld: HeldMessage[] = [];
@@ -389,17 +645,19 @@ export class InboundGate {
     let dropped = 0;
 
     for (const entry of this.held) {
-      const decision = this.resolvePolicy(entry.frame);
+      const decision = this.resolvePolicy(entry.frame, originOf(entry));
       const { policy } = decision;
       if (policy === 'accept') {
         release.push(entry);
       } else if (policy === 'refuse') {
         dropped += 1;
+        // 'denied', not 'refused': this message was admitted and parked,
+        // and what settles it now is the user switching the setting —
+        // a decision, made after the fact, by a person.
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
-        const cause = decision.policy === 'hold' ? decision.cause : entry.cause;
-        stillHeld.push(cause === entry.cause ? entry : { ...entry, cause });
+        stillHeld.push(withCause(entry, decision));
       }
     }
 
@@ -412,7 +670,7 @@ export class InboundGate {
         void this.report(entry.frame, 'misaddressed');
         continue;
       }
-      if (this.tryDeliver(entry.frame)) {
+      if (this.tryDeliver(entry.frame, originOf(entry))) {
         released += 1;
         this.recordSettled(entry.frame.msgId, 'delivered');
         void this.report(entry.frame, 'delivered');
@@ -425,7 +683,21 @@ export class InboundGate {
     }
 
     this.held.length = 0;
+    // Sorted, not appended in loop order: a failed release keeps its
+    // original (older) timestamp, and pushing it behind newer entries
+    // would leave `held.shift()` evicting the newest message at
+    // MAX_HELD_MESSAGES -- the opposite of "evict the oldest".
+    //
+    // Ordered by `ageOf`, not by `heldAt`: expiry judges age on the same
+    // function, and sorting on the wall clock alone reintroduces the
+    // inversion this sort exists to prevent. After a backward wall-clock
+    // step, entries admitted since the step carry a smaller `heldAt` and
+    // would sort ahead of genuinely older ones -- so `held.shift()` would
+    // evict a newer message and receipt its sender `expired` early.
+    // Descending age is oldest-first.
+    stillHeld.sort((a, b) => this.ageOf(b) - this.ageOf(a));
     this.held.push(...stillHeld);
+    this.rescheduleExpiry();
 
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
@@ -444,6 +716,10 @@ export class InboundGate {
    */
   shutdown(): Promise<void> {
     this.shuttingDown = true;
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
     if (this.held.length === 0) return Promise.resolve();
     const settling = this.held.splice(0, this.held.length);
     debugLogger.debug(
@@ -462,7 +738,7 @@ export class InboundGate {
   /** Remember a settled id, pruning the oldest beyond the cap. */
   private recordSettled(
     msgId: string,
-    verdict: 'delivered' | 'denied' | 'expired' | 'misaddressed',
+    verdict: 'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed',
   ): void {
     const key = canonicalizeMsgId(msgId);
     // Delete-then-set refreshes recency: Map iterates in insertion
@@ -498,7 +774,13 @@ export class InboundGate {
    */
   private report(
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
   ): Promise<void> {
     try {
       return Promise.resolve(this.options.reportStatus?.(frame, status));
@@ -513,9 +795,9 @@ export class InboundGate {
   }
 
   /** Hand a message to the session, reporting whether it landed. */
-  private tryDeliver(frame: PeerUserFrame): boolean {
+  private tryDeliver(frame: PeerUserFrame, origin: PeerOrigin): boolean {
     try {
-      this.options.deliver(frame);
+      this.options.deliver(frame, origin);
       return true;
     } catch (error) {
       debugLogger.error(
@@ -525,6 +807,106 @@ export class InboundGate {
       );
       return false;
     }
+  }
+
+  /**
+   * How long `entry` has been parked: the larger of the wall-clock and
+   * monotonic elapsed times.
+   *
+   * Neither clock alone is right. The wall clock is what a suspended
+   * machine advances -- CLOCK_MONOTONIC does not tick across suspend, so
+   * a monotonic-only age would keep a message parked through a two-hour
+   * sleep. But the wall clock also moves when nothing elapsed: a
+   * backward NTP correction of an hour would stretch a five-minute hold
+   * past sixty, and a step over ~24.8 days pushes the re-armed delay
+   * beyond setTimeout's range.
+   *
+   * Taking the larger keeps the suspend case working and makes a
+   * backward step a no-op, at the cost of treating a forward step as
+   * elapsed time -- which is the conservative direction, and in any case
+   * a forward step is indistinguishable from a suspend from in here.
+   */
+  private ageOf(entry: HeldMessage): number {
+    const wall = Date.now() - entry.heldAt;
+    if (entry.monotonicAt === undefined) return wall;
+    return Math.max(wall, performance.now() - entry.monotonicAt);
+  }
+
+  /**
+   * Settle every message whose hold has run out.
+   *
+   * Expiry is judged against the lifetime configured *now*, not the one
+   * in force when each message arrived: shortening the setting expires a
+   * backlog that is already too old, and lengthening it gives the
+   * backlog the longer window. Either reading is defensible; this one
+   * has the property that what `/peers` shows as remaining is what
+   * actually happens.
+   */
+  private expireOverdue(): void {
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null || this.held.length === 0) return;
+    const survivors: HeldMessage[] = [];
+    const expired: HeldMessage[] = [];
+    for (const entry of this.held) {
+      (this.ageOf(entry) >= expiryMs ? expired : survivors).push(entry);
+    }
+    if (expired.length === 0) return;
+
+    this.held.length = 0;
+    this.held.push(...survivors);
+    for (const entry of expired) {
+      debugLogger.debug(
+        `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
+      );
+      this.recordSettled(entry.frame.msgId, 'expired');
+      void this.report(entry.frame, 'expired');
+    }
+    this.notifyHeldChange();
+    // Every entry point sweeps, and several of them return without
+    // touching the buffer afterwards (`decide` answering 'gone',
+    // `admit`'s non-hold paths). Without this a survivor's own deadline
+    // would wait on the next unrelated frame, or on a stale timer.
+    this.rescheduleExpiry();
+  }
+
+  /**
+   * Arm the timer for whichever message expires first, or clear it when
+   * nothing is waiting and when holds do not expire.
+   *
+   * Called after every change to the buffer. Unref'd: a session with a
+   * message parked should still be able to exit, and shutdown settles
+   * the backlog anyway.
+   */
+  private rescheduleExpiry(): void {
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
+    if (this.shuttingDown) return;
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null) return;
+    let oldestAge: number | null = null;
+    for (const entry of this.held) {
+      const age = this.ageOf(entry);
+      if (oldestAge === null || age > oldestAge) oldestAge = age;
+    }
+    if (oldestAge === null) return;
+
+    // Scanned rather than read from `held[0]`: a failed release re-parks
+    // an entry keeping its original timestamp, so the buffer is not
+    // reliably oldest-first and the head can carry a later deadline.
+    //
+    // Never negative, and never zero: a zero-delay timer that fires
+    // inside the same tick as the change that armed it would recurse.
+    // Never above setTimeout's 32-bit ceiling either, where Node clamps
+    // to 1 ms and the callback re-arms the same oversized delay.
+    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(1, expiryMs - oldestAge));
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null;
+      this.expireOverdue();
+      this.rescheduleExpiry();
+    }, delay);
+    this.expiryTimer.unref?.();
   }
 
   private notifyHeldChange(): void {
@@ -540,19 +922,60 @@ export class InboundGate {
   }
 }
 
-/** One-line explanation of why a message is parked, for the UI. */
-export function describeHoldCause(cause: HoldCause): string {
+function originOf(entry: HeldMessage): PeerOrigin {
+  return { selfSent: entry.selfSent === true };
+}
+
+/**
+ * The same entry with the cause a fresh evaluation gave it, keeping the
+ * object identity when nothing changed so observers can compare by
+ * reference.
+ */
+function withCause(entry: HeldMessage, decision: PolicyDecision): HeldMessage {
+  if (decision.policy !== 'hold') return entry;
+  const { cause, scope } = decision;
+  if (cause === entry.cause && scope === entry.policyScope) return entry;
+  const { policyScope: _dropped, ...rest } = entry;
+  return scope === undefined
+    ? { ...rest, cause }
+    : { ...rest, cause, policyScope: scope };
+}
+
+/**
+ * One-line explanation of why a message is parked, for the UI.
+ *
+ * The scope, when known, names who set the policy: a user who never
+ * touched the key should not read "your setting".
+ */
+export function describeHoldCause(
+  cause: HoldCause,
+  scope?: PolicyScope,
+): string {
   switch (cause) {
     case 'explicit-setting':
-      return 'your crossSessionInbound setting is "hold"';
+      switch (scope) {
+        case 'workspace':
+          return 'this repository\'s settings hold messages from other sessions (agents.crossSessionInbound is "hold" in workspace settings)';
+        case 'system':
+          return 'a system setting holds messages from other sessions (agents.crossSessionInbound is "hold" in system settings)';
+        default:
+          return 'your crossSessionInbound setting is "hold"';
+      }
     case 'mode-mismatch':
-      return 'this session can apply some actions without per-action review and the sender does not';
+      return 'the sender and this session are in different review modes: one reviews each action and the other can apply some without per-action review';
     case 'no-mode-asserted':
-      return 'this session can apply some actions without per-action review and the sender did not say whether it does';
+      return 'the sender did not say whether it reviews each action';
     case 'mode-unknown':
       return "this session's approval mode could not be determined";
     case 'policy-unreadable':
-      return 'your crossSessionInbound setting could not be read';
+      switch (scope) {
+        case 'workspace':
+          return "the agents.crossSessionInbound value in this repository's workspace settings could not be read";
+        case 'system':
+          return 'the agents.crossSessionInbound value in system settings could not be read';
+        default:
+          return 'your crossSessionInbound setting could not be read';
+      }
     default: {
       const exhaustive: never = cause;
       return exhaustive;

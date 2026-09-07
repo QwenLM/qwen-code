@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
 import { useInputHistory } from './useInputHistory.js';
