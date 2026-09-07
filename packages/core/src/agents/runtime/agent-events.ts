@@ -38,6 +38,7 @@ export type AgentEvent =
   | 'round_end'
   | 'round_text'
   | 'stream_text'
+  | 'model_retry'
   | 'tool_call'
   | 'tool_result'
   | 'tool_responses_finalized'
@@ -57,6 +58,7 @@ export enum AgentEventType {
   /** Complete round text, emitted once after streaming before tool calls. */
   ROUND_TEXT = 'round_text',
   STREAM_TEXT = 'stream_text',
+  MODEL_RETRY = 'model_retry',
   TOOL_CALL = 'tool_call',
   TOOL_RESULT = 'tool_result',
   TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
@@ -256,6 +258,7 @@ export interface AgentEventMap {
   [AgentEventType.ROUND_END]: AgentRoundEvent;
   [AgentEventType.ROUND_TEXT]: AgentRoundTextEvent;
   [AgentEventType.STREAM_TEXT]: AgentStreamTextEvent;
+  [AgentEventType.MODEL_RETRY]: AgentRoundEvent;
   [AgentEventType.TOOL_CALL]: AgentToolCallEvent;
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
   [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;

@@ -261,11 +261,13 @@ export class AgentHeadless {
     preserveStats = false,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
-      Content[] | undefined;
+      | Content[]
+      | undefined;
     const isContinuation = this.hasStartedReasoning;
     const externalInputsOverride = isContinuation
       ? (context.get('external_inputs_override') as
-          AgentExternalInput[] | undefined)
+          | AgentExternalInput[]
+          | undefined)
       : undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
