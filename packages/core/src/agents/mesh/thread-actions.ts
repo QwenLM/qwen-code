@@ -546,7 +546,7 @@ export interface BindRunSessionInput {
    * reports draining it.
    */
   contextThroughSequence?: number;
-  /** A fresh launch prompt is already consumed when start returns. */
+  /** Whether this runtime path consumes its initial input before returning. */
   consumedOnStart?: boolean;
   /** Content hash of the agent definition in force, for drift audit (§9.4). */
   definitionVersion?: string;

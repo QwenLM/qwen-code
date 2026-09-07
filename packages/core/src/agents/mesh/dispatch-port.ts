@@ -290,7 +290,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
               return {
                 status: 'started',
                 sessionId: result.sessionId,
-                consumedOnStart: true,
+                consumedOnStart: false,
                 transcriptStartOffset,
               };
             }

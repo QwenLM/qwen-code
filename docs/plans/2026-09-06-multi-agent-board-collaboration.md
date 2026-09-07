@@ -868,8 +868,9 @@ Eight rules:
   retry is labelled. Message ids/sequences make duplicate input recognisable.
 - **Mesh turns use structured external input.** The dispatcher supplies one
   `{kind: 'message', text, deliveryId}` envelope rather than a bare
-  `task_prompt` for resident continuation, paused resume, and cold revival. The
-  correlated consumed event and transcript record retain the delivery id.
+  `task_prompt` for launch, resident continuation, paused resume, and cold
+  revival. The correlated consumed event and transcript record retain the
+  delivery id.
   Ordinary background-agent continuations may keep their legacy string path;
   they are not durable mesh deliveries.
 - **Trust comes from runtime binding, not a heading.** Today's resident chat has
