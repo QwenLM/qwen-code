@@ -6017,7 +6017,20 @@ export function App({
       const mergedTabs = [
         ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
         ...tabsOpenedDuringRestore,
-      ];
+      ].filter(
+        (tab) =>
+          // Once the split decision is final, drop stale pane-bound tabs before
+          // they can be selected active and mount a foreign collection; while
+          // the decision is pending, commit and let the settled sweep reclaim.
+          !splitViewSettledRef.current ||
+          !(
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane &&
+            (mainViewRef.current !== 'split' ||
+              tab.sessionId === undefined ||
+              !splitSessionIdsRef.current.includes(tab.sessionId))
+          ),
+      );
       const activeTabId = mergedTabs.some(
         (tab) => tab.id === activeArtifactPanelTabIdRef.current,
       )
@@ -7993,10 +8006,15 @@ export function App({
   // pane-tab reclaim below must wait for it: at restore-commit time
   // mainView/splitSessionIds are still their useState initials.
   const [splitViewSettled, setSplitViewSettled] = useState(false);
+  const splitViewSettledRef = useRef(splitViewSettled);
+  splitViewSettledRef.current = splitViewSettled;
   // Latest pane list, readable from the shrink-close effect without making it a
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  // Generation recorded when the latest classification started; differs from
+  // the live generation only while a superseded classification is in flight.
+  const splitClassificationStartGenerationRef = useRef(0);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -8008,8 +8026,25 @@ export function App({
     previousSplitSessionIdsRef.current = splitSessionIds;
   }, [closeUsageTabs, splitSessionIds]);
   useEffect(() => {
+    // Gated on the same latch: before the split decision is final this would
+    // drop a persisted live pane tab whose pane is a moment from landing.
+    if (!splitViewSettled) return;
     if (mainView !== 'split') closeUsageTabs(undefined, true);
-  }, [closeUsageTabs, mainView]);
+  }, [closeUsageTabs, mainView, splitViewSettled]);
+  // Signature of the pane-bound usage tabs, so the sweep below re-runs when
+  // restoration lands them even if no other dependency moves.
+  const paneBoundUsageTabsSignature = useMemo(
+    () =>
+      artifactPanelTabs
+        .filter(
+          (tab) =>
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane,
+        )
+        .map((tab) => tab.id)
+        .join('\0'),
+    [artifactPanelTabs],
+  );
   // Pane-bound usage tabs restored from storage are reclaimed only once the
   // split bootstrap has settled: deciding at restore-commit time reads
   // mainView/splitSessionIds before the split lands, dropping tabs whose
@@ -8038,6 +8073,7 @@ export function App({
     artifactPanelRestoring,
     closeUsageTabs,
     mainView,
+    paneBoundUsageTabsSignature,
     splitSessionIds,
     splitViewSettled,
   ]);
@@ -8207,7 +8243,12 @@ export function App({
   // onPanesChange — so it must be preserved across entries, not blindly reset.
   const openSplitView = useCallback(
     (sessionIds?: readonly string[]) => {
-      if (!workspaceContextActive) return;
+      if (!workspaceContextActive) {
+        // No classification can start past this guard, so the split decision
+        // is final here: settle so pane-bound reclaim is not stranded.
+        setSplitViewSettled(true);
+        return;
+      }
       setActivePanel(null);
       // See openScheduledTasks: leaving the cockpit must strip its deep link.
       showChat();
@@ -8216,6 +8257,7 @@ export function App({
       ).slice(0, MAX_SPLIT_PANES);
       const generation = splitClassificationGenerationRef.current + 1;
       splitClassificationGenerationRef.current = generation;
+      splitClassificationStartGenerationRef.current = generation;
       if (requested.length === 0) {
         const currentWorkspaceSessionId =
           connection.sessionId !== undefined &&
@@ -8237,6 +8279,14 @@ export function App({
       }
       void sanitizeSplitSessionIds(requested).then((sanitized) => {
         if (splitClassificationGenerationRef.current !== generation) {
+          // Superseded: settle only when no newer classification started,
+          // otherwise the newer one owns the decision.
+          if (
+            splitClassificationStartGenerationRef.current !==
+            splitClassificationGenerationRef.current
+          ) {
+            setSplitViewSettled(true);
+          }
           return;
         }
         setSplitViewSettled(true);
@@ -8292,6 +8342,7 @@ export function App({
       : [];
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
+    splitClassificationStartGenerationRef.current = generation;
     if (requested.length > 0 && cockpitViewRequested()) {
       updateCockpitLocation(false, true);
     }
@@ -8317,7 +8368,15 @@ export function App({
     }
     if (!workspaceCapabilitiesReady) return;
     void sanitizeSplitSessionIds(requested).then((sanitized) => {
-      if (splitClassificationGenerationRef.current !== generation) return;
+      if (splitClassificationGenerationRef.current !== generation) {
+        if (
+          splitClassificationStartGenerationRef.current !==
+          splitClassificationGenerationRef.current
+        ) {
+          setSplitViewSettled(true);
+        }
+        return;
+      }
       setSplitViewSettled(true);
       setSplitSessionIds((previous) =>
         areSessionIdsEqual(previous, sanitized) ? previous : sanitized,

@@ -102,22 +102,43 @@ describe('ContextUsageMessage', () => {
   });
 
   it('renders the compact meter in legend order with threshold colors', () => {
-    const spans = (totalTokens: number) =>
-      Array.from(
-        render(makeStatus(totalTokens, false), true).querySelectorAll(
-          '[aria-hidden="true"] > span',
-        ),
-      ) as HTMLSpanElement[];
+    const container = render(makeStatus(60, false), true);
+    const spans = Array.from(
+      container.querySelectorAll('[aria-hidden="true"] > span'),
+    ) as HTMLSpanElement[];
 
-    const [used, free, buffer] = spans(60);
+    const [used, free, buffer] = spans;
     expect(used.style.width).toBe('60%');
     expect(used.style.background).toBe('var(--agent-blue-500)');
     expect(free.style.width).toBe('30%');
     expect(buffer.style.width).toBe('10%');
     expect(buffer.style.background).toBe('var(--warning-color)');
 
-    expect(spans(61)[0].style.background).toBe('var(--warning-color)');
-    expect(spans(81)[0].style.background).toBe('var(--error-color)');
+    // The meter order and the legend order must agree.
+    const labels = Array.from(
+      container.querySelectorAll('[class*="row"] [class*="label"]'),
+    ).map((node) => node.textContent);
+    expect(labels.slice(0, 3)).toEqual(['Used', 'Free', 'Autocompact buffer']);
+
+    const first = (root: HTMLElement) =>
+      (root.querySelector('[aria-hidden="true"] > span') as HTMLSpanElement)
+        .style.background;
+    expect(first(render(makeStatus(61, false), true))).toBe(
+      'var(--warning-color)',
+    );
+    expect(first(render(makeStatus(81, false), true))).toBe(
+      'var(--error-color)',
+    );
+  });
+
+  it('keeps the transcript glyph track at exactly 56 cells', () => {
+    const container = render(makeStatus(60, false));
+    const [used, free, buffer] = Array.from(
+      container.querySelectorAll('[aria-hidden="true"] > span'),
+    ).map((node) => node.textContent?.length ?? 0);
+    expect(used).toBe(34);
+    expect(free).toBe(16);
+    expect(buffer).toBe(6);
   });
 
   it('suppresses its own title in compact mode so the panel toolbar is the only heading', () => {

@@ -549,9 +549,62 @@ describe('createDaemonSessionActions', () => {
     );
     const { actions } = createActionsHarness({ addNotice, session });
 
-    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('Transport connection closed');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports a transient context usage error for non-silent callers', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.contextUsage.mockRejectedValueOnce(
+      new DaemonTransportClosedError(),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getContextUsage({ detail: false })).rejects.toThrow(
       'Transport connection closed',
     );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context_usage' }),
+    );
+  });
+
+  it.each([
+    'fetch failed',
+    'Failed to fetch',
+    'NetworkError when attempting to fetch resource',
+    'Load failed',
+  ])(
+    'does not report a silent context usage error for a plain network blip: %s',
+    async (message) => {
+      const addNotice = vi.fn();
+      const session = createMockSession('session-a');
+      // Plain Error, not TypeError: only the widened predicate matches these.
+      session.contextUsage.mockRejectedValueOnce(new Error(message));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(
+        actions.getContextUsage({ detail: true, silent: true }),
+      ).rejects.toThrow(message);
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not report a silent context usage error for a name-only transport error', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.contextUsage.mockRejectedValueOnce(
+      Object.assign(new Error('serialized transport failure'), {
+        name: 'DaemonTransportClosedError',
+      }),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('serialized transport failure');
     expect(addNotice).not.toHaveBeenCalled();
   });
 

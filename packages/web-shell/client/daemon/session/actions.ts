@@ -2075,9 +2075,7 @@ export function createDaemonSessionActions({
     },
 
     async getContextUsage(opts) {
-      // Mirrors getStats: a missing or transiently lost session rethrows raw
-      // without a notice — the context panel re-collects on every activation,
-      // so notifying here would stack identical notices while down.
+      // Mirrors getStats: a missing session rethrows raw without a notice.
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       try {
@@ -2086,10 +2084,11 @@ export function createDaemonSessionActions({
           'Load context usage timed out',
         );
       } catch (error) {
-        // Transient read failures rethrow raw, like getStats: the context
-        // panel re-collects on every activation, so notifying here would
-        // stack identical notices for as long as the session is down.
-        if (isTransientSessionReadError(error)) {
+        // Opt-in silence for surfaces that re-collect automatically (the
+        // context panel): notifying there would stack identical notices for
+        // as long as the session is down. User-initiated callers keep the
+        // attributed notice and the suppressed duplicate toast.
+        if (opts?.silent && isTransientSessionReadError(error)) {
           throw error;
         }
         throw dispatchActionError(

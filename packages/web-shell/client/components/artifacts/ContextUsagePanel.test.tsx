@@ -127,7 +127,7 @@ describe('ContextUsagePanel', () => {
     expect(refresh(container).disabled).toBe(true);
     act(() => refresh(container).click());
     expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith({ detail: true });
+    expect(get).toHaveBeenCalledWith({ detail: true, silent: true });
     await act(async () => initial.resolve(fixture()));
     for (const text of [
       'context-model',
@@ -215,8 +215,39 @@ describe('ContextUsagePanel', () => {
     await act(async () => {});
     expect(container.textContent).toContain('context-model');
     expect(container.querySelector('[role="status"]')).toBeNull();
+    // aria-busy is the only DOM evidence of a background refetch.
+    expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
     await act(async () => second.resolve(fixture()));
     expect(container.textContent).toContain('context-model');
+  });
+
+  it('clears a retained reading when a refresh resolves unusable', async () => {
+    for (const mutate of [
+      (snapshot: ReturnType<typeof fixture>) => {
+        snapshot.usage.contextWindowSize = 0;
+      },
+      (snapshot: ReturnType<typeof fixture>) => {
+        snapshot.sessionId = 'other-session';
+      },
+    ]) {
+      const initial = deferred();
+      const second = deferred();
+      const get = vi
+        .fn()
+        .mockReturnValueOnce(initial.promise)
+        .mockReturnValueOnce(second.promise);
+      const { container } = renderPanel(get);
+      await act(async () => initial.resolve(fixture()));
+      expect(container.textContent).toContain('context-model');
+      act(() => refresh(container).click());
+      const invalid = fixture();
+      mutate(invalid);
+      await act(async () => second.resolve(invalid));
+      expect(container.textContent).not.toContain('context-model');
+      expect(container.textContent).toContain(
+        'Context usage is unavailable for this session.',
+      );
+    }
   });
 
   it('keeps the last good reading when a refresh fails transiently', async () => {

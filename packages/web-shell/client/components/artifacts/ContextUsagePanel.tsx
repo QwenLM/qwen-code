@@ -55,7 +55,10 @@ export function ContextUsagePanel({
           : {
               actions: sessionActions,
               sessionId,
-              promise: sessionActions.getContextUsage({ detail: true }),
+              promise: sessionActions.getContextUsage({
+                detail: true,
+                silent: true,
+              }),
             };
       inFlightRef.current = entry;
       try {
@@ -70,9 +73,9 @@ export function ContextUsagePanel({
       } catch (err) {
         if (!active) return;
         // A failed refresh keeps the last good reading. Transient failures
-        // (disconnect, transport close, network blip) stay silent in both
-        // layers — the action rethrows them without a notice — leaving the
-        // unavailable copy plus the enabled Refresh as the retry affordance.
+        // (disconnect, transport close, network blip) are requested silently
+        // and stay silent here too, leaving the unavailable copy plus the
+        // enabled Refresh as the retry affordance.
         setError(!isTransientSessionReadError(err));
       } finally {
         pending = false;

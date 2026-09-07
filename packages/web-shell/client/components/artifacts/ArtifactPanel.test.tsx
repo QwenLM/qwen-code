@@ -415,7 +415,10 @@ describe('ArtifactPanel context usage tabs', () => {
     expect(getStats).toHaveBeenCalledOnce();
     expect(getContextUsage).not.toHaveBeenCalled();
     await act(async () => root.render(renderPanel('context')));
-    expect(getContextUsage).toHaveBeenCalledWith({ detail: true });
+    expect(getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
     expect(getStats).toHaveBeenCalledOnce();
     expect(
       container.querySelector('button[title="Token Usage"]'),
