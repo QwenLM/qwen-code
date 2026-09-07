@@ -106,7 +106,7 @@ describe('mesh host session owner', () => {
           sessionId,
         };
       }),
-    };
+    } as unknown as AcpSessionBridge;
     const owner = startMeshHostSessionOwner({
       bridge,
       workspaceCwd: workspace,
@@ -151,7 +151,7 @@ describe('mesh host session owner', () => {
       resumeSession: vi.fn(),
       closeSession: vi.fn(async () => {}),
       launchMeshAgent: vi.fn(),
-    };
+    } as unknown as AcpSessionBridge;
     const owners = [
       startMeshHostSessionOwner({
         bridge,
@@ -324,7 +324,7 @@ describe('mesh host session owner', () => {
         resumeSession: async () => ({ sessionId: 'mesh-host' }),
         closeSession: async () => {},
         launchMeshAgent: async () => ({ status: 'capacity_wait' as const }),
-      },
+      } as unknown as AcpSessionBridge,
       workspaceCwd: workspace,
       intervalMs: 60_000,
     });
@@ -347,7 +347,7 @@ describe('mesh host session owner', () => {
         resumeSession,
         closeSession: async () => {},
         launchMeshAgent: async () => ({ status: 'capacity_wait' as const }),
-      },
+      } as unknown as AcpSessionBridge,
       workspaceCwd: workspace,
       intervalMs: 60_000,
       resumeTimeoutMs: 5,
