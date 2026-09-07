@@ -784,7 +784,7 @@ jobs:
       # fallback below.
       - name: 'Create Issue on Failure'
         id: 'notify'
-        if: "${{ always() }}"
+        if: '${{ always() }}'
         continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -817,4 +817,4 @@ jobs:
           gh issue create --repo "${GH_REPO}" \
             --title "Release Failed for ${RELEASE_TAG} on $(date -u +%Y-%m-%d)" \
             --label 'type/bug' \
-            --body "The release workflow failed and the primary failure notifier did not run to completion. Run: ${DETAILS_URL}" 
+            --body "The release workflow failed and the primary failure notifier did not run to completion. Run: ${DETAILS_URL}"
