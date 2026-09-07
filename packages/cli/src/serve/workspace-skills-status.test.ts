@@ -675,4 +675,51 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       ]),
     );
   });
+
+  it.each([
+    { language: 'zh', envLanguage: '', expected: '扩展' },
+    { language: 'zh-CN', envLanguage: '', expected: '扩展' },
+    { language: 'en', envLanguage: 'zh', expected: '扩展' },
+    { language: 'auto', envLanguage: '', expected: '扩展' },
+    { language: 'en', envLanguage: '', expected: 'Extension' },
+  ])(
+    'resolves extension names for $language with env $envLanguage',
+    async ({ language, envLanguage, expected }) => {
+      vi.stubEnv('QWEN_CODE_LANG', envLanguage);
+      vi.stubEnv('LANG', 'zh_CN.UTF-8');
+      for (const name of ['active', 'inactive']) {
+        const directory = await writeExtension(name, [`${name}-skill`]);
+        const manifestPath = path.join(directory, 'qwen-extension.json');
+        const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
+        await fsp.writeFile(
+          manifestPath,
+          JSON.stringify({
+            ...manifest,
+            displayName: { en: 'Extension', zh: '扩展' },
+          }),
+        );
+      }
+      await fsp.writeFile(
+        path.join(qwenHome, 'extensions', 'extension-enablement.json'),
+        JSON.stringify({ inactive: { overrides: ['!*'] } }),
+      );
+      await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, '.qwen', 'settings.json'),
+        JSON.stringify({ general: { language } }),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(true);
+      expect(
+        status.skills.filter((s) => s.level === 'extension'),
+      ).toMatchObject([
+        { name: 'active-skill', extensionDisplayName: expected, status: 'ok' },
+        {
+          name: 'inactive-skill',
+          extensionDisplayName: expected,
+          disabledReason: 'inactive_extension',
+        },
+      ]);
+    },
+  );
 });

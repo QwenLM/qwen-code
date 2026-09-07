@@ -41,6 +41,7 @@ import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
 import { loadSettings } from '../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../i18n/index.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
@@ -147,6 +148,11 @@ async function buildWorkspaceSkillsStatus(
         extensionManager = new ExtensionManager({
           workspaceDir: workspaceCwd,
           isWorkspaceTrusted: workspaceTrusted,
+          locale: resolveLanguage(
+            resolveLanguageSetting(
+              settings.merged.general?.language as string | undefined,
+            ),
+          ),
         });
         await extensionManager.refreshCache();
       }

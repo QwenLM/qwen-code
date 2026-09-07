@@ -11,6 +11,8 @@ precedence. Append inactive extension Skills as management entries with the
 existing `inactive_extension` status, retaining their identity and metadata.
 Resolve settings and extension Skill defaults/overrides with the existing
 parsers. A settings opt-in does not enable an inactive parent extension.
+Resolve localized extension names with the existing language setting and locale
+helpers, without changing the daemon process language.
 
 Keep the lightweight Config surface: do not construct a runtime Config, start a
 child, initialize MCP, execute hooks, or install watchers. Honor safe mode,
