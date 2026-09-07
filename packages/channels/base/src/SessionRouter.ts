@@ -22,6 +22,11 @@ interface PersistedEntry {
   sessionId: string;
   target: SessionTarget;
   cwd: string;
+  // Present only for managed worktree routes: the generic restore cannot
+  // resolve a worktree cwd to its workspace, so cold-start restore must
+  // re-attach these through the managed load path with the workspace root.
+  isolation?: 'worktree';
+  workspaceCwd?: string;
 }
 
 interface SessionReservation {
@@ -115,6 +120,10 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private toManagedMeta: Map<
+    string,
+    { isolation: 'worktree'; workspaceCwd: string }
+  > = new Map();
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
@@ -690,6 +699,14 @@ export class SessionRouter {
     }
     changed = this.toTarget.delete(oldSessionId) || changed;
     changed = this.toCwd.delete(oldSessionId) || changed;
+    const managedMeta = this.toManagedMeta.get(oldSessionId);
+    if (managedMeta !== undefined) {
+      // The replacement owns the same worktree, so the route's restore
+      // metadata follows it.
+      this.toManagedMeta.set(newSessionId, managedMeta);
+      this.toManagedMeta.delete(oldSessionId);
+      changed = true;
+    }
     this.liveSessionIds.delete(oldSessionId);
     this.staleBridgeBindings.delete(oldSessionId);
     if (changed) this.persist();
@@ -817,14 +834,34 @@ export class SessionRouter {
     sessionId: string,
     target: SessionTarget,
     cwd: string,
+    managed?: { isolation: ManagedSessionIsolation; workspaceCwd: string },
   ): void {
+    if (managed?.isolation === 'worktree' && !managed.workspaceCwd) {
+      throw new Error('A worktree managed session requires its workspace cwd.');
+    }
+    const previousMeta = this.toManagedMeta.get(sessionId);
+    if (managed?.isolation === 'worktree') {
+      this.toManagedMeta.set(sessionId, {
+        isolation: 'worktree',
+        workspaceCwd: managed.workspaceCwd,
+      });
+    } else {
+      this.toManagedMeta.delete(sessionId);
+    }
+    const metaChanged =
+      managed?.isolation === 'worktree'
+        ? previousMeta?.workspaceCwd !== managed.workspaceCwd
+        : previousMeta !== undefined;
     const key = this.routingKey(
       target.channelName,
       target.senderId,
       target.chatId,
       target.threadId,
     );
-    if (this.toSession.get(key) === sessionId) return;
+    if (this.toSession.get(key) === sessionId) {
+      if (metaChanged) this.persist();
+      return;
+    }
     this.invalidateRouteOperation(key);
     this.toSession.set(key, sessionId);
     this.toTarget.set(sessionId, target);
@@ -842,6 +879,7 @@ export class SessionRouter {
     }
     changed = this.toTarget.delete(sessionId) || changed;
     changed = this.toCwd.delete(sessionId) || changed;
+    changed = this.toManagedMeta.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
     this.staleBridgeBindings.delete(sessionId);
     if (changed) this.persist();
@@ -953,6 +991,7 @@ export class SessionRouter {
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
+    this.toManagedMeta.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
@@ -996,6 +1035,12 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      if (entry.isolation === 'worktree' && entry.workspaceCwd !== undefined) {
+        this.toManagedMeta.set(entry.sessionId, {
+          isolation: 'worktree',
+          workspaceCwd: entry.workspaceCwd,
+        });
+      }
       restored++;
     }
     if (persisted.dropped > 0) this.persist();
@@ -1053,6 +1098,43 @@ export class SessionRouter {
         try {
           this.assertOperationCurrent(operation);
           const options = this.sessionOptions(entry.target.channelName);
+          if (
+            entry.isolation === 'worktree' &&
+            entry.workspaceCwd !== undefined
+          ) {
+            // The generic restore cannot resolve a persisted worktree cwd
+            // (the daemon exact-matches registered workspace roots), so
+            // re-attach through the managed path: load by workspace root and
+            // re-validate the daemon's worktree attestation. A superseded
+            // id redirects to its replacement inside the managed load.
+            const managed = await this.loadManagedSession(
+              entry.sessionId,
+              entry.target,
+              entry.workspaceCwd,
+              entry.cwd,
+              'worktree',
+            );
+            try {
+              this.assertOperationCurrent(operation);
+            } catch (error) {
+              this.scheduleDiscardInvalidatedSession(
+                managed.sessionId,
+                operation,
+              );
+              throw error;
+            }
+            this.toSession.set(key, managed.sessionId);
+            this.toManagedMeta.set(managed.sessionId, {
+              isolation: 'worktree',
+              workspaceCwd: entry.workspaceCwd,
+            });
+            reservation.resolve(managed.sessionId);
+            if (managed.sessionId !== entry.sessionId) {
+              changed = true;
+            }
+            restored++;
+            continue;
+          }
           const sessionId = await this.bridge.loadSession(
             entry.sessionId,
             entry.cwd,
@@ -1118,6 +1200,7 @@ export class SessionRouter {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.toManagedMeta.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
@@ -1194,7 +1277,7 @@ export class SessionRouter {
     const target = entry['target'];
     if (typeof target !== 'object' || target === null) return false;
     const typedTarget = target as Record<string, unknown>;
-    return (
+    const wellFormed =
       typeof entry['sessionId'] === 'string' &&
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
@@ -1205,7 +1288,13 @@ export class SessionRouter {
       (typedTarget['threadId'] === undefined ||
         typeof typedTarget['threadId'] === 'string') &&
       (typedTarget['isGroup'] === undefined ||
-        typeof typedTarget['isGroup'] === 'boolean')
+        typeof typedTarget['isGroup'] === 'boolean');
+    if (!wellFormed) return false;
+    if (entry['isolation'] === undefined) return true;
+    return (
+      entry['isolation'] === 'worktree' &&
+      typeof entry['workspaceCwd'] === 'string' &&
+      entry['workspaceCwd'].length > 0
     );
   }
 
@@ -1220,6 +1309,7 @@ export class SessionRouter {
         sessionId,
         target,
         cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+        ...(this.toManagedMeta.get(sessionId) ?? {}),
       };
     }
 

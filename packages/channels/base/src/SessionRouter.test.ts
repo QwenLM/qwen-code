@@ -2538,6 +2538,256 @@ describe('SessionRouter', () => {
     });
   });
 
+  describe('restoreSessions with managed worktree routes', () => {
+    const target = {
+      channelName: 'ch',
+      senderId: 'alice',
+      chatId: 'chat1',
+    };
+
+    function writeWorktreeRoute(persistPath: string): void {
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'worktree-session',
+            target,
+            cwd: '/tmp/worktree-task',
+            isolation: 'worktree',
+            workspaceCwd: '/tmp',
+          },
+        }),
+      );
+    }
+
+    function worktreeAttestation(sessionId: string) {
+      return {
+        sessionId,
+        workspaceCwd: '/tmp',
+        hasActivePrompt: false,
+        worktree: {
+          slug: 'task',
+          path: '/tmp/worktree-task',
+          branch: 'task',
+        },
+        worktreeState: 'persisted-v1' as const,
+      };
+    }
+
+    function setup(): { persistPath: string } {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeWorktreeRoute(persistPath);
+      return { persistPath };
+    }
+
+    it('restores a worktree route through the managed load path', async () => {
+      const { persistPath } = setup();
+      bridge = {
+        ...mockBridge(),
+        listSessions: vi
+          .fn()
+          .mockReturnValue([worktreeAttestation('worktree-session')]),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      // The managed path loads by workspace root; the persisted worktree
+      // cwd never reaches the daemon as a workspace.
+      expect(bridge.loadSession).toHaveBeenCalledWith(
+        'worktree-session',
+        '/tmp',
+        { sourceId: 'ch' },
+        expect.any(Object),
+      );
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'worktree-session',
+      );
+      expect(router.getSessionCwd('worktree-session')).toBe(
+        '/tmp/worktree-task',
+      );
+
+      // A later persist keeps the restore metadata on the route.
+      router.activateManagedSession(
+        'other-session',
+        { channelName: 'ch', senderId: 'bob', chatId: 'chat2' },
+        '/tmp',
+      );
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': {
+          sessionId: 'worktree-session',
+          target,
+          cwd: '/tmp/worktree-task',
+          isolation: 'worktree',
+          workspaceCwd: '/tmp',
+        },
+        'ch:bob:chat2': {
+          sessionId: 'other-session',
+          target: { channelName: 'ch', senderId: 'bob', chatId: 'chat2' },
+          cwd: '/tmp',
+        },
+      });
+    });
+
+    it('routes the replacement when the restored session was superseded', async () => {
+      const { persistPath } = setup();
+      bridge = {
+        ...mockBridge(),
+        listSessions: vi
+          .fn()
+          .mockReturnValue([worktreeAttestation('replacement-session')]),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'worktree-session') {
+            throw daemonHttpError('worktree_session_superseded', {
+              replacementSessionId: 'replacement-session',
+            });
+          }
+          return sessionId;
+        }),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(router.getSessionCwd('replacement-session')).toBe(
+        '/tmp/worktree-task',
+      );
+
+      // The replacement inherits the route's restore metadata.
+      router.activateManagedSession(
+        'other-session',
+        { channelName: 'ch', senderId: 'bob', chatId: 'chat2' },
+        '/tmp',
+      );
+      const data = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(data['ch:alice:chat1']).toEqual({
+        sessionId: 'replacement-session',
+        target,
+        cwd: '/tmp/worktree-task',
+        isolation: 'worktree',
+        workspaceCwd: '/tmp',
+      });
+    });
+
+    it('drops a worktree route whose managed restore fails attestation', async () => {
+      const { persistPath } = setup();
+      bridge = {
+        ...mockBridge(),
+        listSessions: vi.fn().mockReturnValue([]),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('drops a worktree entry missing its workspace cwd as malformed', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'worktree-session',
+            target,
+            cwd: '/tmp/worktree-task',
+            isolation: 'worktree',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 0,
+      });
+
+      expect(bridge.loadSession).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('persists worktree restore metadata with the route', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      router.activateManagedSession(
+        'worktree-session',
+        target,
+        '/tmp/worktree-task',
+        { isolation: 'worktree', workspaceCwd: '/tmp' },
+      );
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': {
+          sessionId: 'worktree-session',
+          target,
+          cwd: '/tmp/worktree-task',
+          isolation: 'worktree',
+          workspaceCwd: '/tmp',
+        },
+      });
+
+      router.forgetManagedSession('worktree-session');
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('requires a workspace cwd for worktree managed sessions', () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user');
+
+      expect(() =>
+        router.activateManagedSession(
+          'worktree-session',
+          target,
+          '/tmp/worktree-task',
+          { isolation: 'worktree', workspaceCwd: '' },
+        ),
+      ).toThrow('workspace cwd');
+    });
+
+    it('rehydrates worktree metadata in lazy route restore', () => {
+      const { persistPath } = setup();
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 0 });
+
+      // A later persist keeps the rehydrated metadata on the route.
+      router.activateManagedSession(
+        'other-session',
+        { channelName: 'ch', senderId: 'bob', chatId: 'chat2' },
+        '/tmp',
+      );
+      const data = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(data['ch:alice:chat1']).toEqual({
+        sessionId: 'worktree-session',
+        target,
+        cwd: '/tmp/worktree-task',
+        isolation: 'worktree',
+        workspaceCwd: '/tmp',
+      });
+    });
+  });
+
   describe('persistence safety', () => {
     it('quarantines invalid JSON and starts with no routes', () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
