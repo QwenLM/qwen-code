@@ -17,10 +17,16 @@ permissions, and failure boundary.
 Every job that invokes an extracted script checks out `.github/scripts` from
 `github.workflow_sha` into an isolated path before execution. This keeps manual
 releases of older branches or commits working and prevents an operator-selected
-release ref from supplying code that receives release credentials. After
-running code from the selected ref, credential-bearing steps delete and
-re-checkout that isolated path. Versioning remains separate from the bot-PAT
-step, preserving the existing credential boundary.
+release ref from supplying _the extracted helper scripts_ that receive release
+credentials. It does not stop ref-supplied code from running inside a
+credential-bearing step: version resolution still executes the ref's
+`scripts/get-release-version.js` with the job token, and the release commit
+still runs the ref's `.husky` hooks in the step that holds the bot PAT. Both
+paths predate this extraction and are unchanged by it. After running code from
+the selected ref, credential-bearing steps delete and re-checkout that isolated
+path, which resets `.release-workflow` only — never `.husky` or `package.json`.
+Versioning remains separate from the bot-PAT step, preserving the existing
+credential boundary.
 
 The pre-checkout workspace cleanup remains inline. It must execute before any
 checkout can safely read from a persistent self-hosted workspace, so moving it
