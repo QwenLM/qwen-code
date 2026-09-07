@@ -602,6 +602,26 @@ describe('release workflow', () => {
     },
   );
 
+  it('runs the step script only from the trusted checkout', () => {
+    // The whole point of the extraction is that the decision comes from the
+    // workflow-pinned SHA. Every arm pin elsewhere is a substring match that
+    // a bare `.github/scripts/...` invocation would satisfy just as well, so
+    // pin the prefix itself: no step may reach the release-ref copy.
+    let invocations = 0;
+    for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        const run = String(step.run ?? '');
+        if (!/\.github\/scripts\/run-release-[a-z-]+\.sh/.test(run)) continue;
+        invocations += 1;
+        expect(run, `${jobId}:${step.name}`).toContain('.release-workflow/');
+        expect(run, `${jobId}:${step.name}`).not.toMatch(
+          /(^|[^/])\.github\/scripts\/run-release-/m,
+        );
+      }
+    }
+    expect(invocations).toBeGreaterThan(10);
+  });
+
   it('keeps the extracted release scripts executable', () => {
     // release.yml runs these by bare path, so the mode is load-bearing:
     // a checkout that materializes them 100644 dies with exit 126 before any
@@ -2093,6 +2113,15 @@ describe('release workflow', () => {
     );
     expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toContain(
       "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    // The audio-capture switch replaced a deleted step-level
+    // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork
+    // running this workflow would publish @qwen-code/audio-capture.
+    expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(releaseStepScript).toContain(
+      'if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then',
     );
     expect(releaseStepScript).toContain('integrations/external-context-mem0');
     expect(

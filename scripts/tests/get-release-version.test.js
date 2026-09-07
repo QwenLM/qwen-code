@@ -762,7 +762,16 @@ describe('assertVersionUnreleased', () => {
 
   it('passes when no package, tag, or release has shipped the version', () => {
     vi.mocked(execSync).mockImplementation(notFoundAnywhere);
-    expect(() => assertVersionUnreleased('1.2.3')).not.toThrow();
+    // The two scheduled releases never produce a plain X.Y.Z: the 21:00 UTC
+    // nightly and the preview lane are the formats the gate actually sees at
+    // runtime, so tightening the pattern must fail here rather than at 21:00.
+    for (const version of [
+      '1.2.3',
+      '1.2.3-preview.4',
+      '0.7.0-nightly.20260907.a1b2c3d',
+    ]) {
+      expect(() => assertVersionUnreleased(version), version).not.toThrow();
+    }
   });
 
   it('checks origin for tags, not the stale local checkout', () => {
