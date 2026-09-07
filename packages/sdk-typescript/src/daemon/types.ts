@@ -1165,6 +1165,24 @@ export interface DaemonSession {
   worktree?: DaemonWorktreeInfo;
   /** Durable worktree metadata/ownership attestation from the daemon. */
   worktreeState?: 'persisted-v1';
+  /**
+   * Present on a worktree-reset response when the superseded session survived
+   * the sever step because its child refused the conditional idle close (it
+   * holds work — a background shell inside the worktree, for example). The
+   * transfer itself committed and `worktreeState` still attests the
+   * replacement, but the old session is still live inside that checkout, so
+   * the daemon keeps its reset barrier armed: prompts and the other writers
+   * that reach the checkout keep failing with `worktree_reset_active` until
+   * the survivor is discarded.
+   *
+   * Diagnostic only: no first-party caller reads it, and nothing depends
+   * on one doing so. The channel worker reports the same success message
+   * either way, and what actually keeps the survivor out of the checkout is
+   * the armed barrier plus the on-disk sidecar link, not this flag. An
+   * external caller that needs to tell "the old id is gone" from "still
+   * live but fenced" should read it, since a `200` alone does not say which.
+   */
+  supersededSessionLive?: boolean;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
 }
