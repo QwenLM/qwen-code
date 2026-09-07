@@ -22,6 +22,7 @@ import {
   MAX_THREAD_RUNS,
   MESH_SCHEMA_VERSION,
   type MeshAgent,
+  type MeshNotifyTarget,
   type MeshAgentsFile,
   type MeshWorkspaceState,
   type MessageOutcome,
@@ -392,6 +393,24 @@ function isValidThread(value: unknown): value is Thread {
   return value['nextMessageSequence'] > previousSequence;
 }
 
+/**
+ * Absent is valid: no destination has been chosen yet. A malformed one is not
+ * — a half-written target would send somebody's work to the wrong place, and
+ * the store's rule is that a file which exists but does not parse is
+ * corruption rather than emptiness.
+ */
+function isValidNotifyTarget(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const target = value['target'];
+  return (
+    isNonEmptyString(value['channelName']) &&
+    isRecord(target) &&
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    isNonEmptyString(target['id'])
+  );
+}
+
 function isValidWorkspace(value: unknown): value is MeshWorkspaceState {
   return (
     isRecord(value) &&
@@ -399,7 +418,8 @@ function isValidWorkspace(value: unknown): value is MeshWorkspaceState {
     isValidId(value['workspaceId']) &&
     (value['hostSessionId'] === undefined ||
       isNonEmptyString(value['hostSessionId'])) &&
-    isPositiveInteger(value['nextRunSequence'])
+    isPositiveInteger(value['nextRunSequence']) &&
+    isValidNotifyTarget(value['notifyTarget'])
   );
 }
 
@@ -1020,6 +1040,33 @@ export async function readMeshWorkspace(
       throw new Error('Malformed mesh workspace record.');
     }
     return parsed;
+  });
+}
+
+/**
+ * Sets, or clears, where this workspace's notifications go.
+ *
+ * Separate from every other workspace write because it is the one field a
+ * person chooses rather than the system allocates. Passing `undefined` turns
+ * notifications off again, and the events that were already queued stay
+ * pending rather than being dropped on the way out.
+ */
+export async function setMeshNotifyTarget(
+  projectRoot: string,
+  target: MeshNotifyTarget | undefined,
+): Promise<MeshWorkspaceState> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    const next: MeshWorkspaceState = target
+      ? { ...workspace, notifyTarget: target }
+      : (() => {
+          const { notifyTarget: _dropped, ...rest } = workspace;
+          return rest;
+        })();
+    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
+      noFollow: true,
+    });
+    return next;
   });
 }
 

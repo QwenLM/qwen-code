@@ -27,12 +27,7 @@
 import { open, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 
-import type {
-  Application,
-  Request,
-  RequestHandler,
-  Response,
-} from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   assignThread,
   createAssignedThread,
@@ -67,8 +62,10 @@ import {
   type MeshAgent,
   type Thread,
   type ThreadRun,
+  deliverNotifications,
 } from '@qwen-code/qwen-code-core';
 import { startMeshHostSessionOwner } from '../mesh/mesh-host-session.js';
+import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -80,7 +77,16 @@ import type {
 
 export interface RegisterMeshRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
-  mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  mutate: (opts?: {
+    strict?: boolean /**
+     * Sends one channel message. Absent when no channel worker is running, in
+     * which case notifications stay pending rather than being dropped.
+     */;
+    deliverChannelMessage?: (
+      workspaceCwd: string,
+      request: ChannelDeliveryRequest,
+    ) => Promise<unknown>;
+  }) => RequestHandler;
 }
 
 const LIVE_RUN_STATUSES = new Set([
@@ -269,6 +275,35 @@ export function registerMeshRoutes(
     res.status(500).json({ error: message });
   };
 
+  /**
+   * Sends whatever the last dispatch queued.
+   *
+   * Runs after dispatch rather than inside it because the channel worker lives
+   * in this process while the dispatch loop runs in the host session. A send
+   * that fails leaves its event pending with its attempt counted, so the next
+   * mutation retries it; the thread state it announces is durable either way.
+   */
+  const flushNotifications = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    if (!deps.deliverChannelMessage) return;
+    const send = deps.deliverChannelMessage;
+    try {
+      await deliverNotifications(runtime.workspaceCwd, async (input) => {
+        await send(runtime.workspaceCwd, {
+          deliveryId: input.deliveryId,
+          channelName: input.target.channelName,
+          target: input.target.target,
+          text: input.text,
+        });
+      });
+    } catch {
+      // The events stay pending and the next mutation retries them. A
+      // notification failure must not fail the request that produced it: the
+      // work itself already landed.
+    }
+  };
+
   const startBookedRuns = async (
     runtime: WorkspaceRuntime,
   ): Promise<string | undefined> => {
@@ -276,6 +311,8 @@ export function registerMeshRoutes(
       await dispatch(runtime);
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
+    } finally {
+      await flushNotifications(runtime);
     }
   };
 
@@ -580,8 +617,7 @@ export function registerMeshRoutes(
               (count, candidate) =>
                 count +
                 candidate.runs.filter(
-                  (run) =>
-                    run.agentId === target.id && run.status === 'queued',
+                  (run) => run.agentId === target.id && run.status === 'queued',
                 ).length,
               0,
             )
@@ -831,71 +867,75 @@ export function registerMeshRoutes(
     },
   );
 
-  app.post(`${prefix}/agents`, deps.mutate({ strict: true }), async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const payload = (req.body ?? {}) as {
-        name?: unknown;
-        description?: unknown;
-        agentType?: unknown;
-        color?: unknown;
-      };
-      const name = String(payload.name ?? '').trim();
-      if (!name) {
-        res.status(400).json({ error: 'name_required' });
-        return;
-      }
-      if (!isValidAgentName(name)) {
-        res.status(400).json({
-          error:
-            'Agent names must start with a letter or number and contain at most 48 letters, numbers, underscores, or hyphens.',
-        });
-        return;
-      }
-      let created: MeshAgent | undefined;
-      let duplicate = false;
-      await updateMeshAgents(root, (agents) => {
-        if (
-          agents.some(
-            (agent) => agent.name.toLowerCase() === name.toLowerCase(),
-          )
-        ) {
-          duplicate = true;
-          return agents;
-        }
-        created = {
-          id: generateAgentId(),
-          name,
-          createdAt: Date.now(),
-          ...(typeof payload.description === 'string'
-            ? { description: payload.description }
-            : {}),
-          ...(typeof payload.agentType === 'string'
-            ? { agentType: payload.agentType }
-            : {}),
-          ...(typeof payload.color === 'string'
-            ? { color: payload.color }
-            : {}),
+  app.post(
+    `${prefix}/agents`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const root = runtime.workspaceCwd;
+      try {
+        const payload = (req.body ?? {}) as {
+          name?: unknown;
+          description?: unknown;
+          agentType?: unknown;
+          color?: unknown;
         };
-        return [...agents, created];
-      });
-      if (duplicate) {
-        res.status(409).json({
-          error: `An agent named "${name}" already exists.`,
+        const name = String(payload.name ?? '').trim();
+        if (!name) {
+          res.status(400).json({ error: 'name_required' });
+          return;
+        }
+        if (!isValidAgentName(name)) {
+          res.status(400).json({
+            error:
+              'Agent names must start with a letter or number and contain at most 48 letters, numbers, underscores, or hyphens.',
+          });
+          return;
+        }
+        let created: MeshAgent | undefined;
+        let duplicate = false;
+        await updateMeshAgents(root, (agents) => {
+          if (
+            agents.some(
+              (agent) => agent.name.toLowerCase() === name.toLowerCase(),
+            )
+          ) {
+            duplicate = true;
+            return agents;
+          }
+          created = {
+            id: generateAgentId(),
+            name,
+            createdAt: Date.now(),
+            ...(typeof payload.description === 'string'
+              ? { description: payload.description }
+              : {}),
+            ...(typeof payload.agentType === 'string'
+              ? { agentType: payload.agentType }
+              : {}),
+            ...(typeof payload.color === 'string'
+              ? { color: payload.color }
+              : {}),
+          };
+          return [...agents, created];
         });
-        return;
+        if (duplicate) {
+          res.status(409).json({
+            error: `An agent named "${name}" already exists.`,
+          });
+          return;
+        }
+        const dispatchError = await startBookedRuns(runtime);
+        res.json({
+          id: created?.id,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
+      } catch (error) {
+        fail(res, error);
       }
-      const dispatchError = await startBookedRuns(runtime);
-      res.json({
-        id: created?.id,
-        ...(dispatchError ? { dispatchError } : {}),
-      });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
+    },
+  );
 
   app.delete(
     `${prefix}/agents/:id`,
@@ -933,9 +973,9 @@ export function registerMeshRoutes(
               runtime.workspaceCwd,
               workspace.hostSessionId,
             );
-            await runtime.bridge.closeSession(workspace.hostSessionId).catch(
-              () => {},
-            );
+            await runtime.bridge
+              .closeSession(workspace.hostSessionId)
+              .catch(() => {});
           }
         }
         res.json({
@@ -1082,9 +1122,7 @@ export function registerMeshRoutes(
             }
             const target = threads.find((thread) => thread.id === threadId);
             if (!target) return { kind: 'thread_not_found' as const };
-            const byId = new Map(
-              threads.map((thread) => [thread.id, thread]),
-            );
+            const byId = new Map(threads.map((thread) => [thread.id, thread]));
             const isDescendant = (candidate: Thread) => {
               const seen = new Set<string>();
               let parentId = candidate.parentThreadId;
@@ -1121,8 +1159,7 @@ export function registerMeshRoutes(
               outbox:
                 target.parentThreadId &&
                 !target.outbox.some(
-                  (event) =>
-                    event.payload['event'] === 'child_done',
+                  (event) => event.payload['event'] === 'child_done',
                 )
                   ? [
                       ...target.outbox,
@@ -1188,10 +1225,11 @@ export function registerMeshRoutes(
           from: HUMAN_AUTHOR_ID,
           text,
         });
-        const dispatchError =
-          result.outcomes.some((outcome) => outcome.decision.kind !== 'skip')
-            ? await startBookedRuns(runtime)
-            : undefined;
+        const dispatchError = result.outcomes.some(
+          (outcome) => outcome.decision.kind !== 'skip',
+        )
+          ? await startBookedRuns(runtime)
+          : undefined;
         res.json({
           messageId: result.message.id,
           sequence: result.message.sequence,

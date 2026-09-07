@@ -20,11 +20,27 @@ export const HUMAN_AUTHOR_ID = 'user';
 
 export const MESH_SCHEMA_VERSION = 1;
 
+/**
+ * Where this workspace's notifications go.
+ *
+ * There is deliberately no default. A notification is a convenience — the
+ * state it announces is already durable in the thread and visible in the UI —
+ * so guessing a destination would send a person's work to a channel nobody
+ * chose. Until this is set, notification events stay pending, which is the
+ * same rule every other unconsumed event kind follows.
+ */
+export interface MeshNotifyTarget {
+  channelName: string;
+  target: { type: 'user'; id: string } | { type: 'chat'; id: string };
+}
+
 export interface MeshWorkspaceState {
   schemaVersion: typeof MESH_SCHEMA_VERSION;
   workspaceId: string;
   hostSessionId?: string;
   nextRunSequence: number;
+  /** Absent until a person picks one; see {@link MeshNotifyTarget}. */
+  notifyTarget?: MeshNotifyTarget;
 }
 
 export interface MeshAgentsFile {

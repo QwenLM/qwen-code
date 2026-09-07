@@ -3136,7 +3136,13 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
-  registerMeshRoutes(app, { workspaceRegistry, mutate });
+  registerMeshRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    ...(deps.deliverChannelMessage
+      ? { deliverChannelMessage: deps.deliverChannelMessage }
+      : {}),
+  });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron

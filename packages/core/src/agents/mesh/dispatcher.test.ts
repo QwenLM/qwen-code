@@ -14,11 +14,14 @@ import {
   createThread,
   listThreads,
   readMeshWorkspace,
+  enqueueThreadEvent,
   readThread,
+  setMeshNotifyTarget,
   updateMeshAgents,
   writeThread,
 } from './mesh-store.js';
 import {
+  deliverNotifications,
   dispatchOnce,
   selectCandidates,
   type MeshBodyState,
@@ -343,5 +346,133 @@ describe('dispatchOnce', () => {
         (event) => event.kind === 'notification' && event.status === 'pending',
       ),
     ).toBe(true);
+  });
+});
+
+describe('deliverNotifications', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mesh-notify-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+    await updateMeshAgents(PROJECT_ROOT, () => [ALICE]);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  async function threadWithBlocker(): Promise<Thread> {
+    // The event is enqueued directly: this suite is about the consumer, not
+    // about which close path produced the event.
+    const created = await createThread(PROJECT_ROOT, {
+      title: 'Investigate the flake',
+      assigneeAgentId: ALICE.id,
+    });
+    await enqueueThreadEvent(PROJECT_ROOT, created.id, {
+      kind: 'notification',
+      payload: { event: 'blocker_raised', threadId: created.id },
+    });
+    return (await readThread(PROJECT_ROOT, created.id))!;
+  }
+
+  async function setTarget() {
+    await setMeshNotifyTarget(PROJECT_ROOT, {
+      channelName: 'lark',
+      target: { type: 'chat', id: 'oc_1' },
+    });
+  }
+
+  it('leaves notifications pending while no destination has been chosen', async () => {
+    const thread = await threadWithBlocker();
+    const send = vi.fn(async () => {});
+
+    expect(await deliverNotifications(PROJECT_ROOT, send)).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+    // Acknowledging into silence would be worse than not sending: a person who
+    // configures a channel later would never learn what they missed.
+    const stored = await readThread(PROJECT_ROOT, thread.id);
+    expect(
+      stored!.outbox.filter(
+        (event) => event.kind === 'notification' && event.status === 'pending',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('sends once a destination exists, and never sends the same event twice', async () => {
+    const thread = await threadWithBlocker();
+    await setTarget();
+    const send = vi.fn(async () => {});
+
+    expect(await deliverNotifications(PROJECT_ROOT, send)).toBe(1);
+    const call = send.mock.calls[0]![0] as {
+      text: string;
+      deliveryId: string;
+      target: { channelName: string };
+    };
+    expect(call.text).toContain('Investigate the flake');
+    expect(call.text).toContain('asked a question');
+    expect(call.target.channelName).toBe('lark');
+    // Stable per event, so a retry downstream is recognisable as one.
+    const stored = await readThread(PROJECT_ROOT, thread.id);
+    const event = stored!.outbox.find(
+      (entry) => entry.kind === 'notification',
+    )!;
+    expect(call.deliveryId).toBe(event.id);
+    expect(event.status).toBe('acknowledged');
+
+    expect(await deliverNotifications(PROJECT_ROOT, send)).toBe(0);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a send that failed instead of dropping it', async () => {
+    const thread = await threadWithBlocker();
+    await setTarget();
+    const failing = vi.fn(async () => {
+      throw new Error('channel worker down');
+    });
+
+    await expect(deliverNotifications(PROJECT_ROOT, failing)).rejects.toThrow(
+      /channel worker down/,
+    );
+
+    const stored = await readThread(PROJECT_ROOT, thread.id);
+    const event = stored!.outbox.find(
+      (entry) => entry.kind === 'notification',
+    )!;
+    expect(event.status).toBe('pending');
+    expect(event.attempts).toBe(1);
+
+    const send = vi.fn(async () => {});
+    expect(await deliverNotifications(PROJECT_ROOT, send)).toBe(1);
+  });
+
+  it('does not touch the parent reports another consumer owns', async () => {
+    const created = await createThread(PROJECT_ROOT, { title: 'Child' });
+    await enqueueThreadEvent(PROJECT_ROOT, created.id, {
+      kind: 'notification',
+      payload: { event: 'thread_in_review', threadId: created.id },
+    });
+    await enqueueThreadEvent(PROJECT_ROOT, created.id, {
+      kind: 'parent_report',
+      payload: { event: 'child_in_review', parentThreadId: 'th_parent' },
+    });
+    await setTarget();
+
+    await deliverNotifications(
+      PROJECT_ROOT,
+      vi.fn(async () => {}),
+    );
+
+    const stored = await readThread(PROJECT_ROOT, created.id);
+    // Each kind is owned by exactly one consumer; a pass that drained both
+    // would acknowledge a report it never delivered.
+    expect(
+      stored!.outbox.find((event) => event.kind === 'parent_report')?.status,
+    ).toBe('pending');
+    expect(
+      stored!.outbox.find((event) => event.kind === 'notification')?.status,
+    ).toBe('acknowledged');
   });
 });

@@ -40,7 +40,13 @@ import {
   releaseRunClaim,
   SYSTEM_AUTHOR_ID,
 } from './thread-actions.js';
-import type { MeshAgent, Thread, ThreadEvent, ThreadRun } from './types.js';
+import type {
+  MeshAgent,
+  MeshNotifyTarget,
+  Thread,
+  ThreadEvent,
+  ThreadRun,
+} from './types.js';
 
 /** What the runtime says about an agent's long-lived body. */
 export type MeshBodyState =
@@ -230,23 +236,23 @@ async function rebookUndeliveredTriggers(
     );
     const successor: ThreadRun = queued
       ? {
-        ...queued,
-        triggerMessageIds: Array.from(
-          new Set([...queued.triggerMessageIds, ...pending]),
-        ),
-      }
+          ...queued,
+          triggerMessageIds: Array.from(
+            new Set([...queued.triggerMessageIds, ...pending]),
+          ),
+        }
       : {
-        id: generateRunId(),
-        agentId: run.agentId,
-        status: 'queued',
-        triggerMessageIds: pending,
-        acceptedMessageIds: [],
-        consumedMessageIds: [],
-        usageByRound: [],
-        queueSequence: await transaction.allocateRunSequence(),
-        queuedAt: now,
-        attempts: 0,
-      };
+          id: generateRunId(),
+          agentId: run.agentId,
+          status: 'queued',
+          triggerMessageIds: pending,
+          acceptedMessageIds: [],
+          consumedMessageIds: [],
+          usageByRound: [],
+          queueSequence: await transaction.allocateRunSequence(),
+          queuedAt: now,
+          attempts: 0,
+        };
 
     const pendingSet = new Set(pending);
     const nextRuns = thread.runs
@@ -272,8 +278,7 @@ async function rebookUndeliveredTriggers(
         ? {
             ...message,
             outcomes: message.outcomes.map((outcome) =>
-              outcome.runId === run.id &&
-              outcome.targetAgentId === run.agentId
+              outcome.runId === run.id && outcome.targetAgentId === run.agentId
                 ? {
                     ...outcome,
                     kind: 'coalesce' as const,
@@ -746,6 +751,95 @@ export async function deliverParentReports(
     );
   }
   return delivered;
+}
+
+function isNotification(event: ThreadEvent): boolean {
+  return event.kind === 'notification';
+}
+
+/** One line a person can act on, in the words the UI uses for the same state. */
+export function notificationText(thread: Thread, event: ThreadEvent): string {
+  const label = `"${thread.title}"`;
+  switch (event.payload['event']) {
+    case 'blocker_raised':
+      return `${label} needs you: an agent asked a question and is waiting.`;
+    case 'thread_in_review':
+      return `${label} is ready for review.`;
+    case 'thread_blocked': {
+      const reason = event.payload['reason'];
+      return typeof reason === 'string'
+        ? `${label} is blocked: ${reason}`
+        : `${label} is blocked.`;
+    }
+    case 'run_failed_after_retry': {
+      const error = event.payload['error'];
+      return typeof error === 'string'
+        ? `${label} has a run that failed twice: ${error}`
+        : `${label} has a run that failed twice.`;
+    }
+    default:
+      // Never assert a cause the payload does not carry.
+      return `${label} changed and may need you.`;
+  }
+}
+
+export interface MeshNotificationSender {
+  (input: {
+    target: MeshNotifyTarget;
+    text: string;
+    /** Stable per event, so a retry is not a second message downstream. */
+    deliveryId: string;
+  }): Promise<void>;
+}
+
+/**
+ * Sends each pending notification once, and only once a destination exists.
+ *
+ * The workspace record carries no default destination, so with none set this
+ * does nothing and the events stay pending — the same rule every unconsumed
+ * event kind follows, and the reason the outbox reconciler takes a filter at
+ * all. Acknowledging them into silence would be worse than not sending: the
+ * thread state they announce is durable and visible either way, but a person
+ * who configured a channel later would never learn what they missed.
+ *
+ * A send that throws leaves its event pending with its attempt counted, so the
+ * next pass retries rather than dropping it. Duplicates are possible and
+ * accepted; silent loss is not.
+ */
+export async function deliverNotifications(
+  projectRoot: string,
+  send: MeshNotificationSender | undefined,
+): Promise<number> {
+  if (!send) return 0;
+  const workspace = await readMeshWorkspace(projectRoot);
+  const target = workspace.notifyTarget;
+  if (!target) return 0;
+
+  const { threads } = await listThreads(projectRoot);
+  let sent = 0;
+  for (const thread of threads) {
+    if (
+      !thread.outbox.some(
+        (event) => event.status === 'pending' && isNotification(event),
+      )
+    ) {
+      continue;
+    }
+    await reconcileThreadOutbox(
+      projectRoot,
+      thread.id,
+      async (_transaction, event) => {
+        await send({
+          target,
+          text: notificationText(thread, event),
+          deliveryId: event.id,
+        });
+        sent += 1;
+      },
+      isNotification,
+    );
+  }
+  return sent;
 }
 
 /** Whether a thread still has a descendant that can wake it. Re-exported for

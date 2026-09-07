@@ -299,6 +299,11 @@ An accepted delivery replay that repeats `thread_create` with the same parent
 and normalized title now reuses the existing child instead of duplicating the
 delegated work.
 
+**Step 10 landed (the consumer; the destination is a product choice).** `run-lifecycle.ts` had been writing `notification` outbox events at four points since step 5, and nothing read them: `deliverParentReports` filters to `parent_report`, so every blocker, review, gate and failure notification sat pending forever — which also meant a thread that ever raised one could never be deleted, because deletion refuses pending events.
+`deliverNotifications` is the missing consumer. It drains only `notification` events, through the same persist-attempt → apply → acknowledge protocol, and sends through an injected sender so core never reaches the channel worker. `routes/mesh.ts` supplies that sender from the daemon's `deliverChannelMessage` and flushes after every mutation that dispatches, because the worker lives in the daemon while the dispatch loop runs in the host session.
+**No default destination.** `MeshWorkspaceState.notifyTarget` is absent until someone sets it with `setMeshNotifyTarget`, and while it is absent the events stay pending rather than being acknowledged into silence — the same rule every unconsumed event kind follows. Guessing a channel would send a person's work somewhere nobody chose. Who sets it, and whether it belongs per workspace or per agent, is the product decision this leaves open.
+Observed: four new cases in `dispatcher.test.ts` — pending while unconfigured, sent exactly once with the event id as the delivery id, a failed send left pending with its attempt counted and retried, and parent reports untouched by the notification pass. Suite counts before and after this change are identical at 16 pre-existing failures; passing tests went 113 → 117.
+
 ### Step 10 — Channel notifications
 
 Lands: four events to the channel workers.

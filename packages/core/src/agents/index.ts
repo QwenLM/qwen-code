@@ -46,6 +46,7 @@ export {
   updateMeshAgents,
   updateThread,
   withMeshStoreTransaction,
+  setMeshNotifyTarget,
 } from './mesh/mesh-store.js';
 export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
 export { parseMentions } from './mesh/mentions.js';
@@ -65,6 +66,8 @@ export {
   meshBackgroundAgentId,
 } from './mesh/dispatch-port.js';
 export { dispatchOnce } from './mesh/dispatcher.js';
+export { deliverNotifications, notificationText } from './mesh/dispatcher.js';
+export type { MeshNotificationSender } from './mesh/dispatcher.js';
 export { launchMeshAgent } from './mesh/launcher.js';
 export type { MeshAgentLaunchResult } from './mesh/launcher.js';
 export type { DispatchRecord } from './mesh/dispatcher.js';
