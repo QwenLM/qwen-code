@@ -11196,60 +11196,54 @@ describe('LlmChat', async () => {
       // rejection arrives the same way — inside an already-200 stream, traced
       // with a request id, no HTTP status — but re-sending the identical
       // request can never succeed, so the widened gate must not adopt it.
-      vi.useFakeTimers();
-      try {
-        const permanentError = Object.assign(new Error('Content filtered'), {
-          code: 'data_inspection_failed',
-          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
-        });
+      const permanentError = Object.assign(new Error('Content filtered'), {
+        code: 'data_inspection_failed',
+        requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+      });
 
-        vi.mocked(mockContentGenerator.generateContentStream)
-          .mockResolvedValueOnce(
-            (async function* () {
-              throw permanentError;
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw permanentError;
 
-              yield {} as GenerateContentResponse;
-            })(),
-          )
-          // Consumed only if the gate wrongly adopts the rejection: the replay
-          // would land here and appear to succeed, so a regression reports as a
-          // call count rather than as a hang.
-          .mockResolvedValueOnce(
-            (async function* () {
-              yield {
-                candidates: [
-                  {
-                    content: { parts: [{ text: 'must not be delivered' }] },
-                    finishReason: 'STOP',
-                  },
-                ],
-              } as unknown as GenerateContentResponse;
-            })(),
-          );
-
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test' },
-          'prompt-upstream-permanent-midstream',
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        // Consumed only if the gate wrongly adopts the rejection: the replay
+        // would land here and appear to succeed, so a regression reports as a
+        // call count rather than as a hang.
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'must not be delivered' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
         );
-        let events: StreamEvent[] = [];
-        let caughtError: unknown;
-        try {
-          events = await collectStreamWithFakeTimers(stream, 5_000);
-        } catch (error) {
-          caughtError = error;
-        }
 
-        expect(
-          mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(1);
-        expect(
-          events.filter((event) => event.type === StreamEventType.RETRY),
-        ).toHaveLength(0);
-        expect(String(caughtError)).toContain('Content filtered');
-      } finally {
-        vi.useRealTimers();
-      }
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-upstream-permanent-midstream',
+      );
+      // No fake timers here. Nothing retries on this path, so there is no
+      // backoff to advance through, and `collectStreamWithFakeTimers` cannot be
+      // used for a stream that rejects: it builds its collector, awaits two
+      // timer steps, and only then hands the collector back to be awaited, so
+      // the rejection is unhandled in between.
+      const { events, caughtError } = await drainCollecting(stream);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+      expect(String(caughtError)).toContain('Content filtered');
     });
 
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {

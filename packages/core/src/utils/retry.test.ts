@@ -488,9 +488,6 @@ describe('retryWithBackoff', () => {
       maxAttempts: 3,
       initialDelayMs: 10,
     });
-    // Advance past every backoff step so a regression that retries fails on the
-    // call count instead of hanging until the test timeout.
-    await vi.advanceTimersByTimeAsync(1000);
     await expect(promise).rejects.toThrow('No API key configured');
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
@@ -511,7 +508,6 @@ describe('retryWithBackoff', () => {
       maxAttempts: 3,
       initialDelayMs: 10,
     });
-    await vi.advanceTimersByTimeAsync(1000);
     await expect(promise).rejects.toThrow('Content filtered');
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
