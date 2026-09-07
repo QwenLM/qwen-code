@@ -13397,6 +13397,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain(
       'User intentionally cancelled this tool call. Stop',
     );
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   // A post-execution cancellation drops the model-visible output, but the
