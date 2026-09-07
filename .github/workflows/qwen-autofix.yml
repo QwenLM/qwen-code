@@ -1489,6 +1489,19 @@ jobs:
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MODEL_DISPLAY="${MODEL:-default}"
+          # Same agent-model preference + defensive reads as 'Push and
+          # report' (each step is its own shell, so the block does not carry
+          # over): regular file only, never a symlink, bounded head -c
+          # prefixes, allowlist + cap, || true — a planted path degrades to
+          # the configured MODEL and must not abort this PAT-bearing step.
+          AGENT_MODEL=''
+          AGENT_CLI_VERSION=''
+          if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+            AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
+          fi
+          [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+          CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
             exit 1
@@ -1549,7 +1562,7 @@ jobs:
           {
             echo
             echo "---"
-            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
           } >> "${WORKDIR}/e2e-report.md"
           gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"
 
@@ -4041,9 +4054,7 @@ jobs:
           done
           git config core.hooksPath .husky
 
-      # The test-weakening gate's instrument, staged from the trusted
-      # checkout after npm ci and before the branch checkout, digested into
-      # expression context (af-111) and verified before it executes.
+      # The test-weakening gate's instrument, staged trusted and digested.
       # Full rationale → qwen-autofix.md#af-157
       - name: 'Stage trusted test-surface instrument'
         id: 'stage_surface'
@@ -4302,10 +4313,7 @@ jobs:
             | jq -s 'add // []' > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             | jq -s 'add // []' > "${WORKDIR}/ic.json"
-          # headRefOid rides the same read as the rollup: the regression
-          # classifier below binds its verdict to the commit the rollup
-          # describes (af-155), and checks.json stays the bare array its
-          # positional readers expect.
+          # headRefOid rides the same read as the rollup (af-155).
           PR_ROLLUP="$(gh pr view "${PR}" --repo "${REPO}" \
             --json statusCheckRollup,headRefOid 2> /dev/null || echo '{}')"
           jq '.statusCheckRollup // []' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json" 2> /dev/null \
@@ -4749,12 +4757,8 @@ jobs:
             [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]] && echo "🚦 regular-feedback budget exhausted this window for: $(jq -r 'join(", ")' <<< "${OVER_BUDGET_AUTHORS}")"
           fi
           # ---- regression accounting ------------------------------------
-          # Classify the live head: a round that pushes onto a fully GREEN
-          # head and leaves it red introduced the red. Recorded now, charged
-          # by the consecutive-failure walk later.
-          # Counts ONLY checks outside the loop's own lanes, binds to the
-          # commit the rollup describes, and treats GREEN as an ALLOWLIST on
-          # BOTH axes: finished, and holding a recognised passing verdict.
+          # Classify the live head: a push onto a fully GREEN head that
+          # leaves it red introduced the red.
           # Full rationale → qwen-autofix.md#af-155
           CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
             [ .[] | select((((.workflowName // "")
@@ -5635,8 +5639,13 @@ jobs:
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
             "${WORKDIR}/agent-timeout" \
+            "${WORKDIR}/agent-model" \
             "${WORKDIR}/resolved-comments.txt" \
-            "${WORKDIR}/comment-replies.json"
+            "${WORKDIR}/comment-replies.json" || true
+          # || true: rm -f exits non-zero on a directory planted at a
+          # sentinel path; aborting HERE would lose the repair
+          # (attempted=true is already written) while every report read
+          # tolerates a leftover and run 2's writers overwrite the rest.
           # NOT deleted with its siblings: run 2 writes its own
           # deferred-findings.json, and a deferral dropped here is gone for
           # good (the eval watermark filters this round's feedback out of
@@ -5898,7 +5907,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent/reviewer-written content: both workflow-command syntaxes
@@ -5942,9 +5951,7 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
-          # Regression accounting (af-155): the head state this round STARTED
-          # from, stamped into the round's own push marker, and the prior
-          # round prepare charged as a regression.
+          # Regression accounting (af-155).
           CHECK_STATE: '${{ steps.prepare.outputs.check_state }}'
           REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
@@ -6028,8 +6035,7 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
-          # Regression accounting (af-155): the prior round prepare charged as
-          # a regression, recorded by whichever report this round posts.
+          # Regression accounting (af-155).
           REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           # This step also posts a round report (timeout / gate-rejection /
           # abort), so it writes the per-round growth-now marker too — else an
@@ -6057,6 +6063,19 @@ jobs:
           REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
+          # Same agent-model preference + defensive reads as 'Push and
+          # report' (each step is its own shell, so the block does not carry
+          # over): regular file only, never a symlink, bounded head -c
+          # prefixes, allowlist + cap, || true — a planted path degrades to
+          # the configured MODEL and must not abort this PAT-bearing step.
+          AGENT_MODEL=''
+          AGENT_CLI_VERSION=''
+          if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+            AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
+          fi
+          [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+          CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
           # Same helper as 'Push and report' (each step is its own shell, so
           # the definition does not carry over). The verdict is the one the
           # verification GATE validated (AUDIT_VERDICT step output), never a
@@ -6507,25 +6526,19 @@ jobs:
                          | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
-              # Rounds a later round measured as having left a green head red
-              # (af-155). Same window filter the eval markers above use, so a
-              # re-arm drops the whole set with the rounds it keyed.
+              # Rounds later measured as regressing (af-155).
               REGRESSED_ROUNDS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
                 [ .[] | select((.user.login // "") == $ab) | (.body // "")
                   | [ scan("<!-- autofix-regression round=([0-9]+) key=([^ ]+) -->") ] | .[]
                   | select(.[1] == $win) | .[0] ]
                 | unique | join(" ")' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
-              # THIS round's own observation rides the report this step is
-              # still composing, so it is not in COMMENTS_JSON yet — without
-              # it the newest regressing push escapes the walk by one round.
+              # THIS round's observation is not in COMMENTS_JSON yet.
               [[ -n "${REGRESSED_ROUND:-}" ]] && REGRESSED_ROUNDS="${REGRESSED_ROUNDS} ${REGRESSED_ROUND}"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
                 if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* || "${H}" == *"deferred a stale-base refresh"* ]]; then
-                  # A push that turned the checks red is not progress: it
-                  # bought the next round's work rather than reducing it. The
-                  # round number comes from the headline the report wrote it
-                  # into. Full rationale → qwen-autofix.md#af-155
+                  # A push that turned the checks red is not progress.
+                  # Full rationale → qwen-autofix.md#af-155
                   H_ROUND=''
                   [[ "${H}" =~ \(round\ ([0-9]+)/ ]] && H_ROUND="${BASH_REMATCH[1]}"
                   if [[ -n "${H_ROUND}" && " ${REGRESSED_ROUNDS} " == *" ${H_ROUND} "* ]]; then
@@ -6689,7 +6702,7 @@ jobs:
                 echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
               fi
               echo "---"
-              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
               # Per-round growth history the census counts — same marker
@@ -6709,10 +6722,8 @@ jobs:
               if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               fi
-              # A failed round pushed nothing, so it writes no autofix-push
-              # marker — but the regression prepare charged to the PRIOR round
-              # must still be recorded, or a run of failures after a regressing
-              # push would lose it entirely (af-155).
+              # A failed round still records the PRIOR round's regression
+              # (af-155).
               if [[ -n "${REGRESSED_ROUND:-}" ]]; then
                 echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
               fi
