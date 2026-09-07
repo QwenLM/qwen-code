@@ -870,17 +870,22 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
-  it('retries the arbitration past a still-settling owner release', async () => {
+  it('retries the arbitration past a decline caused only by a settling release', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
+    // The decline discriminator is the settling counter ALONE: held is false
+    // at every arbitration attempt, so a retry regression that only breaks
+    // the settling path cannot hide behind the held-lock case.
+    const attempts: boolean[] = [];
     const lock = { held: false, settling: 0 };
     const locks: LockManagerLike = {
       request: async (_name, options, callback) => {
-        // Conformant decline: invoke the callback with null (Web Locks 4.1).
-        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+        if (options.ifAvailable && !lock.held && lock.settling > 0) {
           lock.settling -= 1;
+          attempts.push(true);
           return callback(null);
         }
+        attempts.push(false);
         lock.held = true;
         try {
           await callback({});
@@ -902,22 +907,311 @@ describe('useLocalFilesBridge restore', () => {
     await hA.flush();
     expect(hA.sockets).toHaveLength(1);
 
+    // B has no session: it restores the grant but never owns the lock, so
+    // its disconnect must arbitrate.
+    const hB = render({ ...common, sessionId: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-session');
+
+    // A releases; its release is still "settling" when B disconnects.
+    lock.settling = 1;
+    hA.unmount();
+    // Let the owner's lock-release finally settle, or attempt 0 declines on
+    // the stale held flag instead of the settling counter.
+    await hB.flush();
+    attempts.length = 0;
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    // First arbitration attempt declined by the settling release alone, and
+    // the bounded retry still reached the freed lock.
+    expect(attempts).toEqual([true, false]);
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    hB.unmount();
+  });
+
+  it('keeps a record a connect writes during the arbitration window', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+          if (!lock.held) lock.settling -= 1;
+          return callback(null);
+        }
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+        return undefined;
+      },
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () => delayGate,
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // B has no session: it holds the grant in needs-session without ever
+    // requesting the lock, so its disconnect is the arbitration path.
+    const hB = render({ ...common, sessionId: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-session');
+
+    // A goes away; B's disconnect declines attempt 0 on the settling release
+    // and then waits in the inter-attempt delay, where the user connects:
+    // the stored handle needs no picker, so the connect saves and parks in
+    // needs-session before attempt 1 grants the arbitration.
+    lock.settling = 1;
+    hA.unmount();
+    const disconnecting = act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    await act(async () => {
+      await hB.get().connect();
+    });
+    releaseDelay();
+    await disconnecting;
+    await hB.flush();
+    // The record is the connect's own grant: the vetoed revoke must not wipe
+    // it, and the panel must still name it.
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(hB.get().status.rootName).toBe('ai_coding');
+    hB.unmount();
+  });
+
+  it('revokes when a post-disconnect connect leaves without saving', async () => {
+    // Empty store: a connect with nothing stored falls through to the
+    // native picker, the only connect path that can leave without saving.
+    const store = fakeStore();
+    const lock = { held: false, settling: 0 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+          if (!lock.held) lock.settling -= 1;
+          return callback(null);
+        }
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+        return undefined;
+      },
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () => delayGate,
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(0);
+
+    // B restores nothing (empty store) and owns nothing: its disconnect is
+    // the arbitration path, and its connect parks in the picker.
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('idle');
+
+    lock.settling = 1;
+    hA.unmount();
+    await hB.flush();
+    const disconnecting = act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    // The connect parks in the picker while the arbitration waits in its
+    // inter-attempt delay; the veto defers the revoke to the connect's
+    // finally, and a cancelled picker saves nothing, so it must run there.
+    const connecting = act(async () => {
+      await hB.get().connect();
+    });
+    await hB.flush();
+    releaseDelay();
+    await hB.flush();
+    rejectPicker(new DOMException('user cancelled', 'AbortError'));
+    await connecting;
+    await disconnecting;
+    await hB.flush();
+    expect(store.clears).toBe(1);
+    hB.unmount();
+  });
+
+  it('restores the panel state when every arbitration attempt is declined', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: exclusiveLocks(),
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
     const hB = render({ ...common, sessionId: 'session-B' });
     await hB.flush();
     await hB.flush();
     expect(hB.get().status.phase).toBe('held-elsewhere');
 
-    // The owner goes away but its release is still settling: the first
-    // arbitration attempt is declined the way a conformant manager declines,
-    // and only the bounded retry reaches the freed lock.
-    lock.settling = 1;
-    hA.unmount();
+    // The owner stays alive: all three attempts decline, nothing is revoked,
+    // and the optimistic terminal status must not stand - the record and
+    // B's parked bridge are both still there.
     await act(async () => {
       await hB.get().disconnect();
     });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(hB.get().status).toEqual({
+      phase: 'held-elsewhere',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('reconciles the status when the delete itself fails soft', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    let clearCalls = 0;
+    store.clear = async () => {
+      clearCalls += 1;
+      return false;
+    };
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    // The record survived the failed delete: the panel must keep naming it
+    // and offering the revoke, not report a disconnect that did not happen.
+    expect(clearCalls).toBe(1);
+    expect(h.get().status).toMatchObject({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('names the stored grant when the picker fails under a denied permission', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => {
+        throw new DOMException('Blocked by policy', 'SecurityError');
+      }),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'ai_coding',
+    });
+
+    await act(async () => {
+      await h.get().connect();
+    });
+    // The failure write must not hide the revoke affordance over a record
+    // the store still holds.
+    expect(h.get().status).toMatchObject({
+      phase: 'failed',
+      rootName: 'ai_coding',
+    });
+    expect(await store.load()).toBe(handle);
+    h.unmount();
+  });
+
+  it('revokes on the owner side even when its release outlasts the budget', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    // The release never settles inside the attempt budget: only the owned
+    // run latch can keep this disconnect from arbitrating against the tab's
+    // own still-settling lock.
+    const lock = { held: false, settling: 0 };
+    const locks: LockManagerLike = {
+      request: async (_name, options, callback) => {
+        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+          if (!lock.held) lock.settling -= 1;
+          return callback(null);
+        }
+        lock.held = true;
+        try {
+          await callback({});
+        } finally {
+          lock.held = false;
+        }
+        return undefined;
+      },
+    };
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    lock.settling = 10;
+    await act(async () => {
+      await h.get().disconnect();
+    });
     expect(store.clears).toBe(1);
     expect(await store.load()).toBeUndefined();
-    hB.unmount();
+    h.unmount();
   });
 
   it('revokes over a connect the disconnect already invalidated', async () => {

@@ -111,14 +111,48 @@ export interface LocalFilesBridgeOptions {
 export const DEFAULT_LOCK_ATTEMPTS = 3;
 export const DEFAULT_LOCK_RETRY_DELAY_MS = 100;
 
+/**
+ * Bounded ifAvailable acquisition of the owner lock, shared by the bridge's
+ * start() and the hook's disconnect arbitration so the decline/retry
+ * semantics (a conformant manager declines by invoking the callback with
+ * null, Web Locks 4.1) live in one place. Resolves true when the callback
+ * ran (or the wait was cancelled after a grant), false when every attempt
+ * was declined; a rejecting manager rejects, for the caller to policy.
+ */
+export async function withOwnerLock(opts: {
+  locks: LockManagerLike;
+  delay: (ms: number) => Promise<void>;
+  cancelled: () => boolean;
+  run: () => Promise<void>;
+}): Promise<boolean> {
+  for (let attempt = 0; attempt < DEFAULT_LOCK_ATTEMPTS; attempt++) {
+    if (attempt > 0) await opts.delay(DEFAULT_LOCK_RETRY_DELAY_MS);
+    if (opts.cancelled()) return false;
+    let settled = false;
+    await opts.locks.request(
+      LOCAL_FILES_LOCK_NAME,
+      { ifAvailable: true },
+      async (lock) => {
+        if (lock === null || lock === undefined) return;
+        if (opts.cancelled()) {
+          settled = true;
+          return;
+        }
+        settled = true;
+        await opts.run();
+      },
+    );
+    if (settled) return true;
+  }
+  return false;
+}
+
 const DEFAULTS = {
   maxRegisterAttempts: 6,
   maxReconnectAttempts: 8,
   reconnectBaseDelayMs: 500,
   initializeTimeoutMs: 15_000,
   registerTimeoutMs: 30_000,
-  lockAttempts: DEFAULT_LOCK_ATTEMPTS,
-  lockRetryDelayMs: DEFAULT_LOCK_RETRY_DELAY_MS,
 };
 
 /** Mirrors the bearer-subprotocol scheme the daemon's WS upgrade accepts. */
@@ -269,33 +303,17 @@ export class LocalFilesBridge {
         await this.run();
         return;
       }
-      let owned = false;
       // A same-tab replacement stops the old bridge and starts this one in
       // the same task, while the old lock release is still settling; a single
       // ifAvailable attempt would misread that as another tab and park here
-      // forever, so retry a few times before concluding held-elsewhere.
-      const attempts = DEFAULTS.lockAttempts;
-      for (
-        let attempt = 0;
-        attempt < attempts && !owned && !this.stopped;
-        attempt++
-      ) {
-        if (attempt > 0) await this.delay(DEFAULTS.lockRetryDelayMs);
-        if (this.stopped) break;
-        await locks.request(
-          LOCAL_FILES_LOCK_NAME,
-          { ifAvailable: true },
-          async (lock) => {
-            // `ifAvailable` means the callback is skipped entirely when
-            // another tab holds the lock; a null lock is the other way it can
-            // decline. A stop() landing before the grant must release it
-            // again instead of starting a run nobody can stop.
-            if (lock === null || lock === undefined || this.stopped) return;
-            owned = true;
-            await this.run();
-          },
-        );
-      }
+      // forever, so withOwnerLock retries a few times before concluding
+      // held-elsewhere.
+      const owned = await withOwnerLock({
+        locks,
+        delay: (ms) => this.delay(ms),
+        cancelled: () => this.stopped,
+        run: () => this.run(),
+      });
       if (!owned && !this.stopped) this.setState({ phase: 'held-elsewhere' });
     } catch (err) {
       // A sandboxed iframe can reject navigator.locks.request outright

@@ -19,10 +19,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LocalFilesBridge,
-  LOCAL_FILES_LOCK_NAME,
-  DEFAULT_LOCK_ATTEMPTS,
-  DEFAULT_LOCK_RETRY_DELAY_MS,
   openBrowserSocket,
+  withOwnerLock,
   type AcpWorkspaceSelector,
   type LocalFilesBridgeState,
   type LockManagerLike,
@@ -184,6 +182,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   // must register nothing, not just stop a bridge that already exists.
   const capabilityRef = useRef(capability);
   capabilityRef.current = capability;
+  // Mirrored so disconnect() can reconcile its optimistic terminal status
+  // against what the panel showed before the click.
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const bridgeRef = useRef<LocalFilesBridge | undefined>(undefined);
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   /**
@@ -200,6 +202,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * one started afterwards (which can).
    */
   const connectGenerationRef = useRef(0);
+  /** True once the in-flight connect has persisted its pick or stored handle. */
+  const connectSavedRef = useRef(false);
+  /** Revoke handed to a connect's finally because that connect may still write. */
+  const pendingRevokeRef = useRef<(() => Promise<boolean>) | undefined>(
+    undefined,
+  );
+  /** Set when the last revoke deferred instead of deciding, so disconnect does not reconcile over an undecided outcome. */
+  const deferredRevokeRef = useRef(false);
   /**
    * Bumped by `disconnect()` and by unmount. Every await in `connect()` and
    * `restore()` re-checks it, because both can be waiting on a native picker
@@ -437,6 +447,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     connectInFlightRef.current = true;
     const generation = generationRef.current;
     connectGenerationRef.current = generation;
+    connectSavedRef.current = false;
     const stale = () => generationRef.current !== generation;
     try {
       // A peer tab's disconnect clears the store without signaling this tab:
@@ -456,6 +467,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (stale()) return;
         if (permission.state === 'granted') {
           await store?.save(stored);
+          connectSavedRef.current = true;
           if (stale()) return;
           startBridge(stored);
           return;
@@ -481,18 +493,39 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (stale()) return;
       if (result.kind === 'cancelled') return;
       if (result.kind === 'unavailable') {
-        setStatus({ phase: 'unavailable', blocker: result.blocker });
+        // Name the record-backed grant: the failure write must not hide the
+        // panel's Disconnect, the only revoke path, over a persisted handle.
+        const rootName = (await store?.load())?.name;
+        setStatus({
+          phase: 'unavailable',
+          blocker: result.blocker,
+          ...(rootName === undefined ? {} : { rootName }),
+        });
         return;
       }
       if (result.kind === 'failed') {
-        setStatus({ phase: 'failed', blocker: null, message: result.message });
+        const rootName = (await store?.load())?.name;
+        setStatus({
+          phase: 'failed',
+          blocker: null,
+          message: result.message,
+          ...(rootName === undefined ? {} : { rootName }),
+        });
         return;
       }
       await store?.save(result.handle);
+      connectSavedRef.current = true;
       if (stale()) return;
       startBridge(result.handle);
     } finally {
       connectInFlightRef.current = false;
+      // A revoke deferred by a disconnect waits for this connect's verdict:
+      // it saved, so the record is its own grant and the revoke is dropped;
+      // it left without saving, so the revoke proceeds here instead of being
+      // swallowed by a veto whose connect never wrote anything.
+      const pending = pendingRevokeRef.current;
+      pendingRevokeRef.current = undefined;
+      if (pending !== undefined && !connectSavedRef.current) await pending();
     }
   }, [capability.blocker, startBridge, store, win]);
 
@@ -504,6 +537,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // lock exclusively, so after stop() no peer can hold it and the revoke
     // needs no arbitration (our own release may still be settling).
     const owned = ownedRunRef.current;
+    // Facts the optimistic terminal write below would destroy: the name of
+    // a grant still in the store, and the status to restore when no revoke
+    // happens (every attempt declined, or the delete failing soft).
+    const name = handleRef.current?.name ?? statusRef.current.rootName;
+    // stopBridge() below drops the ref, so the parked-run fact the reconcile
+    // needs must be read here.
+    const parkedBeforeStop =
+      bridgeRef.current?.getState().phase === 'held-elsewhere';
     stopBridge();
     handleRef.current = undefined;
     setStatus(
@@ -511,20 +552,25 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         ? { phase: 'unavailable', blocker: capability.blocker }
         : IDLE,
     );
-    const revoke = async () => {
-      // A later disconnect must win. Only a connect started at or after this
-      // one can still write the record; an earlier in-flight connect was
-      // invalidated by the generation bump above and saves nothing, so it
-      // must not veto the revoke.
-      if (
-        generationRef.current !== generation ||
-        (connectInFlightRef.current &&
-          connectGenerationRef.current >= generation)
-      ) {
-        return;
+    deferredRevokeRef.current = false;
+    const revoke = async (): Promise<boolean> => {
+      // A later disconnect must win over this one's pending revoke.
+      if (generationRef.current !== generation) return false;
+      // A connect stamped at or after this disconnect decides the record's
+      // fate, not this revoke: still in flight, the revoke waits for its
+      // finally; already finished, whether it saved says if the record is
+      // its own grant (keep) or an abandoned attempt (revoke now).
+      if (connectGenerationRef.current >= generation) {
+        if (connectInFlightRef.current) {
+          pendingRevokeRef.current = () => revoke();
+          deferredRevokeRef.current = true;
+          return false;
+        }
+        if (connectSavedRef.current) return false;
       }
-      await store?.clear();
+      return (await store?.clear()) ?? true;
     };
+    let cleared = false;
     const locks =
       optionsRef.current.locks === undefined
         ? defaultLocks()
@@ -532,35 +578,42 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     if (owned || locks === null) {
       // No lock manager: no cross-tab arbitration exists, so this context is
       // the only possible owner of the record.
-      await revoke();
-      return;
+      cleared = await revoke();
+    } else {
+      // The store is origin-global and a peer tab's live bridge depends on
+      // it, so a mount that never owned a run revokes only while no other
+      // context holds the owner lock; withOwnerLock bounds that wait and
+      // guards the conformant null decline (Web Locks 4.1).
+      const delay =
+        optionsRef.current.delay ??
+        ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+      const settled = await withOwnerLock({
+        locks,
+        delay,
+        cancelled: () => generationRef.current !== generation,
+        run: async () => {
+          cleared = await revoke();
+        },
+      }).catch(async () => {
+        // A rejecting manager is functionally no manager.
+        cleared = await revoke();
+        return true;
+      });
+      cleared = cleared && settled;
     }
-    // The store is origin-global and a peer tab's live bridge depends on it,
-    // so a mount that never owned a run revokes only while no other context
-    // holds the owner lock. A conforming manager declines an ifAvailable
-    // request by invoking the callback with null (Web Locks 4.1), and one
-    // attempt cannot tell a peer's lock from this tab's own release still
-    // settling — hence the null guard and the bounded retry, mirroring
-    // start()'s lock acquisition.
-    const delay =
-      optionsRef.current.delay ??
-      ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-    for (let attempt = 0; attempt < DEFAULT_LOCK_ATTEMPTS; attempt++) {
-      if (attempt > 0) await delay(DEFAULT_LOCK_RETRY_DELAY_MS);
-      if (generationRef.current !== generation) return;
-      let settled = false;
-      await locks
-        .request(LOCAL_FILES_LOCK_NAME, { ifAvailable: true }, async (lock) => {
-          if (lock === null || lock === undefined) return;
-          settled = true;
-          await revoke();
-        })
-        .catch(() => {
-          // A rejecting manager is functionally no manager.
-          settled = true;
-          return revoke();
-        });
-      if (settled) return;
+    // The optimistic write above is truthful only when the revoke decided.
+    // Every declined attempt or soft-failed delete leaves the record - and a
+    // peer's dependence on it - exactly where it was, so restore what the
+    // panel showed before the click (bridge state first, else the named
+    // grant over an idle panel) and keep the revoke affordance reachable.
+    if (!cleared && !deferredRevokeRef.current) {
+      setStatus(
+        parkedBeforeStop && name !== undefined
+          ? { phase: 'held-elsewhere', blocker: null, rootName: name }
+          : name === undefined
+            ? IDLE
+            : { ...IDLE, rootName: name },
+      );
     }
   }, [capability.blocker, stopBridge, store]);
 
