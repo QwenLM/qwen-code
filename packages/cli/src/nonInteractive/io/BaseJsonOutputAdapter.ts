@@ -118,6 +118,10 @@ export interface MessageEmitter {
  */
 export interface JsonOutputAdapterInterface extends MessageEmitter {
   startAssistantMessage(): void;
+  restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void;
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
@@ -602,6 +606,48 @@ export abstract class BaseJsonOutputAdapter {
    */
   startAssistantMessage(): void {
     this.startAssistantMessageInternal(this.mainAgentMessageState);
+  }
+
+  /**
+   * Starts a replacement provider attempt. Continuation retries keep the
+   * already-delivered text; fresh retries and fallbacks discard the pending
+   * assistant state. Streaming adapters override this to pair any tool_use
+   * frames that are already on the wire before resetting.
+   */
+  restartAttempt(
+    preserveText: boolean,
+    _discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText) {
+      return;
+    }
+    this.startAssistantMessageInternal(this.mainAgentMessageState);
+  }
+
+  protected emitDiscardedAttemptToolResults(
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    const message =
+      'Skipped because the provider attempt was retried before execution.';
+    for (const request of discardedToolCalls) {
+      const error = new Error(message);
+      this.emitToolResult(request, {
+        callId: request.callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: request.callId,
+              name: request.name,
+              response: { error: message },
+            },
+          },
+        ],
+        resultDisplay: message,
+        error,
+        errorType: ToolErrorType.EXECUTION_FAILED,
+        executionStatus: 'not_started',
+      });
+    }
   }
 
   /**

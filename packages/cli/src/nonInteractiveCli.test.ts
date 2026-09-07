@@ -590,9 +590,15 @@ describe('runNonInteractive', () => {
     }
   }
 
-  it.each([false, true])(
-    'discards failed-attempt tool requests on Retry (drain=%s)',
-    async (drain) => {
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'repairs discarded Retry tools and executes only the accepted attempt in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
       setupMetricsMock();
       const finished: ServerLlmStreamEvent = {
         type: LlmEventType.Finished,
@@ -619,6 +625,7 @@ describe('runNonInteractive', () => {
       mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'abandoned attempt' },
             {
               type: LlmEventType.ToolCallRequest,
               value: {
@@ -629,14 +636,37 @@ describe('runNonInteractive', () => {
                 prompt_id: 'retry-tools',
               },
             },
-            { type: LlmEventType.Retry },
-            { type: LlmEventType.Content, value: 'Recovered without tools' },
+            {
+              type: LlmEventType.Retry,
+              retryInfo: {
+                attempt: 1,
+                maxRetries: 10,
+                delayMs: 60_000,
+                skipDelay: vi.fn(),
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'kept-tool',
+                name: 'test-tool',
+                args: { accepted: true },
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            { type: LlmEventType.Content, value: 'accepted attempt' },
             finished,
           ]),
         )
         .mockImplementation(() => createStreamFromEvents([finished]));
       mockCoreExecuteToolCall.mockResolvedValue({
-        responseParts: [{ text: 'unexpected tool execution' }],
+        callId: 'kept-tool',
+        responseParts: [{ text: 'accepted tool execution' }],
+        resultDisplay: 'accepted',
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
       });
       const exitCode = await runNonInteractive(
         mockConfig,
@@ -645,12 +675,179 @@ describe('runNonInteractive', () => {
         'retry-tools',
       );
       expect(exitCode).toBe(0);
-      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'kept-tool',
+        args: { accepted: true },
+      });
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
-        drain ? 2 : 1,
+        drain ? 3 : 2,
+      );
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        'Retrying in 60s (attempt 1/10)\n',
+      );
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const blocks = messages.flatMap(
+        (message: { message?: { content?: unknown[] } }) =>
+          message.message?.content ?? [],
+      ) as Array<{ type?: string; id?: string; tool_use_id?: string }>;
+      const discardedUses = blocks.filter(
+        (block) => block.type === 'tool_use' && block.id === 'discarded-tool',
+      );
+      const discardedResults = blocks.filter(
+        (block) =>
+          block.type === 'tool_result' &&
+          block.tool_use_id === 'discarded-tool',
+      );
+      if (format === OutputFormat.JSON) {
+        expect(discardedUses).toEqual([]);
+        expect(discardedResults).toEqual([]);
+        expect(stdout).not.toContain('abandoned attempt');
+      } else {
+        expect(discardedUses).toHaveLength(1);
+        expect(discardedResults).toHaveLength(1);
+      }
+      expect(stdout).toContain('accepted attempt');
+      expect(blocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'kept-tool' }),
+          expect.objectContaining({
+            type: 'tool_result',
+            tool_use_id: 'kept-tool',
+          }),
+        ]),
       );
     },
   );
+
+  it.each([false, true])(
+    'preserves delivered text across a continuation Retry (drain=%s)',
+    async (drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          cb?.(
+            'Monitor ready',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_continuation',
+              toolUseId: 'tool_monitor',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix ' },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          finished,
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'continuation'),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      expect(JSON.stringify(messages)).toContain('prefix suffix');
+    },
+  );
+
+  it('repairs a discarded tool when a drain attempt falls back models', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+        monitorId: 'mon_fallback',
+        toolUseId: 'tool_monitor',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    const request = (callId: string): ServerLlmStreamEvent => ({
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId,
+        name: 'test-tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'fallback-tools',
+      },
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([finished]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          request('discarded-tool'),
+          {
+            type: LlmEventType.ModelFallback,
+            fromModel: 'primary',
+            toModel: 'fallback',
+            fallbackIndex: 0,
+          },
+          request('kept-tool'),
+          finished,
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents([finished]));
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'kept-tool',
+      responseParts: [{ text: 'accepted' }],
+      resultDisplay: 'accepted',
+      error: undefined,
+      errorType: undefined,
+      executionStatus: 'success',
+    });
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'fallback-tools'),
+    ).resolves.toBe(0);
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+    expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+      callId: 'kept-tool',
+    });
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    expect(JSON.stringify(messages)).not.toContain('discarded-tool');
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'model_fallback',
+        }),
+      ]),
+    );
+  });
 
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);

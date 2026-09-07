@@ -94,6 +94,18 @@ describe('isRateLimitError — statusless provider errors', () => {
 
   it.each([
     ['invalid_request_error', throttleMessage, true],
+    [
+      'invalid_request_error',
+      'Too many requests, please wait before trying again.',
+      true,
+    ],
+    [
+      'invalid_request_error',
+      JSON.stringify({
+        message: 'Too many requests are not permitted for this key',
+      }),
+      false,
+    ],
     ['rate_limit_error', 'Rate limit reached', true],
     ['overloaded_error', 'Overloaded', true],
     ['invalid_request_error', 'Invalid messages parameter', false],

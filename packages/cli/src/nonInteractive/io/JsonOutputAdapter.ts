@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
 import type { CLIAssistantMessage, CLIMessage } from '../types.js';
 import {
   BaseJsonOutputAdapter,
@@ -23,6 +23,8 @@ export class JsonOutputAdapter
   implements JsonOutputAdapterInterface
 {
   private readonly messages: CLIMessage[] = [];
+  private attemptMessageCheckpoint = 0;
+  private lastAssistantMessageAtAttemptStart: CLIAssistantMessage | null = null;
 
   constructor(config: Config) {
     super(config);
@@ -50,6 +52,32 @@ export class JsonOutputAdapter
    */
   protected shouldEmitStreamEvents(): boolean {
     return false;
+  }
+
+  override startAssistantMessage(): void {
+    this.attemptMessageCheckpoint = this.messages.length;
+    this.lastAssistantMessageAtAttemptStart = this.lastAssistantMessage;
+    super.startAssistantMessage();
+  }
+
+  override restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (!preserveText) {
+      // Keep system/control metadata (notably model_fallback), but retract
+      // assistant messages produced by the abandoned provider attempt.
+      const retained = this.messages
+        .slice(this.attemptMessageCheckpoint)
+        .filter((message) => message.type !== 'assistant');
+      this.messages.splice(
+        this.attemptMessageCheckpoint,
+        this.messages.length - this.attemptMessageCheckpoint,
+        ...retained,
+      );
+      this.lastAssistantMessage = this.lastAssistantMessageAtAttemptStart;
+    }
+    super.restartAttempt(preserveText, discardedToolCalls);
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {

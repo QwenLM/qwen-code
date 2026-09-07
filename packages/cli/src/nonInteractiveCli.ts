@@ -1705,6 +1705,19 @@ export async function runNonInteractive(
         return 1;
       };
 
+      const emitRetryProgress = (event: ServerLlmStreamEvent): void => {
+        if (event.type !== LlmEventType.Retry || !event.retryInfo) {
+          return;
+        }
+        const { attempt, maxRetries, delayMs, message } = event.retryInfo;
+        const delaySeconds = Math.ceil(delayMs / 1000);
+        process.stderr.write(
+          `Retrying in ${delaySeconds}s (attempt ${attempt}/${maxRetries})${
+            message ? `: ${message}` : ''
+          }\n`,
+        );
+      };
+
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
        * `drainBatch`. Both call sites used to reproduce ~120 lines of
@@ -2378,6 +2391,7 @@ export async function runNonInteractive(
         );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -2441,16 +2455,29 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
-          adapter.processEvent(event);
-          if (event.type === LlmEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
-          }
           if (
             event.type === LlmEventType.Retry ||
             event.type === LlmEventType.ModelFallback
           ) {
-            toolCallRequests.length = 0;
+            const discardedToolCalls = toolCallRequests.splice(0);
+            const preserveText =
+              event.type === LlmEventType.Retry &&
+              event.isContinuation === true &&
+              discardedToolCalls.length === 0;
+            adapter.restartAttempt(preserveText, discardedToolCalls);
+            if (!preserveText) {
+              plainTextPreview = plainTextPreview.slice(
+                0,
+                attemptPreviewLength,
+              );
+            }
+            emitRetryProgress(event);
+          }
+          // Process fallback metadata only after the abandoned attempt has
+          // been reset, so batch adapters do not roll the system event back.
+          adapter.processEvent(event);
+          if (event.type === LlmEventType.ToolCallRequest) {
+            toolCallRequests.push(event.value);
           }
           if (
             event.type === LlmEventType.Content &&
@@ -2772,15 +2799,21 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
-                adapter.processEvent(event);
-                if (event.type === LlmEventType.ToolCallRequest) {
-                  itemToolCallRequests.push(event.value);
-                }
                 if (
                   event.type === LlmEventType.Retry ||
                   event.type === LlmEventType.ModelFallback
                 ) {
-                  itemToolCallRequests.length = 0;
+                  const discardedToolCalls = itemToolCallRequests.splice(0);
+                  const preserveText =
+                    event.type === LlmEventType.Retry &&
+                    event.isContinuation === true &&
+                    discardedToolCalls.length === 0;
+                  adapter.restartAttempt(preserveText, discardedToolCalls);
+                  emitRetryProgress(event);
+                }
+                adapter.processEvent(event);
+                if (event.type === LlmEventType.ToolCallRequest) {
+                  itemToolCallRequests.push(event.value);
                 }
                 if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
