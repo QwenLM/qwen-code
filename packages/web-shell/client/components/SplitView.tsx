@@ -488,9 +488,11 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
-                    <AssistantTurnSettlementObserver
-                      onAssistantTurnSettled={onAssistantTurnSettled}
-                    />
+                    {onAssistantTurnSettled ? (
+                      <AssistantTurnSettlementObserver
+                        onAssistantTurnSettled={onAssistantTurnSettled}
+                      />
+                    ) : null}
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}

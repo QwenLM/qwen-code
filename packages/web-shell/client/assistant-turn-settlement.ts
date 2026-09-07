@@ -78,7 +78,7 @@ export function useAssistantTurnSettlementProjection(
 export function AssistantTurnSettlementObserver({
   onAssistantTurnSettled,
 }: {
-  onAssistantTurnSettled?: AssistantTurnSettledHandler;
+  onAssistantTurnSettled: AssistantTurnSettledHandler;
 }) {
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   return null;
