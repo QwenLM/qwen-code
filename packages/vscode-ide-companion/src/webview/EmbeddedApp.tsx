@@ -206,6 +206,13 @@ interface RuntimeConfig {
   token?: string;
   clientId?: string;
   workspaceCwd?: string;
+  /**
+   * The workspace path as VS Code spells it, sent only when it differs from
+   * the canonical `workspaceCwd` (a symlinked folder). Every
+   * `activeEditorChanged` payload carries a raw `uri.fsPath`, so relativizing
+   * the active file has to accept either spelling.
+   */
+  editorWorkspaceCwd?: string;
   sessionId?: string;
   hostKind?: 'view' | 'panel';
 }
@@ -1531,16 +1538,27 @@ export function EmbeddedApp() {
             }
 
             if (!activeFile || !includeActiveFile) return undefined;
-            const normalizedWorkspace = runtime.workspaceCwd?.replace(
-              /\\/g,
-              '/',
-            );
             const normalizedFile = activeFile.filePath.replace(/\\/g, '/');
-            const relativePath =
-              normalizedWorkspace &&
-              normalizedFile.startsWith(`${normalizedWorkspace}/`)
-                ? normalizedFile.slice(normalizedWorkspace.length + 1)
-                : activeFile.fileName;
+            // `workspaceCwd` is canonical — the daemon matches workspaces by
+            // realpath — while `activeFile.filePath` is VS Code's raw
+            // `uri.fsPath`, so in a symlinked folder the two sit in different
+            // path spaces. Try both spellings: on a miss the strip silently
+            // degrades to a bare basename, the prompt says `@foo.ts` instead
+            // of `@src/foo.ts`, and the picker-annotation dedup below misses
+            // with it.
+            const workspacePrefixes = [
+              runtime.workspaceCwd,
+              runtime.editorWorkspaceCwd,
+            ]
+              .filter((cwd): cwd is string => Boolean(cwd))
+              .map((cwd) => cwd.replace(/\\/g, '/'));
+            let relativePath = activeFile.fileName;
+            for (const prefix of workspacePrefixes) {
+              if (normalizedFile.startsWith(`${prefix}/`)) {
+                relativePath = normalizedFile.slice(prefix.length + 1);
+                break;
+              }
+            }
             const reference = `@${relativePath}`;
             const selectedLines = activeFile.selection
               ? ` (selected lines ${activeFile.selection.startLine}-${activeFile.selection.endLine})`

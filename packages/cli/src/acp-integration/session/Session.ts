@@ -2536,6 +2536,7 @@ export class Session implements SessionContext {
     if (!turn) return;
 
     this.goalProcessing = true;
+    this.#activeWorkChanged();
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
     let result: PromptResponse | undefined;
@@ -2578,6 +2579,7 @@ export class Session implements SessionContext {
       await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
@@ -4058,6 +4060,20 @@ export class Session implements SessionContext {
         holds.push({ category: 'workflow', id: task.runId });
       }
     }
+    if (
+      this.historyMutationActive ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.cronCompletion ||
+      this.notificationQueue.some((item) => item.kind === 'monitor') ||
+      (this.notificationCompletion &&
+        this.currentAgentNotificationTaskId === null &&
+        this.currentWorkflowNotificationTaskId === null &&
+        !this.currentShellNotificationActive)
+    ) {
+      holds.push({ category: 'session', id: 'session:active-turn' });
+    }
     return holds;
   }
 
@@ -4100,12 +4116,14 @@ export class Session implements SessionContext {
       });
     }
     this.historyMutationActive = true;
+    this.#activeWorkChanged();
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.historyMutationActive = false;
       if (this.disposed) return;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
@@ -8912,6 +8930,7 @@ export class Session implements SessionContext {
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     this.cronProcessing = true;
+    this.#activeWorkChanged();
 
     let resolveCompletion!: () => void;
     this.cronCompletion = new Promise<void>((resolve) => {
@@ -8930,6 +8949,7 @@ export class Session implements SessionContext {
       this.cronProcessing = false;
       resolveCompletion();
       this.cronCompletion = null;
+      this.#activeWorkChanged();
 
       void this.#drainGoalQueue();
       void this.#drainNotificationQueue();
