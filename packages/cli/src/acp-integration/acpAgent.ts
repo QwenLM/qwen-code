@@ -14071,7 +14071,12 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
-    const modelReasoning = getConfiguredModelReasoning(config, modelId);
+    // Runtime snapshots own their request overrides (the knobs the runtime
+    // model switch applied); only manifest reasoning may judge the selection
+    // here, matching buildConfigOptions and getDefaultReasoningConfig.
+    const modelReasoning = config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getConfiguredModelReasoning(config, modelId);
     if (
       !isReasoningSelectionSupported(
         modelId,

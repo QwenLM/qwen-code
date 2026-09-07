@@ -346,6 +346,50 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('projects a registry-declared reasoning capability in the preview', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'deepseek-v4-pro' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'DS Pro',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['high', 'max'],
+                defaultEffort: 'high',
+                disableField: 'thinking',
+              },
+            },
+          },
+          { id: 'deepseek-v4-chat', name: 'DS Chat' },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const declared = models.find(
+      (model) => model.baseModelId === 'deepseek-v4-pro',
+    );
+    const undeclared = models.find(
+      (model) => model.baseModelId === 'deepseek-v4-chat',
+    );
+
+    expect(declared?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
+      },
+    ]);
+    expect(undeclared?.configOptions).toBeUndefined();
+  });
+
   it.each([
     {
       persisted: 'medium' as const,
