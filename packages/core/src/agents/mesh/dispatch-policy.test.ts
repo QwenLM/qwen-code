@@ -224,18 +224,23 @@ describe('resolveTargets', () => {
       resolveTargets(
         thread({ assigneeAgentId: 'ag_alice' }),
         message({ mentions: ['ag_bob', 'ag_carol'] }),
+        true,
       ),
     ).toEqual(['ag_bob', 'ag_carol']);
   });
 
   it('falls back to the assignee when nobody is named', () => {
     expect(
-      resolveTargets(thread({ assigneeAgentId: 'ag_alice' }), message()),
+      resolveTargets(
+        thread({ assigneeAgentId: 'ag_alice' }),
+        message(),
+        false,
+      ),
     ).toEqual(['ag_alice']);
   });
 
   it('returns nobody for an unassigned thread with no mentions', () => {
-    expect(resolveTargets(thread(), message())).toEqual([]);
+    expect(resolveTargets(thread(), message(), false)).toEqual([]);
   });
 
   it('does not fall back to the assignee for an unknown explicit mention', () => {

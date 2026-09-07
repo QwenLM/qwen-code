@@ -522,13 +522,15 @@ action on the child caused it.
 Pre-existing on this branch (five production files plus two tests; nothing
 starts an agent yet):
 
-| File                                      | Responsibility                                 |
-| ----------------------------------------- | ---------------------------------------------- |
-| `core/src/agents/mesh/types.ts`           | Entities and limits                            |
-| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD               |
-| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                            |
-| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                        |
-| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock |
+| File                                      | Responsibility                                  |
+| ----------------------------------------- | ----------------------------------------------- |
+| `core/src/agents/mesh/types.ts`           | Entities and limits                             |
+| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD                |
+| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                             |
+| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                         |
+| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock  |
+| `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding |
+| `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers  |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -578,6 +580,12 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    per-turn ambient mesh context, incremental run usage recording, and minimal `thread_post`,
    `thread_wait`, `thread_block`, `thread_review`, and `thread_read` tools. No
    model-supplied mutation thread, author, run, or idempotency id.
+   Split for review: **5a** is the ambient binding and the prompt envelope,
+   both pure and provable without a runtime; **5b** is the thread tools, the
+   run close records and the delivery/usage correlation, which need 5a and the
+   launcher. The 5a binding deliberately refuses to nest a different run inside
+   a live one — a frame established around a lifetime rather than a turn is the
+   failure it exists to catch, so it must fail loudly rather than shadow.
 6. **Minimal in-process dispatcher, no recovery** — pick one queued run per
    agent by `queueSequence`; launch, continue resident, resume `paused`, or cold
    revive; call `startRun`/`finishRun`; and consume the parent-report outbox.
