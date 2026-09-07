@@ -639,6 +639,9 @@ export function createExtensionsController(
               async (release) => {
                 assertGenerationOpen?.();
                 return await task((generation) => {
+                  // sendOperation passes reserveRuntimeReconciliation even on
+                  // skipRefresh routes; an operation that will not reconcile
+                  // must not block the external reconciler queue.
                   if (!options.skipRefresh) {
                     reconciliationReservation ??=
                       options.reserveRuntimeReconciliation?.();
