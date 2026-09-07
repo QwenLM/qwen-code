@@ -906,8 +906,13 @@ export class ContentGenerationPipeline {
     // A `reasoning` object the user put in `samplingParams` ships verbatim (the
     // contract `clampConfiguredReasoningEffort` keeps), so the capability
     // mapping must leave it for the provider hook to translate.
+    // OpenRouter's effort knob is the nested `reasoning` parameter: the
+    // gateway ignores the flat `reasoning_effort` the capability mapping
+    // writes, so flattening would stop delivering the tier. The disable
+    // path below special-cases OpenRouter for the same reason.
     if (
-      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      !isOpenRouterHostname(this.contentGeneratorConfig)
     ) {
       baseRequest = applyConfiguredReasoningEffort(
         baseRequest,

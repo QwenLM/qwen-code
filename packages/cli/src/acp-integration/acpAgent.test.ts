@@ -4464,6 +4464,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
@@ -9555,6 +9556,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     },
   );
+
+  it("keeps a runtime snapshot session's own request overrides on auth refresh", async () => {
+    const sessionId = 'snapshot-persisted-reasoning-auth-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const extraBody = { enable_thinking: false, seed: 7 };
+    const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+    const generation: {
+      model: string;
+      reasoning?: false | { effort?: string };
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    } = { model: 'qwen3.8-max', reasoning: { effort: 'medium' } };
+    const settings = makeSessionSettings({
+      mcpServers: {},
+      model: { reasoningEffort: 'medium' },
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    vi.mocked(innerConfig.getActiveRuntimeModelSnapshot).mockReturnValue({
+      id: '$runtime|api-key|qwen3.8-max',
+      authType: 'api-key',
+      modelId: 'qwen3.8-max',
+    });
+    innerConfig.refreshAuth = vi.fn(async () => {
+      generation.extra_body = { ...extraBody };
+      generation.samplingParams = { ...samplingParams };
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(generation.extra_body).toEqual(extraBody);
+      expect(generation.samplingParams).toEqual(samplingParams);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it("keeps a duplicate-id route model's own request overrides on auth refresh", async () => {
+    const sessionId = 'route-persisted-reasoning-auth-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const extraBody = { enable_thinking: true, thinking_budget: 8000 };
+    const generation: {
+      model: string;
+      reasoning?: false | { effort?: string };
+      extra_body?: Record<string, unknown>;
+    } = { model: 'qwen3.8-max', reasoning: { effort: 'medium' } };
+    const settings = makeSessionSettings({
+      mcpServers: {},
+      model: { reasoningEffort: 'medium' },
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    // One model id declared twice under one authType with distinct base
+    // URLs: the ACP id resolves to an opaque `qwen-route:v1:` selector that
+    // buildConfigOptions refuses to publish a reasoning option for.
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'qwen3.8-max',
+        label: 'Route A',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://route-a.example/v1',
+      },
+      {
+        id: 'qwen3.8-max',
+        label: 'Route B',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://route-b.example/v1',
+      },
+    ]);
+    innerConfig.getCurrentModelRegistryBaseUrl = vi.fn().mockReturnValue(null);
+    innerConfig.refreshAuth = vi.fn(async () => {
+      generation.extra_body = { ...extraBody };
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(generation.extra_body).toEqual(extraBody);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it.each([false, { effort: 'medium', budget_tokens: 42000 }] as const)(
     'resets to canonical reasoning defaults %j rather than a previous selection',

@@ -6585,7 +6585,7 @@ describe('Session', () => {
 
   describe('setModel', () => {
     function installReasoningPreference(
-      selection: 'none' | 'low' | 'max',
+      selection: 'none' | 'low' | 'high' | 'max',
       options: {
         trusted?: boolean;
         thinkingMandatory?: boolean;
@@ -7249,6 +7249,43 @@ describe('Session', () => {
         });
       },
     );
+
+    it("keeps a runtime snapshot session's own request overrides on reload", () => {
+      const state = installReasoningPreference('high');
+      const extraBody = { enable_thinking: false, seed: 7 };
+      const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+      currentModel = 'deepseek-v4-pro';
+      Object.assign(state.live, {
+        model: 'deepseek-v4-pro',
+        authType: AuthType.USE_OPENAI,
+        extra_body: { ...extraBody },
+        samplingParams: { ...samplingParams },
+      });
+      // The registry now declares a reasoning capability for the snapshotted
+      // model; the snapshot still owns the overrides its switch applied.
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          id: `$runtime|${AuthType.USE_OPENAI}|deepseek-v4-pro`,
+          modelId: 'deepseek-v4-pro',
+          authType: AuthType.USE_OPENAI,
+        })),
+        getResolvedModelConfig: vi.fn(() => ({
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['high', 'max'],
+              defaultEffort: 'high',
+              disableField: 'thinking',
+            },
+          },
+        })),
+      });
+
+      session.reloadReasoningSelection();
+
+      expect(state.live.extra_body).toEqual(extraBody);
+      expect(state.live.samplingParams).toEqual(samplingParams);
+    });
 
     it('keeps a model switch live when incompatible preference cleanup fails', async () => {
       const state = installReasoningPreference('max');

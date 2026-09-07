@@ -10747,7 +10747,12 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
-    const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
+    // A runtime snapshot owns the request overrides its switch applied —
+    // refuse to resolve a capability for it, as getDefaultReasoningConfig
+    // and QwenAgent.getModelReasoningConfiguration already do.
+    const modelReasoning = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getConfiguredModelReasoning(this.config, modelId);
     let supported =
       selection !== undefined &&
       selection !== REASONING_EFFORT_DEFAULT &&

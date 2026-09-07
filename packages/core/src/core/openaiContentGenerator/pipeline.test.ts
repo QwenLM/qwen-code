@@ -1866,6 +1866,27 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall['reasoning_effort']).toBeUndefined();
     });
 
+    it('keeps the nested reasoning object on an OpenRouter route', async () => {
+      // OpenRouter's effort knob is the nested `reasoning` parameter — the
+      // flat `reasoning_effort` the capability mapping writes is ignored by
+      // the gateway (the disable path special-cases OpenRouter for the same
+      // reason), so flattening here would silently stop delivering the tier.
+      const apiCall = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+        {
+          baseUrl: 'https://openrouter.ai/api/v1',
+          reasoning: { effort: 'high' },
+        },
+      );
+      expect(apiCall['reasoning']).toEqual({ effort: 'high' });
+      expect(apiCall['reasoning_effort']).toBeUndefined();
+    });
+
     it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {
       // DeepSeek V4+ defaults thinking.type to 'enabled' — just stripping
       // the effort knob keeps thinking on, leaking latency/cost into side
