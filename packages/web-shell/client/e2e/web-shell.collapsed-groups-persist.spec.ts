@@ -81,12 +81,12 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
 
   await sessionTitle.hover();
   const details = page.getByRole('dialog', { name: longTitle });
-  const title = details.getByTitle(longTitle);
+  const title = details.getByText(longTitle, { exact: true });
   const copyAction = details.getByRole('button', {
     name: 'Copy session ID',
   });
   await expect(details).toBeVisible();
-  await expect(title).toHaveAttribute('title', longTitle);
+  await expect(title).toHaveText(longTitle);
   await expect(copyAction).toBeVisible();
   await expect(
     details.getByText(scenario.sessionId, { exact: true }),
@@ -106,6 +106,8 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     await sessionTitle.hover();
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);
+    await copyAction.scrollIntoViewIfNeeded();
+    await expect(copyAction).toBeInViewport();
     await expect(copyAction).toBeVisible();
   }
 
@@ -113,15 +115,22 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     const style = window.getComputedStyle(element);
     return {
       clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
       lineHeight: Number.parseFloat(style.lineHeight),
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
     };
   });
-  expect(titleMetrics.clientHeight).toBeLessThanOrEqual(
-    titleMetrics.lineHeight + 1,
+  expect(titleMetrics.clientHeight).toBeGreaterThan(titleMetrics.lineHeight);
+  expect(titleMetrics.scrollHeight).toBeLessThanOrEqual(
+    titleMetrics.clientHeight + 1,
   );
-  expect(titleMetrics.scrollWidth).toBeGreaterThan(titleMetrics.clientWidth);
+  expect(titleMetrics.scrollWidth).toBeLessThanOrEqual(
+    titleMetrics.clientWidth + 1,
+  );
+  await copyAction.click();
+  await expect(details).toContainText('Session ID copied');
+  await expectDetailsInsideRoot(webShellRoot, details);
 });
 
 async function expectDetailsInsideRoot(

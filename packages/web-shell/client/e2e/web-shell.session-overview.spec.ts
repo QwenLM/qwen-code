@@ -85,7 +85,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   ).toBeVisible();
 });
 
-test('compact overview distinguishes states and filters checkbox selection', async ({
+test('compact overview distinguishes states and filters checkbox selection @smoke', async ({
   page,
 }) => {
   const panel = page.locator('[data-web-shell-session-panel]');
@@ -154,7 +154,7 @@ test('compact overview distinguishes states and filters checkbox selection', asy
   await expect(panel.locator('[data-web-shell-session-title]')).toHaveCount(4);
 });
 
-test('title hover exposes full metadata, permits copy, and links keep overview open', async ({
+test('title hover exposes full metadata, permits copy, and links keep overview open @smoke', async ({
   page,
   context,
 }) => {
@@ -198,7 +198,7 @@ test('title hover exposes full metadata, permits copy, and links keep overview o
   ).toHaveAttribute('href', 'https://github.com/example/repo/issues/1234');
 });
 
-test('details button supports keyboard and Escape restores focus without navigating', async ({
+test('details button supports keyboard and Escape restores focus without navigating @smoke', async ({
   page,
 }) => {
   const panel = page.locator('[data-web-shell-session-panel]');
@@ -225,7 +225,7 @@ test('details button supports keyboard and Escape restores focus without navigat
   await expect(dialog).toHaveCount(0);
 });
 
-test('row opens a session without selecting it', async ({ page }) => {
+test('row opens a session without selecting it @smoke', async ({ page }) => {
   const panel = page.locator('[data-web-shell-session-panel]');
   const idle = panel.getByRole('row').filter({ hasText: 'Idle fixture' });
   await idle.locator('[data-web-shell-session-status]').click();

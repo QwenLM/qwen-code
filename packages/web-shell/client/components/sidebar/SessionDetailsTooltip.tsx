@@ -173,155 +173,160 @@ export function SessionDetailsTooltip({
         onPointerEnter={openOnClick ? undefined : cancelClose}
         onPointerLeave={openOnClick ? undefined : closeAfterDelay}
         onClick={(event) => event.stopPropagation()}
-        className={styles.sessionDetailsTooltip}
+        className={`${styles.sessionDetailsTooltip} max-h-(--radix-popover-content-available-height)`}
       >
-        {!worktreeOnly && (
-          <>
-            <div className={styles.sessionDetailsHeader}>
-              <span
-                className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
-              >
-                {label}
-              </span>
-              {time && (
-                <span className={styles.sessionDetailsTime}>{time}</span>
-              )}
-            </div>
-            <div className={styles.sessionDetailsRow}>
-              <FolderClosedIcon aria-hidden="true" />
-              <span className="!whitespace-normal break-all" title={folderPath}>
-                {folderPath}
-              </span>
-            </div>
-          </>
-        )}
-        {branch && (
-          <div className={styles.sessionDetailsRow}>
-            <GitBranchIcon aria-hidden="true" />
-            <span title={branch}>{branch}</span>
-          </div>
-        )}
-        {prs.map((pr, index) => {
-          const stateLabel = sessionPrStateLabel(t, pr.state);
-          return (
-            // Index composite: a hand-edited sidecar can carry duplicate
-            // numbers (the reader validates shape, not uniqueness), and a
-            // duplicate key would reconcile rows against each other. The
-            // list is a stable per-snapshot order, so index keys are safe.
-            <div
-              className={styles.sessionDetailsRow}
-              key={`${index}-${pr.number}`}
-            >
-              <SessionPrStateIcon state={pr.state} />
-              <a
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                title={pr.url}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openExternalLink(event, pr.url);
-                }}
-              >
-                {t('sidebar.sessionPr', { number: pr.number })}
-                {stateLabel ? (
-                  <span className="sr-only">{` · ${stateLabel}`}</span>
-                ) : null}
-              </a>
-            </div>
-          );
-        })}
-        {issues.map((issue, index) => {
-          const stateLabel = sessionIssueStateLabel(t, issue.state);
-          return (
-            <div
-              className={styles.sessionDetailsRow}
-              key={`issue-${index}-${issue.number}`}
-            >
-              <SessionIssueStateIcon state={issue.state} />
-              <a
-                href={issue.url}
-                target="_blank"
-                rel="noreferrer"
-                title={issue.url}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openExternalLink(event, issue.url);
-                }}
-              >
-                {t('sidebar.sessionIssue', { number: issue.number })}
-                {stateLabel ? (
-                  <span className="sr-only">{` · ${stateLabel}`}</span>
-                ) : null}
-              </a>
-            </div>
-          );
-        })}
-        {!worktreeOnly && (
-          <>
-            <div className={styles.sessionDetailsRow}>
-              <RadioTowerIcon aria-hidden="true" />
-              <span>{status}</span>
-            </div>
-            <div className={styles.sessionDetailsIdRow}>
-              <span
-                className="!whitespace-normal break-all"
-                data-web-shell-session-id
-                title={session.sessionId}
-              >
-                {session.sessionId}
-              </span>
-              <button
-                type="button"
-                tabIndex={openOnClick ? undefined : -1}
-                className={styles.sessionDetailsCopyButton}
-                data-web-shell-session-id-copy
-                aria-label={t('sidebar.copySessionId')}
-                title={t('sidebar.copySessionId')}
-                onClick={() => {
-                  const copyAttempt = ++copyAttemptRef.current;
-                  void writeClipboardText(session.sessionId)
-                    .then(() => {
-                      if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('copied');
-                        window.clearTimeout(copyResetTimerRef.current);
-                        copyResetTimerRef.current = window.setTimeout(() => {
-                          if (copyAttemptRef.current === copyAttempt) {
-                            setCopyStatus('idle');
-                          }
-                        }, 2000);
-                      }
-                    })
-                    .catch(() => {
-                      if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('failed');
-                      }
-                    });
-                }}
-              >
-                {copyStatus === 'copied' ? (
-                  <CheckIcon aria-hidden="true" />
-                ) : (
-                  <CopyIcon aria-hidden="true" />
+        <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto">
+          {!worktreeOnly && (
+            <>
+              <div className={styles.sessionDetailsHeader}>
+                <span
+                  className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
+                >
+                  {label}
+                </span>
+                {time && (
+                  <span className={styles.sessionDetailsTime}>{time}</span>
                 )}
-              </button>
-              <span
-                className={
-                  copyStatus === 'copied'
-                    ? 'sr-only'
-                    : styles.sessionDetailsCopied
-                }
-                aria-live="polite"
-              >
-                {copyStatus === 'copied'
-                  ? t('sidebar.sessionIdCopied')
-                  : copyStatus === 'failed'
-                    ? t('sidebar.copySessionIdFailed')
-                    : ''}
-              </span>
+              </div>
+              <div className={styles.sessionDetailsRow}>
+                <FolderClosedIcon aria-hidden="true" />
+                <span
+                  className="!whitespace-normal break-all"
+                  title={folderPath}
+                >
+                  {folderPath}
+                </span>
+              </div>
+            </>
+          )}
+          {branch && (
+            <div className={styles.sessionDetailsRow}>
+              <GitBranchIcon aria-hidden="true" />
+              <span title={branch}>{branch}</span>
             </div>
-          </>
-        )}
+          )}
+          {prs.map((pr, index) => {
+            const stateLabel = sessionPrStateLabel(t, pr.state);
+            return (
+              // Index composite: a hand-edited sidecar can carry duplicate
+              // numbers (the reader validates shape, not uniqueness), and a
+              // duplicate key would reconcile rows against each other. The
+              // list is a stable per-snapshot order, so index keys are safe.
+              <div
+                className={styles.sessionDetailsRow}
+                key={`${index}-${pr.number}`}
+              >
+                <SessionPrStateIcon state={pr.state} />
+                <a
+                  href={pr.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={pr.url}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openExternalLink(event, pr.url);
+                  }}
+                >
+                  {t('sidebar.sessionPr', { number: pr.number })}
+                  {stateLabel ? (
+                    <span className="sr-only">{` · ${stateLabel}`}</span>
+                  ) : null}
+                </a>
+              </div>
+            );
+          })}
+          {issues.map((issue, index) => {
+            const stateLabel = sessionIssueStateLabel(t, issue.state);
+            return (
+              <div
+                className={styles.sessionDetailsRow}
+                key={`issue-${index}-${issue.number}`}
+              >
+                <SessionIssueStateIcon state={issue.state} />
+                <a
+                  href={issue.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={issue.url}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openExternalLink(event, issue.url);
+                  }}
+                >
+                  {t('sidebar.sessionIssue', { number: issue.number })}
+                  {stateLabel ? (
+                    <span className="sr-only">{` · ${stateLabel}`}</span>
+                  ) : null}
+                </a>
+              </div>
+            );
+          })}
+          {!worktreeOnly && (
+            <>
+              <div className={styles.sessionDetailsRow}>
+                <RadioTowerIcon aria-hidden="true" />
+                <span>{status}</span>
+              </div>
+              <div className={styles.sessionDetailsIdRow}>
+                <span
+                  className="!whitespace-normal break-all"
+                  data-web-shell-session-id
+                  title={session.sessionId}
+                >
+                  {session.sessionId}
+                </span>
+                <button
+                  type="button"
+                  tabIndex={openOnClick ? undefined : -1}
+                  className={styles.sessionDetailsCopyButton}
+                  data-web-shell-session-id-copy
+                  aria-label={t('sidebar.copySessionId')}
+                  title={t('sidebar.copySessionId')}
+                  onClick={() => {
+                    const copyAttempt = ++copyAttemptRef.current;
+                    void writeClipboardText(session.sessionId)
+                      .then(() => {
+                        if (copyAttemptRef.current === copyAttempt) {
+                          setCopyStatus('copied');
+                          window.clearTimeout(copyResetTimerRef.current);
+                          copyResetTimerRef.current = window.setTimeout(() => {
+                            if (copyAttemptRef.current === copyAttempt) {
+                              setCopyStatus('idle');
+                            }
+                          }, 2000);
+                        }
+                      })
+                      .catch(() => {
+                        if (copyAttemptRef.current === copyAttempt) {
+                          setCopyStatus('failed');
+                        }
+                      });
+                  }}
+                >
+                  {copyStatus === 'copied' ? (
+                    <CheckIcon aria-hidden="true" />
+                  ) : (
+                    <CopyIcon aria-hidden="true" />
+                  )}
+                </button>
+                <span
+                  className={
+                    copyStatus === 'copied'
+                      ? 'sr-only'
+                      : styles.sessionDetailsCopied
+                  }
+                  aria-live="polite"
+                >
+                  {copyStatus === 'copied'
+                    ? t('sidebar.sessionIdCopied')
+                    : copyStatus === 'failed'
+                      ? t('sidebar.copySessionIdFailed')
+                      : ''}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
       </PopoverContent>
     </Popover>
   );
