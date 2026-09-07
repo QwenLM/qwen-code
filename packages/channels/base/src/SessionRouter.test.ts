@@ -2725,6 +2725,81 @@ describe('SessionRouter', () => {
       });
     });
 
+    it('persists a superseded redirect before any later route change', async () => {
+      const { persistPath } = setup();
+      bridge = {
+        ...mockBridge(),
+        listSessions: vi
+          .fn()
+          .mockReturnValue([worktreeAttestation('replacement-session')]),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'worktree-session') {
+            throw daemonHttpError('worktree_session_superseded', {
+              replacementSessionId: 'replacement-session',
+            });
+          }
+          return sessionId;
+        }),
+      } satisfies ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+
+      // Read the file before any later activation rewrites it: the
+      // redirect must already be durable.
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': {
+          sessionId: 'replacement-session',
+          target,
+          cwd: '/tmp/worktree-task',
+          isolation: 'worktree',
+          workspaceCwd: '/tmp',
+        },
+      });
+    });
+
+    it('migrates a metadata-free route on the next managed activation', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      // Pre-PR shape: a worktree-task route persisted without metadata.
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'worktree-session',
+            target,
+            cwd: '/tmp/worktree-task',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 0 });
+
+      // Same key, same session, first activation carrying metadata.
+      router.activateManagedSession(
+        'worktree-session',
+        target,
+        '/tmp/worktree-task',
+        { isolation: 'worktree', workspaceCwd: '/tmp' },
+      );
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': {
+          sessionId: 'worktree-session',
+          target,
+          cwd: '/tmp/worktree-task',
+          isolation: 'worktree',
+          workspaceCwd: '/tmp',
+        },
+      });
+    });
+
     it('drops a worktree route whose managed restore fails attestation', async () => {
       const { persistPath } = setup();
       bridge = {
