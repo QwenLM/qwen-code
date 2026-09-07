@@ -282,6 +282,12 @@ function buildSentCompletionNotification(
     taskId: sessionId,
     status,
     kind: 'agent' as const,
+    // `subSessionName` strips bidi and control marks and trims, so a name that
+    // was only those characters leaves an empty label -- which the receiving
+    // gate rejects as invalid params. The acceptance wait treats that as
+    // retryable and gives up 30 minutes later, so the parent's completion turn
+    // never runs. An absent label is valid; an empty one is not.
+    ...(modelLabel.trim() ? { label: modelLabel } : {}),
   };
 }
 
@@ -911,6 +917,7 @@ export function createSubSessionLauncher(
             info.name ?? info.prompt,
             !isScheduledTaskRunSource(info),
           ),
+          titleSource: 'auto',
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
@@ -1001,7 +1008,7 @@ export function createSubSessionLauncher(
               if (notifySentCompletion) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  subSessionName(info.name ?? info.prompt),
+                  subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
                 );
@@ -1012,7 +1019,7 @@ export function createSubSessionLauncher(
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
-                subSessionName(info.name ?? info.prompt),
+                subSessionName(info.name ?? info.prompt, false),
                 message,
                 'error',
               );

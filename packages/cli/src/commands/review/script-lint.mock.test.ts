@@ -283,6 +283,9 @@ describe('runScriptLint — refuses a path that escapes the worktree', () => {
     expect(r.checked).toEqual([]);
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].reason).toContain('outside the worktree');
+    // The body's "Not reviewed:" wrapper already says the file went
+    // unchecked — a "not linted" tail here posted the phrase twice.
+    expect(r.skipped[0].reason).not.toContain('not linted');
   });
 
   it('refuses a path whose ANCESTOR is a symlink out of the worktree (lexical is not enough)', () => {
@@ -306,6 +309,7 @@ describe('runScriptLint — refuses a path that escapes the worktree', () => {
     expect(r.checked).toEqual([]);
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].reason).toContain('outside the worktree');
+    expect(r.skipped[0].reason).not.toContain('not linted');
   });
 });
 

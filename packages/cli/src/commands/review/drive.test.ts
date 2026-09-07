@@ -47,6 +47,7 @@ import {
   makeStaleBundleFixture,
   stampDigest,
 } from './lib/test-utils.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 // The handler's output goes through the same helpers the parse-args suite
 // mocks; the wiring tests below intercept them so no real terminal is touched.
@@ -773,7 +774,7 @@ describe('the log cap', () => {
       rmSync(workDir, { recursive: true, force: true });
       expect(r.outcome).toBe('timed-out'); // returned — did not block on the FIFO
       expect(r.exitCode).toBeNull();
-      expect(Date.now() - started).toBeLessThan(10_000);
+      expectWithinLatencyBudget(Date.now() - started, 10_000);
     },
   );
 
