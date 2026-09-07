@@ -263,6 +263,13 @@ export function explainSkip(
         what: `${target} is disabled and cannot take work`,
         fix: `Enable ${target} to let it take work again.`,
       };
+    case 'agent_retired':
+      // Deliberately not the disabled copy: enabling a retired agent is
+      // refused, so telling someone to enable it sends them at a wall.
+      return {
+        what: `${target} is retired and takes no new work`,
+        fix: `Its posts stay on every thread. Hand this to another agent.`,
+      };
     case 'no_target':
       return {
         what: 'your reply would reach nobody',

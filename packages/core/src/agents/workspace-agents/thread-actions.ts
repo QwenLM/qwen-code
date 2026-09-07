@@ -395,7 +395,7 @@ export async function createAssignedThread(
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const agents = await transaction.readAgents();
     const assignee = agents.find((agent) => agent.id === input.assignee.id);
-    if (!assignee || assignee.enabled === false) {
+    if (!assignee || !isAgentAddressable(assignee)) {
       throw new Error(`Agent "${input.assignee.name}" is no longer available.`);
     }
     const thread = await prepareThreadInTransaction(transaction, {
@@ -433,7 +433,8 @@ export type AssignThreadResult =
         | 'thread_not_found'
         | 'thread_done'
         | 'agent_unknown'
-        | 'agent_disabled';
+        | 'agent_disabled'
+        | 'agent_retired';
     };
 
 export async function assignThread(
@@ -460,6 +461,9 @@ export async function assignThread(
       (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
     );
     if (!assignee) return { kind: 'agent_unknown' };
+    // Same order and same reason as admission: retirement is not disablement,
+    // and the remedy differs.
+    if (assignee.retiredAt !== undefined) return { kind: 'agent_retired' };
     if (assignee.enabled === false) return { kind: 'agent_disabled' };
     if (thread.assigneeAgentId === assignee.id) {
       return { kind: 'updated', thread };

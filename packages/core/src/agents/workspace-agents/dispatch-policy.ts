@@ -51,6 +51,7 @@ export type DispatchDecision =
 export type SkipReason =
   | 'self_trigger'
   | 'agent_disabled'
+  | 'agent_retired'
   | 'agent_unknown'
   | 'turn_budget_exhausted'
   | 'token_budget_exhausted'
@@ -101,6 +102,13 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
   const { thread, message, target } = context;
 
   if (!target) return { kind: 'skip', reason: 'agent_unknown' };
+  // Retired before disabled, and a reason of its own: the two are different
+  // refusals with different remedies. Booking a run for a retired agent used
+  // to succeed here — `selectCandidates` then refused to start it, so the run
+  // sat queued forever, held a queue slot, and told the person nothing.
+  if (target.retiredAt !== undefined) {
+    return { kind: 'skip', reason: 'agent_retired' };
+  }
   if (!isAgentEnabled(target)) {
     return { kind: 'skip', reason: 'agent_disabled' };
   }

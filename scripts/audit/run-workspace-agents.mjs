@@ -31,6 +31,7 @@ await fs.writeFile(
   `export * from '${repo}/${src}/store.js';
 export { selectCandidates } from '${repo}/${src}/dispatcher.js';
 export { assembleAgentPrompt } from '${repo}/${src}/prompt.js';
+export { decideDispatch, resolveTargets } from '${repo}/${src}/dispatch-policy.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
@@ -263,6 +264,84 @@ ok(
     withCriteria.text.indexOf('RECENT THREAD POSTS'),
 );
 ok('a thread with none says nothing', !env.text.includes('Done when:'));
+
+console.log('\n6. admission');
+const post = (over = {}) => ({
+  id: 'm1',
+  sequence: 1,
+  authorKind: 'human',
+  from: M.HUMAN_AUTHOR_ID,
+  authorNameSnapshot: 'you',
+  text: 'go',
+  mentions: [],
+  outcomes: [],
+  at: 1,
+  ...over,
+});
+const decide = (over = {}) =>
+  M.decideDispatch({
+    thread: thr('th_a', undefined, []),
+    message: post(),
+    target: BOB,
+    budget: { autoTurnsUsed: 0, tokensUsed: 0 },
+    agentQueuedElsewhere: 0,
+    ...over,
+  });
+ok('an ordinary mention dispatches', decide().kind === 'dispatch');
+ok(
+  'an unknown target is refused',
+  decide({ target: undefined }).reason === 'agent_unknown',
+);
+ok(
+  'a disabled agent is refused',
+  decide({ target: { ...BOB, enabled: false } }).reason === 'agent_disabled',
+);
+ok(
+  'a retired agent is refused, and not as merely disabled',
+  decide({ target: { ...BOB, retiredAt: 1 } }).reason === 'agent_retired',
+  JSON.stringify(decide({ target: { ...BOB, retiredAt: 1 } })),
+);
+ok(
+  'a done thread is refused',
+  decide({ thread: { ...thr('th_a', undefined, []), status: 'done' } })
+    .reason === 'thread_done',
+);
+ok(
+  "an agent's own post never wakes it",
+  decide({ message: post({ from: BOB.id, authorKind: 'agent' }) }).reason ===
+    'self_trigger',
+);
+ok(
+  'an agent-triggered turn stops at the turn budget',
+  decide({
+    message: post({ from: 'ag_other', authorKind: 'agent' }),
+    budget: { autoTurnsUsed: 999, tokensUsed: 0 },
+  }).reason === 'turn_budget_exhausted',
+);
+ok(
+  'a human post is not stopped by the turn budget',
+  decide({ budget: { autoTurnsUsed: 999, tokensUsed: 0 } }).kind === 'dispatch',
+);
+ok(
+  'the token budget stops even a human trigger',
+  decide({ budget: { autoTurnsUsed: 0, tokensUsed: 99_999_999 } }).reason ===
+    'token_budget_exhausted',
+);
+const queued = thr('th_a', undefined, [run('rq', 1)]);
+ok(
+  'a queued run of its own coalesces',
+  JSON.stringify(decide({ thread: queued })) ===
+    '{"kind":"coalesce","runId":"rq","into":"queued"}',
+);
+const running = thr('th_a', undefined, [run('rr', 1, { status: 'running' })]);
+ok(
+  'a running run of its own coalesces mid-turn',
+  decide({ thread: running }).into === 'running',
+);
+ok(
+  'a full queue is refused',
+  decide({ agentQueuedElsewhere: 99 }).reason === 'queue_full',
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -891,7 +891,9 @@ export function registerWorkspaceAgentRoutes(
                 ? ([409, 'thread_done'] as const)
                 : result.kind === 'agent_unknown'
                   ? ([400, 'assignee_unknown'] as const)
-                  : ([409, 'assignee_disabled'] as const);
+                  : result.kind === 'agent_retired'
+                    ? ([409, 'assignee_retired'] as const)
+                    : ([409, 'assignee_disabled'] as const);
           res.status(status).json({ error });
           return;
         }

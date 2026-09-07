@@ -1267,8 +1267,10 @@ export function maxConcurrentRunsFor(agent: WorkspaceAgent): number {
  *
  * Retired and disabled are different refusals with the same answer here, and
  * both are kept apart from "unknown": a retired agent's name still resolves, so
- * a post that mentions it gets `agent_disabled` and a person is told the agent
- * is gone rather than that they mistyped.
+ * a post that mentions it is refused with `agent_retired` and the person is
+ * told the agent is gone rather than that they mistyped. Retired has its own
+ * reason rather than borrowing `agent_disabled` because the remedies differ —
+ * enabling a retired agent is itself refused.
  */
 export function isAgentAddressable(agent: WorkspaceAgent): boolean {
   return agent.retiredAt === undefined && agent.enabled !== false;
