@@ -1951,6 +1951,69 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('lets the newer disconnect own the status when a deferred revoke settles late', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'prompt' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let denyPermission!: (value: PermissionState) => void;
+    const permissionGate = new Promise<PermissionState>((resolve) => {
+      denyPermission = resolve;
+    });
+    vi.mocked(handle.requestPermission).mockImplementation(
+      () => permissionGate,
+    );
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: settlingLocks(lock),
+      delay: () => delayGate,
+    };
+    const hB = render({ ...common, sessionId: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-gesture');
+    lock.settling = 1;
+    const first = act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    const connecting = act(async () => {
+      await hB.get().connect();
+    });
+    await hB.flush();
+    // Attempt 1 grants while the connect is in flight: the revoke defers.
+    releaseDelay();
+    await first;
+    // A newer disconnect clears the record and writes the withheld status.
+    hB.rerender({
+      ...common,
+      sessionId: undefined,
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await hB.flush();
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    // The stale deferred revoke settles after the newer disconnect's write
+    // and must leave that status alone.
+    await act(async () => {
+      denyPermission('denied');
+      await connecting;
+    });
+    await hB.flush();
+    expect(hB.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+    hB.unmount();
+  });
+
   it('reconciles the status when the delete itself fails soft', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
