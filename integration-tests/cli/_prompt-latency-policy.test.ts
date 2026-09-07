@@ -42,6 +42,25 @@ describe('shouldSkipPromptLatency', () => {
     expect(shouldSkipPromptLatency({ ...KEY })).toBe(false);
   });
 
+  it('skips under CI even with a credential, unless force-run', () => {
+    // The E2E macOS leg: hosted runner, credential present, CI=true.
+    expect(shouldSkipPromptLatency({ ...HOSTED, ...KEY, CI: 'true' })).toBe(
+      true,
+    );
+    expect(shouldSkipPromptLatency({ ...POOL, ...KEY, CI: 'true' })).toBe(true);
+    // The force-run switch outranks the CI clause.
+    expect(
+      shouldSkipPromptLatency({
+        ...HOSTED,
+        ...KEY,
+        CI: 'true',
+        QWEN_BASELINE_ENABLE_PROMPT_LATENCY: '1',
+      }),
+    ).toBe(false);
+    // Any populated CI marker counts, matching the repo's other CI checks.
+    expect(shouldSkipPromptLatency({ ...HOSTED, ...KEY, CI: '1' })).toBe(true);
+  });
+
   it('counts every recognized credential env key', () => {
     // Spelled out, not imported: a shared list would be tautological.
     for (const key of [
@@ -128,6 +147,18 @@ describe('promptLatencySkipReason', () => {
   it('reports the pool with the iteration count the probe would have used', () => {
     expect(promptLatencySkipReason({ ...POOL, ...KEY }, 7)).toBe(
       'Shared self-hosted pool: 7 real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.',
+    );
+  });
+
+  it('keeps the pool reason on a self-hosted CI runner', () => {
+    expect(promptLatencySkipReason({ ...POOL, ...KEY, CI: 'true' }, 7)).toBe(
+      'Shared self-hosted pool: 7 real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.',
+    );
+  });
+
+  it('reports CI gateway contention off the pool', () => {
+    expect(promptLatencySkipReason({ ...HOSTED, ...KEY, CI: 'true' }, 7)).toBe(
+      'CI: 7 real model round-trips against the shared gateway would measure gateway contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.',
     );
   });
 });
