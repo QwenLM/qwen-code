@@ -72,6 +72,7 @@ import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
+  isSessionWriterBlockedCode,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
   restoreSessionContextMatches,
@@ -3784,6 +3785,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad.reject(error);
           }
           if (
+            (session === undefined &&
+              activeSessionContextRef.current?.kind === 'standalone' &&
+              isSessionWriterBlockedCode(getDaemonErrorCode(error))) ||
             productContextFailure ||
             error instanceof DaemonCapabilityMissingError ||
             (session === undefined &&
