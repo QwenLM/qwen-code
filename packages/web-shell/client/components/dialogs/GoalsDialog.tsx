@@ -15,6 +15,7 @@ import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
+import { formatContextTokens } from '../../utils/formatTokenCount';
 import { getGoalActiveTimeMs } from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
@@ -452,6 +453,18 @@ export function GoalsDialog({
                       })
                     : t('goals.notYetEvaluated')}
                 </span>
+                {goal.tokensUsed !== undefined && goal.tokensUsed > 0 ? (
+                  <span className={styles.meta} data-testid="goal-tokens">
+                    {goal.tokenBudget === undefined
+                      ? t('goal.tokens', {
+                          used: formatContextTokens(goal.tokensUsed),
+                        })
+                      : t('goal.tokensOfBudget', {
+                          used: formatContextTokens(goal.tokensUsed),
+                          budget: formatContextTokens(goal.tokenBudget),
+                        })}
+                  </span>
+                ) : null}
                 <span className={styles.meta} data-testid="goal-elapsed">
                   {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
                 </span>

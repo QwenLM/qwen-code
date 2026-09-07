@@ -3,6 +3,7 @@ import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { formatRuntime } from '../utils/formatRuntime';
+import { formatContextTokens } from '../utils/formatTokenCount';
 import { canResumeGoal } from '../utils/goalGate';
 import styles from './GoalStatusStrip.module.css';
 
@@ -73,6 +74,25 @@ export function GoalStatusStrip({
         <span className={styles.elapsed} data-testid="goal-active-elapsed">
           {formatRuntime(getGoalActiveTimeMs(snapshot, now))}
         </span>
+        {/* A Goal that has not billed a turn shows no figures: `0 / 30.0m`
+            says nothing the status has not already said. */}
+        {goal.tokensUsed !== undefined && goal.tokensUsed > 0 ? (
+          <>
+            <span className={styles.separator} aria-hidden="true">
+              ·
+            </span>
+            <span className={styles.elapsed} data-testid="goal-tokens">
+              {goal.tokenBudget === undefined
+                ? t('goal.tokens', {
+                    used: formatContextTokens(goal.tokensUsed),
+                  })
+                : t('goal.tokensOfBudget', {
+                    used: formatContextTokens(goal.tokensUsed),
+                    budget: formatContextTokens(goal.tokenBudget),
+                  })}
+            </span>
+          </>
+        ) : null}
       </div>
       <div className={styles.actions}>
         <button
