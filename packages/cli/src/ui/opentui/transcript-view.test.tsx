@@ -89,6 +89,44 @@ describe('OpenTuiTranscriptView', () => {
     expect(container.textContent).toContain('awaiting approval');
   });
 
+  it('keeps a long pending payload approvable and caps it once settled (R5-9)', () => {
+    // The settled 5-row cap would hide exactly the tail of the payload the
+    // user is being asked to approve, so a pending card budgets its own
+    // (bounded) rows; the cap applies again once the call settles. Two
+    // separate renders: siblings in one render would share the container and
+    // defeat the absent assertion.
+    const description =
+      '{"path":"/x","content":"' + 'x'.repeat(600) + 'TAIL_MARKER"}';
+    const pending = render(
+      <OpenTuiTranscriptView
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    expect(pending.container.textContent).toContain('TAIL_MARKER');
+    expect(pending.container.textContent).toContain('awaiting approval');
+    pending.unmount();
+
+    const settled = render(
+      <OpenTuiTranscriptView
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'approved',
+          }),
+        ]}
+      />,
+    );
+    expect(settled.container.textContent).not.toContain('TAIL_MARKER');
+    expect(settled.container.textContent).toContain('... last');
+  });
+
   it('shows the description once approval resolves or the call is done', () => {
     const { container } = render(
       <OpenTuiTranscriptView

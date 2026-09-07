@@ -55,6 +55,7 @@ import {
 import { renderDiffBody } from './diff-render.js';
 import {
   headWindowPhysical,
+  hiddenLinesLabel,
   hiddenTailLinesLabel,
   tailWindow,
   tailWindowPhysical,
@@ -165,6 +166,13 @@ function TextBody({ text }: { text: string }) {
       ),
     [rows, width, height],
   );
+  // The ctrl-s promise is "show more lines": offer and honor it only when
+  // expansion actually reveals rows the collapsed window hides. On short
+  // terminals the expanded tail window is strictly smaller — pressing it
+  // would drop head rows, so the handler refuses and the hint must not
+  // claim otherwise (R5-2, ink MaxSizedBox honesty parity).
+  const canExpand =
+    window.hiddenRows > 0 && expandedWindow.hiddenRows < window.hiddenRows;
 
   useKeyboard((key) => {
     // A body that fits must ignore ctrl-s: the expanded tail window can be
@@ -172,12 +180,7 @@ function TextBody({ text }: { text: string }) {
     // The same guard covers short terminals, where the expanded tail window
     // is strictly smaller than the collapsed head it would replace — the
     // key's on-screen promise is "show more lines".
-    if (
-      key.ctrl &&
-      toOriginalKey(key).name === 's' &&
-      window.hiddenRows > 0 &&
-      expandedWindow.hiddenRows < window.hiddenRows
-    ) {
+    if (key.ctrl && toOriginalKey(key).name === 's' && canExpand) {
       setExpanded(true);
     }
   });
@@ -193,9 +196,9 @@ function TextBody({ text }: { text: string }) {
           <text key={`${i}`}>{row}</text>
         ))}
         {expandedWindow.hiddenRows > 0 ? (
-          <text fg={C.dim}>
-            {hiddenTailLinesLabel(expandedWindow.hiddenRows)}
-          </text>
+          // The tail window keeps the LAST rows, so what it drops is the
+          // head — the same label the transcript's tail windows use (R5-1).
+          <text fg={C.dim}>{hiddenLinesLabel(expandedWindow.hiddenRows)}</text>
         ) : null}
       </box>
     );
@@ -215,7 +218,9 @@ function TextBody({ text }: { text: string }) {
         <text key={`${i}`}>{row}</text>
       ))}
       <text fg={C.dim}>{hiddenTailLinesLabel(window.hiddenRows)}</text>
-      <text fg={C.dim}>Press ctrl-s to show more lines</text>
+      {canExpand ? (
+        <text fg={C.dim}>Press ctrl-s to show more lines</text>
+      ) : null}
     </box>
   );
 }

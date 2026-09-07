@@ -296,7 +296,8 @@ describe('OpenTuiToolConfirmation', () => {
     expect(expanded).toContain('BODY_TAIL');
     // The expanded tail window (20 rows at height 40) still drops 6 of the
     // 26 rows, and the label is the only trace of them on the alt screen.
-    expect(expanded).toContain('... last 6 lines hidden ...');
+    // A tail window hides the HEAD rows, so the label says "first" (R5-1).
+    expect(expanded).toContain('... first 6 lines hidden ...');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
   });
 
@@ -363,7 +364,7 @@ describe('OpenTuiToolConfirmation', () => {
     // viewport has no scrollback, so the tail must be on screen); the rows it
     // still drops are labeled, not silently discarded.
     expect(expanded).toContain('CONFIRM_TAIL');
-    expect(expanded).toMatch(/last \d+ lines hidden/);
+    expect(expanded).toMatch(/first \d+ lines hidden/);
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
   });
 
@@ -392,7 +393,11 @@ describe('OpenTuiToolConfirmation', () => {
       />,
     );
     expect(container.textContent).toContain('OVERFLOW_LINE_00');
-    expect(container.textContent).toContain('Press ctrl-s to show more lines');
+    // The handler refuses ctrl-s here, so the hint must not be offered —
+    // a box may not advertise lines the key cannot reveal (R5-2).
+    expect(container.textContent).not.toContain(
+      'Press ctrl-s to show more lines',
+    );
 
     press({ name: 's', ctrl: true });
     expect(container.textContent).toContain('OVERFLOW_LINE_00');

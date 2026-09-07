@@ -246,15 +246,20 @@ function ToolCard({
   // The description stays visible while a call awaits approval: the
   // confirmation dialog does not carry the payload for every type (an MCP
   // dialog shows only the server and tool names, so hiding here would leave
-  // the arguments nowhere on screen), and TOOL_CARD_DESCRIPTION_ROWS bounds
-  // any large payload (ink MaxSizedBox parity).
+  // the arguments nowhere on screen). A pending card therefore keeps the
+  // card's own row budget instead of the settled 5-row cap — that cap would
+  // hide the tail of exactly the payload being approved (R5-9). The budget
+  // stays finite (maxHistoryItemRows), so the pending card still cannot
+  // flood the column and push the dialog off-screen.
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
   const cap = capToolCardDescription(
     description,
     name,
     width,
-    TOOL_CARD_DESCRIPTION_ROWS,
+    item.confirm === 'pending' && !item.done
+      ? maxRows
+      : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (
