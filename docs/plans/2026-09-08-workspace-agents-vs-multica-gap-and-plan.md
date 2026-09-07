@@ -247,6 +247,15 @@ Reaching MCP means moving the read-only ceiling, which is a separate decision.
 
 ### Still open
 
+- **Definition drift is designed in but never fed.** `bindRunSession` stores a
+  `definitionVersion` and the turn envelope renders it, but `definitionVersion`
+  is an optional port method and the session dispatch port does not implement
+  it, so every envelope reads `definition=unversioned`. Supplying it means
+  hashing the agent definition, which the port cannot do today: it holds the
+  bridge and a workspace path, while definitions load through core's
+  `SubagentManager` against a `Config`. Either the port gains that reach or the
+  child stamps the hash it already resolved at boot — a decision, not a wiring
+  fix, which is why this tick recorded it rather than guessing.
 - Labels, project and due date on a thread (Stage C, items 3 and 4).
 - §9.9 envelope role transport, §9.10 parent-to-child replies, §9.11 human
   blocker acknowledgement scope — all owner decisions, unchanged.
