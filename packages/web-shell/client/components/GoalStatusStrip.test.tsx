@@ -205,7 +205,8 @@ describe('GoalStatusStrip', () => {
     render('active', { tokensUsed: 1_234, tokenBudget: 30_000_000 });
 
     expect(
-      container.querySelector('[data-testid="goal-tokens"]')?.textContent,
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
     ).toBe('1.2k / 30.0M tokens');
   });
 
@@ -213,29 +214,34 @@ describe('GoalStatusStrip', () => {
     render('active', { tokensUsed: 1_234 });
 
     expect(
-      container.querySelector('[data-testid="goal-tokens"]')?.textContent,
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
     ).toBe('1.2k tokens');
   });
 
   it('shows nothing for a Goal that has not billed a turn', () => {
-    // A fresh `0 / 30.0M` says nothing the status has not already said.
-    render('active', { tokenBudget: 30_000_000 });
+    render('active', { tokensUsed: 0, tokenBudget: 30_000_000 });
 
-    expect(container.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
   });
 
   it('shows nothing for a daemon that does not report spend', () => {
     // An older daemon's snapshot carries neither field.
     render('active');
 
-    expect(container.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
   });
 
   it('keeps showing what a stopped Goal spent', () => {
     render('paused', { tokensUsed: 2_500_000, tokenBudget: 30_000_000 });
 
     expect(
-      container.querySelector('[data-testid="goal-tokens"]')?.textContent,
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
     ).toBe('2.5M / 30.0M tokens');
   });
 });

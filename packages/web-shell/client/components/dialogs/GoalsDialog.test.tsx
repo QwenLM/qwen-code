@@ -232,7 +232,7 @@ describe('GoalsDialog', () => {
   });
 
   it('shows nothing for a Goal that has not billed a turn', async () => {
-    await mount([withSpend({ tokenBudget: 30_000_000 })]);
+    await mount([withSpend({ tokensUsed: 0, tokenBudget: 30_000_000 })]);
 
     expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });

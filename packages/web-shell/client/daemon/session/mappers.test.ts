@@ -507,6 +507,8 @@ describe('updateConnectionFromDaemonEvent', () => {
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 3,
       activeTimeMs: 4_000,
+      tokensUsed: 1_234,
+      tokenBudget: 30_000_000,
       createdAt: 10,
       updatedAt: 20,
     };
