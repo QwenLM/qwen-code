@@ -17,6 +17,8 @@ import {
   type MessageListProps,
 } from './MessageList';
 import { Button } from './ui/button';
+import { GlobalTurnNavigation } from './GlobalTurnNavigation';
+import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useI18n } from '../i18n';
 
@@ -43,24 +45,23 @@ export const TranscriptViewport = forwardRef<
     pin,
     toolSources,
   } = viewport;
-  const unavailable =
-    viewport.enabled &&
-    !historical &&
-    !viewport.canOpen &&
-    !props.loadingTranscript &&
-    (props.hasOlderHistory ||
-      props.historyCapacityReached ||
-      props.historyPaginationError);
+  const globalNavigation =
+    !props.hideSessionTimeline &&
+    (viewport.navigation.mode === 'ready' ||
+      viewport.navigation.mode === 'loading') &&
+    viewport.navigation.effectiveTurnCount > 0;
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
   const lastView = useRef(viewport.viewKey);
+  const lastMessages = useRef(messages);
+  const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
   useLayoutEffect(() => {
-    if (historical) onCanScrollToBottomChange?.(false);
-  }, [historical, onCanScrollToBottomChange]);
+    if (historical || loading) onCanScrollToBottomChange?.(true);
+  }, [historical, loading, onCanScrollToBottomChange]);
   const scroller = useCallback(
     () =>
       root.current?.querySelector<HTMLElement>('[data-web-shell-message-list]'),
@@ -128,9 +129,17 @@ export const TranscriptViewport = forwardRef<
 
   useLayoutEffect(() => {
     const changedView = lastView.current !== viewKey;
+    const changedMessages = lastMessages.current !== messages;
+    lastMessages.current = messages;
     lastView.current = viewKey;
+    const targetBlockId =
+      viewport.target?.token !== appliedTarget.current
+        ? viewport.target?.blockId
+        : undefined;
+    appliedTarget.current = viewport.target?.token;
+    if (!changedView && !changedMessages && !targetBlockId) return;
     if (changedView) anchor.current = undefined;
-    if (!historical) return;
+    if (!historical && !targetBlockId) return;
     restoring.current = true;
     let frame = 0;
     let remaining = 8;
@@ -140,7 +149,14 @@ export const TranscriptViewport = forwardRef<
       const scroll = scroller();
       if (!scroll) return;
       const saved = anchor.current;
-      if (saved) {
+      const target =
+        targetBlockId &&
+        messages.find((message) =>
+          message.sourceBlockIds?.includes(targetBlockId),
+        );
+      if (target) {
+        list.current?.scrollToMessage(target.id);
+      } else if (saved) {
         const child = saved.callId
           ? [
               ...(root.current?.querySelectorAll<HTMLElement>(
@@ -187,7 +203,7 @@ export const TranscriptViewport = forwardRef<
       cancelAnimationFrame(frame);
       restoring.current = false;
     };
-  }, [messages, viewKey, historical, capture, rows, scroller]);
+  }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
     anchor.current = capture();
@@ -196,133 +212,167 @@ export const TranscriptViewport = forwardRef<
   };
   const handleScrollIntent = () => {
     scrollIntent.current += 1;
+    viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
     restoring.current = false;
   };
-  const boundaryButton = (direction: 'older' | 'newer') => {
-    const boundary = viewport.range?.[direction];
-    if (!boundary || boundary.kind === 'end') return null;
-    if (boundary.kind === 'live' && !viewport.canContinueLive) return null;
-    return (
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={
-          viewport.loading ||
-          !viewport.connected ||
-          (boundary.kind === 'error' && !boundary.retryable)
-        }
-        onClick={() => load(direction)}
-      >
-        {t(direction === 'older' ? 'history.loadEarlier' : 'history.loadNewer')}
-      </Button>
-    );
+  const loadAtEdge = (direction?: 'older' | 'newer') => {
+    const scroll = scroller();
+    if (
+      !historical ||
+      !viewport.connected ||
+      !scroll ||
+      loading ||
+      viewport.error ||
+      restoring.current
+    )
+      return;
+    const edge = direction ?? (scroll.scrollTop < 200 ? 'older' : 'newer');
+    if (
+      edge === 'older'
+        ? scroll.scrollTop >= 200
+        : scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop >= 200
+    )
+      return;
+    const boundary = viewport.range?.[edge];
+    if (boundary?.kind === 'live' && !viewport.canContinueLive) {
+      load('newer');
+    } else if (boundary?.kind === 'live') {
+      const source = capture()?.source;
+      const overlap =
+        source &&
+        props.messages.some((message) =>
+          message.sourceBlockIds?.includes(source),
+        );
+      viewport.continueLive(
+        overlap ? source : props.messages[0]?.sourceBlockIds?.[0],
+      );
+    } else if (boundary?.kind === 'loadable' || boundary?.kind === 'cached')
+      load(edge);
   };
 
   return (
     <div
       ref={root}
-      className="flex min-h-0 flex-1 flex-col"
-      onWheelCapture={handleScrollIntent}
-      onPointerDownCapture={handleScrollIntent}
-      onKeyDownCapture={handleScrollIntent}
-      onScrollCapture={() => {
-        if (restoring.current) return;
-        const current = capture();
-        if (viewport.loading) anchor.current = current;
-      }}
-      data-history-viewport={viewport.historical ? 'historical' : 'live'}
+      className={`${styles.root} relative flex min-h-0 flex-1`}
+      data-history-viewport={historical ? 'historical' : 'live'}
     >
-      {(viewport.historical ||
-        viewport.canOpen ||
-        viewport.loading ||
-        viewport.error ||
-        unavailable) && (
-        <div className="flex flex-wrap items-center justify-center gap-2 border-b bg-background p-2 text-sm text-muted-foreground">
-          {viewport.historical ? (
-            <>
-              <span>{t('history.snapshotView')}</span>
-              {boundaryButton('older')}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={viewport.returnToLive}
-              >
-                {t('history.returnLatest')}
-              </Button>
-            </>
-          ) : (
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={viewport.loading || !viewport.canOpen}
-              onClick={() => load('older')}
-            >
-              {t('history.openEarlier')}
-            </Button>
-          )}
-          {viewport.loading && (
-            <span role="status">{t('history.loadingEarlier')}</span>
-          )}
-          {viewport.error && <span role="alert">{t('history.viewError')}</span>}
-          {unavailable && (
-            <span role="status">{t('history.viewUnavailable')}</span>
-          )}
+      {globalNavigation && (
+        <div className={styles.navigation}>
+          <GlobalTurnNavigation
+            state={viewport.navigation}
+            store={viewport.store}
+            onSelect={(ordinal) => {
+              anchor.current = undefined;
+              void viewport.selectOrdinal(ordinal);
+            }}
+          />
         </div>
       )}
-      <MessageList
-        {...props}
-        key={viewport.viewKey}
-        ref={list}
-        messages={viewport.messages}
-        {...(viewport.enabled
-          ? {
-              hasOlderHistory: false,
-              onLoadOlderHistory: undefined,
-              historyCapacityReached: false,
-              historyPaginationError: false,
-              loadingOlderHistory: false,
-            }
-          : {})}
-        {...(viewport.historical
-          ? {
-              frozenViewport: true,
-              onCanScrollToBottomChange: undefined,
-              hideSessionTimeline: true,
-              firstTurnMetrics: undefined,
-              sessionKey: viewport.viewKey,
-              pendingApproval: null,
-              loadingTranscript: false,
-              catchingUp: false,
-              isResponding: false,
-              transcriptActivity: undefined,
-              onReloadTranscript: undefined,
-              transcriptReloadPaused: true,
-              onEditUserMessage: undefined,
-              onShowContextDetail: undefined,
-              onBranchSession: undefined,
-              onRetryClick: undefined,
-              onRetryFailedPrompt: undefined,
-              showRetryHint: false,
-              failedPromptMessageId: undefined,
-              tailContent: undefined,
-              welcomeHeader: undefined,
-              activeTurnStartedAt: undefined,
-              turnFileChanges: undefined,
-              turnArtifacts: undefined,
-              turnScheduledTasks: undefined,
-              generateContent: undefined,
-            }
-          : {})}
-      />
-      {viewport.historical && (
-        <div className="flex justify-center gap-2 border-t bg-background p-2">
-          {boundaryButton('newer')}
-          <Button variant="ghost" size="sm" onClick={viewport.returnToLive}>
+      <div
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        onWheelCapture={(event) => {
+          handleScrollIntent();
+          loadAtEdge(event.deltaY < 0 ? 'older' : 'newer');
+        }}
+        onPointerDownCapture={handleScrollIntent}
+        onKeyDownCapture={(event) => {
+          if (
+            [
+              'ArrowUp',
+              'ArrowDown',
+              'PageUp',
+              'PageDown',
+              'Home',
+              'End',
+              ' ',
+            ].includes(event.key)
+          )
+            handleScrollIntent();
+        }}
+        onScrollCapture={(event) => {
+          if (event.target !== scroller() || restoring.current) return;
+          const current = capture();
+          if (loading) anchor.current = current;
+          loadAtEdge();
+        }}
+      >
+        {(loading || viewport.error) && (
+          <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
+            {loading && (
+              <span role="status">{t('history.loadingEarlier')}</span>
+            )}
+            {viewport.error && (
+              <span role="alert">
+                {t('history.viewError')}{' '}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    anchor.current = capture();
+                    viewport.retry();
+                  }}
+                >
+                  {t('history.retry')}
+                </Button>
+              </span>
+            )}
+          </div>
+        )}
+        <MessageList
+          {...props}
+          key={viewport.viewKey}
+          ref={list}
+          messages={viewport.messages}
+          hideSessionTimeline={
+            historical || globalNavigation || props.hideSessionTimeline
+          }
+          {...(viewport.historical
+            ? {
+                frozenViewport: true,
+                hasOlderHistory: false,
+                onLoadOlderHistory: undefined,
+                historyCapacityReached: false,
+                historyPaginationError: false,
+                loadingOlderHistory: false,
+                onCanScrollToBottomChange: undefined,
+                firstTurnMetrics: undefined,
+                sessionKey: viewport.viewKey,
+                pendingApproval: null,
+                loadingTranscript: false,
+                catchingUp: false,
+                isResponding: false,
+                transcriptActivity: undefined,
+                onReloadTranscript: undefined,
+                transcriptReloadPaused: true,
+                onEditUserMessage: undefined,
+                onShowContextDetail: undefined,
+                onBranchSession: undefined,
+                onRetryClick: undefined,
+                onRetryFailedPrompt: undefined,
+                showRetryHint: false,
+                failedPromptMessageId: undefined,
+                tailContent: undefined,
+                welcomeHeader: undefined,
+                activeTurnStartedAt: undefined,
+                turnFileChanges: undefined,
+                turnArtifacts: undefined,
+                turnScheduledTasks: undefined,
+                generateContent: undefined,
+              }
+            : {})}
+        />
+        {historical && !onCanScrollToBottomChange && (
+          <Button
+            className="absolute bottom-3 left-1/2 -translate-x-1/2"
+            variant="outline"
+            size="sm"
+            onClick={returnToLive}
+          >
             {t('history.returnLatest')}
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 });

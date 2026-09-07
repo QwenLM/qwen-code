@@ -255,6 +255,7 @@ describe('HistoricalTranscriptPageTable', () => {
     expect(table.beginBoundaryLoad(target.rangeId, 'newer')).toEqual({
       kind: 'gap',
       anchorRecordId: 'live-2',
+      beforeAnchor: true,
       afterRecordId: 'a',
       snapshot: 's2',
     });

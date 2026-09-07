@@ -80,6 +80,8 @@ async function setup(supported = true, cursorOnly = false) {
       v: 1,
       sessionId: 'session',
       events: [],
+      targetRecordId: 'old',
+      hasOlder: true,
       hasMore: false,
     });
   const store = createDaemonTurnNavigationStore({
@@ -137,12 +139,20 @@ async function setup(supported = true, cursorOnly = false) {
   };
   act(() => root!.render(<TranscriptViewport {...props} ref={ref} />));
   const click = async (key: string) => {
-    const button = [...container!.querySelectorAll('button')].find(
-      (button) => button.textContent === key,
-    );
-    expect(button).toBeDefined();
     await act(async () => {
-      button!.click();
+      if (key === 'history.openEarlier')
+        container!
+          .querySelector<HTMLButtonElement>('[data-turn-ordinal]')!
+          .click();
+      else
+        container!
+          .querySelector('[data-web-shell-message-list]')!
+          .dispatchEvent(
+            new WheelEvent('wheel', {
+              bubbles: true,
+              deltaY: key === 'history.loadEarlier' ? -1 : 1,
+            }),
+          );
     });
   };
   return { store, client, ref, props, getTranscriptPage, click, legacyLoad };
@@ -165,14 +175,29 @@ describe('TranscriptViewport', () => {
           updatedAt: 1,
           clientReceivedAt: 1,
         },
+        ...(toolId === 'newer-tool'
+          ? [
+              {
+                id: 'old',
+                kind: 'user' as const,
+                text: 'old',
+                sourceRecordIds: ['old'],
+                createdAt: 1,
+                updatedAt: 1,
+                clientReceivedAt: 1,
+              },
+            ]
+          : []),
       ],
       nextBlockOrdinal: 2,
-      encounteredRecordIds: [toolId],
+      encounteredRecordIds: ['old', toolId],
     });
     getTranscriptPage.mockResolvedValue({
       v: 1,
       sessionId: 'session',
       events: [],
+      targetRecordId: 'old',
+      hasOlder: true,
       hasMore: true,
       nextCursor: 'older',
     });
@@ -183,6 +208,8 @@ describe('TranscriptViewport', () => {
       v: 1,
       sessionId: 'session',
       events: [],
+      targetRecordId: 'old',
+      hasOlder: true,
       hasMore: false,
     });
     await click('history.loadEarlier');
@@ -195,13 +222,16 @@ describe('TranscriptViewport', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       function (this: HTMLElement) {
         const callId = this.dataset.transcriptToolCallId;
-        const top = this.hasAttribute('data-source-block-ids')
-          ? -200
-          : callId === 'older-tool'
-            ? -200
-            : callId === 'newer-tool'
-              ? -10
-              : 0;
+        const top =
+          this.dataset.sourceBlockIds === 'old'
+            ? -500
+            : this.hasAttribute('data-source-block-ids')
+              ? -200
+              : callId === 'older-tool'
+                ? -200
+                : callId === 'newer-tool'
+                  ? -10
+                  : 0;
         const height = callId ? 100 : 300;
         return {
           top,
@@ -255,6 +285,13 @@ describe('TranscriptViewport', () => {
     act(() => ref.current?.scrollToBottom());
     expect(observed.props?.messages).toBe(nextLive);
     expect(observed.props?.onEditUserMessage).toBe(props.onEditUserMessage);
+  });
+
+  it('preserves the original loader with turn navigation enabled', async () => {
+    const { legacyLoad } = await setup();
+    expect(observed.props?.onLoadOlderHistory).toBe(legacyLoad);
+    expect(observed.props?.hasOlderHistory).toBe(true);
+    expect(container!.textContent).not.toContain('history.snapshotView');
   });
 
   it('preserves the unsupported-daemon loader', async () => {

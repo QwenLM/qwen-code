@@ -332,6 +332,74 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getViewportSnapshot().pages.size).toBe(0);
   });
 
+  it('recovers a trimmed live connection for a globally located range before continuing', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn', 'live-1']));
+    getTranscriptPage.mockResolvedValue(
+      transcriptPage(['turn', 'live-1'], { targetRecordId: 'turn' }),
+    );
+    let beforeRecordId = 'live-1';
+    const store = createDaemonTurnNavigationStore({
+      captureLiveBoundary: () => ({
+        beforeRecordId,
+        reachable: true,
+        isCurrent: () => true,
+      }),
+    });
+    store.configure({ sessionId: 'session-1', supported: true, client });
+    await flushInitialHead(store);
+    store.observeLiveBlocks([userBlock('live-one', 'live-1')]);
+    const location = await store.locateOrdinal(0);
+    const rangeId = location.rangeId!;
+    expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+    beforeRecordId = 'live-2';
+    store.observeLiveBlocks([
+      { ...userBlock('live-two', 'live-2'), kind: 'assistant' },
+    ]);
+    getTurnIndexPage.mockResolvedValue(
+      turnPage(0, ['turn', 'live-1'], { snapshot: 'fresh' }),
+    );
+    getTranscriptPage.mockClear().mockImplementation(async (options) => {
+      if (options.atRecordId) throw new Error('invalid_turn_anchor');
+      return transcriptPage(
+        options.beforeRecordId === 'live-2'
+          ? ['late']
+          : options.beforeRecordId === 'late'
+            ? ['gap', 'live-1']
+            : ['turn'],
+      );
+    });
+    await store.loadViewportBoundary(rangeId, 'newer', {
+      isCurrent: () => true,
+    });
+    expect(getTranscriptPage).toHaveBeenNthCalledWith(1, {
+      beforeRecordId: 'live-2',
+      snapshot: 'fresh',
+      limit: 200,
+    });
+    expect(
+      [...store.getViewportSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['turn', 'gap', 'live-1']);
+    expect(store.getViewportSnapshot().ranges[0]?.newer).toMatchObject({
+      kind: 'loadable',
+      request: { kind: 'gap', anchorRecordId: 'live-2', beforeAnchor: true },
+    });
+    await store.loadViewportBoundary(rangeId, 'newer', {
+      isCurrent: () => true,
+    });
+    expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+    expect(
+      getTranscriptPage.mock.calls.every(([options]) => !options.atRecordId),
+    ).toBe(true);
+    expect(
+      [...store.getViewportSnapshot().pages.values()].flatMap((page) => [
+        ...page.recordIds,
+      ]),
+    ).toEqual(['turn', 'gap', 'live-1', 'late']);
+  });
+
   it('recovers the new live-trim gap from the fresh before-origin', async () => {
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
     getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));

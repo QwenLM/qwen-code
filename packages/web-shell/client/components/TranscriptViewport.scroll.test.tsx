@@ -85,6 +85,8 @@ function page(ids: string[], hasMore = false): DaemonSessionTranscriptPage {
         ({ type: 'user_message_chunk', data: { recordId } }) as DaemonEvent,
     ),
     hasMore,
+    targetRecordId: 'u1',
+    hasOlder: hasMore,
     ...(hasMore ? { nextCursor: `older-${ids[0]}` } : {}),
   };
 }
@@ -247,12 +249,18 @@ async function setup(
     );
   render();
   const click = async (label: string) => {
-    const button = [...container!.querySelectorAll('button')].find(
-      (button) => button.textContent === label,
-    );
-    expect(button).toBeDefined();
     await act(async () => {
-      button!.click();
+      if (label === 'history.openEarlier')
+        container!
+          .querySelector<HTMLButtonElement>('[data-turn-ordinal]')!
+          .click();
+      else
+        list().dispatchEvent(
+          new WheelEvent('wheel', {
+            bubbles: true,
+            deltaY: label === 'history.loadEarlier' ? -1 : 1,
+          }),
+        );
     });
   };
   const list = () =>
@@ -307,6 +315,7 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
         }
       });
       const expected = before - (input === 'scroll' ? 20 : 0);
+      settleFrames();
       await act(async () => resolve(page(['old1', 'old2'])));
       settleFrames();
       expect(
@@ -377,11 +386,17 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     ).toEqual({ kind: 'cached', rangeId: newer.rangeId });
     const snapshot = { ...store.getViewportSnapshot(), ...table.getSnapshot() };
     vi.spyOn(store, 'getViewportSnapshot').mockReturnValue(snapshot);
-    vi.spyOn(store, 'openBeforeLive').mockResolvedValue(older.rangeId);
+    vi.spyOn(store, 'locateViewportOrdinal').mockResolvedValue({
+      view: 'historical',
+      blockId: table.getSnapshot().pages.get(older.pageId)!.blocks.at(-1)!.id,
+      turnId: 'a3',
+      rangeId: older.rangeId,
+      pageId: older.pageId,
+    });
     render();
     await click('history.openEarlier');
     settleFrames();
-    expect(list().scrollTop).toBe(list().scrollHeight - list().clientHeight);
+    list().scrollTop = list().scrollHeight - list().clientHeight;
     await click('history.loadNewer');
     settleFrames();
     const firstPage = table

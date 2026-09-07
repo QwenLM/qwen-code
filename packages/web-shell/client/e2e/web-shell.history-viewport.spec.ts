@@ -2,9 +2,7 @@ import { expect, test, type Locator } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
-  permissionRequestEvent,
   replayCompleteEvent,
-  turnCompleteEvent,
 } from './utils/mockDaemon';
 
 function recordEvent(record: number, text = `HISTORY ${record}`) {
@@ -47,132 +45,173 @@ async function readingAnchor(viewport: Locator) {
   });
 }
 
-async function moveReadingPosition(
-  scroll: Locator,
-  direction: 'older' | 'newer',
+async function historyScenario(
+  page: import('@playwright/test').Page,
+  baseURL: string | undefined,
+  pageRecords: number,
 ) {
-  await scroll.hover();
-  const edgeDistance = () =>
-    scroll.evaluate(
-      (element, direction) =>
-        direction === 'older'
-          ? element.scrollTop
-          : element.scrollHeight - element.clientHeight - element.scrollTop,
-      direction,
-    );
-  for (const offset of [0, 80]) {
-    await expect
-      .poll(async () => {
-        const delta = (await edgeDistance()) - offset;
-        if (Math.abs(delta) > 2) {
-          await scroll
-            .page()
-            .mouse.wheel(0, direction === 'older' ? -delta : delta);
-        }
-        return Math.abs((await edgeDistance()) - offset);
-      })
-      .toBeLessThanOrEqual(2);
-  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const count = pageRecords * 12;
+  const sessionId = `history-navigation-${pageRecords}`;
+  const live = Array.from({ length: 40 }, (_, index) =>
+    recordEvent(count + index, `LIVE ${count + index}`),
+  );
+  const scenario = createWebShellDaemonScenario({ sessionId, events: live });
+  scenario.capabilities.features.push(
+    'session_turn_navigation',
+    'session_transcript_pagination',
+  );
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
+  const requests: Array<{ start: number; end: number; anchored: boolean }> = [];
+  let hold = false;
+  let release: (() => void) | undefined;
+  await page.route(`${baseURL}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (/\/session\/[^/]+\/(load|resume)$/.test(url.pathname)) {
+      await route.fulfill({
+        json: {
+          sessionId,
+          workspaceCwd: scenario.workspaceCwd,
+          attached: true,
+          createdAt: new Date().toISOString(),
+          hasActivePrompt: false,
+          clientId: scenario.clientId,
+          state: scenario.state,
+          compactedReplay: live,
+          liveJournal: [],
+          lastEventId: count + 60,
+          historyHasMore: true,
+          historyAnchorRecordId: `record-${count}`,
+        },
+      });
+    } else if (url.pathname.endsWith('/turn-index')) {
+      const totalTurns = (count + 40) / 2;
+      const limit = Number(url.searchParams.get('limit'));
+      const start = Number(
+        url.searchParams.get('start') ?? Math.max(0, totalTurns - limit),
+      );
+      await route.fulfill({
+        json: {
+          v: 1,
+          sessionId,
+          snapshot: 'mock-snapshot',
+          totalTurns,
+          start,
+          turns: Array.from(
+            { length: Math.min(limit, totalTurns - start) },
+            (_, index) => ({
+              ordinal: start + index,
+              turnId: `record-${2 * (start + index)}`,
+              kind: 'prompt',
+              label: `History ${start + index}`,
+            }),
+          ),
+        },
+      });
+    } else if (url.pathname.endsWith('/transcript')) {
+      const at = url.searchParams.get('atRecordId');
+      const before = url.searchParams.get('beforeRecordId');
+      const after = url.searchParams.get('afterRecordId');
+      const cursor = url.searchParams.get('cursor');
+      const backward = !!before || cursor?.startsWith('before:');
+      const boundary = Number(
+        (at ?? before ?? after ?? cursor)?.split(/[-:]/).at(-1),
+      );
+      const start = backward
+        ? Math.max(0, boundary - pageRecords)
+        : boundary + (after ? 1 : 0);
+      const end = backward
+        ? boundary
+        : Math.min(count + 40, start + pageRecords);
+      requests.push({ start, end, anchored: !!at });
+      if (hold && !at)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      await route.fulfill({
+        json: {
+          v: 1,
+          sessionId,
+          events: Array.from({ length: end - start }, (_, index) =>
+            recordEvent(start + index),
+          ),
+          hasMore: backward ? start > 0 : end < count + 40,
+          ...((backward ? start > 0 : end < count + 40)
+            ? { nextCursor: backward ? `before:${start}` : `after:${end}` }
+            : {}),
+          ...(at ? { targetRecordId: at, hasOlder: start > 0 } : {}),
+        },
+      });
+    } else await route.fallback();
+  });
+  await page.goto(`/session/${sessionId}`);
+  await daemon.sse.waitForConnection(sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId, replayedCount: live.length }),
+  );
+  return {
+    count,
+    sessionId,
+    daemon,
+    requests,
+    hold: () => {
+      hold = true;
+    },
+    release: () => {
+      hold = false;
+      release?.();
+      release = undefined;
+    },
+  };
 }
 
+test('continuous history preserves the original upward loader with global navigation enabled @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const { requests } = await historyScenario(page, baseURL, 16);
+  const scroll = page.locator('[data-web-shell-message-list]');
+  await expect(page.locator('[data-global-turn-navigation]')).toBeVisible();
+  await expect(
+    page.getByText(
+      /Historical snapshot|历史快照|Open earlier history|打开更早历史/,
+    ),
+  ).toHaveCount(0);
+  await scroll.hover();
+  await page.mouse.wheel(0, -100000);
+  await expect
+    .poll(() => requests.filter((request) => !request.anchored).length)
+    .toBeGreaterThan(0);
+  await expect(page.locator('[data-history-viewport="live"]')).toBeVisible();
+});
+
 for (const pageRecords of [16, 200]) {
-  test(`history viewport preserves the reading row across bounded ${pageRecords}-record pages @smoke`, async ({
+  test(`global turn navigation preserves the reading row across bounded ${pageRecords}-record pages @smoke`, async ({
     page,
     baseURL,
   }) => {
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    const count = pageRecords * 12;
-    const sessionId = `history-viewport-${pageRecords}`;
-    const live = [
-      recordEvent(count, 'LIVE prompt'),
-      recordEvent(count + 1, 'LIVE answer'),
-      turnCompleteEvent('live-prompt', { id: count + 20 }),
-      permissionRequestEvent('live-approval', { id: count + 21, sessionId }),
-    ];
-    const scenario = createWebShellDaemonScenario({ sessionId, events: live });
-    scenario.capabilities.features.push(
-      'session_turn_navigation',
-      'session_transcript_pagination',
-    );
-    const daemon = await installMockDaemon(page, scenario, { baseURL });
-    const transcriptRequests: Array<{ start: number; end: number }> = [];
-    await page.route(`${baseURL}/**`, async (route) => {
-      const url = new URL(route.request().url());
-      if (/\/session\/[^/]+\/(load|resume)$/.test(url.pathname)) {
-        await route.fulfill({
-          json: {
-            sessionId,
-            workspaceCwd: scenario.workspaceCwd,
-            attached: true,
-            createdAt: new Date().toISOString(),
-            hasActivePrompt: false,
-            clientId: scenario.clientId,
-            state: scenario.state,
-            compactedReplay: live,
-            liveJournal: [],
-            lastEventId: count + 21,
-            historyHasMore: true,
-            historyAnchorRecordId: `record-${count}`,
-          },
-        });
-      } else if (url.pathname.endsWith('/turn-index')) {
-        const totalTurns = count / 2 + 1;
-        const limit = Number(url.searchParams.get('limit'));
-        const start = Number(
-          url.searchParams.get('start') ?? Math.max(0, totalTurns - limit),
-        );
-        await route.fulfill({
-          json: {
-            v: 1,
-            sessionId,
-            snapshot: 'mock-snapshot',
-            totalTurns,
-            start,
-            turns: Array.from(
-              { length: Math.min(limit, totalTurns - start) },
-              (_, index) => ({
-                ordinal: start + index,
-                turnId: `record-${2 * (start + index)}`,
-                kind: 'prompt',
-                label: `History ${start + index}`,
-              }),
-            ),
-          },
-        });
-      } else if (url.pathname.endsWith('/transcript')) {
-        const before = url.searchParams.get('beforeRecordId');
-        const cursor = url.searchParams.get('cursor');
-        const end = Number(
-          before?.split('-').at(-1) ?? cursor?.split(':').at(-1),
-        );
-        const start = Math.max(0, end - pageRecords);
-        transcriptRequests.push({ start, end });
-        await route.fulfill({
-          json: {
-            v: 1,
-            sessionId,
-            events: Array.from({ length: end - start }, (_, index) =>
-              recordEvent(start + index),
-            ),
-            hasMore: start > 0,
-            ...(start > 0 ? { nextCursor: `before:${start}` } : {}),
-          },
-        });
-      } else await route.fallback();
-    });
-    await page.goto(`/session/${sessionId}`);
-    await daemon.sse.waitForConnection(sessionId);
-    await daemon.sendEvent(
-      replayCompleteEvent({ sessionId, replayedCount: live.length }),
-    );
-    await page
-      .getByRole('button', { name: /^(Open earlier history|打开更早历史)$/ })
-      .click();
+    const fixture = await historyScenario(page, baseURL, pageRecords);
+    const ordinal = (fixture.count - 2 * pageRecords) / 2;
+    const rail = page.locator('[data-global-turn-navigation]');
+    await expect(rail).toBeVisible();
+    await rail
+      .locator('div')
+      .first()
+      .evaluate((element, ordinal) => {
+        const item = element.querySelector<HTMLElement>('[aria-setsize]')!;
+        element.scrollTop =
+          ordinal *
+          (element.scrollHeight / Number(item.getAttribute('aria-setsize')));
+      }, ordinal);
+    await rail.locator(`[data-turn-ordinal="${ordinal}"]`).click();
     const viewport = page.locator('[data-history-viewport="historical"]');
     await expect(viewport).toBeVisible();
-    const bootstrapEnd = transcriptRequests.at(-1)!.end;
+    await expect
+      .poll(() => fixture.requests.filter((request) => request.anchored).length)
+      .toBe(1);
     const scroll = viewport.locator('[data-web-shell-message-list]');
-    const directions = [
+    await expect(scroll).toContainText(`HISTORY ${ordinal * 2}`);
+    for (const direction of [
       'older',
       'older',
       'older',
@@ -181,91 +220,51 @@ for (const pageRecords of [16, 200]) {
       'older',
       'newer',
       'newer',
-    ] as const;
-    for (const [round, direction] of directions.entries()) {
-      await test.step(`${direction} admission ${round + 1}`, async () => {
-        await moveReadingPosition(scroll, direction);
+    ] as const) {
+      await test.step(`scroll ${direction}`, async () => {
+        fixture.hold();
+        const previous = fixture.requests.length;
+        await scroll.hover();
+        await page.mouse.wheel(0, direction === 'older' ? -100000 : 100000);
+        await expect
+          .poll(() => fixture.requests.length)
+          .toBeGreaterThan(previous);
         const anchor = await readingAnchor(viewport);
-        const requests = transcriptRequests.length;
-        const button = viewport.getByRole('button', {
-          name:
-            direction === 'older'
-              ? /^(Load earlier|加载更早记录)$/
-              : /^(Load newer|加载较新记录)$/,
-        });
-        await button.click();
-        await expect
-          .poll(() => transcriptRequests.length)
-          .toBeGreaterThan(requests);
-        await expect(
-          viewport.getByText(/^(Loading earlier messages…|正在加载更早消息…)$/),
-        ).toHaveCount(0);
+        fixture.release();
+        await expect(viewport.locator('[role="status"]')).toHaveCount(0);
         await expect(viewport.locator('[role="alert"]')).toHaveCount(0);
-        let stableAnchorSamples = 0;
         await expect
-          .poll(
-            async () => {
-              const delta = await viewport.evaluate((root, anchor) => {
-                const scroll = root.querySelector<HTMLElement>(
-                  '[data-web-shell-message-list]',
-                )!;
-                const row = [
-                  ...root.querySelectorAll<HTMLElement>(
-                    '[data-source-block-ids]',
-                  ),
-                ].find((row) =>
-                  anchor.rowKey
-                    ? row.dataset.messageRowKey === anchor.rowKey
-                    : row.dataset.sourceBlockIds
-                        ?.split(',')
-                        .includes(anchor.source),
-                );
-                return row
-                  ? Math.abs(
-                      row.getBoundingClientRect().top -
-                        scroll.getBoundingClientRect().top -
-                        anchor.offset,
-                    )
-                  : Number.MAX_VALUE;
-              }, anchor);
-              stableAnchorSamples = delta <= 2 ? stableAnchorSamples + 1 : 0;
-              return stableAnchorSamples;
-            },
-            { intervals: [100] },
-          )
-          .toBeGreaterThanOrEqual(4);
-        if (direction === 'newer') {
-          await moveReadingPosition(scroll, 'newer');
-          const expectedNewest = bootstrapEnd - pageRecords * (7 - round) - 1;
-          await expect(scroll).toContainText(`HISTORY ${expectedNewest}`);
-        }
+          .poll(async () => {
+            return viewport.evaluate((root, anchor) => {
+              const scroll = root.querySelector<HTMLElement>(
+                '[data-web-shell-message-list]',
+              )!;
+              const row = [
+                ...root.querySelectorAll<HTMLElement>('[data-message-row-key]'),
+              ].find((row) => row.dataset.messageRowKey === anchor.rowKey);
+              return row
+                ? Math.abs(
+                    row.getBoundingClientRect().top -
+                      scroll.getBoundingClientRect().top -
+                      anchor.offset,
+                  )
+                : Number.MAX_VALUE;
+            }, anchor);
+          })
+          .toBeLessThanOrEqual(2);
       });
     }
-    await expect(
-      viewport.getByRole('button', { name: /第 \d+ 轮|Turn \d+/ }),
-    ).toHaveCount(0);
-    await expect(
-      viewport.locator('[data-web-shell-permission-option]'),
-    ).toHaveCount(0);
-    await page
-      .locator(
-        '[data-web-shell-permission-option][data-option-id="allow_once"]',
-      )
-      .first()
-      .click();
-    await expect
-      .poll(() => daemon.permissionRequests().length)
-      .toBeGreaterThan(0);
+    await expect(rail).toBeVisible();
     const anchor = await readingAnchor(viewport);
-    await daemon.sendEvent({
-      ...recordEvent(count + 3, 'BACKGROUND LIVE answer'),
-      id: count + 40,
+    await fixture.daemon.sendEvent({
+      ...recordEvent(fixture.count + 41, 'BACKGROUND LIVE answer'),
+      id: fixture.count + 100,
     });
     await page.waitForTimeout(250);
     expect(await readingAnchor(viewport)).toEqual(anchor);
-    await viewport
-      .getByRole('button', { name: /^(Return to latest|返回最新)$/ })
-      .first()
+    await expect(viewport).not.toContainText('BACKGROUND LIVE answer');
+    await page
+      .getByRole('button', { name: /Scroll to bottom|回到底部/ })
       .click();
     await expect(page.locator('[data-history-viewport="live"]')).toContainText(
       'BACKGROUND LIVE answer',

@@ -149,6 +149,11 @@ export interface HistoryViewportRequest {
 
 export interface DaemonHistoryNavigationStore
   extends DaemonTurnNavigationStore {
+  locateViewportOrdinal(
+    ordinal: number,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation>;
   getViewportSnapshot(): DaemonHistoryViewportSnapshot;
   captureLiveBoundary(): LiveHistoryBoundary;
   hasLiveOverlap(rangeId: string): boolean;
@@ -788,7 +793,11 @@ export function createDaemonTurnNavigationStore(
     }
   }
 
-  async function locateOrdinal(ordinal: number): Promise<DaemonTurnLocation> {
+  async function locateOrdinal(
+    ordinal: number,
+    request?: HistoryViewportRequest,
+    releaseAnchor?: () => void,
+  ): Promise<DaemonTurnLocation> {
     assertOrdinal(ordinal);
     const generation = ++selectionGeneration;
     publish({
@@ -801,7 +810,7 @@ export function createDaemonTurnNavigationStore(
     });
     try {
       await loadOrdinal(ordinal, generation);
-      if (generation !== selectionGeneration)
+      if (generation !== selectionGeneration || request?.isCurrent() === false)
         throw new Error('Selection changed');
       const entryWithSnapshot = findIndexEntry(ordinal);
       if (!entryWithSnapshot) throw new Error('Turn metadata is unavailable');
@@ -835,6 +844,7 @@ export function createDaemonTurnNavigationStore(
       });
       if (
         generation !== selectionGeneration ||
+        request?.isCurrent() === false ||
         capturedSession !== sessionEpoch ||
         capturedChain !== chainEpoch ||
         !isCurrentClient(activeClient)
@@ -862,6 +872,7 @@ export function createDaemonTurnNavigationStore(
         });
         return live;
       }
+      releaseAnchor?.();
       const target = pageTable.admitAnchor(
         ordinal,
         entryWithSnapshot.entry.turnId,
@@ -886,7 +897,10 @@ export function createDaemonTurnNavigationStore(
       });
       return location;
     } catch (error) {
-      if (generation === selectionGeneration) {
+      if (
+        generation === selectionGeneration &&
+        request?.isCurrent() !== false
+      ) {
         if (isTranscriptTooLarge(error)) {
           enterTooLargeFallback();
         } else {
@@ -945,8 +959,9 @@ export function createDaemonTurnNavigationStore(
           .getSnapshot()
           .ranges.find((range) => range.id === rangeId);
         if (!origin) return;
+        const beforeAnchor = 'beforeRecordId' in origin || request.beforeAnchor;
         response = await activeClient.getTranscriptPage({
-          ...('beforeRecordId' in origin
+          ...(beforeAnchor
             ? { beforeRecordId: request.anchorRecordId }
             : { atRecordId: request.anchorRecordId }),
           snapshot: request.snapshot,
@@ -961,6 +976,7 @@ export function createDaemonTurnNavigationStore(
           validateHistoricalResponse(response, sessionId);
           if (
             fromAnchor &&
+            !beforeAnchor &&
             'anchorTurnId' in origin &&
             response.targetRecordId !== request.anchorRecordId
           ) {
@@ -1154,9 +1170,9 @@ export function createDaemonTurnNavigationStore(
       !activeClient ||
       !boundary?.reachable ||
       !boundary.beforeRecordId ||
-      !('beforeRecordId' in range) ||
       hasLiveOverlap(range.id) ||
-      boundary.beforeRecordId === range.beforeRecordId
+      ('beforeRecordId' in range &&
+        boundary.beforeRecordId === range.beforeRecordId)
     )
       return;
     const revision = viewportSnapshot.revision;
@@ -1453,8 +1469,10 @@ export function createDaemonTurnNavigationStore(
         isCurrent: () => false,
       },
     openBeforeLive,
-    setViewportAnchor: (viewportId, pageId) =>
-      pageTable.setViewportAnchor(viewportId, pageId),
+    setViewportAnchor: (viewportId, pageId) => {
+      pageTable.setViewportAnchor(viewportId, pageId);
+      if (pageId) pageTable.clearSelection();
+    },
     loadViewportBoundary,
     subscribe(listener) {
       listeners.add(listener);
@@ -1467,6 +1485,7 @@ export function createDaemonTurnNavigationStore(
     handleSessionEvent,
     loadOrdinal,
     locateOrdinal,
+    locateViewportOrdinal: locateOrdinal,
     refreshHead,
     loadOlder: (rangeId) => loadBoundary(rangeId, 'older'),
     loadNewer: (rangeId) => loadBoundary(rangeId, 'newer'),

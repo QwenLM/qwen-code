@@ -19,6 +19,7 @@ export type FrozenTranscriptBoundaryRequest =
       anchorRecordId: string;
       afterRecordId: string;
       snapshot: string;
+      beforeAnchor?: true;
     };
 
 export interface TranscriptGapResolution {
@@ -505,19 +506,18 @@ export class HistoricalTranscriptPageTable {
     snapshot: string,
   ): void {
     const range = this.snapshot.ranges.find((range) => range.id === rangeId);
-    if (!range || !('beforeRecordId' in range) || range.newer.kind !== 'live')
-      return;
+    if (!range || range.newer.kind !== 'live') return;
     const edge = this.snapshot.pages.get(range.pageIds.at(-1)!);
     if (!edge?.lastRecordId)
       throw new Error('Historical page has no retained edge');
-    const nextRange: SequentialHistoricalTranscriptRange = {
+    const nextRange: HistoricalViewportRange = {
       ...range,
-      beforeRecordId,
-      snapshot,
+      ...('beforeRecordId' in range ? { beforeRecordId, snapshot } : {}),
       newer: {
         kind: 'loadable',
         request: {
           kind: 'gap',
+          beforeAnchor: true,
           anchorRecordId: beforeRecordId,
           afterRecordId: edge.lastRecordId,
           snapshot,
@@ -538,6 +538,7 @@ export class HistoricalTranscriptPageTable {
           },
           {
             kind: 'gap',
+            beforeAnchor: true,
             anchorRecordId: beforeRecordId,
             afterRecordId: page.lastRecordId,
             snapshot,
@@ -650,16 +651,24 @@ export class HistoricalTranscriptPageTable {
         ? page
         : this.pageFromBlocks(page.id, snapshot, blocks);
     const sequentialTerminal =
-      'beforeRecordId' in range && recovery?.fromAnchor === true;
+      ('beforeRecordId' in range ||
+        (admittedRequest.kind === 'gap' &&
+          admittedRequest.beforeAnchor === true)) &&
+      recovery?.fromAnchor === true;
     const newerRequest =
       (direction === 'older' || (recovery && !recovery.fromAnchor)) &&
       filteredPage.lastRecordId
         ? {
             kind: 'gap' as const,
+            ...(admittedRequest.kind === 'gap' && admittedRequest.beforeAnchor
+              ? { beforeAnchor: true as const }
+              : {}),
             anchorRecordId:
-              'anchorTurnId' in range
-                ? range.anchorTurnId
-                : range.beforeRecordId,
+              admittedRequest.kind === 'gap'
+                ? admittedRequest.anchorRecordId
+                : 'anchorTurnId' in range
+                  ? range.anchorTurnId
+                  : range.beforeRecordId,
             afterRecordId: filteredPage.lastRecordId,
             snapshot: 'beforeRecordId' in range ? range.snapshot : snapshot,
           }
@@ -1211,6 +1220,7 @@ function requestBytes(
   if (request.kind === 'gap') {
     return (
       80 +
+      (request.beforeAnchor ? 16 : 0) +
       2 *
         (request.anchorRecordId.length +
           request.afterRecordId.length +

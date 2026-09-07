@@ -61,6 +61,7 @@ const page: DaemonSessionTranscriptPage = {
   v: 1,
   sessionId: 'session',
   events: [],
+  targetRecordId: 'old',
   hasMore: false,
 };
 
@@ -129,7 +130,7 @@ async function setup() {
       blocks: [
         {
           id: 'old',
-          kind: 'assistant',
+          kind: 'user',
           text: 'old',
           sourceRecordIds: ['old'],
           createdAt: 1,
@@ -173,7 +174,6 @@ async function setup() {
           messages={live}
           pendingApproval={null}
           isResponding={false}
-          hideSessionTimeline
           ref={ref}
         />
       </I18nProvider>,
@@ -186,8 +186,8 @@ async function setup() {
     container!.querySelector<HTMLElement>('[data-history-viewport]')!.dataset
       .historyViewport;
   const openButton = () =>
-    [...container!.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Open earlier history',
+    [...container!.querySelectorAll('button')].find((button) =>
+      button.hasAttribute('data-turn-ordinal'),
     )!;
   const open = async () => {
     await act(async () => {
@@ -296,71 +296,34 @@ describe('TranscriptViewport pending first entry', () => {
     expect(list().scrollTop).toBe(400);
   });
 
-  it.each(['head', 'transcript'] as const)(
-    'reports a stale live boundary while %s is pending',
-    async (stage) => {
-      const {
-        store,
-        mode,
-        open,
-        openButton,
-        getTurnIndexPage,
-        getTranscriptPage,
-        invalidateBoundary,
-        settle,
-      } = await setup();
-      const pendingHead = deferred<DaemonSessionTurnIndexPage>();
-      const pendingPage = deferred<DaemonSessionTranscriptPage>();
-      if (stage === 'head')
-        getTurnIndexPage.mockReturnValue(pendingHead.promise);
-      else getTranscriptPage.mockReturnValue(pendingPage.promise);
-      await open();
-      expect(container!.querySelector('[role="status"]')?.textContent).toBe(
-        'Loading earlier messages…',
-      );
-      invalidateBoundary();
-      await act(async () => {
-        if (stage === 'head') pendingHead.resolve(head);
-        else pendingPage.resolve(page);
-      });
-      settle();
-      expect(mode()).toBe('live');
-      expect(store.getViewportSnapshot().pages.size).toBe(0);
-      expect(getTranscriptPage).toHaveBeenCalledTimes(stage === 'head' ? 0 : 1);
-      expect(container!.querySelector('[role="status"]')).toBeNull();
-      expect(openButton().disabled).toBe(false);
-      expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
-        'This section could not be loaded. Move the reading position and retry, or return to latest.',
-      );
-      await open();
-      settle();
-      expect(mode()).toBe('historical');
-      expect(store.getViewportSnapshot().pages.size).toBe(1);
-      expect(getTranscriptPage).toHaveBeenCalledTimes(stage === 'head' ? 1 : 2);
-      expect(container!.querySelector('[role="alert"]')).toBeNull();
-    },
-  );
+  it('cancels a distant selection when the user scrolls before it resolves', async () => {
+    const { store, mode, open, list, getTranscriptPage, settle } =
+      await setup();
+    const request = deferred<DaemonSessionTranscriptPage>();
+    getTranscriptPage.mockReturnValue(request.promise);
+    await open();
+    act(() =>
+      list().dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, deltaY: -10 }),
+      ),
+    );
+    await act(async () => request.resolve(page));
+    settle();
+    expect(mode()).toBe('live');
+    expect(store.getViewportSnapshot().pages.size).toBe(0);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
 
-  it('reports a live boundary that changes after page admission but before entry', async () => {
-    const { store, mode, open, invalidateBoundary, settle } = await setup();
-    const unsubscribe = store.subscribe(() => {
-      if (store.getViewportSnapshot().pages.size > 0) {
-        unsubscribe();
-        invalidateBoundary();
-      }
-    });
+  it('retains live content after a failed selection and retries from the rail', async () => {
+    const { mode, open, getTranscriptPage, settle } = await setup();
+    getTranscriptPage.mockRejectedValueOnce(new Error('offline'));
     await open();
     settle();
     expect(mode()).toBe('live');
-    expect(store.getViewportSnapshot().pages.size).toBe(1);
-    expect(container!.querySelector('[role="status"]')).toBeNull();
-    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
-      'This section could not be loaded. Move the reading position and retry, or return to latest.',
-    );
+    expect(container!.querySelector('[role="alert"]')).not.toBeNull();
     await open();
     settle();
     expect(mode()).toBe('historical');
-    expect(store.getViewportSnapshot().pages.size).toBe(1);
     expect(container!.querySelector('[role="alert"]')).toBeNull();
   });
 
