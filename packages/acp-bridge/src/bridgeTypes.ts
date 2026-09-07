@@ -10,7 +10,6 @@ import type {
   GoalSnapshotV2,
   GoalStateResponse,
   DispatchRecord,
-  WorkspaceAgentLaunchResult,
   SessionGroupPresetColor,
   TurnResultCode,
   TurnResultErrorPayload,
@@ -653,7 +652,6 @@ export interface BridgeForkAgentResult {
   launched: boolean;
 }
 
-export type BridgeWorkspaceAgentLaunchResult = WorkspaceAgentLaunchResult;
 export type BridgeAgentDispatchRecord = DispatchRecord;
 
 export interface BridgeConversationDirectoryExpectation {

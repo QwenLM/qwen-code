@@ -26,6 +26,7 @@ import {
   selectCandidates,
   type AgentBodyState,
   type AgentDispatchPort,
+  type AgentNotificationSender,
   type AgentStartResult,
 } from './dispatcher.js';
 import { closeRun, finishRunInTransaction } from './run-lifecycle.js';
@@ -559,14 +560,13 @@ describe('deliverNotifications', () => {
   it('sends once a destination exists, and never sends the same event twice', async () => {
     const thread = await threadWithBlocker();
     await setTarget();
-    const send = vi.fn(async () => {});
+    // Typed as the real sender so `mock.calls` carries its argument: an
+    // untyped `vi.fn(async () => {})` infers a zero-arity call signature, and
+    // then `calls[0][0]` is an index into an empty tuple.
+    const send = vi.fn<AgentNotificationSender>(async () => {});
 
     expect(await deliverNotifications(PROJECT_ROOT, send)).toBe(1);
-    const call = send.mock.calls[0]![0] as {
-      text: string;
-      deliveryId: string;
-      target: { channelName: string };
-    };
+    const call = send.mock.calls[0]![0];
     expect(call.text).toContain('Investigate the flake');
     expect(call.text).toContain('asked a question');
     expect(call.target.channelName).toBe('lark');
