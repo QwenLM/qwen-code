@@ -627,6 +627,10 @@ jobs:
           trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Build packages'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run build'
+
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -1453,6 +1457,11 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Build packages and bundle'
+        run: |-
+          npm run build
+          npm run bundle
+
       - name: 'Install Playwright Chromium (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         run: |-
@@ -1587,6 +1596,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Build packages'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run build'
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1759,6 +1772,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Build packages'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run build'
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1990,6 +2007,12 @@ jobs:
         run: |-
           npm ci --no-audit --progress=false
 
+      - name: 'Build packages and bundle'
+        if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm run build
+          npm run bundle
+
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -2203,6 +2226,11 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Build packages and bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && runner.environment == 'self-hosted' }}"
