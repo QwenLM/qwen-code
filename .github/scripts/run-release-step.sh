@@ -300,6 +300,11 @@ Failed job(s):
 ${failed_jobs}
 BODY
 
+    # `in:title` is a fuzzy full-text search, so the jq filter re-checks the
+    # title exactly: without the trailing " on " a v0.18.1 failure would reuse
+    # an open v0.18.10 issue. The bot-authored issue is preferred because the
+    # `// .[0]` fallback would otherwise hand a human's same-titled issue to
+    # the autofix dispatch below.
     existing_issue="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
@@ -316,6 +321,9 @@ BODY
       issue_number="$(jq -r '.number' <<< "${existing_issue}")"
       issue_url="$(jq -r '.url' <<< "${existing_issue}")"
       issue_author="$(jq -r '.author.login // ""' <<< "${existing_issue}")"
+      # Only a workflow-owned issue may be reused: commenting on and
+      # labelling a human's issue would attach autofix to someone else's
+      # report.
       if [[ "${issue_author}" != "github-actions[bot]" ]]; then
         echo "::warning::Existing ${issue_url} was opened by ${issue_author:-unknown}; creating a workflow-owned issue instead."
         existing_issue=''
@@ -330,6 +338,10 @@ BODY
         still_eligible="$(gh issue list --repo "${GH_REPO}" --state open \
           --search "\"Release Failed for ${RELEASE_TAG}\" in:title no:assignee -linked:pr -label:status/need-information -label:status/need-retesting" \
           --json number --jq "any(.[]; .number == ${issue_number})" || echo 'false')"
+        # Re-query after commenting: a maintainer who has assigned the issue,
+        # linked a PR, or flagged it need-information/need-retesting has taken
+        # it over, and autofix must not dispatch onto it. Inverting this test
+        # is the failure mode to guard against.
         if [[ "${still_eligible}" != "true" ]]; then
           echo "::warning::Reused ${issue_url} looks maintainer-owned (assignee / linked PR / need-information / need-retesting); skipping autofix dispatch."
           exit 0

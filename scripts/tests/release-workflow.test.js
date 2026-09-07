@@ -2102,6 +2102,23 @@ describe('release workflow', () => {
     );
   });
 
+  it('keeps the guard copy of isExpectedMissingGitHubRelease in sync', () => {
+    // The guard ships alone under release.yml's sparse-checkout set, so it
+    // cannot import scripts/lib/release-helpers.js — the copy is deliberate.
+    // Two copies of a fail-closed hinge can drift, and widening only the
+    // guard's copy (a 403 or rate-limit branch) would read a throttled probe
+    // as "release absent" and let the force push proceed over a shipped
+    // version. Pin the bodies together so a one-sided edit goes red here.
+    const bodyOf = (source) =>
+      source
+        .slice(source.indexOf('function isExpectedMissingGitHubRelease'))
+        .split('\n}')[0]
+        .replace(/^export /, '');
+    const guard = readFileSync('scripts/assert-release-version.mjs', 'utf8');
+    const helpers = readFileSync('scripts/lib/release-helpers.js', 'utf8');
+    expect(bodyOf(guard)).toBe(bodyOf(helpers));
+  });
+
   it('wires the guard exit code to the process exit status end to end', () => {
     // The workflow reads the guard's decision from the process exit
     // status. Run the real entry point without mocks — a usage error
@@ -2112,7 +2129,10 @@ describe('release workflow', () => {
       ['scripts/assert-release-version.mjs', '--assert-unreleased='],
       { encoding: 'utf8' },
     );
-    expect(result.status).toBe(2);
+    // 4 rather than 2: the retry loop in run-release-step.sh breaks on any
+    // status other than 2, so a usage error fails fast instead of being
+    // logged three times as a transient probe failure.
+    expect(result.status).toBe(4);
     expect(result.stdout).toContain(
       '::error::assert-unreleased requires a version',
     );

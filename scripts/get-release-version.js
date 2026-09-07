@@ -15,13 +15,9 @@ import {
   readJson,
   validateVersion,
 } from './lib/release-helpers.js';
-import {
-  assertVersionUnreleased,
-  PUBLISHED_PACKAGES,
-  runAssertVersionCli,
-} from './assert-release-version.mjs';
+import { PUBLISHED_PACKAGES } from './assert-release-version.mjs';
 
-export { assertVersionUnreleased, PUBLISHED_PACKAGES };
+export { PUBLISHED_PACKAGES };
 
 function getVersionFromNPM(distTag) {
   const command = `npm view @qwen-code/qwen-code version --tag=${distTag}`;
@@ -530,18 +526,19 @@ export function getVersion(options = {}) {
 }
 
 /**
- * CLI dispatch, exported for tests: `--assert-unreleased=<version>` runs
- * the push-time guard; anything else prints the version JSON. Returns the
- * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
- * benign refusal the workflow marks to skip the release-failed
- * notification), 2 = probe or usage failure. 1 is never returned on
- * purpose: node exits 1 on uncaught errors, and those must stay on the
- * real-failure path.
+ * CLI dispatch, exported for tests: prints the version JSON and returns the
+ * exit code.
+ *
+ * The push-time guard is deliberately *not* reachable from here. This file is
+ * supplied by the operator-selected release ref, while the guard must run from
+ * the workflow-pinned SHA — `release.yml` invokes
+ * `.release-workflow/scripts/assert-release-version.mjs` directly, and
+ * `scripts/tests/release-workflow.test.js` forbids the
+ * `node scripts/get-release-version.js --assert-unreleased=` spelling. Adding a
+ * dispatch back here would let a ref that has already shipped supply its own
+ * relaxed guard and force-push over a published version.
  */
 export function runCli(args) {
-  if (args['assert-unreleased'] !== undefined) {
-    return runAssertVersionCli(args['assert-unreleased']);
-  }
   console.log(JSON.stringify(getVersion(args), null, 2));
   return 0;
 }
