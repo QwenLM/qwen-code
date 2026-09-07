@@ -1733,6 +1733,37 @@ process.stdout.write(JSON.stringify({
     expect(JSON.stringify(out)).toContain('filter.evil.smudge');
   });
 
+  it('runs no planted post-checkout hook when it CREATES the probe tree', async () => {
+    // `worktree add` materialises every file, and a checkout that does so runs a
+    // `post-checkout` hook (measured) — a surface the filter screen cannot see,
+    // since it enumerates `filter.*` keys and this is `core.hooksPath`. The
+    // fixture already points that key at a directory of the test's own, which is
+    // the shape a plant in the never-wiped common dir takes. This is the only
+    // `worktree add` in this command's path, and the restore and the revert both
+    // carry the inert pair, so a canary here can only have come from creation —
+    // which is what makes this pin the flags on that spawn rather than restate
+    // the ones beside it.
+    const { wt, base } = scaffoldModifiedPr();
+    const canary = join(outside, 'PWNED-creation-hook');
+    const hooksDir = git(repo, 'config', 'core.hooksPath').trim();
+    // Written after the scaffold's commits: a committed hook would be checked
+    // out into the probe tree and this would measure the fixture, not the spawn.
+    writeFileSync(
+      join(hooksDir, 'post-checkout'),
+      `#!/bin/sh\ntouch ${canary}\n`,
+    );
+    chmodSync(join(hooksDir, 'post-checkout'), 0o755);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(canary)).toBe(false);
+  });
+
   it('refuses the REVERT checkout when the baseline suite planted a filter mid-run', async () => {
     // The restore is screened once at the top of each run, but what runs
     // BETWEEN the restore and the revert is the PR's own test code. It can
@@ -2458,8 +2489,12 @@ if (!fs.existsSync(stamp) && args.includes('ls-files') && args.includes('-v')) {
   fs.writeFileSync(stamp, '');
   // BOTH sides: a reverse-apply runs the clean and the smudge, where a
   // pathspec checkout runs only the smudge.
-  spawnSync(real, ['config', 'filter.evil.smudge', ${JSON.stringify(`touch ${canary}`)}], { cwd: ${JSON.stringify(repo)} });
-  spawnSync(real, ['config', 'filter.evil.clean', ${JSON.stringify(`touch ${canary}-clean`)}], { cwd: ${JSON.stringify(repo)} });
+  // Both sides pass the content through. A filter that only touches the canary
+  // hands git an EMPTY result, and then the reverse-apply fails on a context
+  // mismatch instead of executing the plant and rewriting the tree — the arm
+  // would report a benign failure and the witness would be about a message.
+  spawnSync(real, ['config', 'filter.evil.smudge', ${JSON.stringify(`touch ${canary}; cat`)}], { cwd: ${JSON.stringify(repo)} });
+  spawnSync(real, ['config', 'filter.evil.clean', ${JSON.stringify(`touch ${canary}-clean; cat`)}], { cwd: ${JSON.stringify(repo)} });
 }
 const r = spawnSync(real, args, {
   cwd: process.cwd(),
@@ -2488,16 +2523,17 @@ process.exit(r.status === null ? 1 : r.status);
         // planting anything — a detector that goes dark reads as a green
         // witness for a screen that is not there.
         expect(existsSync(stamp)).toBe(true);
-        // The APPLY's refusal, not the restore's. Their texts differ, and only
-        // this one proves the plant landed after the restore had already
+        // Damage first, because it is the assertion that matters: neither side
+        // of the filter ran on the reviewer's host.
+        expect(existsSync(canary)).toBe(false);
+        expect(existsSync(`${canary}-clean`)).toBe(false);
+        // Then the APPLY's refusal, not the restore's. Their texts differ, and
+        // only this one proves the plant landed after the restore had already
         // passed — an arm that fired too early fails here rather than passing
         // for the wrong reason.
         expect(got.verdict).toBe('inconclusive');
         expect(got.detail).toContain('reverse-apply would EXECUTE them');
         expect(got.detail).toContain('filter.evil.smudge');
-        // Damage: neither side of the filter ran on the host.
-        expect(existsSync(canary)).toBe(false);
-        expect(existsSync(`${canary}-clean`)).toBe(false);
       } finally {
         process.env['PATH'] = savedPath;
         rmSync(shimDir, { recursive: true, force: true });
