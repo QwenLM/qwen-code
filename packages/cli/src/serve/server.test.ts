@@ -728,6 +728,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -806,6 +807,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
+      f !== 'session_worktree_reset_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -872,6 +874,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -12538,7 +12541,7 @@ describe('createServeApp', () => {
     });
 
     it.each(['live', 'probe-error'] as const)(
-      'preserves a worktree when post-spawn cleanup is inconclusive (%s)',
+      'removes an unowned worktree when post-spawn cleanup is inconclusive (%s)',
       async (cleanupState) => {
         const generationGuard = createWorkspaceGenerationGuard();
         const removed: string[] = [];
@@ -12609,7 +12612,10 @@ describe('createServeApp', () => {
               opts: { requireZeroAttaches: true },
             },
           ]);
-          expect(removed).toEqual([]);
+          // Relocation never ran, so nothing can own the checkout: the
+          // worktree is removed even though the session cleanup outcome was
+          // inconclusive (live summary / probe error).
+          expect(removed).toEqual(['my-task']);
         } finally {
           mockWt.impl = undefined;
         }
@@ -16685,7 +16691,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps an unlocated restored prompt compatible without attesting isolation', async () => {
+    it('fails closed for an unlocated active restored prompt instead of attesting isolation', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -16725,6 +16731,76 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
+        // An active restored prompt whose cwd the bridge never reported is
+        // unlocated: the restore must fail closed rather than assigning the
+        // worktree without relocation or attestation.
+        expect(res.status).toBe(500);
+        expect(res.body.error).toBe('Active session is outside its worktree');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'wt-session',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'restored-client',
+          state: {},
+          hasActivePrompt: true,
+        }),
+      });
+      // No persisted source and none requested, so this is not a Channel
+      // restore and the route asks the bridge for no deferral. With
+      // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
+      // question during the cold restore, and that response reports an
+      // active prompt while carrying no `currentCwd` at all.
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({});
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        // The session is inside its checkout — a non-suppressed restore lets
+        // the child restore its own worktree context — and relocating it is
+        // impossible while its prompt is live. It keeps the worktree metadata
+        // without the attestation the route cannot earn, and survives.
         expect(res.status).toBe(200);
         expect(res.body.worktree).toEqual({
           slug: 'my-task',
@@ -16732,11 +16808,12 @@ describe('createServeApp', () => {
           branch: 'worktree-my-task',
         });
         expect(res.body.worktreeState).toBeUndefined();
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-        });
+        expect(bridge.loadCalls[0]).not.toHaveProperty(
+          'suppressWorktreeContextRestore',
+        );
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
         expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+        expect(bridge.killCalls).toHaveLength(0);
       } finally {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
@@ -17195,7 +17272,8 @@ describe('createServeApp', () => {
           second,
         ]);
 
-        expect(firstResponse.status).toBe(500);
+        expect(firstResponse.status).toBe(409);
+        expect(firstResponse.body.code).toBe('worktree_marker_missing');
         expect(secondResponse.status).toBe(200);
         expect(bridge.loadCalls).toHaveLength(2);
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
@@ -17562,8 +17640,16 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry: createWorkspaceRegistry([runtime]) },
       );
+      // The restore pre-reads the sidecar to pick its worktree-ownership lock
+      // key, so the generation must close on the post-load integrity read:
+      // the bridge has registered the cold session by then, which is what
+      // this cleanup path is about.
+      let sidecarReads = 0;
       mockWt.readSidecarStrict = async () => {
-        generationGuard.close();
+        sidecarReads++;
+        if (sidecarReads === 2) {
+          generationGuard.close();
+        }
         return { state: 'missing' };
       };
 
@@ -17694,7 +17780,8 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(500);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_marker_missing');
         expect(bridge.detachCalls).toEqual([
           { sessionId: 'wt-session', clientId: 'attached-client' },
         ]);
