@@ -23,6 +23,15 @@ import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 
+// A hung-runner bound, not a performance budget, so it rides the suite's own
+// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
+// quiet machine. Release run 33957952281: this harness's heaviest case costs
+// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
+// stub's recording — so a timeout surfaced as a content mismatch.
+const subprocessTimeoutMs = Number(
+  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+);
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
@@ -202,6 +211,15 @@ const verificationGateBodies = [
   verificationGateSteps[0] ?? '',
   reviewVerificationRunner,
 ];
+const quotedCriticalWitness = (label = '') =>
+  [
+    '**[Suggestion]** Add a regression assertion for the fallback path.',
+    '',
+    ...(label ? [label] : []),
+    '```text',
+    '**[Critical]** quoted fixture output',
+    '```',
+  ].join('\n');
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -2055,7 +2073,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -7002,6 +7020,13 @@ exit 1
     // unclassified comments stay open instead of driving more code changes.
     expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
     expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const leadingCriticalDefinitions = (
+      `${workflow}\n${reviewVerificationRunner}`.match(
+        /def leading_critical:\s*\n\s*gsub\([^\n]+\)\s*\n\s*\| startswith\([^\n]+\);/g,
+      ) ?? []
+    ).map((definition) => definition.replace(/\s+/g, ' ').trim());
+    expect(leadingCriticalDefinitions).toHaveLength(9);
+    expect(new Set(leadingCriticalDefinitions).size).toBe(1);
     const inlineFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -7051,6 +7076,21 @@ exit 1
         author_association: 'MEMBER',
         body: 'The null branch still crashes.',
       },
+      {
+        id: 16,
+        created_at: '2026-01-02T00:00:05Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness('Witness:'),
+      },
+      {
+        id: 17,
+        in_reply_to_id: 16,
+        created_at: '2026-01-02T00:00:06Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'The assertion should cover the fallback path too.',
+      },
     ];
     const reviews = [
       {
@@ -7093,7 +7133,7 @@ exit 1
           },
         ),
       );
-    expect(countInline(false)).toBe(5);
+    expect(countInline(false)).toBe(7);
     // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
     // but MAINTAINER comments (13) stay actionable regardless of wording —
     // the lexical **[Critical]** test applies only to the bot's own
@@ -7129,7 +7169,10 @@ exit 1
         submitted_at: '2026-01-02T00:00:01Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: 'Looks good overall',
+        body: [
+          '<!-- hidden from readers',
+          '**[Critical]** invisible marker',
+        ].join('\n'),
       },
       {
         id: 22,
@@ -7137,7 +7180,16 @@ exit 1
         submitted_at: '2026-01-02T00:00:02Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: '**[Critical]** memory leak in the owner route',
+        body: [
+          '<!-- rendered metadata -->',
+          '',
+          '\uFEFF',
+          '**[Critical]** Blocking finding(s) follow.',
+          '',
+          '⚠️ Downgraded from Request changes to Comment: self-PR.',
+          '',
+          '**[Critical]** memory leak in the owner route',
+        ].join('\n'),
       },
       {
         id: 23,
@@ -7146,6 +7198,14 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableReviews = (criticalOnly, over = []) =>
@@ -7176,10 +7236,11 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
         ),
       );
-    // All four are actionable while suggestions are in scope; in
-    // Critical-only mode only the BOT's non-Critical COMMENTED review is
-    // excluded — the maintainer's COMMENTED review stays actionable.
-    expect(countActionableReviews(false)).toBe(4);
+    // All five are actionable while suggestions are in scope. In Critical-only
+    // mode, the rendered-invisible residue ahead of 22 still leaves its
+    // Critical marker leading, while the unclosed comment in 21 and quoted
+    // marker in 24 stay non-Critical.
+    expect(countActionableReviews(false)).toBe(5);
     expect(countActionableReviews(true)).toBe(3);
     // Over-budget: the maintainer's COMMENTED review defers; their formal
     // CHANGES_REQUESTED (20) still cuts through.
@@ -7210,6 +7271,13 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: '@qwen-code /review',
+      },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableIssue = (criticalOnly, over = []) =>
@@ -7244,7 +7312,7 @@ exit 1
     // scope; the command-style comment is always excluded. In Critical-only
     // mode the maintainer's comment STAYS actionable alongside the bot's
     // Critical one — only bot non-Critical output is filtered.
-    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(false)).toBe(3);
     expect(countActionableIssue(true)).toBe(2);
     // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
     // still counts.
@@ -7285,6 +7353,15 @@ exit 1
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
         html_url: 'https://github.com/test/pull/1#review-23',
       },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#review-24',
+      },
     ];
     const countDeferredReviews = (over = []) =>
       Number(
@@ -7311,11 +7388,9 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
         ),
       );
-    // Only the BOT's COMMENTED non-Critical review is deferred;
-    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
-    // COMMENTED review are not.
-    expect(countDeferredReviews()).toBe(1);
-    expect(countDeferredReviews(['maintainer'])).toBe(2);
+    // The ordinary suggestion and the fenced-marker suggestion are deferred.
+    expect(countDeferredReviews()).toBe(2);
+    expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
       /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
@@ -7350,14 +7425,14 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
         ),
       );
-    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
-    // unclassified comment (13) stays actionable, and Critical (11),
-    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
-    // never deferred.
-    expect(countDeferredInline()).toBe(1);
+    // The ordinary suggestion (12), fenced-marker root (16), and its reply
+    // (17) defer together. The maintainer's unclassified comment (13) stays
+    // actionable, as do Critical (11), reply-to-Critical (14), and the
+    // CHANGES_REQUESTED-associated comment (15).
+    expect(countDeferredInline()).toBe(3);
     // Over-budget maintainer: their unclassified comment (13) joins the
     // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
-    expect(countDeferredInline(['maintainer'])).toBe(2);
+    expect(countDeferredInline(['maintainer'])).toBe(4);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
       /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -7396,6 +7471,14 @@ exit 1
         body: '**[Suggestion]** consider caching this lookup',
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
       },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#issuecomment-34',
+      },
     ];
     const countDeferredIssue = (over = []) =>
       Number(
@@ -7422,10 +7505,10 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(issueComments) },
         ),
       );
-    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
-    // comment (30), the Critical (31), and the command (32) are not.
-    expect(countDeferredIssue()).toBe(1);
-    expect(countDeferredIssue(['maintainer'])).toBe(2);
+    // Both bot suggestions are deferred; the maintainer's normal comment
+    // (30), the Critical (31), and the command (32) are not.
+    expect(countDeferredIssue()).toBe(2);
+    expect(countDeferredIssue(['maintainer'])).toBe(3);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
@@ -7503,6 +7586,18 @@ exit 1
           humanC('onetime', '2026-06-14T12:00:00Z'),
           humanC('looper', '2026-07-01T12:00:00Z'),
           humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC(
+            'quoted-issue',
+            '2026-07-02T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
+          humanC(
+            'quoted-issue',
+            '2026-07-03T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
           humanC(
             'looper',
@@ -7575,6 +7670,20 @@ exit 1
             submitted_at: '2026-07-02T12:30:00Z',
             body: 'feedback delivered through a review',
           },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-03T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
           // Request changes / APPROVED reviews are never deferrable, so two
           // consumed-span batches of each must not count (both authors absent):
           // the census mirrors the deferred renderer's `state == "COMMENTED"`.
@@ -7626,6 +7735,32 @@ exit 1
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:30:00Z',
             body: 'feedback delivered through an inline comment',
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            id: 902,
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:20:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 902,
+            created_at: '2026-07-03T13:20:00Z',
+            body: 'The same fallback path is still uncovered.',
           },
           // Critical root comment (id 901) that replyguy's replies attach to.
           {
@@ -7689,17 +7824,31 @@ exit 1
         ],
         { encoding: 'utf8' },
       );
-      // Only the two looped authors land here; every protected author above
-      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
-      // two consumed-span batches yet stays absent — dropping any one of the
-      // census's deferral-mirroring exclusions surfaces one of them and fails.
-      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
+      // The four fenced-marker authors are regular feedback in every input
+      // shape, including a reply to a fenced-marker root. The protected
+      // authors (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/
+      // sentinelvictim) still stay absent.
+      expect(JSON.parse(overOut)).toEqual([
+        'looper',
+        'quoted-inline',
+        'quoted-issue',
+        'quoted-reply',
+        'quoted-reviewer',
+        'reviewer2',
+      ]);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
     }
     // The deferral note names over-budget authors with the escapes.
     expect(prepareBranchAndFeedbackStep).toContain('is at this window');
     expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'start your comment with **[Critical]**',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '请以 **[Critical]** 开头评论',
+    );
+    expect(designDoc).toContain('starting a comment with **[Critical]**');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the
@@ -8944,6 +9093,57 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       'strip_runner_channels npm run test',
     );
+    // The load clamps must actually reach every vitest the gate launches.
+    // Dropping the expansion from any of the three legs is silent —
+    // `set -eo pipefail` without `-u` swallows an empty array — and the
+    // gate reverts to 15s timeouts, unbounded workers and coverage on,
+    // which is the incident this script's clamps exist to prevent.
+    // Pinned on reviewVerificationRunner only: the inline issue-fix gate
+    // keeps unclamped copies by design — RUNNER_NAME is present there, so
+    // its package legs keep the config-level clamps, and its contracts leg
+    // accepts the web-shell 5s default.
+    expect(reviewVerificationRunner).toContain(
+      '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
+    expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and the array definition sits above its consumers: `set -eo
+    // pipefail` without `-u` expands a not-yet-set array to zero words, so
+    // a definition moved below them silently empties every clamp while the
+    // position-blind toContains above stay green.
+    expect(
+      reviewVerificationRunner.indexOf('VITEST_LOAD_CLAMPS=('),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+      ),
+    );
+    // ...and above the contracts call: run_check_no_ab spawns a child bash
+    // that inherits exported variables only, so an export missing or moved
+    // below the call leaves the drift leg at vitest's 5s default.
+    expect(
+      reviewVerificationRunner.indexOf('export AUTOFIX_VITEST_FLAGS'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    );
+    // ...and the unset stays below the contracts call: the child inherits
+    // the export at spawn time, so an unset moved above the call (or
+    // deleted) strips the clamps from the drift leg while every
+    // establish-side pin above stays green.
+    expect(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('unset AUTOFIX_VITEST_FLAGS'),
+    );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
     const verdictGateAt = reviewVerificationRunner.indexOf(
@@ -9608,6 +9808,83 @@ exit 1
     );
   });
 
+  it('never counts or renders the salvage note as actionable feedback (R5-3)', () => {
+    // The salvage step posts the historical-head note with CI_BOT_PAT —
+    // the REVIEW_BOT account the fleet scan counts as actionable. Its
+    // marker must sit in every exclusion that counts or renders REVIEW_BOT
+    // issue comments: without it, a salvaged APPROVE (N_REVIEWS counts
+    // only CHANGES_REQUESTED/COMMENTED) flips "nothing new since
+    // watermark" into a full review-address round dispatched on the bot's
+    // own note, and the NEWEST computation advances the watermark onto
+    // it. Behavioral witness first: the scan's N_ISSUE_COMMENTS filter,
+    // extracted VERBATIM, replayed over the exact note body plus one
+    // human comment.
+    const scanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    const filterDef = scanStep.match(/BOT_COMMENT_FILTER='([^']+)'/)?.[1];
+    expect(filterDef).toContain('qwen-review-salvaged');
+    const cmd =
+      scanStep.match(/N_ISSUE_COMMENTS="\$\(jq[\s\S]*?ic\.json"\)"/)?.[0] ?? '';
+    const jqProgram = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"));
+    expect(jqProgram).toContain('| length');
+    const note = {
+      user: { login: 'qwen-code-ci-bot' },
+      author_association: 'NONE',
+      created_at: '2026-08-02T00:00:00Z',
+      body:
+        '<!-- qwen-review-salvaged e2b07356f5d2e56197a89e438535edfc8e23823e -->\n\n' +
+        '⏳ **Historical-head review** — head moved while this review was in flight.',
+    };
+    const human = {
+      user: { login: 'maintainer' },
+      author_association: 'MEMBER',
+      created_at: '2026-08-02T01:00:00Z',
+      body: 'please address the remaining findings',
+    };
+    const countComments = (comments) =>
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-08-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'bf',
+          filterDef,
+          '--arg',
+          'cf',
+          '^\\s*@qwen-code /',
+          jqProgram,
+        ],
+        { input: JSON.stringify(comments), encoding: 'utf8' },
+      ).trim();
+    // The note alone adds nothing actionable; the human comment still
+    // counts beside it.
+    expect(countComments([note])).toBe('0');
+    expect(countComments([note, human])).toBe('1');
+    expect(countComments([human])).toBe('1');
+    // Shape pin: the marker rides the shared alternation at the four
+    // sibling sites that count or render REVIEW_BOT issue comments
+    // (NEWEST, LIVE_NEW, and both feedback renderers) plus the scan
+    // filter's BOT_COMMENT_FILTER — and at no other site (the
+    // conflict-wake and over-budget filters already exclude REVIEW_BOT
+    // by login).
+    expect(
+      workflow.match(/qwen-review-ack\|qwen-review-salvaged/g) ?? [],
+    ).toHaveLength(5);
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',
@@ -9830,7 +10107,7 @@ exit 1
         ],
         // spawnSync blocks the event loop, so vitest's async timeout can't
         // fire — bound each subprocess directly against a hung runner.
-        { encoding: 'utf8', timeout: 10_000 },
+        { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
@@ -9905,25 +10182,21 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
@@ -9967,6 +10240,11 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
+      expect(step).toContain(
+        'echo \'QWEN_SKIP_LATENCY_BUDGETS=1\' >> "${GITHUB_ENV}"',
+      );
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -9992,10 +10270,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -10003,6 +10280,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
@@ -11953,7 +12233,10 @@ exit 1
         join(dir, 'npm'),
         [
           '#!/usr/bin/env bash',
-          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          // One bracketed line per argv word: $*-joined logging renders a
+          // joined-blob flag identically to separate words, so a [*]-for-
+          // [@] regression in the contracts script would survive it.
+          'printf \'[%s]\\n\' "$@" >> "${NPM_LOG}"',
           'if [[ "$*" == "run check-i18n" ]]; then',
           '  exit "${I18N_EXIT:-0}"',
           'fi',
@@ -11977,14 +12260,45 @@ exit 1
 
       expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
+        '[run]',
+        '[check-i18n]',
       ]);
 
       writeFileSync(npmLog, '');
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
+      ]);
+
+      // web-shell's config sets no timeouts and has no RUNNER_NAME branch,
+      // so without caller flags the drift test runs at vitest's 5s default;
+      // the review gate launches it on a saturating shared host and hands
+      // its clamps down through this variable. The issue-fix gate leaves
+      // it unset (the case above) and accepts the 5s default there.
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          AUTOFIX_VITEST_FLAGS: '--maxWorkers=25% --testTimeout=60000',
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[--maxWorkers=25%]',
+        '[--testTimeout=60000]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
       writeFileSync(npmLog, '');
@@ -11995,7 +12309,7 @@ exit 1
           I18N_EXIT: '1',
         }).status,
       ).toBe(1);
-      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('[run]\n[check-i18n]');
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
 
       writeFileSync(npmLog, '');
@@ -12415,7 +12729,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13446,7 +13760,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -13946,7 +14260,7 @@ exit 1
           encoding: 'utf8',
           // spawnSync blocks the event loop, so vitest's async timeout cannot
           // fire — bound each subprocess directly against a hung runner.
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -14668,7 +14982,7 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  }, 30000);
+  });
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -14862,6 +15176,62 @@ exit 1
       expect(testSide.out).toContain('SURVIVED');
       expect(testSide.out).not.toContain('REJECT:');
       expect(testSide.advisory).toContain('test-side defect claim');
+      // A fenced marker on a source comment is not a second Critical claim.
+      // The real test-side Critical keeps the advisory path; if either of the
+      // two gate predicates treats the quoted marker as a signal, this turns
+      // into a source-side rejection.
+      const quotedSource = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedSource.out).toContain('SURVIVED');
+      expect(quotedSource.out).not.toContain('REJECT:');
+      expect(quotedSource.advisory).toContain('test-side defect claim');
+      const quotedRootReply = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n103\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+            {
+              id: 103,
+              in_reply_to_id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: 'The same fallback path is still uncovered.',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedRootReply.out).toContain('SURVIVED');
+      expect(quotedRootReply.out).not.toContain('REJECT:');
+      expect(quotedRootReply.advisory).toContain('test-side defect claim');
       // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
       // resolved alongside must not break the demotion.
       expect(
@@ -17229,7 +17599,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  }, 30000);
+  });
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -17712,7 +18082,7 @@ exit 1
     expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \[\[ "\$\{STALE_BASE_DEFERRED:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -17730,6 +18100,8 @@ exit 1
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
     const STALE_BASE =
       '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
+    const STALE_BASE_DEFER =
+      '🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind `main`, but a review of this PR is still in flight (#10110).';
 
     const run = (
       priorHeadlines,
@@ -17740,6 +18112,7 @@ exit 1
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        staleBaseDeferred = false,
         agentTimeout = '',
       } = {},
     ) => {
@@ -17769,7 +18142,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -17883,6 +18256,18 @@ exit 1
     expect(
       run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
     ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Same for a DEFERRED stale-base refresh (#10110): the round failed
+    // because the base is stale AND a review was in flight — the fix was
+    // never re-attempted on a fresh base, so the failure is not evidence
+    // about the PR. Current-round exemption and prior-headline streak reset
+    // both mirror the retry branch.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseDeferred: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(run([FAIL, FAIL, STALE_BASE_DEFER, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -20993,7 +21378,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -23676,10 +24061,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
     // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+    // replay under bash — this outgrows vitest's 5s default on slow runners
+    // (it timed out at ~6.4s on the PR head), so it runs on the suite
+    // ceiling in scripts/tests/vitest.config.ts rather than a per-test one.
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside
@@ -24278,7 +24663,7 @@ describe('run-agent idle watchdog', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24521,7 +24906,7 @@ describe('stale sandbox container cleanup', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24567,5 +24952,247 @@ describe('stale sandbox container cleanup', () => {
     expect(r.failure).toContain('timeout (1200ms)');
     expect(r.failure).not.toContain('idle-timeout');
     expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+});
+
+describe('report-step stale-base hold while review-pr is in flight (#10110)', () => {
+  // The scan's dispatch gate (#8888) covers every push the SCAN can make,
+  // but the report step's stale-base retry calls update-branch hours after
+  // that gate last looked — the one loop-owned head move outside the hold.
+  // Full rationale → qwen-autofix.md#af-155.
+
+  it('probes for a live review before the report-step update-branch', () => {
+    const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
+    const updateAt = reviewAddressReportStep.indexOf(
+      'gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}"',
+    );
+    expect(probeAt).toBeGreaterThan(-1);
+    expect(updateAt).toBeGreaterThan(probeAt);
+    // Both probe layers, mirroring the scan gate: the rollup filter (any
+    // started review-pr check) and the runs-API fallback for lifecycle runs
+    // still parked in the delay window with no check-run yet. The probe is
+    // lifecycle-scoped by construction — a command run carries no PR-head
+    // check and the runs fallback is event-scoped (af-155).
+    expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
+    expect(reviewAddressReportStep).toContain(
+      'actions/workflows/qwen-code-pr-review.yml',
+    );
+    // The update runs only on a falsy probe — fail-open: a probe error must
+    // not wedge stale-base recovery, so errors read as "no review live".
+    // R32-1: the deferral is only honest while a next round exists — at
+    // the cap the scan's round gate parks the PR before any report step,
+    // so the hold yields to the refresh there.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${REVIEW_LIVE_R}" == \'true\' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then\n                          STALE_BASE_DEFERRED=true\n                        elif gh api -X PUT',
+    );
+    expect(designDoc).toContain('At the cap itself (MARK_ROUND ==');
+  });
+
+  it('refreshes instead of deferring on the capped round (replayed decision)', () => {
+    // The hold's branch choice, executed: the block from the rollup probe
+    // through the update-branch PUT runs verbatim with a stub gh (live
+    // rollup, PUT logged) and the real jq. Below the cap a live review
+    // defers; AT the cap (MARK_ROUND == MAX_ROUNDS) the same live review
+    // must yield to the refresh, because the next scan the deferred
+    // headline promises is the one the round gate skips (R32-1).
+    const start = reviewAddressReportStep.indexOf(
+      'ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup',
+    );
+    const putAt = reviewAddressReportStep.indexOf(
+      'elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch"',
+      start,
+    );
+    const end =
+      reviewAddressReportStep.indexOf('\n                        fi', putAt) +
+      '\n                        fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(putAt).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(putAt);
+    const block = reviewAddressReportStep.slice(start, end);
+    const decide = ({ markRound, maxRounds, live }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-hold-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  *"--json statusCheckRollup"*) printf "%s\\n" "$ROLLUP_JSON" ;;',
+            '  *"update-branch"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const rollup = live
+          ? [
+              {
+                name: 'review-pr',
+                workflowName: '🧐 Qwen Pull Request Review',
+                status: 'IN_PROGRESS',
+              },
+            ]
+          : [];
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -euo pipefail',
+              'PR=1; REPO=o/r; REPORT_HEAD=sha-head',
+              `MARK_ROUND=${markRound}; MAX_ROUNDS=${maxRounds}`,
+              'STALE_BASE_DEFERRED=false; STALE_BASE_RETRY=false',
+              block,
+              'printf "deferred=%s retry=%s\\n" "$STALE_BASE_DEFERRED" "$STALE_BASE_RETRY"',
+            ].join('\n'),
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              ROLLUP_JSON: JSON.stringify(rollup),
+            },
+          },
+        ).trim();
+        const put = readFileSync(ghLog, 'utf8').includes('update-branch');
+        return `${out} put=${put}`;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Below the cap, a live review defers and the PUT is withheld.
+    expect(decide({ markRound: 5, maxRounds: 10, live: true })).toBe(
+      'deferred=true retry=false put=false',
+    );
+    // At the cap the same live review yields: the PUT is issued and the
+    // deferred headline (with its "next scan" promise) is never taken.
+    expect(decide({ markRound: 10, maxRounds: 10, live: true })).toBe(
+      'deferred=false retry=true put=true',
+    );
+    // No live review: the refresh runs whatever the round.
+    expect(decide({ markRound: 10, maxRounds: 10, live: false })).toBe(
+      'deferred=false retry=true put=true',
+    );
+  });
+
+  it('defers with the retry branch sentinel and an exempted headline', () => {
+    // Deferred keeps the exact semantics of the retry branch minus the
+    // update: the 9999 sentinel keeps feedback live so the next round
+    // re-runs and ITS report step refreshes the base once the review landed.
+    const deferred = reviewAddressReportStep.match(
+      /elif \[\[ "\$\{STALE_BASE_DEFERRED\}" == 'true' \]\]; then[\s\S]*?(?=\n {16}else)/,
+    )?.[0];
+    expect(deferred).toBeTruthy();
+    expect(deferred).toContain("MARK_TS='9999-12-31T23:59:59Z'");
+    expect(deferred).toContain('deferred a stale-base refresh');
+    expect(deferred).toContain('#10110');
+    // The deferred headline joins the streak-reset needles: a round that
+    // failed because it was reviewed at the wrong moment is not evidence
+    // about the PR.
+    expect(reviewAddressReportStep).toContain(
+      '|| "${H}" == *"deferred a stale-base refresh"*',
+    );
+  });
+
+  it('detects a live review through the replayed rollup filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /REVIEW_LIVE_R="\$\(jq -r '([\s\S]*?)' <<< "\$\{ROLLUP_R\}"/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (checks) =>
+      execFileSync('jq', ['-r', filter], {
+        input: JSON.stringify(checks),
+        encoding: 'utf8',
+      }).trim();
+    const live = {
+      name: 'review-pr',
+      workflowName: '🧐 Qwen Pull Request Review',
+      status: 'IN_PROGRESS',
+    };
+    expect(probe([live])).toBe('true');
+    expect(probe([{ ...live, status: 'QUEUED' }])).toBe('true');
+    // A finished review does not hold, and neither does a live check that
+    // is not the review workflow's review-pr.
+    expect(
+      probe([{ ...live, status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    ).toBe('false');
+    expect(probe([{ ...live, workflowName: 'CI' }])).toBe('false');
+    expect(probe([{ ...live, name: 'lint' }])).toBe('false');
+    expect(probe([])).toBe('false');
+  });
+
+  it('detects a delay-parked lifecycle run through the replayed runs filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /jq -r --arg pr "\$\{PR\}" --arg head "\$\{LIVE_HEAD_R\}" '([\s\S]*?)' 2> \/dev\/null \|\| echo/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (runs, pr = '9729', head = 'sha-live') =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'pr', pr, '--arg', 'head', head, filter],
+        {
+          input: JSON.stringify({ workflow_runs: runs }),
+          encoding: 'utf8',
+        },
+      ).trim();
+    const parked = {
+      event: 'pull_request_target',
+      status: 'waiting',
+      head_sha: 'sha-live',
+      pull_requests: [],
+    };
+    expect(probe([parked])).toBe('true');
+    // Matches by PR number too (fork heads may not equal the fetched head).
+    expect(
+      probe([
+        { ...parked, head_sha: 'other', pull_requests: [{ number: 9729 }] },
+      ]),
+    ).toBe('true');
+    // Completed runs, non-lifecycle events, and unrelated runs do not
+    // hold. The command-event exclusion is a DELIBERATE scope, not coverage
+    // (af-155): the hold does not see command runs, and the design doc must
+    // say so instead of claiming a trigger-independent probe.
+    expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
+    expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
+    expect(
+      probe([{ ...parked, head_sha: 'other', pull_requests: [{ number: 1 }] }]),
+    ).toBe('false');
+    // An empty fetched head must not wildcard-match every run.
+    expect(probe([{ ...parked, head_sha: '' }], '9729', '')).toBe('false');
+  });
+
+  it('documents the hold in the design doc', () => {
+    // af-155 is the hold's own entry (af-149 predates it: pinning that
+    // anchor let the section be removed or renumbered with the suite green).
+    expect(designDoc).toContain('<a id="af-155"></a>');
+    expect(designDoc).toContain(
+      'Hold the stale-base refresh while a review-pr is in flight',
+    );
+    expect(designDoc).toContain('deferred a stale-base refresh');
+  });
+
+  it('scopes the hold to lifecycle runs instead of claiming trigger independence (R13-2)', () => {
+    // The probe pair is structurally blind to command-triggered review
+    // runs: they execute against the base branch (their review-pr check
+    // attaches to main's commit, never the PR's rollup) and the runs
+    // fallback is event-scoped to pull_request_target. The docs and the
+    // deferred headline must scope the hold to what it sees, so no reader
+    // relies on protection for command runs that does not exist; the
+    // mechanism fix (a PR-head-visible signal posted by command runs) is
+    // deliberately deferred (af-155).
+    expect(designDoc).not.toContain('trigger-independent');
+    expect(designDoc).toContain('The probe sees');
+    expect(designDoc).toContain('LIFECYCLE runs only');
+    expect(reviewAddressReportStep).toContain(
+      'but a lifecycle review of this PR is still in flight',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Command-triggered reviews are invisible to this probe (af-155)',
+    );
   });
 });

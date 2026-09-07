@@ -593,7 +593,12 @@ export class ExitWorktreeTool extends BaseDeclarativeTool<
     if (typeof params.name !== 'string' || params.name.trim() === '') {
       return 'Parameter "name" must be a non-empty string.';
     }
-    const slugError = GitWorktreeService.validateUserWorktreeSlug(params.name);
+    // `exit_worktree` never CREATES slugs: an existing `pr-<N>` worktree
+    // is necessarily one of the PR-backed ones `--worktree=#<N>` creates,
+    // so the reservation must not lock users out of leaving or removing it.
+    const slugError = GitWorktreeService.validateUserWorktreeSlug(params.name, {
+      allowPrBackedShape: true,
+    });
     if (slugError) return slugError;
 
     if (params.action !== 'keep' && params.action !== 'remove') {

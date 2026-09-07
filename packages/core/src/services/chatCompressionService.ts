@@ -247,6 +247,15 @@ export function computeThresholds(
 
 export type CompactTrigger = 'manual' | 'auto';
 
+/**
+ * Per-text-payload character cap applied to the compaction side-query when
+ * the compaction was triggered by an HTTP 413 request-body overflow
+ * (#10380). The side-query travels through the same byte-limited gateway
+ * as the rejected request, so large tool-result texts are truncated to a
+ * summary-friendly size. Token-driven compactions keep text intact.
+ */
+export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
+
 export interface CompressOptions {
   promptId: string;
   force: boolean;
@@ -298,6 +307,14 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
+  /**
+   * Set when the compression is triggered by an HTTP 413 request-body
+   * overflow rather than a token-count overflow (#10380). The side-query
+   * input then truncates oversized text/tool-result payloads so the
+   * compression request can itself fit under the gateway byte limit that
+   * rejected the main request.
+   */
+  requestPayloadTooLarge?: boolean;
 }
 
 /**
@@ -406,8 +423,15 @@ export class ChatCompressionService {
     // Why this compaction fired, surfaced on the COMPRESSED result so the UI
     // notice is accurate. Defaults by trigger; the gate below upgrades it to
     // 'image_overflow' when the screenshot trigger is what let it through.
-    let triggerReason: CompactionTriggerReason =
-      compactTrigger === 'manual' ? 'manual' : 'token_limit';
+    // 413-driven compactions report 'payload_overflow' so the notice (and the
+    // recorded payload) doesn't claim a token overflow the request never
+    // reached (#10380). The reactive 413 path is force=true, so the
+    // non-forced gate below cannot overwrite this.
+    let triggerReason: CompactionTriggerReason = opts.requestPayloadTooLarge
+      ? 'payload_overflow'
+      : compactTrigger === 'manual'
+        ? 'manual'
+        : 'token_limit';
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);
@@ -599,7 +623,13 @@ export class ChatCompressionService {
     // afterwards.
     let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
     const getColdInput = () => {
-      coldInput ??= slimCompactionInput(sideQueryHistory);
+      coldInput ??= slimCompactionInput(
+        sideQueryHistory,
+        undefined,
+        opts.requestPayloadTooLarge
+          ? { maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP }
+          : undefined,
+      );
       return coldInput;
     };
 
@@ -673,12 +703,17 @@ export class ChatCompressionService {
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
       const slim = getColdInput();
-      if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+      if (
+        slim.stats.imagesStripped > 0 ||
+        slim.stats.documentsStripped > 0 ||
+        slim.stats.textPartsTruncated > 0
+      ) {
         config
           .getDebugLogger()
           .debug(
-            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
-              `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
+              `${slim.stats.documentsStripped} document(s), and truncated ` +
+              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
       }
       // Clamp the output budget to the receiving model's remaining window so
@@ -774,7 +809,14 @@ export class ChatCompressionService {
       usesMainModel &&
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
-      sharedRequestFits;
+      sharedRequestFits &&
+      // The shared request is built from the UNSLIMMED history. A
+      // payload-overflow compaction exists because that exact payload was
+      // just rejected at the gateway's byte limit — re-uploading it would
+      // 413 again (logging a misleading cache-sharing failure) before the
+      // slimmed cold path recovers anyway. Keep 413 recoveries on the
+      // slimmed cold path exclusively (#10380).
+      !opts.requestPayloadTooLarge;
     if (!canShareCache) {
       const reason = !usesMainModel
         ? 'distinct compaction model'
@@ -782,9 +824,11 @@ export class ChatCompressionService {
           ? 'provider does not support cache sharing'
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
-            : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
-              `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
-              `window=${contextLimit}`;
+            : !sharedRequestFits
+              ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+                `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+                `window=${contextLimit}`
+              : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
@@ -1065,8 +1109,16 @@ export class ChatCompressionService {
           {
             workspaceRoot: config.getTargetDir(),
             signal,
-            maxFiles: tuning.maxRecentFiles,
-            maxImages: tuning.maxRecentImages,
+            // A payload-overflow compaction (#10380) exists because the
+            // serialized request exceeded the gateway's BYTE limit while
+            // staying under the token threshold. Restoration re-embeds
+            // full-size image payloads and ~20KB file blocks that the
+            // slimmed side-query never carried — re-inflating the rebuilt
+            // retry request straight back over the same limit and defeating
+            // the recovery. Suppress restoration attachments on this path;
+            // the summary that just fit dominates the retried request.
+            maxFiles: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentFiles,
+            maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
@@ -1144,6 +1196,7 @@ export class ChatCompressionService {
       // token estimation.
       if (
         !usedCacheSharing &&
+        !opts.requestPayloadTooLarge &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&

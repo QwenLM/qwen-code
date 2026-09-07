@@ -34,6 +34,8 @@ import {
   createDebugLogger,
   ToolNames,
   goalToolResultProvenance,
+  goalPauseReasonForFailure,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
@@ -401,6 +403,19 @@ const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
 const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
+/**
+ * Minimum interval between model turns triggered by interim (status
+ * 'running') monitor notifications (#10818). A monitor whose command prints on
+ * every poll emits one <task-notification> per line; without a session-level
+ * minimum interval each pulse starts its own model turn, so a ~0.5 Hz pulse
+ * stream keeps the session permanently busy — Esc cancels the in-flight turn
+ * but the next pulse starts another immediately, and typed input never finds
+ * a clean idle edge. Only interim monitor pulses are gated; terminal
+ * notifications and cron fires stay prompt. Queued pulses still batch-drain
+ * into a single catch-up turn once the window elapses, so no update is lost.
+ */
+export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
+
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
   | { kind: 'image'; value: InlineImageData }
@@ -592,7 +607,11 @@ export const useLlmStream = (
     }
   }, []);
   const failClosedGoalTurn = useCallback(
-    async (binding: GoalTurnBinding, reason: string): Promise<void> => {
+    async (
+      binding: GoalTurnBinding,
+      reason: string,
+      options?: { userCancelled?: boolean; pauseReason?: string },
+    ): Promise<void> => {
       if (!binding.controller.signal.aborted) {
         binding.controller.abort(reason);
       }
@@ -613,6 +632,17 @@ export const useLlmStream = (
               action: 'pause',
               expectedGoalId: binding.permit.goalId,
               expectedRevision: binding.permit.revision,
+              // `reason` is the abort cause, which sibling hosts compare
+              // against sentinel constants and which the debug log wants
+              // verbatim. It is a scheduler diagnostic, so it never reaches
+              // the durable user-facing reason: a caller that has a sentence
+              // for the reader passes it as `pauseReason`, and everything
+              // else falls back to the builder's detail-free wording.
+              reason:
+                options?.pauseReason ??
+                (options?.userCancelled
+                  ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                  : goalPauseReasonForFailure('')),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause invalid Goal tool batch', error);
@@ -2350,7 +2380,9 @@ export const useLlmStream = (
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
           ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
-          : `approached the input token limit for ${activeModel}`;
+          : eventValue?.triggerReason === 'payload_overflow'
+            ? `exceeded the endpoint request-body limit for ${activeModel}`
+            : `approached the input token limit for ${activeModel}`;
       const warningSuffix = eventValue?.warning
         ? `\n⚠️ ${eventValue.warning}`
         : '';
@@ -3912,6 +3944,9 @@ export const useLlmStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
+            ...(allowConcurrentBtwDuringResponse
+              ? { isConcurrentSideQuery: true }
+              : {}),
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
@@ -4184,6 +4219,7 @@ export const useLlmStream = (
               await failClosedGoalTurn(
                 goalBinding,
                 'Goal turn ended without a valid continuation',
+                { userCancelled: turnCancelledRef.current },
               );
             }
           }
@@ -4953,6 +4989,30 @@ export const useLlmStream = (
       }
       let promptId =
         ownerToolCall?.request.prompt_id ?? continuationOwner?.promptId;
+      const pairGoalToolResponsesIntoHistory = async () => {
+        if (!llmClient || llmTools.length === 0) return;
+        const responses = await finalizeToolResponses(
+          config,
+          llmTools.map(({ request, response }) => ({
+            callId: request.callId,
+            toolName: request.name,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+          })),
+          new Map(
+            llmTools.flatMap(({ request }) =>
+              request.prompt_id
+                ? [[request.callId, request.prompt_id] as const]
+                : [],
+            ),
+          ),
+        );
+        llmClient.addHistory({
+          role: 'user',
+          parts: responses.flatMap((entry) => entry.responseParts),
+        });
+      };
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
@@ -4994,6 +5054,7 @@ export const useLlmStream = (
         toolGoalPermit = sharedGoalPermit(toolGoalContexts);
       } catch (error) {
         const callIds = llmTools.map((toolCall) => toolCall.request.callId);
+        await pairGoalToolResponsesIntoHistory();
         markToolsAsSubmitted(callIds);
         const reason = getErrorMessage(error);
         const bindings = new Map<string, GoalTurnBinding>();
@@ -5015,7 +5076,12 @@ export const useLlmStream = (
           bindings.set(binding.turnKey, binding);
         }
         for (const binding of bindings.values()) {
-          await failClosedGoalTurn(binding, reason);
+          // `reason` here is a scheduler diagnostic, not something a user
+          // reads. It stays the abort cause and the error item; the durable
+          // `lastReason` gets the builder's detail-free sentence.
+          await failClosedGoalTurn(binding, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
         }
         addItem(
           {
@@ -5046,11 +5112,14 @@ export const useLlmStream = (
           }
         }
         if (active && activeGoalPermitValid) {
+          await pairGoalToolResponsesIntoHistory();
           markToolsAsSubmitted(
             llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch is missing the active Goal context';
-          await failClosedGoalTurn(active, reason);
+          await failClosedGoalTurn(active, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
           addItem(
             {
               type: MessageType.ERROR,
@@ -5070,11 +5139,14 @@ export const useLlmStream = (
       if (toolGoalPermit) {
         const existing = goalTurnBindingsRef.current.get(toolGoalPermit.turnId);
         if (existing && !sameGoalPermit(existing.permit, toolGoalPermit)) {
+          await pairGoalToolResponsesIntoHistory();
           markToolsAsSubmitted(
             llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch has a stale Goal context';
-          await failClosedGoalTurn(existing, reason);
+          await failClosedGoalTurn(existing, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
           addItem(
             {
               type: MessageType.ERROR,
@@ -5187,6 +5259,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation ended without a result',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         if (
@@ -5294,6 +5367,19 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
+        // This is the branch a cancelled Goal tool batch actually takes: the
+        // controller retained across tool execution feeds the continuation
+        // owner's signal, so pressing Esc while tools run aborts it here
+        // rather than at either of the branches below. `markToolsAsSubmitted`
+        // stops these callIds ever being submitted, so unless the responses
+        // are written now the model's function calls stay unanswered and the
+        // next `/goal resume` sends a history with an unpaired call. The
+        // all-cancelled branch below writes them for the batch it handles;
+        // this branch owes its own batch the same pairing, whether or not
+        // every tool in it was cancelled.
+        if (toolGoalBinding && llmClient) {
+          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
         );
@@ -5301,6 +5387,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');
@@ -5330,9 +5417,16 @@ export const useLlmStream = (
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
         if (toolGoalBinding) {
+          // Every cancellation that reaches here originates in a user action:
+          // either Esc through `cancelOngoingRequest`, or a declined tool
+          // confirmation, which the dialog consumes so `turnCancelledRef`
+          // stays false. Selecting the failure arm on that ref would tell a
+          // user who declined one command that their Goal stopped because a
+          // turn failed.
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');
@@ -5422,6 +5516,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             `Goal turn could not finish: ${errorMessage}`,
+            { pauseReason: goalPauseReasonForFailure(errorMessage) },
           );
         } finally {
           // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
@@ -5537,9 +5632,11 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
         if (toolGoalBinding) {
+          llmClient?.addHistory({ role: 'user', parts: responsesToSend });
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped after a model switch',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         endToolInteraction('cancelled');
@@ -5568,6 +5665,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped: background capacity exhausted',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         endToolInteraction(
@@ -5577,6 +5675,8 @@ export const useLlmStream = (
         );
         return;
       }
+
+      const toolResultPartsForPause = responsesToSend.slice();
 
       // Drain steerable user messages at this sampling boundary and append
       // them after the tool responses as genuine user content.
@@ -5746,13 +5846,25 @@ export const useLlmStream = (
             }
           : undefined;
 
+      // Both exits below leave a batch whose callIds are already marked
+      // submitted, so the responses have to reach history here or the
+      // model's function calls stay unanswered and the next `/goal resume`
+      // sends an unpaired call -- the same pairing the cancellation check
+      // above owes its own batch.
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
+          if (llmClient) {
+            llmClient.addHistory({
+              role: 'user',
+              parts: toolResultPartsForPause,
+            });
+          }
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');
@@ -5761,9 +5873,16 @@ export const useLlmStream = (
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
+        if (llmClient) {
+          llmClient.addHistory({
+            role: 'user',
+            parts: toolResultPartsForPause,
+          });
+        }
         await failClosedGoalTurn(
           toolGoalBinding,
           'Goal tool continuation was preempted',
+          { pauseReason: GOAL_PAUSE_REASON_USER_INTERRUPT },
         );
         endToolInteraction('cancelled');
         return;
@@ -5936,6 +6055,9 @@ export const useLlmStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  // Last time an interim-monitor-led notification batch started a model turn
+  // (#10818 cooldown).
+  const lastInterimMonitorTurnAtRef = useRef(0);
   const goalQueuePendingCount =
     goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0;
   const claimSystemGoalTurn = useCallback((): {
@@ -6160,10 +6282,38 @@ export const useLlmStream = (
   // intact and the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
-      streamingState === StreamingState.Idle &&
-      !isSubmittingQueryRef.current &&
-      notificationQueueRef.current.length > 0
+      streamingState !== StreamingState.Idle ||
+      isSubmittingQueryRef.current ||
+      notificationQueueRef.current.length === 0
     ) {
+      return undefined;
+    }
+    {
+      // #10818: interim monitor pulses arrive at whatever rate the monitored
+      // command prints; without a session-level minimum interval each pulse
+      // starts its own model turn and the session never returns to idle (Esc
+      // cancels the in-flight turn, the next pulse starts another). Gate only
+      // interim (status 'running') monitor-led batches; terminal notifications
+      // and cron fires stay prompt. Checking queue[0] before the cancelled-
+      // monitor prune inside is conservative in the right direction.
+      const leading = notificationQueueRef.current[0]!;
+      if (
+        leading.sendMessageType === SendMessageType.Notification &&
+        leading.monitor?.status === 'running'
+      ) {
+        const elapsed = Date.now() - lastInterimMonitorTurnAtRef.current;
+        if (elapsed < INTERIM_MONITOR_MIN_TURN_INTERVAL_MS) {
+          // Re-fire this effect when the window elapses so queued pulses
+          // still batch into a single catch-up turn even if the monitor
+          // goes quiet in the meantime.
+          const timer = setTimeout(
+            () => setNotificationTrigger((n) => n + 1),
+            INTERIM_MONITOR_MIN_TURN_INTERVAL_MS - elapsed,
+          );
+          return () => clearTimeout(timer);
+        }
+      }
+
       // Consumer-side guard for #7156: this effect can run on a render pass
       // that React batched together with progress setState calls issued from
       // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
@@ -6233,6 +6383,9 @@ export const useLlmStream = (
           splitIdx++;
         }
         const batch = queue.splice(0, splitIdx);
+        if (batch[0]?.monitor?.status === 'running') {
+          lastInterimMonitorTurnAtRef.current = Date.now();
+        }
 
         const now = Date.now();
         for (const item of batch) {
@@ -6262,6 +6415,7 @@ export const useLlmStream = (
           debugLogger.warn('Failed to admit background notification', error);
         });
       });
+      return undefined;
     }
   }, [
     streamingState,

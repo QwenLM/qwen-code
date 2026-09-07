@@ -91,12 +91,15 @@ export function registerSkillHooks(
           continue;
         }
 
+        // A project skill's hooks are repo-supplied: they register only
+        // while the folder is trusted (the caller's gate) and fire only
+        // while it still is (the event handler re-checks at fire time).
         sessionHooksManager.addSessionHook(
           sessionId,
           eventName,
           matcherPattern,
           hookConfig,
-          { skillRoot: skill.skillRoot },
+          { skillRoot: skill.skillRoot, trustGated: skill.level === 'project' },
         );
 
         registeredCount++;
@@ -158,7 +161,9 @@ function prepareHookConfig(
  *
  * Note: This is typically not needed as session hooks are cleared
  * when the session ends. However, it can be useful for cleanup
- * in certain scenarios.
+ * in certain scenarios. Folder-trust revocation does not go through it:
+ * a project skill's hooks are registered trust-gated and re-checked at
+ * fire time, so no per-skill tracking is needed to silence them.
  *
  * @param sessionHooksManager - The session hooks manager instance
  * @param sessionId - The current session ID

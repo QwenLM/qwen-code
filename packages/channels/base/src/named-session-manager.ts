@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import process from 'node:process';
 import { canonicalizeWorkspacePath } from './paths.js';
 import type { SessionTarget } from './types.js';
@@ -28,12 +28,18 @@ export interface NamedSessionOwnerInput {
 export interface NamedSessionView {
   name: string;
   status: 'open' | 'closed';
-  isolation: 'shared';
+  isolation: NamedSessionIsolation;
   active: boolean;
 }
 
 export interface NamedSessionSelection extends NamedSessionView {
   sessionId: string;
+}
+
+export interface NamedSessionTaskReference {
+  taskName: string;
+  status: 'open' | 'closed';
+  target: SessionTarget;
 }
 
 export interface NamedSessionManagerOptions {
@@ -45,11 +51,13 @@ export interface NamedSessionManagerOptions {
   now?: () => number;
 }
 
+export type NamedSessionIsolation = 'shared' | 'worktree';
+
 interface StoredTask {
   name: string;
   sessionId: string;
   cwd: string;
-  isolation: 'shared';
+  isolation: NamedSessionIsolation;
   status: 'open' | 'closed';
   target: SessionTarget;
   createdAt: number;
@@ -67,6 +75,7 @@ interface StoredOwner {
 
 interface StoredRegistry {
   version: 1;
+  workspaceCwd: string;
   owners: StoredOwner[];
 }
 
@@ -79,6 +88,7 @@ export class NamedSessionManager {
   private readonly isBusy: (sessionId: string) => boolean;
   private readonly now: () => number;
   private registry: StoredRegistry;
+  private taskBySessionId: Map<string, NamedSessionTaskReference>;
   private readonly ownerOperations = new Map<string, Promise<void>>();
 
   constructor(options: NamedSessionManagerOptions) {
@@ -90,16 +100,77 @@ export class NamedSessionManager {
     this.isBusy = options.isBusy;
     this.now = options.now ?? Date.now;
     this.registry = this.readRegistry();
+    this.taskBySessionId = this.buildTaskIndex(this.registry);
+  }
+
+  presentation(sessionId: string): NamedSessionTaskReference | undefined {
+    const reference = this.taskBySessionId.get(sessionId);
+    return reference ? this.cloneTaskReference(reference) : undefined;
+  }
+
+  async resolvePresentation(
+    sessionId: string,
+  ): Promise<NamedSessionTaskReference | undefined> {
+    const existing = this.presentation(sessionId);
+    if (existing) return existing;
+
+    const target = this.router.getTarget(sessionId);
+    if (
+      target?.channelName !== this.channelName ||
+      this.router.getSession(
+        this.channelName,
+        target.senderId,
+        target.chatId,
+      ) !== sessionId
+    ) {
+      return undefined;
+    }
+
+    return this.withOwnerLock(target, async () => {
+      const concurrent = this.presentation(sessionId);
+      if (concurrent) return concurrent;
+      if (this.getOwner(target)) return undefined;
+
+      const routedTarget = this.router.getTarget(sessionId);
+      if (
+        routedTarget?.channelName !== this.channelName ||
+        routedTarget.chatId !== target.chatId ||
+        routedTarget.senderId !== target.senderId ||
+        this.router.getSession(
+          this.channelName,
+          target.senderId,
+          target.chatId,
+        ) !== sessionId
+      ) {
+        return undefined;
+      }
+      const routedCwd = this.router.getSessionCwd(sessionId);
+      if (routedCwd !== undefined && !this.isCurrentCwd(routedCwd)) {
+        return undefined;
+      }
+
+      const timestamp = this.nextTimestamp();
+      const task: StoredTask = {
+        name: 'default',
+        sessionId,
+        cwd: routedCwd ?? this.cwd,
+        isolation: 'shared',
+        status: 'open',
+        target: routedTarget,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastSelectedAt: timestamp,
+      };
+      this.commitOwner(this.createOwner(routedTarget, task.name, [task]));
+      return this.presentation(sessionId);
+    });
   }
 
   resolve(
     input: NamedSessionOwnerInput,
-    expectedSessionId?: string,
     reserve?: (sessionId: string) => () => void,
   ): Promise<string | undefined> {
-    return this.withOwnerLock(input, () =>
-      this.resolveLocked(input, expectedSessionId, reserve),
-    );
+    return this.withOwnerLock(input, () => this.resolveLocked(input, reserve));
   }
 
   resolveAfterPreparation(
@@ -118,7 +189,7 @@ export class NamedSessionManager {
       try {
         return {
           status: 'resolved',
-          sessionId: await this.resolveLocked(input, undefined, reserve),
+          sessionId: await this.resolveLocked(input, reserve),
         };
       } catch (error) {
         return { status: 'resolve_error', error };
@@ -150,9 +221,41 @@ export class NamedSessionManager {
     });
   }
 
+  lookup(
+    input: NamedSessionOwnerInput,
+    name: string,
+  ): Promise<NamedSessionSelection | undefined> {
+    return this.withOwnerLock(input, async () => {
+      const owner = await this.ensureOwner(input, false);
+      if (!owner) return undefined;
+      const task = this.findTask(owner, name);
+      return task ? this.selection(owner, task) : undefined;
+    });
+  }
+
+  resumeReserved(
+    input: NamedSessionOwnerInput,
+    sessionId: string,
+  ): Promise<boolean> {
+    return this.withOwnerLock(input, async () => {
+      const owner = await this.ensureOwner(input, false);
+      const task = owner?.tasks.find(
+        (candidate) =>
+          candidate.sessionId === sessionId && candidate.status === 'open',
+      );
+      if (!task) return false;
+      await this.loadTask(
+        task,
+        `Could not reload reserved task "${task.name}".`,
+      );
+      return true;
+    });
+  }
+
   create(
     input: NamedSessionOwnerInput,
     name: string,
+    isolation: NamedSessionIsolation = 'shared',
   ): Promise<NamedSessionSelection> {
     return this.withOwnerLock(input, async () => {
       this.validateName(name);
@@ -166,20 +269,26 @@ export class NamedSessionManager {
           'You already have eight open tasks. Close one before creating another.',
         );
       }
-      this.assertCanLeaveSelected(owner, undefined);
       const timestamp = this.nextTimestamp(owner);
 
       const target = this.target(input);
       const sessionId = await this.createSession(
         target,
-        this.cwd,
+        isolation,
         `Could not create task "${name}".`,
       );
+      const sessionCwd = this.router.getSessionCwd(sessionId);
+      if (!sessionCwd) {
+        await this.router
+          .detachManagedSession(sessionId)
+          .catch(() => undefined);
+        throw new Error(`Could not determine task "${name}" workspace.`);
+      }
       const task: StoredTask = {
         name,
         sessionId,
-        cwd: this.cwd,
-        isolation: 'shared',
+        cwd: sessionCwd,
+        isolation,
         status: 'open',
         target,
         createdAt: timestamp,
@@ -199,7 +308,7 @@ export class NamedSessionManager {
           .catch(() => undefined);
         throw error;
       }
-      this.router.activateManagedSession(sessionId, target, this.cwd);
+      this.router.activateManagedSession(sessionId, target, task.cwd);
       return this.selection(nextOwner, task);
     });
   }
@@ -213,12 +322,6 @@ export class NamedSessionManager {
       if (!owner) throw new Error('No named tasks exist in this chat.');
       const task = this.findTask(owner, name);
       if (!task) throw new Error(`Task "${name}" was not found.`);
-      this.assertCanLeaveSelected(owner, task.name);
-      if (this.isBusy(task.sessionId)) {
-        throw new Error(
-          `Task "${task.name}" is still running or waiting for permission.`,
-        );
-      }
       if (
         task.status === 'closed' &&
         this.openTaskCount(owner) >= MAX_OPEN_TASKS
@@ -286,11 +389,6 @@ export class NamedSessionManager {
         : undefined;
       let replacementLoaded = false;
       if (replacement) {
-        if (this.isBusy(replacement.sessionId)) {
-          throw new Error(
-            `Task "${replacement.name}" is still running or waiting for permission.`,
-          );
-        }
         replacementLoaded = await this.loadTask(
           replacement,
           `Could not load fallback task "${replacement.name}". Task "${task.name}" was not closed.`,
@@ -379,11 +477,16 @@ export class NamedSessionManager {
       if (!owner?.activeTaskName) return undefined;
       const task = this.findTask(owner, owner.activeTaskName);
       if (!task || task.status !== 'open') return undefined;
+      if (task.isolation === 'worktree') {
+        throw new Error(
+          `Task "${task.name}" uses a worktree and cannot be cleared or reset yet. Continue using the task or close it. Its files were not changed.`,
+        );
+      }
       const timestamp = this.nextTimestamp(owner);
 
       const sessionId = await this.createSession(
         task.target,
-        task.cwd,
+        task.isolation,
         `Could not reset task "${task.name}".`,
       );
       const updatedTask: StoredTask = {
@@ -474,7 +577,7 @@ export class NamedSessionManager {
     const timestamp = this.nextTimestamp();
     const createdSessionId = await this.createSession(
       target,
-      this.cwd,
+      'shared',
       'Could not create the default task.',
     );
     const task: StoredTask = {
@@ -503,7 +606,6 @@ export class NamedSessionManager {
 
   private async resolveLocked(
     input: NamedSessionOwnerInput,
-    expectedSessionId?: string,
     reserve?: (sessionId: string) => () => void,
   ): Promise<string | undefined> {
     const owner = await this.ensureOwner(input, true);
@@ -511,12 +613,6 @@ export class NamedSessionManager {
     const task = this.findTask(owner, owner.activeTaskName);
     if (!task || task.status !== 'open') {
       throw new Error('The selected Channel task is unavailable.');
-    }
-    if (
-      expectedSessionId !== undefined &&
-      task.sessionId !== expectedSessionId
-    ) {
-      return undefined;
     }
     const release = reserve?.(task.sessionId);
     try {
@@ -566,24 +662,6 @@ export class NamedSessionManager {
     this.commitOwner(this.createOwner(target, task.name, [task]));
   }
 
-  private assertCanLeaveSelected(
-    owner: StoredOwner,
-    nextTaskName: string | undefined,
-  ): void {
-    if (
-      !owner.activeTaskName ||
-      (nextTaskName && this.sameName(owner.activeTaskName, nextTaskName))
-    ) {
-      return;
-    }
-    const selected = this.findTask(owner, owner.activeTaskName);
-    if (selected && this.isBusy(selected.sessionId)) {
-      throw new Error(
-        `Task "${selected.name}" is still running or waiting for permission.`,
-      );
-    }
-  }
-
   private async loadTask(
     task: StoredTask,
     failureMessage: string,
@@ -593,7 +671,9 @@ export class NamedSessionManager {
         await this.router.loadManagedSession(
           task.sessionId,
           task.target,
+          this.cwd,
           task.cwd,
+          task.isolation,
         )
       ).loaded;
     } catch (error) {
@@ -603,11 +683,15 @@ export class NamedSessionManager {
 
   private async createSession(
     target: SessionTarget,
-    cwd: string,
+    isolation: NamedSessionIsolation,
     failureMessage: string,
   ): Promise<string> {
     try {
-      return await this.router.createManagedSession(target, cwd);
+      return await this.router.createManagedSession(
+        target,
+        this.cwd,
+        isolation,
+      );
     } catch (error) {
       throw new Error(failureMessage, { cause: error });
     }
@@ -759,6 +843,28 @@ export class NamedSessionManager {
     };
   }
 
+  private cloneTaskReference(
+    reference: NamedSessionTaskReference,
+  ): NamedSessionTaskReference {
+    return { ...reference, target: { ...reference.target } };
+  }
+
+  private buildTaskIndex(
+    registry: StoredRegistry,
+  ): Map<string, NamedSessionTaskReference> {
+    const index = new Map<string, NamedSessionTaskReference>();
+    for (const owner of registry.owners) {
+      for (const task of owner.tasks) {
+        index.set(task.sessionId, {
+          taskName: task.name,
+          status: task.status,
+          target: { ...task.target },
+        });
+      }
+    }
+    return index;
+  }
+
   private commitOwner(owner: StoredOwner): void {
     const owners = this.registry.owners.map((candidate) =>
       candidate.channelName === owner.channelName &&
@@ -777,17 +883,27 @@ export class NamedSessionManager {
     ) {
       owners.push(owner);
     }
-    const next: StoredRegistry = { version: REGISTRY_VERSION, owners };
+    const next: StoredRegistry = {
+      version: REGISTRY_VERSION,
+      workspaceCwd: this.canonicalCwd,
+      owners,
+    };
     if (!this.isRegistry(next)) {
       throw new Error('Invalid named-session registry update.');
     }
+    const nextTaskBySessionId = this.buildTaskIndex(next);
     this.writeRegistry(next);
     this.registry = next;
+    this.taskBySessionId = nextTaskBySessionId;
   }
 
   private readRegistry(): StoredRegistry {
     if (!existsSync(this.filePath)) {
-      return { version: REGISTRY_VERSION, owners: [] };
+      return {
+        version: REGISTRY_VERSION,
+        workspaceCwd: this.canonicalCwd,
+        owners: [],
+      };
     }
     let value: unknown;
     try {
@@ -801,7 +917,13 @@ export class NamedSessionManager {
       );
     }
     if (!this.isRegistry(value)) {
-      if (this.isRegistry(value, false)) {
+      if (this.isRegistry(value, true, true)) {
+        return { ...value, workspaceCwd: this.canonicalCwd };
+      }
+      if (
+        this.isRegistry(value, false) ||
+        this.isRegistry(value, false, true)
+      ) {
         const stalePath = `${this.filePath}.stale-${randomUUID()}`;
         try {
           renameSync(this.filePath, stalePath);
@@ -813,7 +935,11 @@ export class NamedSessionManager {
         process.stderr.write(
           '[NamedSessionManager] Archived a stale registry after the channel working directory changed.\n',
         );
-        return { version: REGISTRY_VERSION, owners: [] };
+        return {
+          version: REGISTRY_VERSION,
+          workspaceCwd: this.canonicalCwd,
+          owners: [],
+        };
       }
       throw new Error(`Invalid named-session registry: ${this.filePath}`);
     }
@@ -856,8 +982,19 @@ export class NamedSessionManager {
   private isRegistry(
     value: unknown,
     requireCurrentCwd = true,
+    allowMissingWorkspaceCwd = false,
   ): value is StoredRegistry {
     if (!this.isRecord(value) || value['version'] !== REGISTRY_VERSION) {
+      return false;
+    }
+    const workspaceCwd = value['workspaceCwd'];
+    if (
+      workspaceCwd === undefined
+        ? !allowMissingWorkspaceCwd
+        : typeof workspaceCwd !== 'string' ||
+          (requireCurrentCwd &&
+            canonicalizeWorkspacePath(workspaceCwd) !== this.canonicalCwd)
+    ) {
       return false;
     }
     const owners = value['owners'];
@@ -868,6 +1005,19 @@ export class NamedSessionManager {
       if (!this.isOwner(owner, ownerKeys, sessionIds, requireCurrentCwd)) {
         return false;
       }
+    }
+    if (
+      workspaceCwd === undefined &&
+      owners.some(
+        (owner) =>
+          this.isRecord(owner) &&
+          Array.isArray(owner['tasks']) &&
+          owner['tasks'].some(
+            (task) => this.isRecord(task) && task['isolation'] === 'worktree',
+          ),
+      )
+    ) {
+      return false;
     }
     return true;
   }
@@ -936,8 +1086,12 @@ export class NamedSessionManager {
       typeof value['sessionId'] === 'string' &&
       value['sessionId'].length > 0 &&
       typeof value['cwd'] === 'string' &&
-      (!requireCurrentCwd || this.isCurrentCwd(value['cwd'])) &&
-      value['isolation'] === 'shared' &&
+      isAbsolute(value['cwd']) &&
+      (value['isolation'] === 'shared' || value['isolation'] === 'worktree') &&
+      (!requireCurrentCwd ||
+        (value['isolation'] === 'shared'
+          ? this.isCurrentCwd(value['cwd'])
+          : !this.isCurrentCwd(value['cwd']))) &&
       (value['status'] === 'open' || value['status'] === 'closed') &&
       this.isTimestamp(value['createdAt']) &&
       this.isTimestamp(value['updatedAt']) &&

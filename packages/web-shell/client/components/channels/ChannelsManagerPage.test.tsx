@@ -12,7 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
+const {
+  channelState,
+  statusState,
+  useChannelsMock,
+  useStatusReportMock,
+  workspaceState,
+} = vi.hoisted(() => ({
   channelState: {
     current: {
       catalog: [] as Array<{
@@ -69,6 +75,22 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
     },
   },
   useChannelsMock: vi.fn(),
+  useStatusReportMock: vi.fn(),
+  statusState: {
+    current: {
+      report: undefined as
+        | {
+            security: {
+              tokenConfigured: boolean;
+              requireAuth: boolean;
+              loopbackBind: boolean;
+            };
+          }
+        | undefined,
+      loading: false,
+      error: undefined as Error | undefined,
+    },
+  },
   workspaceState: {
     current: {
       workspaceCwd: '/workspace/demo',
@@ -92,6 +114,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useChannels: (options: unknown) => {
     useChannelsMock(options);
     return channelState.current;
+  },
+  useStatusReport: (options: unknown) => {
+    useStatusReportMock(options);
+    return statusState.current;
   },
   useWorkspace: () => workspaceState.current,
 }));
@@ -198,6 +224,12 @@ beforeEach(() => {
   channelState.current.loading = false;
   channelState.current.error = undefined;
   useChannelsMock.mockReset();
+  useStatusReportMock.mockReset();
+  statusState.current = {
+    report: undefined,
+    loading: false,
+    error: undefined,
+  };
   channelState.current.reload.mockReset().mockResolvedValue(undefined);
   channelState.current.createOrUpdate.mockReset().mockResolvedValue(undefined);
   channelState.current.remove.mockReset().mockResolvedValue(undefined);
@@ -721,11 +753,73 @@ describe('ChannelsManagerPage', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('disables lifecycle controls without a bearer token', async () => {
+  it('allows lifecycle controls without a bearer token on trusted loopback', async () => {
     workspaceState.current = {
       ...workspaceState.current,
       token: '',
     };
+    statusState.current.report = {
+      security: {
+        tokenConfigured: false,
+        requireAuth: false,
+        loopbackBind: true,
+      },
+    };
+    await renderPage();
+
+    expect(container.textContent).not.toContain(
+      'Channel management is read-only',
+    );
+    const start = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Start',
+    );
+    expect(start?.disabled).toBe(false);
+    await act(async () => {
+      start?.click();
+    });
+    expect(channelState.current.start).toHaveBeenCalledWith('DingTalk Bot');
+  });
+
+  it('disables lifecycle controls without operator authority', async () => {
+    workspaceState.current = {
+      ...workspaceState.current,
+      token: '',
+    };
+    statusState.current.report = {
+      security: {
+        tokenConfigured: false,
+        requireAuth: false,
+        loopbackBind: false,
+      },
+    };
+    await renderPage();
+
+    expect(container.textContent).toContain('Channel management is read-only');
+    const start = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Start',
+    );
+    expect(start?.disabled).toBe(true);
+  });
+
+  it.each([
+    [
+      'a configured daemon token',
+      { tokenConfigured: true, requireAuth: false, loopbackBind: true },
+    ],
+    [
+      'require-auth',
+      { tokenConfigured: false, requireAuth: true, loopbackBind: true },
+    ],
+    ['an unavailable status report', undefined],
+  ])('fails closed without a bearer under %s', async (_label, security) => {
+    workspaceState.current = {
+      ...workspaceState.current,
+      token: '',
+    };
+    statusState.current.report = security ? { security } : undefined;
+    statusState.current.error = security
+      ? undefined
+      : new Error('status unavailable');
     await renderPage();
 
     expect(container.textContent).toContain('Channel management is read-only');

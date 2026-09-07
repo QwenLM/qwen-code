@@ -77,6 +77,10 @@ class TestableFeishuChannel extends FeishuChannel {
   pushLoop(target: SessionTarget, text: string): Promise<void> {
     return this.pushProactive(target, text);
   }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
+  }
 }
 
 function createTestableChannel(
@@ -716,6 +720,386 @@ describe('FeishuChannel', () => {
       expect(bridge.prompt).toHaveBeenCalledTimes(1);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it('keeps media messages running when a prefix is configured', async () => {
+    // Feishu delivers media as its own message type with no caption
+    // field, so an image carries only the adapter's `(image)`
+    // placeholder. Gating that would drop every media message with no
+    // action the user could take to get past it -- while text with no
+    // prefix must still be gated.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (
+      messageId: string,
+      messageType: string,
+      content: Record<string, unknown>,
+    ) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: messageType,
+        content: JSON.stringify(content),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    // The control: ordinary text with no prefix stays gated.
+    onMessage(event('plain-text', 'text', { text: 'no prefix here' }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches prefixes after platform-normalized mentions with spaced names', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (messageId: string, text: string) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text }),
+        mentions: [
+          {
+            key: '@_user_1',
+            id: { open_id: 'ou_bot' },
+            name: 'Qwen Bot',
+          },
+          {
+            key: '@_user_2',
+            id: { open_id: 'ou_alice' },
+            name: 'Alice Smith',
+          },
+        ],
+      },
+      sender: {
+        sender_id: { open_id: 'ou_user' },
+        sender_type: 'user',
+      },
+    });
+
+    onMessage(
+      event(
+        'prefixed-spaced-mention',
+        '@_user_1 @_user_2 /review inspect this',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('inspect this'),
+      expect.anything(),
+    );
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).not.toContain(
+      '/review',
+    );
+
+    onMessage(
+      event(
+        'unprefixed-spaced-mention',
+        '@_user_1 @_user_2 inspect without prefix',
+      ),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches after a mentioned member whose name extends the bot name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'overlapping-mention-names',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Bot 2',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('removes the structured bot mention without corrupting a longer member name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'member-before-bot',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            {
+              key: '@_user_1',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Fan',
+            },
+            { key: '@_user_2', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('does not mistake an extending mention name for an at-sign prefix', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '@bot' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'at-prefix-boundary',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 @bot do X',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'botswana',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('do X');
+    expect(prompt).not.toContain('@bot');
+  });
+
+  it('keeps a mention the user typed after the prefix', async () => {
+    // The matching text consumes only the leading mention run, so a
+    // mention inside the payload reaches the agent exactly as it does
+    // with no prefix configured.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'payload-mention',
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '@_user_1 /review please talk to @_user_2',
+        }),
+        mentions: [
+          { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          { key: '@_user_2', id: { open_id: 'ou_alice' }, name: 'Alice Smith' },
+        ],
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('please talk to @Alice Smith');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('matches the prefix on a rich-text post behind a spaced mention', async () => {
+    // A post carries its mentions as at-nodes, so the message-level keys
+    // never appear in the text: without normalizing the rendered name, a
+    // display name with a space leaves a token the shared mention skip
+    // cannot consume and the message is dropped.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'post-prefixed',
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: 'post',
+        content: JSON.stringify({
+          zh_cn: {
+            content: [
+              [
+                { tag: 'at', user_name: 'Qwen Bot' },
+                { tag: 'text', text: ' /review inspect this' },
+              ],
+            ],
+          },
+        }),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(String(vi.mocked(bridge.prompt).mock.calls[0]?.[1])).toContain(
+      'inspect this',
+    );
+  });
+
+  it('keeps a media placeholder out of the next prompt as group history', async () => {
+    // The placeholder bypasses the prefix gate, so without the synthetic
+    // marking it would be recorded as unmentioned group traffic and quoted
+    // back to the model as if a member had typed `(image)`.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-history-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({
+        messagePrefix: '/review',
+        groupHistoryLimit: 10,
+        groups: { '*': { requireMention: true } },
+      }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    try {
+      onMessage({
+        message: {
+          message_id: 'history-image',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'image',
+          content: JSON.stringify({ image_key: 'img_1' }),
+        },
+        sender: { sender_id: { open_id: 'ou_alice' }, sender_type: 'user' },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      onMessage({
+        message: {
+          message_id: 'history-trigger',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({ text: '@_user_1 /review summarize' }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      });
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled());
+      const prompt = String(
+        vi.mocked(bridge.prompt).mock.calls.at(-1)?.[1] ?? '',
+      );
+      expect(prompt).toContain('summarize');
+      expect(prompt).not.toContain('(image)');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      rmSync(qwenHome, { recursive: true, force: true });
     }
   });
 
@@ -1918,6 +2302,99 @@ describe('FeishuChannel', () => {
       extractCardText = getPrivateMethod<
         (card: Record<string, unknown>) => string | undefined
       >(channel, 'extractCardText').bind(channel);
+    });
+
+    it('strips named-task attribution from quoted cards', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-feishu-card-text-'));
+      try {
+        channel = new FeishuChannel(
+          'test',
+          createConfig({ multiSession: true }),
+          createMockBridge(),
+          { stateDir },
+        );
+        extractCardText = getPrivateMethod<
+          (
+            card: Record<string, unknown>,
+            isFromBot?: boolean,
+          ) => string | undefined
+        >(channel, 'extractCardText').bind(channel);
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[Alice · review\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '好的，<at id=ou_user></at>\n\n\\[review\\_x\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\n---\n*已停止生成*',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBeUndefined();
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\nUser-authored content',
+                  },
+                ],
+              },
+            },
+            false,
+          ),
+        ).toBe('\\[review\\]\n\nUser-authored content');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves leading escaped brackets when named tasks are disabled', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: '\\[review\\]\n\nAnswer' }],
+        },
+      };
+
+      expect(extractCardText(card)).toBe('\\[review\\]\n\nAnswer');
     });
 
     it('extracts markdown from v2 card format (body.elements)', () => {
@@ -3965,6 +4442,30 @@ describe('FeishuChannel', () => {
       fetchSpy.mockRestore();
     });
 
+    it('neutralizes Feishu mention markup in attributed messages', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.sendAttributed(
+        'oc_chat_id',
+        'done',
+        '[Alice <at id=ou_other></at> & review]',
+      );
+
+      const body = String(fetchSpy.mock.calls[0]?.[1]?.body);
+      expect(body).toContain('&lt;at');
+      expect(body).toContain('&lt;/at&gt;');
+      expect(body).toContain('&amp;');
+      expect(body).not.toContain('<at');
+      fetchSpy.mockRestore();
+    });
+
     it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
@@ -5129,6 +5630,55 @@ describe('FeishuChannel', () => {
       const stoppedCard = updateCard.mock.calls[1]![1] as string;
       expect(stoppedCard).toContain('已停止生成');
       expect(stoppedCard).not.toContain('已完成');
+    });
+
+    it('keeps the sender mention before attribution in stopped-card fallback', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+      const cardState = {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: true,
+        accumulatedText: 'partial answer',
+        atPrefix: '好的，<at id=ou_sender></at>',
+        sourceLabel: '[Alice · review_*]',
+        lastUpdateAt: Date.now(),
+      };
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard: vi.fn().mockResolvedValue(false),
+        deleteCard: vi.fn().mockResolvedValue(true),
+      });
+
+      await getPrivateMethod<
+        (
+          inboundMsgId: string,
+          state: typeof cardState,
+          chatId: string,
+        ) => Promise<boolean>
+      >(channel, 'finalizeStoppedCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+        'oc_chat_id',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      const card = JSON.parse(body.content) as {
+        body: { elements: Array<{ content?: string }> };
+      };
+      const content = card.body.elements[0]?.content ?? '';
+      expect(content).toBe(
+        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\npartial answer\n\n---\n*已停止生成*',
+      );
+      expect(content.match(/<at id=ou_sender><\/at>/g)).toHaveLength(1);
     });
 
     it('keeps the card running when cancellation fails mid-finalization', async () => {
@@ -6607,6 +7157,50 @@ describe('FeishuChannel', () => {
       expect(finalText.length).toBeLessThanOrEqual(20_000);
       expect(finalText.startsWith('```\n')).toBe(true);
       expect(finalText).toContain('内容过长，已截断早期内容');
+    });
+
+    it('renders one truncation marker through the real card update path', async () => {
+      const channel = createChannel();
+      const patchInteractiveCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        patchInteractiveCard,
+      });
+      const cardState = {
+        messageId: 'om_stream',
+        created: true,
+        creating: false,
+        stopped: false,
+        finalizing: false,
+        accumulatedText: `HEAD${'x'.repeat(21_000)}TAIL`,
+        sourceLabel: '[review_task]',
+        lastUpdateAt: Date.now(),
+      };
+      getPrivateMethod<Map<string, typeof cardState>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', cardState);
+
+      await getPrivateMethod<
+        (inboundMsgId: string, state: typeof cardState) => Promise<void>
+      >(channel, 'runThrottledCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+      );
+
+      expect(patchInteractiveCard).toHaveBeenCalledTimes(1);
+      const renderedCard = patchInteractiveCard.mock.calls[0]?.[1] as {
+        body: { elements: Array<{ tag: string; content?: string }> };
+      };
+      const markdown =
+        renderedCard.body.elements.find((element) => element.tag === 'markdown')
+          ?.content ?? '';
+      expect(markdown.length).toBeLessThanOrEqual(20_000);
+      expect(markdown.match(/内容过长，已截断早期内容/gu)).toHaveLength(1);
+      expect(markdown.match(/\\\[review\\_task\\\]/gu)).toHaveLength(1);
+      expect(markdown.match(/运行中\.\.\./gu)).toHaveLength(1);
+      expect(markdown).not.toContain('HEAD');
+      expect(markdown).toContain('TAIL');
     });
   });
 

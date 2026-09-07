@@ -21,6 +21,7 @@ import {
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
+import { UNVERIFIABLE_IDENTITY_CODE } from '@qwen-code/qwen-code-core/noFollowOpen';
 
 vi.mock('@xterm/headless', () => ({
   Terminal: class Terminal {},
@@ -4084,6 +4085,93 @@ describe('SessionArtifactStore', () => {
       ).rejects.toMatchObject({ field: 'workspacePath' });
     } finally {
       openSpy.mockRestore();
+    }
+  });
+
+  it('treats an unverifiable inode identity as missing, not an escape, on upsert', async () => {
+    // On volumes that never report inode numbers (ino 0: FAT/exFAT, some
+    // SMB shares) openNoFollow cannot prove the opened file matches the
+    // pre-open check and refuses with UNVERIFIABLE_IDENTITY_CODE. The
+    // upsert must then degrade to a plain missing artifact — it must not
+    // reject outright, and it must not raise the symlink-escape flag for a
+    // path the containment check already accepted (#8227 follow-up).
+    const store = new SessionArtifactStore({
+      sessionId: 's7-unverifiable-upsert',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (entry, flags, mode) => {
+        if (String(entry).endsWith('report.txt')) {
+          throw Object.assign(new Error('inode 0 cannot be verified'), {
+            code: UNVERIFIABLE_IDENTITY_CODE,
+          });
+        }
+        return originalOpen(entry, flags, mode);
+      });
+
+    try {
+      const created = await store.upsertMany(
+        [{ title: 'Report', workspacePath: 'report.txt' }],
+        { strict: true },
+      );
+      expect(created.changes).toHaveLength(1);
+      expect(created.changes[0]).toMatchObject({
+        action: 'created',
+        artifact: expect.objectContaining({
+          status: 'missing',
+          workspacePath: 'report.txt',
+        }),
+      });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('keeps reporting unverifiable artifacts missing on refresh without an escape flag', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-unverifiable-refresh',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }], {
+      strict: true,
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (entry, flags, mode) => {
+        if (String(entry).endsWith('report.txt')) {
+          throw Object.assign(new Error('inode 0 cannot be verified'), {
+            code: UNVERIFIABLE_IDENTITY_CODE,
+          });
+        }
+        return originalOpen(entry, flags, mode);
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      const artifact = (await store.list()).artifacts[0];
+      expect(artifact).toMatchObject({
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
+      expect(artifact).not.toHaveProperty('sizeBytes');
+      // The degradation is a graceful missing status, not a refresh error:
+      // deleting the branch would re-throw the refusal and log this marker.
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).not.toContain('status_refresh_failed');
+    } finally {
+      vi.useRealTimers();
+      openSpy.mockRestore();
+      stderr.mockRestore();
     }
   });
 

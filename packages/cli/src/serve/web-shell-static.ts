@@ -9,6 +9,7 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
+import { isLoopbackAddress } from './loopback-binds.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -49,7 +50,19 @@ export function loopbackSandboxOrigins(
   const suffix = port ? `:${port}` : '';
   // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
   // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
-  const hosts = ['localhost', '127.0.0.1'] as const;
+  const hosts = ['localhost', '127.0.0.1'];
+  try {
+    const requestHostname = new URL(`http://${hostHeader}`).hostname;
+    if (
+      isLoopbackAddress(requestHostname) &&
+      !requestHostname.includes(':') &&
+      !hosts.includes(requestHostname)
+    ) {
+      hosts.push(requestHostname);
+    }
+  } catch {
+    // Ignore malformed Host headers; the fixed loopback aliases remain safe.
+  }
   return (['http', 'https'] as const).flatMap((scheme) =>
     hosts.map((host) => `${scheme}://${host}${suffix}`),
   );

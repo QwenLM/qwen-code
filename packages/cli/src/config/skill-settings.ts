@@ -117,20 +117,11 @@ export function updateWorkspaceSkillSettingLists(
   lists: WorkspaceSkillSettingLists,
   skillName: string,
   enabled: boolean,
-  defaultDisabled: boolean,
 ): WorkspaceSkillSettingLists {
-  const normalizedName = skillName.trim().toLowerCase();
-  const hadExplicitEnable = lists.enabled.some(
-    (name) => name.trim().toLowerCase() === normalizedName,
-  );
-
   if (enabled) {
     return {
       disabled: updateTarget(lists.disabled, skillName, false),
-      enabled:
-        defaultDisabled || hadExplicitEnable
-          ? updateTarget(lists.enabled, skillName, true)
-          : lists.enabled,
+      enabled: updateTarget(lists.enabled, skillName, true),
     };
   }
 
@@ -144,8 +135,6 @@ export interface WorkspaceSkillListToggle {
   name: string;
   wasEnabled: boolean;
   isEnabled: boolean;
-  /** Record an explicit `skills.enabled` opt-in when enabling this skill. */
-  defaultDisabled: boolean;
 }
 
 export interface WorkspaceSkillListUpdates {
@@ -180,7 +169,6 @@ export function computeWorkspaceSkillListUpdates(
       next,
       toggle.name,
       toggle.isEnabled,
-      toggle.defaultDisabled,
     );
   }
   return {

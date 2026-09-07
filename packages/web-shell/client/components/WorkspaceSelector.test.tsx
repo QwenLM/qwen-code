@@ -98,4 +98,54 @@ describe('WorkspaceSelector', () => {
     ].find((entry) => entry.textContent?.includes('locked'));
     expect(locked?.getAttribute('data-disabled')).not.toBeNull();
   });
+
+  it('offers the projectless target and reports selecting it', async () => {
+    const onSelectStandalone = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      standaloneSupported: true,
+      onSelectStandalone,
+    });
+    // A single workspace hides the selector unless the projectless target
+    // gives it a second choice.
+    const trigger = element.querySelector('button')!;
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const standaloneEntry = [
+      ...document.querySelectorAll('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('No workspace (standalone)'));
+    expect(standaloneEntry).toBeDefined();
+    await act(async () => {
+      standaloneEntry?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(onSelectStandalone).toHaveBeenCalledOnce();
+  });
+
+  it('labels the trigger with the projectless target when selected', () => {
+    const element = renderSelector({
+      standaloneSupported: true,
+      selectedStandalone: true,
+      onSelectStandalone: vi.fn(),
+    });
+    expect(element.querySelector('button')?.textContent).toContain(
+      'No workspace (standalone)',
+    );
+  });
 });

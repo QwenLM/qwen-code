@@ -11,6 +11,7 @@ import {
   constants as fsConstants,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   utimesSync,
@@ -32,6 +33,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -112,11 +114,85 @@ const readFileFault = vi.hoisted(() => ({
   afterRead: undefined as (() => Promise<void> | void) | undefined,
 }));
 
+const descriptorReadHook = vi.hoisted(() => ({
+  afterRead: undefined as (() => void) | undefined,
+}));
+
+const lockIdentityPrecisionFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  replaced: false,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const readFileSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.readFileSync as (...readArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (typeof args[0] === 'number') {
+      const afterRead = descriptorReadHook.afterRead;
+      descriptorReadHook.afterRead = undefined;
+      afterRead?.();
+    }
+    return result;
+  }) as typeof actual.readFileSync;
+  const applyLockIdentityFault = (
+    result: unknown,
+    bigint: boolean,
+    replaced: boolean,
+  ): unknown => {
+    if (typeof result !== 'object' || result === null) return result;
+    const base = 9_007_199_254_740_992n;
+    Object.defineProperty(result, 'dev', {
+      value: bigint ? 1n : 1,
+    });
+    Object.defineProperty(result, 'ino', {
+      value: bigint
+        ? base + (replaced ? 1n : 0n)
+        : Number(base + (replaced ? 1n : 0n)),
+    });
+    return result;
+  };
+  const fstatSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.fstatSync as (...callArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (lockIdentityPrecisionFault.path === undefined) return result;
+    const bigint =
+      typeof args[1] === 'object' &&
+      args[1] !== null &&
+      (args[1] as { bigint?: boolean }).bigint === true;
+    return applyLockIdentityFault(result, bigint, false);
+  }) as typeof actual.fstatSync;
+  const lstatSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.lstatSync as (...callArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (args[0] !== lockIdentityPrecisionFault.path) return result;
+    const bigint =
+      typeof args[1] === 'object' &&
+      args[1] !== null &&
+      (args[1] as { bigint?: boolean }).bigint === true;
+    return applyLockIdentityFault(
+      result,
+      bigint,
+      lockIdentityPrecisionFault.replaced,
+    );
+  }) as typeof actual.lstatSync;
+  return {
+    ...actual,
+    fstatSync: fstatSyncWithHook,
+    lstatSync: lstatSyncWithHook,
+    readFileSync: readFileSyncWithHook,
+  };
+});
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    lstat: async (filePath: Parameters<typeof actual.lstat>[0]) => {
+    lstat: async (...args: unknown[]) => {
+      const filePath = args[0] as Parameters<typeof actual.lstat>[0];
       if (filePath === lstatFault.path) {
         lstatFault.calls++;
         if (lstatFault.remainingFailures > 0) {
@@ -126,7 +202,25 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           });
         }
       }
-      return actual.lstat(filePath);
+      const result = await (
+        actual.lstat as (...callArgs: unknown[]) => Promise<unknown>
+      )(...args);
+      if (filePath !== lockIdentityPrecisionFault.path) return result;
+      const bigint =
+        typeof args[1] === 'object' &&
+        args[1] !== null &&
+        (args[1] as { bigint?: boolean }).bigint === true;
+      if (typeof result !== 'object' || result === null) return result;
+      const base = 9_007_199_254_740_992n;
+      Object.defineProperty(result, 'dev', {
+        value: bigint ? 1n : 1,
+      });
+      Object.defineProperty(result, 'ino', {
+        value: bigint
+          ? base + (lockIdentityPrecisionFault.replaced ? 1n : 0n)
+          : Number(base + (lockIdentityPrecisionFault.replaced ? 1n : 0n)),
+      });
+      return result;
     },
     stat: async (
       filePath: Parameters<typeof actual.stat>[0],
@@ -376,6 +470,40 @@ async function waitForClose(child: ChildProcess): Promise<void> {
   console.warn(`Process ${pid} remained live after close`);
 }
 
+/**
+ * Acquires a lease in a helper process, kills it with SIGKILL, and rewrites
+ * the orphaned record through `mutate`, so Linux identity-domain cases can
+ * craft missing or foreign boot/namespace identities from a real record.
+ */
+async function deadOwnerRecord(
+  mutate?: (record: Record<string, unknown>) => void,
+): Promise<{
+  options: AcquireSessionWriterLeaseOptions;
+  lockPath: string;
+}> {
+  const fixture = await createFixture();
+  const deadOwner = startLeaseProcess();
+  expect(
+    await requestChild(deadOwner, {
+      type: 'acquire',
+      options: fixture.options,
+    }),
+  ).toMatchObject({ ok: true });
+  deadOwner.kill('SIGKILL');
+  await waitForClose(deadOwner);
+  const lockPath = getSessionWriterLockPath(
+    fixture.runtimeBaseDir,
+    fixture.options.sessionId,
+  );
+  const record = JSON.parse(await fs.readFile(lockPath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  mutate?.(record);
+  await fs.writeFile(lockPath, JSON.stringify(record));
+  return { options: fixture.options, lockPath };
+}
+
 function record(
   uuid: string,
   parentUuid: string | null,
@@ -459,6 +587,9 @@ afterEach(async () => {
   readFileFault.triggerCall = 0;
   readFileFault.calls = 0;
   readFileFault.afterRead = undefined;
+  descriptorReadHook.afterRead = undefined;
+  lockIdentityPrecisionFault.path = undefined;
+  lockIdentityPrecisionFault.replaced = false;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -893,6 +1024,97 @@ describe('SessionWriterLease', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'records the PID namespace identity on Linux',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const lockRecord = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+        pid_namespace_id?: number;
+      };
+      expect(lockRecord.pid_namespace_id).toBe(
+        processLiveness.readPidNamespaceId(),
+      );
+      await lease.release();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'reclaims a dead writer only inside the same Linux identity domain',
+    async () => {
+      const reclaimable = await deadOwnerRecord();
+      const reclaimed = await SessionWriterLease.acquire(reclaimable.options);
+      await reclaimed.release();
+
+      const missingNamespace = await deadOwnerRecord((record) => {
+        delete record['pid_namespace_id'];
+      });
+      await expect(
+        SessionWriterLease.acquire(missingNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignNamespace = await deadOwnerRecord((record) => {
+        record['pid_namespace_id'] = (record['pid_namespace_id'] as number) + 1;
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignBoot = await deadOwnerRecord((record) => {
+        record['process_start_identity'] =
+          'linux:00000000-0000-0000-0000-000000000000:1';
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignBoot.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    },
+  );
+
+  it.runIf(process.platform === 'linux').each([
+    ['an unparseable identity', () => 'linux:zz'],
+    [
+      'an identity truncated before the start ticks',
+      () => `linux:${processLiveness.readLocalBootId()}`,
+    ],
+    [
+      'a darwin identity read by a Linux reader',
+      () => 'darwin:Tue Sep 1 00:00:00 2026',
+    ],
+    [
+      'a win32 identity read by a Linux reader',
+      () => 'win32:638000000000000000',
+    ],
+  ])('fences a dead writer carrying %s', async (_label, identity) => {
+    const fenced = await deadOwnerRecord((record) => {
+      record['process_start_identity'] = identity();
+    });
+    await expect(
+      SessionWriterLease.acquire(fenced.options),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'fences a dead writer when the local identity domain is indeterminate',
+    async () => {
+      const bootFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(bootFenced.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+      vi.restoreAllMocks();
+
+      const namespaceFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(namespaceFenced.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    },
+  );
+
   it.runIf(process.platform === 'darwin')(
     'does not reclaim a live Darwin owner across different time zones',
     async () => {
@@ -969,6 +1191,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
 
     await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+    expect(() => lease.assertCleanupOwned()).not.toThrow();
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionTranscriptChangedError,
     );
@@ -979,6 +1202,7 @@ describe('SessionWriterLease', () => {
     );
     await fs.unlink(lockPath);
     await fs.writeFile(lockPath, '{"replacement":true}');
+    expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionWriterLostError,
     );
@@ -989,6 +1213,136 @@ describe('SessionWriterLease', () => {
       '{"replacement":true}',
     );
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during cleanup',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(replacementPath, lockRecord);
+      await fs.rename(replacementPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical replacement during an asynchronous ownership read',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      await fs.writeFile(replacementPath, await fs.readFile(lockPath, 'utf8'));
+      readFileFault.path = lockPath;
+      readFileFault.triggerCall = 1;
+      readFileFault.afterRead = () => fs.rename(replacementPath, lockPath);
+
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it('compares lock identities without losing large inode precision', async () => {
+    const fixture = await createFixture();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    lockIdentityPrecisionFault.path = lockPath;
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    lockIdentityPrecisionFault.replaced = true;
+
+    expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+    await expect(lease.release()).rejects.toBeInstanceOf(
+      SessionWriterLostError,
+    );
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a lock replaced while cleanup ownership is being verified',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      writeFileSync(replacementPath, readFileSync(lockPath));
+      descriptorReadHook.afterRead = () => {
+        renameSync(replacementPath, lockPath);
+      };
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a byte-identical atomic replacement during acquisition',
+    async () => {
+      const fixture = await createFixture();
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          onOwnershipAcquired: () => {
+            writeFileSync(replacementPath, readFileSync(lockPath));
+            renameSync(replacementPath, lockPath);
+          },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      await fs.unlink(lockPath);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlinked cleanup lock',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const targetPath = `${lockPath}.replacement`;
+      const lockRecord = await fs.readFile(lockPath, 'utf8');
+      await fs.writeFile(targetPath, lockRecord);
+      await fs.unlink(lockPath);
+      await fs.symlink(targetPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await fs.unlink(lockPath);
+      await fs.unlink(targetPath);
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'classifies an unreadable owned lock as unavailable',
@@ -2239,7 +2593,7 @@ describe('SessionWriterLease', () => {
     lstatFault.remainingFailures = 1;
 
     await expect(lease.release()).resolves.toBeUndefined();
-    expect(lstatFault.calls).toBe(2);
+    expect(lstatFault.calls).toBe(3);
     expect(lease.isReleased).toBe(true);
     lstatFault.path = undefined;
     await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });

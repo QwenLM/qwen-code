@@ -32,10 +32,13 @@ function Harness({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -50,10 +53,13 @@ function Harness({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -66,11 +72,14 @@ function Harness({
     followupState,
     sessionId,
     atWorkspaceCwd,
+    composerScopeKey,
+    disableLegacyHistoryFallback,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
     workspaceUploadBusy,
     fileDragEnabled,
+    attachmentsEnabled,
   });
   latest = composer;
 
@@ -91,10 +100,13 @@ async function mount({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  composerScopeKey,
+  disableLegacyHistoryFallback,
   commands,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
+  attachmentsEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -109,10 +121,13 @@ async function mount({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
+  attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -121,6 +136,7 @@ async function mount({
   let currentPortalRoot: HTMLElement | null = null;
   let currentSessionId = sessionId;
   let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={currentPortalRoot}>
@@ -135,10 +151,13 @@ async function mount({
             followupState={followupState}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
+            composerScopeKey={composerScopeKey}
+            disableLegacyHistoryFallback={disableLegacyHistoryFallback}
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
+            attachmentsEnabled={currentAttachmentsEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -163,6 +182,10 @@ async function mount({
       act(() => render());
     },
     rerender() {
+      act(() => render());
+    },
+    setAttachmentsEnabled(enabled: boolean) {
+      currentAttachmentsEnabled = enabled;
       act(() => render());
     },
   };
@@ -420,6 +443,49 @@ describe('useComposerCore history and drafts', () => {
           '[]',
       ),
     ).toEqual(['prompt from b']);
+  });
+
+  it('isolates standalone history without falling back to legacy workspace prompts', async () => {
+    const scope = 'standalone';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy workspace prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: scope,
+      disableLegacyHistoryFallback: true,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('');
+
+    act(() => {
+      latest!.setText('standalone prompt');
+      latest!.submitText();
+      pressHistoryKey('ArrowUp');
+    });
+    expect(latest!.getText()).toBe('standalone prompt');
+    expect(
+      JSON.parse(
+        localStorage.getItem(getPromptHistoryStorageKey(scope)) ?? '[]',
+      ),
+    ).toEqual(['standalone prompt']);
+  });
+
+  it('keeps legacy prompt history available in the Live scope', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['legacy Live prompt']),
+    );
+    await mount({
+      sessionId: 'session-a',
+      composerScopeKey: 'live',
+      disableLegacyHistoryFallback: false,
+    });
+
+    act(() => pressHistoryKey('ArrowUp'));
+    expect(latest!.getText()).toBe('legacy Live prompt');
   });
 
   it('resets history navigation when the session changes', async () => {
@@ -875,6 +941,45 @@ describe('useComposerCore paste', () => {
     expect(latest!.pastedFiles).toMatchObject([
       { name: 'notes.txt', data: files[1] },
     ]);
+  });
+
+  it('drops held attachments with a notice when attachments become unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    const mounted = await mount({ onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(1);
+
+    mounted.setAttachmentsEnabled(false);
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
+  });
+
+  it('rejects new attachment ingestion while attachments are unavailable', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ attachmentsEnabled: false, onImageIngestionNotice });
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+
+    await act(async () => {
+      expect(latest!.ingestFiles([file])).toBe(true);
+      await Promise.resolve();
+    });
+
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.any(String),
+    );
   });
 
   it('claims image drops, blocks submit while reading, and submits image-only', async () => {

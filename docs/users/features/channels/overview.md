@@ -63,6 +63,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
 | `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
+| `messagePrefix`          | No               | Only dispatch user messages that begin with this exact, case-sensitive prefix after any leading `@mentions`; the prefix and following whitespace are removed before dispatch                                            |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -75,6 +76,10 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                         |
 | `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
 | `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
+
+When `messagePrefix` is set, every user-authored message must begin with the prefix and a non-empty payload, for example `/review inspect #123`. Only the prefix and the mentions ahead of it are removed; a mention the user typed after the prefix reaches the agent unchanged. Shared and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Telegram's registered command-menu actions remain available without the prefix — unless the configured prefix is itself one of them, in which case the prefix wins and that command has to be sent prefixed too (`/new /new`). Attachments need a matching caption when the platform supports one; captionless Telegram, Feishu, WeChat, DingTalk and WeCom media messages continue to run, and their placeholder text is never quoted back as group history. Native todos, webhooks, and provider-generated assignment or review-request events also continue to run without a prefix because they are system events rather than chat messages.
+
+Two behaviours are deliberate and worth knowing before you turn the prefix on. A voice message whose transcript DingTalk or WeCom fills in counts as text the user spoke, so it must carry the prefix like any other message and is dropped otherwise — only an untranscribed voice note runs as captionless media. And the prefix is checked before pairing, so first contact from an unknown sender or an unapproved group has to carry the prefix as well; without that ordering every unprefixed message in a busy group would draw a pairing reply, which is exactly the noise the prefix exists to suppress. Tell new users the prefix out of band, or leave pairing channels unprefixed.
 
 ### Sender Policy
 
@@ -111,7 +116,9 @@ Daemon-managed Channels can retain several named conversations for the same user
 
 The catalog is private to the exact channel, chat, and sender. Task names use 1–32 ASCII letters, numbers, underscores, or hyphens, and are unique case-insensitively. Up to eight tasks may be open; closing a task detaches it without deleting its transcript, so selecting it later reopens the exact conversation. Session IDs are never accepted by or shown in chat commands.
 
-Part 2 uses one selected task at a time and a shared working directory. Creating a task or switching away from the selected task is rejected while that task is still running or waiting for permission, and a busy task cannot be closed. Concurrent running-task switching, named cancellation, and task labels are planned for Part 3; per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
+
+One task remains selected to receive the next normal message, but other named tasks may keep running concurrently. `/session new <name>` shares the configured workspace, while `/session new <name> --worktree` creates an isolated checkout for that task under the daemon workspace's `.qwen/worktrees/` directory. The daemon verifies the persisted worktree owner before reopening the task after a restart; a missing, changed, or foreign ownership record fails closed instead of silently moving the task into the shared workspace. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. `/clear`, `/new`, and `/reset` do not replace a selected worktree task; select or create a shared task first. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
@@ -487,12 +494,13 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/help` — List available commands
 - `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
 - `/status` — Show session info and access policy
+- `/btw <question>` — Ask a side question without interrupting the current task; text-only questions up to 4096 characters, requires an agent connection with side-question support
 - `/sessions [all]` — List open named tasks, or include closed tasks; available only with `multiSession: true`
 - `/session current` — Show the selected named task
 - `/session new <name>` — Create and select a shared-workspace task
-- `/session new <name> --worktree` — Recognized but deferred to Part 4
+- `/session new <name> --worktree` — Create and select a task in its own Git worktree; daemon-managed named-task mode only
 - `/session use <name>` — Select an open task or reopen a closed task
-- `/session cancel [<name>]` — Recognized but deferred to Part 3. Wait for the selected task to finish before switching; Telegram users can use `/cancel` for the selected task
+- `/session cancel [<name>]` — Cancel the selected task's active prompt, or name another owned task; independently queued turns are not cancelled, but `collect`-mode follow-ups buffered behind the cancelled prompt are discarded by the existing cancellation behavior; media preparation is not targeted
 - `/session close <name>` — Close a task without deleting its transcript
 - `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
 - `/loop list` — List loops for the current chat

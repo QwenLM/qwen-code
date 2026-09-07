@@ -1166,7 +1166,7 @@ describe('SessionCatalogStore', () => {
     ).toEqual(['pinned', 'a', 'b']);
   });
 
-  it('records, snapshots, and resolves pending session activity', () => {
+  it('records, snapshots, and resolves pending session activity', async () => {
     const wake = vi.fn();
     const stopWake = store.onLiveStateWake(wake);
 
@@ -1195,6 +1195,7 @@ describe('SessionCatalogStore', () => {
     // Releasing the last live-state user drops pending completions.
     store.recordSessionActivity('/work', 'b');
     releaseLiveState();
+    await Promise.resolve();
     expect(store.snapshotSessionActivity('/work')).toBeUndefined();
     stopWake();
   });
@@ -2076,26 +2077,37 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
     expect(store.getLiveSession('/work', 'unknown')).toBeUndefined();
   });
 
-  it('notifies live-session subscribers only when volatile state changes', () => {
+  it('separates content changes from fresh live-state observations', () => {
     const listener = vi.fn();
+    const observationListener = vi.fn();
     const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    const unsubscribeObservations = store.subscribeLiveSessionObservations(
+      '/work',
+      observationListener,
+    );
 
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(1);
 
-    // The 2s poll cadence keeps re-applying identical state: no churn.
+    // Identical polls do not churn content readers, but still advance the
+    // freshness signal used by session ownership handoffs.
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(2);
 
     store.applyLiveState('/work', [live('s1', false)]);
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
 
     unsubscribe();
+    unsubscribeObservations();
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
   });
 
-  it('drops the snapshot when the last live-state retainer releases', () => {
+  it('drops the snapshot when the last live-state retainer releases', async () => {
     const release = store.retainWorkspaceLiveState('/work');
     store.applyLiveState('/work', [live('s1', true)]);
     const listener = vi.fn();
@@ -2103,9 +2115,29 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
 
     release();
 
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    await Promise.resolve();
     expect(store.hasLiveSessions('/work')).toBe(false);
     expect(store.getLiveSession('/work', 's1')).toBeUndefined();
     expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('keeps the snapshot during a same-tick live-state owner handoff', async () => {
+    const releaseFirst = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    releaseFirst();
+    const releaseSecond = store.retainWorkspaceLiveState('/work');
+    await Promise.resolve();
+
+    expect(store.getLiveSession('/work', 's1')).toEqual(live('s1', true));
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseSecond();
+    await Promise.resolve();
     unsubscribe();
   });
 });

@@ -142,6 +142,9 @@ describe('Session.pendingWorktreeNotice', () => {
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
       }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
@@ -187,6 +190,13 @@ describe('Session.pendingWorktreeNotice', () => {
         setStatusChangeCallback: vi.fn(),
         clearStatusChangeCallback: vi.fn(),
         hasRunningEntries: vi.fn().mockReturnValue(false),
+      }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),

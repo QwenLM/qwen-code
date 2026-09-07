@@ -45,9 +45,16 @@ export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
 const MAX_SANDBOX_QUERY_LENGTH = 8192;
 
 function isLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
-  );
+  const octets = hostname.split('.');
+  const isIpv4Loopback =
+    octets.length === 4 &&
+    octets[0] === '127' &&
+    octets.slice(1).every((octet) => {
+      if (!/^\d+$/.test(octet)) return false;
+      const value = Number(octet);
+      return value >= 0 && value <= 255;
+    });
+  return hostname === 'localhost' || hostname === '[::1]' || isIpv4Loopback;
 }
 
 function loopbackCrossOriginHostname(hostname: string): string | undefined {

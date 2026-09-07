@@ -752,7 +752,7 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('agent_not_found');
   });
 
-  it('refuses POST with 401 token_required on no-token loopback strict mode', async () => {
+  it('refuses POST when the injected strict gate fails closed', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({
       bridge,
