@@ -74,3 +74,16 @@ export function runWithoutToolCallRuntime<T>(fn: () => T): T {
 export function getToolCallRuntime(): ToolCallRuntimeContext | undefined {
   return context.getStore();
 }
+
+const sourceStorage = new AsyncLocalStorage<{ kind: 'code_mode' }>();
+
+export function runWithToolCallSource<T>(
+  source: { kind: 'code_mode' },
+  callback: () => T,
+): T {
+  return sourceStorage.run(source, callback);
+}
+
+export function getCurrentToolCallSource(): { kind: 'code_mode' } | undefined {
+  return sourceStorage.getStore();
+}

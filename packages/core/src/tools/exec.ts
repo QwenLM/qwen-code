@@ -6,7 +6,16 @@
 
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { executeCodeMode } from '../code-mode/host-client.js';
+import {
+  executeCodeMode,
+  CodeModeExecutionError,
+  type CodeModeExecutionResult,
+} from '../code-mode/host-client.js';
+import {
+  boundCodeModeOutput,
+  EXEC_MAX_OUTPUT_CHARS,
+} from '../code-mode/output.js';
+import { ToolErrorType } from './tool-error.js';
 import { getToolCallRuntime } from '../code-mode/tool-call-runtime.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { ToolResult } from './tools.js';
@@ -42,14 +51,26 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
           ? new Set(runtime.allowedToolNames)
           : undefined,
       );
-    const result = await executeCodeMode(
-      this.params.source,
-      plan,
-      runtime,
-      signal,
+    let result: CodeModeExecutionResult;
+    let failure: string | undefined;
+    try {
+      result = await executeCodeMode(this.params.source, plan, runtime, signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      result =
+        error instanceof CodeModeExecutionError ? error.result : { output: '' };
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    const sections: string[] = [];
+    if (result.output) sections.push(result.output);
+    if (result.value !== undefined)
+      sections.push(`Return value: ${JSON.stringify(result.value)}`);
+    if (failure !== undefined) sections.push(`Script error:\n${failure}`);
+    const output = boundCodeModeOutput(
+      sections.join('\n') || 'JavaScript completed successfully.',
+      EXEC_MAX_OUTPUT_CHARS,
     );
-    const llmContent: Part[] = [];
-    if (result.output) llmContent.push({ text: result.output });
+    const llmContent: Part[] = [{ text: output }];
     for (const item of result.content ?? []) {
       llmContent.push({
         inlineData: {
@@ -58,16 +79,16 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         },
       });
     }
-    const sections: string[] = [];
-    if (result.output) sections.push(result.output);
-    if (result.value !== undefined) {
-      const value = `Return value: ${JSON.stringify(result.value)}`;
-      sections.push(value);
-      llmContent.push({ text: value });
-    }
-    const output = sections.join('\n') || 'JavaScript completed successfully.';
-    if (llmContent.length === 0) llmContent.push({ text: output });
-    return { llmContent, returnDisplay: output };
+    return {
+      llmContent,
+      returnDisplay: output,
+      persistedOutputFiles: [],
+      ...(failure === undefined
+        ? {}
+        : {
+            error: { message: output, type: ToolErrorType.EXECUTION_FAILED },
+          }),
+    };
   }
 }
 
@@ -94,6 +115,10 @@ export class ExecTool extends BaseDeclarativeTool<ExecParams, ToolResult> {
       false,
       true,
     );
+  }
+
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
   }
 
   protected createInvocation(params: ExecParams): ExecInvocation {

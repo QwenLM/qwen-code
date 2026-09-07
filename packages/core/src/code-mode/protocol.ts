@@ -60,6 +60,8 @@ export interface CompleteMessage {
 export interface ErrorMessage {
   type: 'error';
   error: string;
+  output?: string;
+  content?: CodeModeContentItem[];
 }
 
 export type HostMessage = ToolCallMessage | CompleteMessage | ErrorMessage;
@@ -97,7 +99,9 @@ function hasBoundedImageContent(message: ParentMessage | HostMessage): boolean {
 }
 
 function maxFrameBytes(message: ParentMessage | HostMessage): number {
-  if (message.type === 'complete') return CODE_MODE_MAX_FRAME_BYTES;
+  if (message.type === 'complete' || message.type === 'error') {
+    return CODE_MODE_MAX_FRAME_BYTES;
+  }
   if (hasBoundedImageContent(message)) return CODE_MODE_MAX_FRAME_BYTES;
   return CODE_MODE_MAX_CONTROL_FRAME_BYTES;
 }

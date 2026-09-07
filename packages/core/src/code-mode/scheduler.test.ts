@@ -73,6 +73,52 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(JSON.stringify(functionResponse)).not.toContain('Media output:');
   }, 10_000);
 
+  it.each(['image', 'audio'] as const)(
+    'preserves emitted %s and text when exec fails',
+    async (kind) => {
+      const config = makeFakeConfig({
+        codeModeOnly: true,
+        targetDir: '/tmp',
+        cwd: '/tmp',
+      });
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({
+        image: true,
+      });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      const completed = vi.fn();
+      const scheduler = new CoreToolScheduler({
+        config,
+        onAllToolCallsComplete: async (calls) => completed(calls),
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => undefined,
+        onEditorClose: vi.fn(),
+      });
+      const mimeType = kind === 'image' ? 'image/png' : 'audio/wav';
+      const data = kind === 'image' ? TINY_PNG_BASE64 : 'QUJD';
+      await scheduler.schedule(
+        {
+          callId: 'exec-failure-media',
+          name: 'exec',
+          args: {
+            source: `text('DONE'); ${kind}('data:${mimeType};base64,${data}'); throw new Error('LATER');`,
+          },
+          isClientInitiated: false,
+          prompt_id: 'media-failure',
+        },
+        new AbortController().signal,
+      );
+      const call = completed.mock.calls[0]?.[0][0];
+      expect(call.status).toBe('error');
+      const response = call.response.responseParts[0].functionResponse;
+      expect(response.response.error).toContain('DONE');
+      expect(response.response.error).toContain('LATER');
+      expect(response.parts).toEqual([{ inlineData: { mimeType, data } }]);
+    },
+    10_000,
+  );
+
   it('normalizes a nested MCP image for image(result.content[0])', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,

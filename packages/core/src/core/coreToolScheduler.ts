@@ -213,6 +213,7 @@ import {
   extractCodeModeImageContent,
   runWithoutToolCallRuntime,
   runWithToolCallRuntime,
+  runWithToolCallSource,
   type CodeModeToolResult,
 } from '../code-mode/tool-call-runtime.js';
 import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
@@ -258,6 +259,7 @@ const GATE_HEADROOM = 3000;
 // returns lifecycle policy that must remain inline. This gate runs before
 // per-tool limits, so each requires an explicit exemption here.
 const GATE_EXEMPT_TOOLS = new Set<string>([
+  ToolNames.EXEC,
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
@@ -5272,7 +5274,9 @@ export class CoreToolScheduler {
                   },
                   execute,
                 )
-              : execute();
+              : scheduledCall.request.source === 'code_mode'
+                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                : execute();
           }),
         );
       } else {
@@ -5309,7 +5313,9 @@ export class CoreToolScheduler {
                   },
                   execute,
                 )
-              : execute();
+              : scheduledCall.request.source === 'code_mode'
+                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                : execute();
           }),
         );
       }
@@ -6149,6 +6155,7 @@ export class CoreToolScheduler {
         const errorGateThreshold =
           this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
         if (
+          canonicalName !== ToolNames.EXEC &&
           errorMessage.length > errorGateThreshold &&
           !isAlreadyTruncated(errorMessage)
         ) {
@@ -6231,6 +6238,15 @@ export class CoreToolScheduler {
                 ? { visionBridgeNotice: processedImages.visionBridgeNotice }
                 : {}),
             };
+          }
+        }
+        if (canonicalName === ToolNames.EXEC) {
+          const audioParts = normalizeParts(toolResult.llmContent).filter(
+            (part) => part.inlineData?.mimeType?.startsWith('audio/'),
+          );
+          const response = errorResponse.responseParts[0]?.functionResponse;
+          if (response && audioParts.length > 0) {
+            response.parts = [...(response.parts ?? []), ...audioParts];
           }
         }
         if (

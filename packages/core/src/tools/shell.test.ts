@@ -79,6 +79,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
 import { ToolErrorType } from './tool-error.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -3568,6 +3569,34 @@ describe('ShellTool', () => {
         await promise;
       });
     });
+
+    it.each([0, 1])(
+      'omits repeated command source from nested shell results (exit %i)',
+      async (exitCode) => {
+        const command = 'echo ' + 'large-script-source'.repeat(3000);
+        const invocation = shellTool.build({ command, is_background: false });
+        const promise = runWithToolCallSource(
+          {
+            kind: 'code_mode',
+          },
+          () => invocation.execute(mockAbortSignal),
+        );
+        resolveShellExecution({
+          output: 'diagnostic output',
+          exitCode,
+          error: null,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('diagnostic output');
+        expect(result.llmContent).toContain(`Exit Code: ${exitCode}`);
+        expect(result.llmContent).not.toContain('large-script-source');
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        if (exitCode !== 0) {
+          expect(result.error?.message).toContain('diagnostic output');
+          expect(result.error?.message).not.toContain('large-script-source');
+        }
+      },
+    );
 
     it('reports a foreground non-zero exit as a tool error', async () => {
       const invocation = shellTool.build({

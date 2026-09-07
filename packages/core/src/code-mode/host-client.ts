@@ -35,6 +35,16 @@ export interface CodeModeExecutionResult {
   content?: CodeModeContentItem[];
 }
 
+export class CodeModeExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly result: CodeModeExecutionResult,
+  ) {
+    super(message);
+    this.name = 'CodeModeExecutionError';
+  }
+}
+
 function hostCommand(): { command: string; args: string[] } {
   const currentFile = fileURLToPath(import.meta.url);
   if (currentFile.endsWith('.ts')) {
@@ -201,7 +211,11 @@ export async function executeCodeMode(
           continue;
         }
         if (message.type === 'error') {
-          protocolError = new Error(message.error);
+          protocolError = new CodeModeExecutionError(message.error, {
+            output: message.output ?? '',
+            ...(message.content ? { content: message.content } : {}),
+          });
+          cancelNested(protocolError);
           child.stdin.end();
           continue;
         }

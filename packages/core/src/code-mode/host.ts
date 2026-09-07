@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { boundCodeModeOutput } from './output.js';
+
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import {
   newQuickJSWASMModuleFromVariant,
@@ -56,7 +58,7 @@ function errorMessage(value: unknown): string {
   } else {
     message = String(value);
   }
-  return message.slice(0, CODE_MODE_MAX_OUTPUT_CHARS);
+  return boundCodeModeOutput(message, CODE_MODE_MAX_OUTPUT_CHARS);
 }
 
 function jsonHandle(vm: QuickJSContext, value: unknown): QuickJSHandle {
@@ -81,9 +83,8 @@ function appendBounded(
       : value === undefined
         ? 'undefined'
         : JSON.stringify(value);
-  if (output.length >= maxOutputChars) return output;
   const next = output.length === 0 ? text : `\n${text}`;
-  return output + next.slice(0, maxOutputChars - output.length);
+  return boundCodeModeOutput(output + next, maxOutputChars);
 }
 
 function boundedValue(value: unknown, maxChars: number): unknown {
@@ -528,6 +529,13 @@ async function execute(message: ExecuteMessage): Promise<void> {
       ...(value === undefined
         ? {}
         : { value: boundedValue(value, maxOutputChars) }),
+      ...(content.length === 0 ? {} : { content }),
+    });
+  } catch (error) {
+    write({
+      type: 'error',
+      error: error instanceof Error ? error.message : errorMessage(error),
+      output,
       ...(content.length === 0 ? {} : { content }),
     });
   } finally {
