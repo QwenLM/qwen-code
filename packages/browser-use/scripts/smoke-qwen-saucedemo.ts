@@ -89,6 +89,7 @@ await withManagedChrome('sauce', async (chrome) => {
     await mkdir(providerLogs, { recursive: true, mode: 0o700 });
 
     const settings = {
+      skills: { enabled: ['browser-use'] },
       general: { chatRecording: false },
       telemetry: { enabled: false },
       security: { auth: { selectedType: 'openai' } },

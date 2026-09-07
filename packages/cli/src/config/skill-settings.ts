@@ -53,6 +53,7 @@ export function resolveSkillSettings(
   const defaultDisabled = normalizeSkillNames(
     settings.merged.skills?.defaultDisabled,
   );
+  defaultDisabled.add('browser-use');
   const enabled = normalizeSkillNames(settings.merged.skills?.enabled);
   const disablements = new Map<string, SkillDisablement>();
 

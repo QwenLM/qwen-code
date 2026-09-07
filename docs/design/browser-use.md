@@ -53,6 +53,14 @@ layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
 
+Browser Use is disabled by default. Users opt in through `/skills` or
+`skills.enabled: ["browser-use"]` and disable it through the same skill
+controls (`skills.disabled` takes precedence). Disabled skills are excluded
+from model discovery and skill invocation. This is the existing generic skill
+mechanism used by Computer Use, not a browser permission boundary: disabling
+the skill does not unload instructions already in a conversation or disconnect
+an existing SDK session.
+
 Native Host registration is native-side product setup, not a Chrome-extension
 operation. On macOS and Linux, the first Browser runtime initialization
 idempotently installs the launcher and manifests for existing Google Chrome,
@@ -310,7 +318,7 @@ For the first release:
 - there is no Browser Use-specific origin allowlist, upload-root allowlist, or
   snapshot redaction in this release;
 - the existing Qwen toolbar action and side panel remain;
-- there is no separate Browser Use enable/disable switch yet.
+- Qwen skill availability is opt-in and uses the existing `/skills` controls.
 
 ## Current boundaries and future work
 
@@ -326,8 +334,8 @@ For the first release:
 - **Browser backends:** The Qwen extension currently connects the SDK to
   Chrome. Other browser families or an in-app browser should be added together
   with capability discovery when products need them.
-- **Product control:** Add Qwen-owned opt-in and authenticate the local
-  connection.
+- **Product control:** Authenticate the local connection. Skill enablement
+  controls availability, not direct SDK access or active browser sessions.
 - **History:** Make Chrome History optional through a Qwen-owned grant and
   revoke flow outside the side panel.
 - **Platform and optional APIs:** Native Host installation currently supports

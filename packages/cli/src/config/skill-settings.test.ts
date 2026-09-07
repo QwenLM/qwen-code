@@ -40,6 +40,38 @@ function fakeSettings({
 }
 
 describe('resolveSkillSettings', () => {
+  it('requires an explicit Browser Use opt-in without changing Computer Use', () => {
+    const result = resolveSkillSettings(fakeSettings({ merged: {} }));
+
+    expect(result.disabledNames).toEqual(new Set(['browser-use']));
+    expect(result.disablements.get('browser-use')).toEqual({
+      reason: 'default',
+    });
+    expect(result.disabledNames.has('computer-use')).toBe(false);
+  });
+
+  it('lets the skills picker enable, disable, and re-enable Browser Use', () => {
+    let lists = { disabled: [] as string[], enabled: [] as string[] };
+    for (const enabled of [true, false, true]) {
+      lists = updateWorkspaceSkillSettingLists(lists, 'browser-use', enabled);
+      const result = resolveSkillSettings(fakeSettings({ merged: lists }));
+      expect(result.disabledNames.has('browser-use')).toBe(!enabled);
+    }
+  });
+
+  it('keeps a hard Browser Use disable authoritative over an explicit opt-in', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: { disabled: ['browser-use'], enabled: [' BROWSER-USE '] },
+        user: { disabled: ['browser-use'] },
+      }),
+    );
+    expect(result.disablements.get('browser-use')).toEqual({
+      reason: 'hard',
+      lockedScope: 'user',
+    });
+  });
+
   it('lets a workspace opt-in override a user default case-insensitively', () => {
     const result = resolveSkillSettings(
       fakeSettings({
@@ -52,7 +84,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['plan']));
+    expect(result.disabledNames).toEqual(new Set(['plan', 'browser-use']));
     expect(result.enabledNames).toEqual(new Set(['review']));
     expect(result.disablements.get('plan')).toEqual({ reason: 'default' });
     expect(result.disablements.has('review')).toBe(false);
@@ -70,7 +102,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['review']));
+    expect(result.disabledNames).toEqual(new Set(['review', 'browser-use']));
     expect(result.disablements.get('review')).toEqual({
       reason: 'hard',
       lockedScope: 'user',
@@ -88,7 +120,7 @@ describe('resolveSkillSettings', () => {
       }),
     );
 
-    expect(result.disabledNames).toEqual(new Set(['valid']));
+    expect(result.disabledNames).toEqual(new Set(['valid', 'browser-use']));
   });
 });
 

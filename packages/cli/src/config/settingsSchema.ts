@@ -2314,7 +2314,8 @@ const SETTINGS_SCHEMA = {
         description:
           'Skill names disabled by default unless explicitly enabled through ' +
           'skills.enabled. Matched case-insensitively and UNION-merged across ' +
-          'settings scopes. skills.disabled always wins.',
+          'settings scopes. Browser Use is disabled by default even when this ' +
+          'list is empty. skills.disabled always wins.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
