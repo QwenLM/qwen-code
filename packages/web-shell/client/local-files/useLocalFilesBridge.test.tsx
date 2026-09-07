@@ -143,6 +143,31 @@ function exclusiveLocks(): LockManagerLike {
   };
 }
 
+/**
+ * Owner lock whose decline cause can be a still-settling release: an
+ * `ifAvailable` request declines while a peer holds the lock or while the
+ * settling counter lasts, so an arbitration's first attempt can be declined
+ * with the lock itself already free.
+ */
+function settlingLocks(lock: { held: boolean; settling: number }) {
+  const locks: LockManagerLike = {
+    request: async (_name, options, callback) => {
+      if (options.ifAvailable && (lock.held || lock.settling > 0)) {
+        if (!lock.held) lock.settling -= 1;
+        return callback(null);
+      }
+      lock.held = true;
+      try {
+        await callback({});
+      } finally {
+        lock.held = false;
+      }
+      return undefined;
+    },
+  };
+  return locks;
+}
+
 interface Harness {
   get(): ReturnType<typeof useLocalFilesBridge>;
   unmount(): void;
@@ -752,6 +777,7 @@ describe('useLocalFilesBridge restore', () => {
     // disconnect must revoke it instead of reporting success over it.
     expect(store.clears).toBe(1);
     expect(await store.load()).toBeUndefined();
+    expect(hB.get().status).toEqual({ phase: 'idle', blocker: null });
     hB.unmount();
   });
 
@@ -940,21 +966,7 @@ describe('useLocalFilesBridge restore', () => {
     const delayGate = new Promise<void>((resolve) => {
       releaseDelay = resolve;
     });
-    const locks: LockManagerLike = {
-      request: async (_name, options, callback) => {
-        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
-          if (!lock.held) lock.settling -= 1;
-          return callback(null);
-        }
-        lock.held = true;
-        try {
-          await callback({});
-        } finally {
-          lock.held = false;
-        }
-        return undefined;
-      },
-    };
+    const locks: LockManagerLike = settlingLocks(lock);
     const common = {
       baseUrl: 'https://daemon.example/',
       win: secureWindow(async () => handle),
@@ -991,10 +1003,83 @@ describe('useLocalFilesBridge restore', () => {
     await disconnecting;
     await hB.flush();
     // The record is the connect's own grant: the vetoed revoke must not wipe
-    // it, and the panel must still name it.
+    // it, and the connect's own write is the authoritative status — the
+    // reconcile must not downgrade it to a bare idle.
     expect(store.clears).toBe(0);
     expect(await store.load()).toBe(handle);
-    expect(hB.get().status.rootName).toBe('ai_coding');
+    expect(hB.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    hB.unmount();
+  });
+
+  it('does not reconcile over a connect-started bridge that won the lock', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // B parks behind A's lock: every start attempt declines.
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    for (let i = 0; i < 8 && hB.get().status.phase !== 'held-elsewhere'; i++) {
+      delayResolvers.shift()?.();
+      await hB.flush();
+    }
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    // A goes away with its release still settling: attempt 0 declines and
+    // the arbitration parks in the inter-attempt delay.
+    lock.settling = 1;
+    hA.unmount();
+    await hB.flush();
+    const disconnecting = act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    // The user connects inside the window: the stored handle needs no
+    // picker, so the connect saves and its own bridge wins the freed lock.
+    const connecting = act(async () => {
+      await hB.get().connect();
+    });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(1);
+    // The remaining arbitration attempts decline on B's own bridge.
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await hB.flush();
+    }
+    await connecting;
+    await disconnecting;
+    await hB.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    // The bridge's own status must stand: restoring the pre-click
+    // held-elsewhere would report another tab owning the directory this
+    // tab's bridge is actually serving.
+    expect(hB.get().status).toEqual({
+      phase: 'connecting',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
     hB.unmount();
   });
 
@@ -1013,21 +1098,7 @@ describe('useLocalFilesBridge restore', () => {
         rejectPicker = reject;
       },
     );
-    const locks: LockManagerLike = {
-      request: async (_name, options, callback) => {
-        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
-          if (!lock.held) lock.settling -= 1;
-          return callback(null);
-        }
-        lock.held = true;
-        try {
-          await callback({});
-        } finally {
-          lock.held = false;
-        }
-        return undefined;
-      },
-    };
+    const locks: LockManagerLike = settlingLocks(lock);
     const common = {
       baseUrl: 'https://daemon.example/',
       win: secureWindow(async () => pickerGate),
@@ -1071,6 +1142,284 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('does not clear a grant a peer took over while the revoke was deferred', async () => {
+    const perms = { query: 'denied' as PermissionState };
+    const handle = fakeHandle('ai_coding', perms);
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const locks: LockManagerLike = settlingLocks(lock);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () => delayGate,
+    };
+    // B restores the denied grant into needs-gesture; it owns nothing, so
+    // its disconnect arbitrates.
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-gesture');
+
+    lock.settling = 1;
+    const disconnectPromise = hB.get().disconnect();
+    await hB.flush();
+    // Attempt 0 declined on the settling release; the user connects inside
+    // the inter-attempt delay and the connect parks in the picker, so
+    // attempt 1 defers the revoke — and the arbitration releases the lock
+    // with the decision still open. The connect is not wrapped in act: its
+    // open scope would hold back the peer mount's effects below.
+    const connectPromise = hB.get().connect();
+    await hB.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    // A peer mount restores the same record, takes the freed lock and runs
+    // a live bridge on it.
+    perms.query = 'granted';
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+    // The picker is cancelled: the deferred revoke must re-arbitrate, see
+    // the peer's lock, and keep the record the peer's bridge depends on.
+    rejectPicker(new DOMException('user cancelled', 'AbortError'));
+    await act(async () => {
+      await connectPromise;
+    });
+    await hB.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('names the surviving grant when a deferred revoke fails soft', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    let clearCalls = 0;
+    store.clear = async () => {
+      clearCalls += 1;
+      return false;
+    };
+    const lock = { held: false, settling: 1 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () => delayGate,
+    });
+    await h.flush();
+    await h.flush();
+    // needs-gesture: the stored grant is denied, so the panel names it and
+    // offers Disconnect; no run was ever owned, so the revoke arbitrates.
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    // Attempt 0 declined on the settling release; the user connects inside
+    // the inter-attempt delay, so attempt 1 defers the revoke to the
+    // connect's finally.
+    const connecting = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    rejectPicker(new DOMException('user cancelled', 'AbortError'));
+    await connecting;
+    await h.flush();
+    // The deferred revoke reached the store but the delete failed soft: the
+    // record survives, so the panel must keep naming it — otherwise
+    // Disconnect (the only store.clear() caller) never renders again.
+    expect(clearCalls).toBe(1);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toEqual({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('drops the name when a deferred revoke clears behind a re-ask', async () => {
+    const handle = fakeHandle('ai_coding', {
+      query: 'prompt',
+      request: 'prompt',
+    });
+    let releaseRequest!: (state: PermissionState) => void;
+    const requestGate = new Promise<PermissionState>((resolve) => {
+      releaseRequest = resolve;
+    });
+    vi.mocked(handle.requestPermission).mockImplementation(() => requestGate);
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 1 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () => delayGate,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    // Attempt 0 declined on the settling release; the user reconnects
+    // inside the window and the permission re-ask keeps the connect in
+    // flight when attempt 1 lands, so the revoke defers.
+    const connecting = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    // The re-ask came back still prompt: the connect re-arms needs-gesture
+    // (naming the grant), and its finally runs the deferred revoke — which
+    // clears, so the panel must stop naming a record that no longer exists.
+    releaseRequest('prompt');
+    await connecting;
+    await h.flush();
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+    h.unmount();
+  });
+
+  it('revokes when the deferred connect only attempted to save', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    // The save fails soft and writes nothing (the store's own contract):
+    // the record still holds the ORIGINAL directory, so the connect must
+    // not stamp the saved flag that vetoes the pending revoke.
+    store.save = async () => false;
+    const lock = { held: false, settling: 1 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let resolvePicker!: (value: FileSystemDirectoryHandle) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>((resolve) => {
+      resolvePicker = resolve;
+    });
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () => delayGate,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    // Attempt 0 declined on the settling release; the user connects inside
+    // the window, the denied stored grant falls through to the picker, and
+    // attempt 1 defers the revoke.
+    const connecting = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    resolvePicker(fakeHandle('new_dir', { query: 'granted' }));
+    await connecting;
+    await h.flush();
+    // The soft-failed save left the original record in place, and the
+    // deferred revoke reaches it.
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('still revokes when the view unmounts inside the arbitration backoff', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 0 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    const locks: LockManagerLike = settlingLocks(lock);
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () => delayGate,
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // No session: B restores the grant but never owns the lock.
+    const hB = render({ ...common, sessionId: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-session');
+
+    // A goes away with its release still settling: attempt 0 declines and
+    // the arbitration parks in the inter-attempt delay.
+    lock.settling = 1;
+    hA.unmount();
+    await hB.flush();
+    const disconnecting = act(async () => {
+      await hB.get().disconnect();
+    });
+    await hB.flush();
+    // The view unmounts inside the backoff. Losing the UI must not cancel
+    // the revoke the user asked for — only a newer disconnect may.
+    hB.unmount();
+    releaseDelay();
+    await disconnecting;
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+  });
+
   it('restores the panel state when every arbitration attempt is declined', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
@@ -1102,6 +1451,68 @@ describe('useLocalFilesBridge restore', () => {
     expect(hB.get().status).toEqual({
       phase: 'held-elsewhere',
       blocker: null,
+      rootName: 'ai_coding',
+    });
+
+    // A second declined click must restore the same state: the parked
+    // bridge settled start() terminally and stopBridge() dropped the ref,
+    // so the pre-click phase now lives only in the rendered status.
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(hB.get().status).toEqual({
+      phase: 'held-elsewhere',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it('keeps the withhold when a declined revoke runs under a blocker', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const locks = exclusiveLocks();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    // A trusted peer owns the lock with a live bridge.
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // B's workspace is withheld: restore names the stored grant so the
+    // panel's Disconnect (the only revoke path) renders over it.
+    const hB = render({
+      ...common,
+      sessionId: 'session-B',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+
+    // Every arbitration attempt declines on A's lock: nothing was revoked,
+    // so the reconcile must restore the withhold, not a connectable idle.
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(hB.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
       rootName: 'ai_coding',
     });
     hA.unmount();
@@ -1178,21 +1589,7 @@ describe('useLocalFilesBridge restore', () => {
     // run latch can keep this disconnect from arbitrating against the tab's
     // own still-settling lock.
     const lock = { held: false, settling: 0 };
-    const locks: LockManagerLike = {
-      request: async (_name, options, callback) => {
-        if (options.ifAvailable && (lock.held || lock.settling > 0)) {
-          if (!lock.held) lock.settling -= 1;
-          return callback(null);
-        }
-        lock.held = true;
-        try {
-          await callback({});
-        } finally {
-          lock.held = false;
-        }
-        return undefined;
-      },
-    };
+    const locks: LockManagerLike = settlingLocks(lock);
     const h = render({
       sessionId: 'session-1',
       baseUrl: 'https://daemon.example/',
