@@ -15,6 +15,8 @@ import {
   type WorkspaceAgentSummaryView,
   type NewWorkspaceAgent,
   type NewThread,
+  type AgentConfigPatch,
+  type AgentCapabilitiesView,
 } from './ThreadsPage';
 import {
   ThreadView,
@@ -31,12 +33,16 @@ interface CreateThreadResult {
 }
 
 export interface ThreadsApi {
-  listAgents(): Promise<{ agents: WorkspaceAgentSummaryView[] }>;
+  listAgents(): Promise<{
+    agents: WorkspaceAgentSummaryView[];
+    capabilities?: AgentCapabilitiesView;
+  }>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
+  updateAgent(id: string, patch: AgentConfigPatch): Promise<unknown>;
   createThread(input: NewThread): Promise<CreateThreadResult>;
   previewThread(
     assignee?: string,
@@ -92,6 +98,11 @@ function createThreadsHttpApi(
         method: 'PATCH',
         body: JSON.stringify({ enabled }),
       }),
+    updateAgent: (id, patch) =>
+      request(`/agents/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
     createThread: (input) => post('/threads', input),
     previewThread: (assignee) => post('/threads/preview', { assignee }),
     assignThread: (id, assignee) =>
@@ -146,6 +157,7 @@ export function ThreadsRoute({
     [api, workspace.baseUrl, workspace.token, workspaceCwd],
   );
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
+  const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
   const [openId, setOpenId] = useState<string | undefined>();
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
@@ -174,6 +186,7 @@ export function ThreadsRoute({
         openId ? client.getThread(openId) : undefined,
       ]);
       setAgents(nextAgents.agents);
+      if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
       setRefreshError(undefined);
@@ -338,6 +351,10 @@ export function ThreadsRoute({
         onSetAgentEnabled={(id, enabled) =>
           void mutate(() => client.setAgentEnabled(id, enabled))
         }
+        onUpdateAgent={(id, patch) =>
+          void mutate(() => client.updateAgent(id, patch))
+        }
+        {...(capabilities ? { capabilities } : {})}
         onCreateThread={(input) =>
           void mutate(async () => {
             const created = await client.createThread(input);

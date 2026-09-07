@@ -185,6 +185,10 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
     (value['agentType'] === undefined ||
       isNonEmptyString(value['agentType'])) &&
     (value['model'] === undefined || isNonEmptyString(value['model'])) &&
+    // An empty string is not absent: it would append a blank paragraph to the
+    // persona and read as an instruction that was meant to say something.
+    (value['instructions'] === undefined ||
+      isNonEmptyString(value['instructions'])) &&
     (value['queueLimit'] === undefined ||
       isPositiveInteger(value['queueLimit'])) &&
     (value['enabled'] === undefined || typeof value['enabled'] === 'boolean') &&

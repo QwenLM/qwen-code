@@ -18,6 +18,26 @@ import {
 } from './agents-view-logic';
 import styles from './ThreadsPage.module.css';
 
+/**
+ * A change to one agent's configuration. Absent leaves a field alone; `null`
+ * clears the override and returns the agent to what its definition says.
+ */
+export interface AgentConfigPatch {
+  description?: string | null;
+  color?: string | null;
+  model?: string | null;
+  instructions?: string | null;
+  agentType?: string | null;
+  maxConcurrentRuns?: number | null;
+}
+
+/** What every agent in this workspace may do. A property of the subsystem. */
+export interface AgentCapabilitiesView {
+  readOnly: boolean;
+  allowed: readonly string[];
+  threadTools: readonly string[];
+}
+
 export interface ThreadsPageProps {
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
@@ -25,6 +45,8 @@ export interface ThreadsPageProps {
   onCreateAgent: (input: NewWorkspaceAgent) => void;
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
+  onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
+  capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => void;
   onPreviewThread?: (assignee?: string) => void;
   createPreview?: readonly RoutingPreviewTarget[];
@@ -37,6 +59,12 @@ export interface WorkspaceAgentSummaryView {
   name: string;
   description?: string;
   color?: string;
+  /** Definition supplying the persona. Absent uses the workspace default. */
+  agentType?: string;
+  model?: string;
+  /** What this identity is told on top of its definition's prompt. */
+  instructions?: string;
+  maxConcurrentRuns?: number;
   enabled: boolean;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
@@ -139,6 +167,8 @@ export function ThreadsPage({
   onCreateAgent,
   onDeleteAgent,
   onSetAgentEnabled,
+  onUpdateAgent,
+  capabilities,
   onCreateThread,
   onPreviewThread,
   createPreview,
@@ -147,6 +177,30 @@ export function ThreadsPage({
 }: ThreadsPageProps) {
   const groups = useMemo(() => groupThreads(threads), [threads]);
   const [creating, setCreating] = useState<'agent' | 'thread' | undefined>();
+  const [configuring, setConfiguring] = useState<string>();
+
+  const submitConfig =
+    (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!onUpdateAgent) return;
+      const data = new FormData(event.currentTarget);
+      const field = (name: string): string | null => {
+        const value = String(data.get(name) ?? '').trim();
+        // A field emptied on purpose clears the override rather than being
+        // ignored, which is the difference between "no opinion" and "back to
+        // the definition".
+        return value === '' ? null : value;
+      };
+      const runs = String(data.get('maxConcurrentRuns') ?? '').trim();
+      onUpdateAgent(agentId, {
+        description: field('description'),
+        model: field('model'),
+        agentType: field('agentType'),
+        instructions: field('instructions'),
+        maxConcurrentRuns: runs === '' ? null : Number(runs),
+      });
+      setConfiguring(undefined);
+    };
 
   const submitAgent = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -386,6 +440,19 @@ export function ThreadsPage({
                 </span>
                 {agent.retiredAt ? null : (
                   <>
+                    {onUpdateAgent ? (
+                      <button
+                        type="button"
+                        className={styles.agentAction}
+                        onClick={() =>
+                          setConfiguring(
+                            configuring === agent.id ? undefined : agent.id,
+                          )
+                        }
+                      >
+                        {configuring === agent.id ? 'Close' : 'Configure'}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className={styles.agentAction}
@@ -414,9 +481,93 @@ export function ThreadsPage({
                     </button>
                   </>
                 )}
+                {configuring === agent.id && onUpdateAgent ? (
+                  <form
+                    className={styles.agentConfig}
+                    onSubmit={submitConfig(agent.id)}
+                  >
+                    <label className={styles.configLabel}>
+                      What this agent is for
+                      <input
+                        className={styles.field}
+                        name="description"
+                        defaultValue={agent.description ?? ''}
+                        placeholder="Reviews changes before they ship"
+                      />
+                    </label>
+                    <label className={styles.configLabel}>
+                      Instructions, on top of its definition
+                      <textarea
+                        className={styles.field}
+                        name="instructions"
+                        rows={4}
+                        defaultValue={agent.instructions ?? ''}
+                        placeholder="How this one should work. It cannot widen what the agent may do."
+                      />
+                    </label>
+                    <label className={styles.configLabel}>
+                      Definition
+                      <input
+                        className={styles.field}
+                        name="agentType"
+                        defaultValue={agent.agentType ?? ''}
+                        placeholder="Workspace default"
+                      />
+                    </label>
+                    <label className={styles.configLabel}>
+                      Model
+                      <input
+                        className={styles.field}
+                        name="model"
+                        defaultValue={agent.model ?? ''}
+                        placeholder="Workspace default"
+                      />
+                    </label>
+                    <label className={styles.configLabel}>
+                      Threads at once
+                      <input
+                        className={styles.field}
+                        name="maxConcurrentRuns"
+                        type="number"
+                        min={1}
+                        max={8}
+                        defaultValue={agent.maxConcurrentRuns ?? 1}
+                      />
+                    </label>
+                    <p className={styles.configNote}>
+                      Emptying a field returns it to what the definition says.
+                    </p>
+                    <div className={styles.formActions}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setConfiguring(undefined)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="submit" size="sm" disabled={pending}>
+                        Save changes
+                      </Button>
+                    </div>
+                  </form>
+                ) : null}
               </div>
             ))
           )}
+          {capabilities ? (
+            <div className={styles.ceiling}>
+              <h3 className={styles.ceilingTitle}>What agents can do here</h3>
+              <p className={styles.ceilingText}>
+                {capabilities.readOnly
+                  ? 'Agents read the workspace and post to threads. They cannot edit files, run commands, or reach the network. Instructions and definitions change what an agent is for, never what it may do.'
+                  : 'Agents run without the read-only boundary.'}
+              </p>
+              <p className={styles.ceilingTools}>
+                {capabilities.allowed.join(', ')}
+              </p>
+            </div>
+          ) : null}
         </section>
 
         {loading && threads.length === 0 ? null : groups.length === 0 ? (

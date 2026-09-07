@@ -63,6 +63,12 @@ export {
 } from './workspace-agents/thread-actions.js';
 export { resolveThreadStatus } from './workspace-agents/thread-status.js';
 export {
+  AGENT_TOOL_CLASSIFICATION,
+  THREAD_TOOL_NAMES,
+  buildAgentToolConfig,
+  classifyAgentTool,
+} from './workspace-agents/capability.js';
+export {
   finishRunInTransaction,
   hasLiveDescendant,
 } from './workspace-agents/run-lifecycle.js';

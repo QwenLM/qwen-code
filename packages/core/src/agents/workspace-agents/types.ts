@@ -76,13 +76,26 @@ export interface WorkspaceAgent {
   /** Model override; absent inherits the workspace default. */
   model?: string;
   /**
+   * What this identity is told on top of its definition's prompt.
+   *
+   * An override rather than a replacement, because `agentType` is shared: two
+   * agents built on the same definition differ by who they are here, not by
+   * forking the definition. Appended to the persona at boot, so editing it
+   * reaches the next turn rather than only the next spawn.
+   *
+   * It cannot widen anything. The read-only capability boundary is derived
+   * from the definition and applied after this, so instructions change what an
+   * agent is for and never what it may do.
+   */
+  instructions?: string;
+  /**
    * How many runs may wait for this agent across all threads before further
    * mentions are refused. Absent means {@link DEFAULT_QUEUE_LIMIT}.
    *
-   * There is deliberately no concurrency setting: an agent is one long-lived
-   * body working one thread at a time, so the only meaningful bound is how
-   * much work may pile up behind it. Refusing at the limit makes the agent's
-   * real throughput visible instead of accruing a backlog nobody reaches.
+   * Distinct from {@link maxConcurrentRuns}, which bounds how many threads
+   * this agent works at once. This bounds how much may pile up behind those.
+   * Refusing at the limit makes the agent's real throughput visible instead of
+   * accruing a backlog nobody reaches.
    */
   queueLimit?: number;
   /**

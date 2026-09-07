@@ -48,6 +48,9 @@ import {
   releaseAgentHostSession,
   retireWorkspaceAgent,
   isAgentAddressable,
+  maxConcurrentRunsFor,
+  THREAD_TOOL_NAMES,
+  AGENT_TOOL_CLASSIFICATION,
   resolveThreadStatus,
   setWorkspaceAgentEnabled,
   updateWorkspaceAgents,
@@ -110,6 +113,106 @@ function lastActivity(thread: Thread): number {
   );
   return Math.max(lastPost, lastRun);
 }
+
+/**
+ * Reads the editable half of an agent from a PATCH body.
+ *
+ * Three states per field, and they are not the same thing. Absent leaves the
+ * value alone, so editing one field cannot blank the others. `null` clears the
+ * override and returns the agent to what its definition says. A value sets it.
+ * Anything else is rejected rather than coerced, because a colour that is not
+ * a colour or a concurrency that is not a number would be written to the
+ * roster and read back by the dispatcher.
+ */
+function readAgentConfigPatch(payload: {
+  description?: unknown;
+  color?: unknown;
+  model?: unknown;
+  instructions?: unknown;
+  agentType?: unknown;
+  maxConcurrentRuns?: unknown;
+}):
+  | { error: string; touched?: undefined; apply?: undefined }
+  | {
+      error?: undefined;
+      touched: boolean;
+      apply: (agent: WorkspaceAgent) => WorkspaceAgent;
+    } {
+  const steps: Array<(agent: WorkspaceAgent) => WorkspaceAgent> = [];
+
+  const text = (
+    key: 'description' | 'color' | 'model' | 'instructions' | 'agentType',
+    check?: (value: string) => boolean,
+  ): string | undefined => {
+    const raw = payload[key];
+    if (raw === undefined) return undefined;
+    if (raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+      steps.push((agent) => {
+        const { [key]: _dropped, ...rest } = agent;
+        return rest as WorkspaceAgent;
+      });
+      return undefined;
+    }
+    if (typeof raw !== 'string') return `${key}_invalid`;
+    const value = key === 'instructions' ? raw.trim() : raw.trim();
+    if (check && !check(value)) return `${key}_invalid`;
+    steps.push((agent) => ({ ...agent, [key]: value }));
+    return undefined;
+  };
+
+  for (const error of [
+    text('description'),
+    text('color', (value) => /^#[0-9a-fA-F]{6}$/.test(value)),
+    text('model'),
+    text('instructions'),
+    text('agentType'),
+  ]) {
+    if (error) return { error };
+  }
+
+  const runs = payload.maxConcurrentRuns;
+  if (runs !== undefined) {
+    if (runs === null) {
+      steps.push((agent) => {
+        const { maxConcurrentRuns: _dropped, ...rest } = agent;
+        return rest as WorkspaceAgent;
+      });
+    } else if (
+      typeof runs !== 'number' ||
+      !Number.isInteger(runs) ||
+      runs < 1 ||
+      runs > MAX_CONCURRENT_RUNS_CEILING
+    ) {
+      return { error: 'maxConcurrentRuns_invalid' };
+    } else {
+      steps.push((agent) => ({ ...agent, maxConcurrentRuns: runs }));
+    }
+  }
+
+  return {
+    touched: steps.length > 0,
+    apply: (agent) => steps.reduce((current, step) => step(current), agent),
+  };
+}
+
+/**
+ * The most threads one agent may be set to work at once.
+ *
+ * A ceiling on the setting, not on the machine: every concurrent run is a
+ * prompt in flight against the same session, and a number typed with an extra
+ * digit would book work nobody can read the results of.
+ */
+const MAX_CONCURRENT_RUNS_CEILING = 8;
+
+/**
+ * The tools an agent may actually call, derived from the same table the guard
+ * refuses from. Derived rather than listed so the two cannot drift: a tool
+ * reclassified in core changes what this reports on the next build.
+ */
+const AGENT_ALLOWED_TOOL_NAMES = Object.entries(AGENT_TOOL_CLASSIFICATION)
+  .filter(([, classification]) => classification === 'allow')
+  .map(([name]) => name)
+  .sort();
 
 /** Why a run exists, in the words a reader asks the question in. */
 function triggerText(thread: Thread, run: ThreadRun): string {
@@ -339,6 +442,10 @@ export function registerWorkspaceAgentRoutes(
             name: agent.name,
             ...(agent.description ? { description: agent.description } : {}),
             ...(agent.color ? { color: agent.color } : {}),
+            ...(agent.agentType ? { agentType: agent.agentType } : {}),
+            ...(agent.model ? { model: agent.model } : {}),
+            ...(agent.instructions ? { instructions: agent.instructions } : {}),
+            maxConcurrentRuns: maxConcurrentRunsFor(agent),
             enabled: agent.enabled !== false,
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
@@ -364,6 +471,15 @@ export function registerWorkspaceAgentRoutes(
             waiting,
           };
         }),
+        // What every agent may do, sent once rather than per agent because it
+        // is a property of the subsystem and not of an identity. Shown so the
+        // boundary is something a person can read before trusting an agent
+        // with work, instead of something they discover from a refusal.
+        capabilities: {
+          readOnly: true,
+          allowed: AGENT_ALLOWED_TOOL_NAMES,
+          threadTools: [...THREAD_TOOL_NAMES],
+        },
       });
     } catch (error) {
       fail(res, error);
@@ -1020,30 +1136,81 @@ export function registerWorkspaceAgentRoutes(
     async (req, res) => {
       const runtime = runtimeFor(req, res);
       if (!runtime) return;
-      const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
-      if (typeof enabled !== 'boolean') {
-        res.status(400).json({ error: 'enabled_required' });
+      const payload = (req.body ?? {}) as {
+        enabled?: unknown;
+        description?: unknown;
+        color?: unknown;
+        model?: unknown;
+        instructions?: unknown;
+        agentType?: unknown;
+        maxConcurrentRuns?: unknown;
+      };
+      const enabled = payload.enabled;
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        res.status(400).json({ error: 'enabled_invalid' });
+        return;
+      }
+      // Every configurable field is optional and a missing one is left alone,
+      // so a form that edits one thing cannot blank the rest. Clearing is
+      // still possible, and says so: an explicit null removes the override.
+      const config = readAgentConfigPatch(payload);
+      if (config.error) {
+        res.status(400).json({ error: config.error });
+        return;
+      }
+      if (enabled === undefined && !config.touched) {
+        res.status(400).json({ error: 'nothing_to_update' });
         return;
       }
       try {
         const agentId = String(req.params['id']);
-        const result = await setWorkspaceAgentEnabled(
-          runtime.workspaceCwd,
-          agentId,
-          enabled,
-        );
-        if (result === 'not_found') {
-          res.status(404).json({ error: 'agent_not_found' });
-          return;
+        let missing = false;
+        let retired = false;
+        if (config.touched) {
+          await updateWorkspaceAgents(runtime.workspaceCwd, (agents) => {
+            const existing = agents.find((agent) => agent.id === agentId);
+            if (!existing) {
+              missing = true;
+              return agents;
+            }
+            // A retired identity is a record, not a thing to keep tuning.
+            if (existing.retiredAt !== undefined) {
+              retired = true;
+              return agents;
+            }
+            return agents.map((agent) =>
+              agent.id === agentId ? config.apply(agent) : agent,
+            );
+          });
+          if (missing) {
+            res.status(404).json({ error: 'agent_not_found' });
+            return;
+          }
+          if (retired) {
+            res.status(409).json({ error: 'agent_retired' });
+            return;
+          }
         }
-        if (result === 'has_live_work') {
-          res.status(409).json({ error: 'agent_has_live_work' });
-          return;
+        if (enabled !== undefined) {
+          const result = await setWorkspaceAgentEnabled(
+            runtime.workspaceCwd,
+            agentId,
+            enabled,
+          );
+          if (result === 'not_found') {
+            res.status(404).json({ error: 'agent_not_found' });
+            return;
+          }
+          if (result === 'has_live_work') {
+            res.status(409).json({ error: 'agent_has_live_work' });
+            return;
+          }
         }
         const dispatchError = await startBookedRuns(runtime);
         res.json({
           id: agentId,
-          enabled,
+          ...(enabled !== undefined ? { enabled } : {}),
+          updated: true,
           ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {

@@ -73,7 +73,9 @@
 
 .agentRow {
   display: grid;
-  grid-template-columns: 10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr) auto auto auto;
+  grid-template-columns:
+    10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr)
+    auto auto auto auto;
   gap: 10px;
   align-items: center;
   min-height: 34px;
@@ -276,4 +278,62 @@
 .emptyLead {
   color: var(--foreground);
   font-size: 14px;
+}
+
+/* The configuration form opens inside the row it belongs to, spanning it, so
+   it reads as that agent's settings and not as a second panel about nothing
+   in particular. */
+.agentConfig {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  margin: 8px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.configLabel {
+  display: grid;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.configNote {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* The boundary every agent runs under. Stated once at the foot of the roster
+   because it belongs to the workspace, not to any one identity. */
+.ceiling {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.ceilingTitle {
+  margin: 0 0 4px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ceilingText {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ceilingTools {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }

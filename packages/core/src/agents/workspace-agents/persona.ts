@@ -43,6 +43,20 @@ export type AgentPersonaResolution =
  * post under its name, and every guard in the capability boundary is derived
  * from the definition it would have skipped.
  */
+/**
+ * Puts this identity's own instructions after the definition's prompt.
+ *
+ * After, not before, so where the two disagree the identity wins: the
+ * definition is shared by every agent built on it, and this is the part a
+ * person wrote for this one. It is read at boot from the roster, so an edit
+ * reaches the next turn rather than waiting for a respawn.
+ */
+function appendInstructions(prompt: string, instructions?: string): string {
+  if (!instructions?.trim()) return prompt;
+  const own = `You are configured with these instructions for this workspace:\n${instructions.trim()}`;
+  return prompt ? `${prompt}\n\n${own}` : own;
+}
+
 export async function resolveAgentPersona(
   config: Config,
   agentId: string,
@@ -90,10 +104,12 @@ export async function resolveAgentPersona(
       status: 'resolved',
       agent,
       definition,
-      systemPrompt:
+      systemPrompt: appendInstructions(
         runtime.promptConfig.systemPrompt ??
-        runtime.promptConfig.renderedSystemPrompt ??
-        '',
+          runtime.promptConfig.renderedSystemPrompt ??
+          '',
+        agent.instructions,
+      ),
       // The read-only ceiling is applied here, in the process that will run the
       // tools, so a session cannot be started with a wider surface than the
       // boundary allows and then narrowed afterwards.
