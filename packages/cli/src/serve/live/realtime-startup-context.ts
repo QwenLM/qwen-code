@@ -14,6 +14,7 @@ import {
   type ChatRecord,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
+import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -214,6 +215,7 @@ async function loadRecentThreads(
         ).listSessions({
           size: MAX_RECENT_THREADS,
           archiveState: 'active',
+          excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
         });
         return page.items.map(recentThread);
       }),

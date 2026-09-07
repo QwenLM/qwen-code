@@ -48,20 +48,20 @@ Supporting local observation: `mesh-store.test.ts`, `workspace-lock.test.ts`,
 
 Lands: one hidden `Config` + registry per workspace; keepalive registration reusing `scheduled-task-keepalive.ts`; `launchMeshAgent(agent)` that builds the persona through `convertToRuntimeConfig` and starts a background agent; typed launch results `started | capacity_wait | agent_unavailable | launch_failed`.
 Gate: (a) with `QWEN_CODE_MAX_BACKGROUND_AGENTS=1`, launching a second agent returns `capacity_wait` and books nothing; (b) an agent whose `agentType` names no definition returns `agent_unavailable` and no runtime is created; (c) the host session does not appear in the session list API; (d) after the real bridge reaper closes the host session, keepalive reloads it and the next launch succeeds without recreating the bridge; (e) `continueResidentAgent` returns `continued` for a completed resident and `capacity_wait` never triggers a cold revive (#11204's tests, now on this branch).
-Evidence: report the reaper timeout and observed reload latency from an in-process `AcpSessionBridge` with a fake ACP child. Step 4 deliberately has no server-bootstrap caller before the dispatcher exists, so the equivalent daemon-process observation moves to step 6/7 instead of adding unused wiring here.
+Evidence: report the reaper timeout and observed reload latency from an in-process `AcpSessionBridge` with a fake ACP child. Step 4 deliberately has no server-bootstrap caller before the dispatcher exists, so step 7 repeats this observation through the daemon dispatcher instead of adding unused wiring here.
 
 Supporting local observations on the stacked step branch: `capability.test.ts`
 and `launcher.test.ts` pass 16 tests; `background-agent-resume.test.ts` passes
 52 tests including cold-revive capability restoration; `background-tasks.test.ts`
 passes 150 tests including typed resident continuation; `mesh-host-session.test.ts`
-and `scheduled-task-keepalive.test.ts` pass 33 tests; `bridge.test.ts` passes
-914 tests; and `acpAgent.test.ts` passes 623 tests. A targeted `acp-bridge`
+and `scheduled-task-keepalive.test.ts` pass 34 tests; `bridge.test.ts` passes
+914 tests; and `acpAgent.test.ts` passes 629 tests. A targeted `acp-bridge`
 package build also succeeds. The real `AcpSessionBridge` reaper was configured
 to 20 ms in-process with a fake ACP child; it closed the host, a second channel
 resumed the same session, and the next launch returned `started` after a
 measured 4.3 ms reload (1,000 ms resume deadline), without recreating the
 bridge. The child merge and #11206's whole-branch CI remain the step gate; the
-daemon-process observation is deferred to step 6/7 for the reason above.
+daemon-process observation is part of step 7 for the reason above.
 
 ### Step 5 — Run envelope, tools, runtime correlation
 
@@ -79,7 +79,7 @@ Evidence: the three tests. No live model.
 
 Lands: nothing new; this is a run.
 Gate: the §8 demo steps 1-5 complete against two real agents on a build-capable machine, plus: a forced `queueExternalInput` miss (kill the agent between its last tool round and finish) is rebooked and delivered on the next run; a synthetic ping-pong between two _running_ agents on one thread stops at 12 with `turn_budget_exhausted` in the thread and one channel-less notification record.
-Evidence: the thread JSON files after the run, the two agents' transcript slices, and the observed wall-clock between the child's `thread_review` and the parent's wake. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
+Evidence: the thread JSON files after the run, the two agents' transcript slices, the observed wall-clock between the child's `thread_review` and the parent's wake, and the host reaper timeout plus daemon-observed reload latency. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
 
 ### Step 8 — Dispatcher reliability
 

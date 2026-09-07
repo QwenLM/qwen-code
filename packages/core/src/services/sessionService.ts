@@ -274,6 +274,8 @@ export interface ListSessionsOptions {
   archiveState?: SessionArchiveState;
   /** Aborts an in-progress catalog scan. */
   signal?: AbortSignal;
+  /** Omits records carrying this immutable creator attribution. */
+  excludeSourceType?: string;
 }
 
 /**
@@ -2520,7 +2522,13 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active', signal } = options;
+    const {
+      cursor,
+      size = 20,
+      archiveState = 'active',
+      signal,
+      excludeSourceType,
+    } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
     signal?.throwIfAborted();
@@ -2625,6 +2633,17 @@ export class SessionService {
         continue;
       }
 
+      const source = this.extractCreationMetadataFromFile(
+        filePath,
+        records,
+        tailBuffer,
+      );
+      if (
+        excludeSourceType !== undefined &&
+        source.sourceType === excludeSourceType
+      ) {
+        continue;
+      }
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
@@ -2635,11 +2654,6 @@ export class SessionService {
         filePath,
         records,
         readResult.complete,
-        tailBuffer,
-      );
-      const source = this.extractCreationMetadataFromFile(
-        filePath,
-        records,
         tailBuffer,
       );
       items.push({
@@ -2782,6 +2796,10 @@ export class SessionService {
     let count = 0;
     let filesProcessed = 0;
     let truncated = false;
+    const tailBuffer =
+      excludeSourceType === undefined
+        ? undefined
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const name of fileNames) {
       if (!SESSION_FILE_PATTERN.test(name)) continue;
@@ -2812,8 +2830,8 @@ export class SessionService {
         }
         if (
           excludeSourceType !== undefined &&
-          this.extractCreationMetadataFromFile(filePath, records).sourceType ===
-            excludeSourceType
+          this.extractCreationMetadataFromFile(filePath, records, tailBuffer)
+            .sourceType === excludeSourceType
         ) {
           continue;
         }
@@ -4356,8 +4374,10 @@ export class SessionService {
    *
    * @returns Session data for resumption, or undefined if no sessions exist
    */
-  async loadLastSession(): Promise<ResumedSessionData | undefined> {
-    const result = await this.listSessions({ size: 1 });
+  async loadLastSession(
+    options: Pick<ListSessionsOptions, 'excludeSourceType'> = {},
+  ): Promise<ResumedSessionData | undefined> {
+    const result = await this.listSessions({ size: 1, ...options });
     if (result.items.length === 0) {
       return;
     }

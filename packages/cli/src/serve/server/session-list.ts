@@ -16,7 +16,6 @@ import {
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
-  type SessionListItem,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -33,7 +32,7 @@ import {
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from '../mesh/mesh-session-source.js';
+import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -690,6 +689,7 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
     });
     signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
@@ -1401,31 +1401,13 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
-  let persistedCursor = numericCursor;
-  const persistedItems: SessionListItem[] = [];
-  let nextPersistedCursor: number | undefined;
-  do {
-    const persistedPage = await sessionService.listSessions({
-      cursor: persistedCursor,
-      size: pageSize - persistedItems.length,
-      archiveState,
-      ...(readOptions.signal ? { signal: readOptions.signal } : {}),
-    });
-    persistedItems.push(
-      ...persistedPage.items.filter(
-        (item) => item.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE,
-      ),
-    );
-    nextPersistedCursor = persistedPage.nextCursor;
-    persistedCursor = nextPersistedCursor;
-  } while (
-    persistedItems.length < pageSize &&
-    nextPersistedCursor !== undefined
-  );
-  const persisted = {
-    items: persistedItems,
-    nextCursor: nextPersistedCursor,
-  };
+  const persisted = await sessionService.listSessions({
+    cursor: numericCursor,
+    size: pageSize,
+    archiveState,
+    excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+    ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+  });
   readOptions.signal?.throwIfAborted();
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
@@ -1604,7 +1586,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item)
+      if (item?.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE)
         bySessionId.set(
           hit.sessionId,
           applyOrganization(

@@ -12,19 +12,22 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
-import { MESH_HOST_SESSION_SOURCE_TYPE } from './mesh-session-source.js';
+import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
 
 const DEFAULT_MESH_KEEPALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_MESH_RESUME_TIMEOUT_MS = 70_000;
 
-type MeshHostBridge = Pick<
-  AcpSessionBridge,
-  | 'recordHeartbeat'
-  | 'resumeSession'
-  | 'spawnOrAttach'
-  | 'closeSession'
-  | 'launchMeshAgent'
->;
+interface MeshHostBridge {
+  recordHeartbeat(sessionId: string): unknown;
+  resumeSession(
+    request: Parameters<AcpSessionBridge['resumeSession']>[0],
+  ): Promise<unknown>;
+  spawnOrAttach(
+    request: Parameters<AcpSessionBridge['spawnOrAttach']>[0],
+  ): Promise<{ sessionId: string }>;
+  closeSession(sessionId: string): Promise<unknown>;
+  launchMeshAgent: AcpSessionBridge['launchMeshAgent'];
+}
 
 export interface MeshHostSessionOwner {
   ensureResident(): Promise<string>;
@@ -83,9 +86,15 @@ export function startMeshHostSessionOwner(options: {
       sourceType: MESH_HOST_SESSION_SOURCE_TYPE,
       sourceId: workspace.workspaceId,
     });
-    const winner = await claimMeshHostSession(workspaceCwd, spawned.sessionId);
+    let winner: string;
+    try {
+      winner = await claimMeshHostSession(workspaceCwd, spawned.sessionId);
+    } catch (error) {
+      await bridge.closeSession(spawned.sessionId).catch(() => {});
+      throw error;
+    }
     if (winner !== spawned.sessionId) {
-      await bridge.closeSession(spawned.sessionId);
+      await bridge.closeSession(spawned.sessionId).catch(() => {});
       return ensure();
     }
     return winner;

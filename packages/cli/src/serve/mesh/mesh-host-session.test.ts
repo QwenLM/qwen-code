@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Storage, type MeshAgent } from '@qwen-code/qwen-code-core';
+import {
+  readMeshWorkspace,
+  Storage,
+  type MeshAgent,
+} from '@qwen-code/qwen-code-core';
 import {
   makeBridge,
   makeChannel,
@@ -19,6 +23,7 @@ import {
   getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 import { startMeshHostSessionOwner } from './mesh-host-session.js';
 
@@ -97,21 +102,23 @@ describe('mesh host session owner', () => {
         return { sessionId };
       }),
       closeSession: vi.fn(async () => {}),
-      launchMeshAgent: vi.fn(async (sessionId: string, agentId: string) => {
-        launches.push(`${sessionId}:${agentId}`);
-        return {
-          status: 'started' as const,
-          runtimeId: `local:mesh-${agentId}`,
-          backgroundAgentId: `mesh-${agentId}`,
-          sessionId,
-        };
-      }),
+      launchMeshAgent: vi.fn(
+        async (sessionId: string, agentId: string, prompt: string) => {
+          launches.push(`${sessionId}:${agentId}:${prompt}`);
+          return {
+            status: 'started' as const,
+            runtimeId: `local:mesh-${agentId}`,
+            backgroundAgentId: `mesh-${agentId}`,
+            sessionId,
+          };
+        },
+      ),
     };
     const owner = startMeshHostSessionOwner({
       bridge,
       workspaceCwd: workspace,
       intervalMs: 60_000,
-      resumeTimeoutMs: 1_000,
+      resumeTimeoutMs: 5_000,
     });
 
     await expect(owner.launch(AGENT, 'first')).resolves.toMatchObject({
@@ -130,7 +137,19 @@ describe('mesh host session owner', () => {
 
     expect(spawnCount).toBe(1);
     expect(resumes).toEqual(['mesh-host-1']);
-    expect(launches).toEqual(['mesh-host-1:ag_alice', 'mesh-host-1:ag_alice']);
+    const meshWorkspace = await readMeshWorkspace(workspace);
+    expect(bridge.spawnOrAttach).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: workspace,
+        sessionScope: 'thread',
+        sourceType: 'mesh',
+        sourceId: meshWorkspace.workspaceId,
+      }),
+    );
+    expect(launches).toEqual([
+      'mesh-host-1:ag_alice:first',
+      'mesh-host-1:ag_alice:second',
+    ]);
     expect(reloadMs).toBeLessThan(1_000);
   });
 
@@ -178,7 +197,7 @@ describe('mesh host session owner', () => {
   });
 
   it('reloads after the daemon bridge reaper closes the host', async () => {
-    const handles: ReturnType<typeof makeChannel>[] = [];
+    const handles: Array<ReturnType<typeof makeChannel>> = [];
     const bridge = makeBridge({
       boundWorkspace: workspace,
       sessionReapIntervalMs: 10,
@@ -221,6 +240,9 @@ describe('mesh host session owner', () => {
 
       expect(handles).toHaveLength(2);
       expect(handles[0]?.killed).toBe(true);
+      expect(bridge.listWorkspaceSessions(workspace)).toEqual([
+        expect.objectContaining({ sessionId, sourceType: 'mesh' }),
+      ]);
       expect(reloadMs).toBeLessThan(1_000);
     } finally {
       owner.stop();
@@ -310,6 +332,17 @@ describe('mesh host session owner', () => {
       { runtimeBaseDir: scratch, mergeLive: false },
     );
     expect(explicitMesh.sessions).toEqual([]);
+
+    await expect(
+      searchWorkspaceSessionsForResponse(
+        workspace,
+        hiddenId,
+        {},
+        {
+          runtimeBaseDir: scratch,
+        },
+      ),
+    ).resolves.toEqual({ results: [] });
 
     await expect(
       getWorkspaceSessionInfoForResponse(bridge, workspace),

@@ -666,10 +666,10 @@ npx vitest run src/bridge.test.ts
 
 cd packages/cli
 npx vitest run src/acp-integration/acpAgent.test.ts
-# 1 file, 623 tests passed
+# 1 file, 629 tests passed
 npx vitest run src/serve/scheduled-task-keepalive.test.ts \
   src/serve/mesh/mesh-host-session.test.ts
-# 2 files, 33 tests passed; in-process bridge reload 4.3 ms after a 20 ms reap
+# 2 files, 34 tests passed; in-process bridge reload 4.3 ms after a 20 ms reap
 ```
 
 The earlier foundation's targeted lint and core typecheck passed. Step 4's
