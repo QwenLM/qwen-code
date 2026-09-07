@@ -25593,6 +25593,63 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- the file was removed in an EARLIER round, so the pre-round ref
+    //    lacks it while main still carries it untouched. Main landed
+    //    nothing here, and the round only merged: main merely still
+    //    HOLDING a file it has always held must not put it back in the
+    //    baseline, or every later round re-charges the same deletion.
+    'deleted-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- the same shape spelled as a rename an earlier round made. The old
+    //    path costs ONE ack entry in the round that renames it, not one in
+    //    every later round that merges main.
+    'renamed-earlier-round-then-merge': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      seed: ['git mv pkg/a.test.ts pkg/b.test.ts'],
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // -- main adds a file, deletes it again with the merge keeping the
+    //    round's copy, then re-adds it. Each event measures main against
+    //    its OWN merge base, so the re-add must not be credited a second
+    //    time on top of the first.
+    'main-adds-deletes-readds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm main-drops-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm keep-x',
+        'git checkout -q main',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-readds-x',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
     'main-directory-swap': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -25912,7 +25969,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     //    side, so the measurement is the same as for any other content.
     //    Here main only appends a comment while the round deletes an
     //    assertion.
-    //    the round deletes an assertion.
     'binary-merge': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
@@ -26617,7 +26673,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // A merge that DISCARDED main's side adopted nothing from it, so
       // nothing is subtracted: the round's own removal stands charged. Both
       // lanes, because the model is what the tip took, not what an
-      // main's own side would have produced.
+      // main's own side produced.
       for (const shape of [
         'strategy-ours-hole',
         'strategy-ours-hole-binary',
@@ -26671,6 +26727,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // ...including when the merge commit TOUCHED that own file: main
       // never held it, so no event may latch it into the baseline.
       acceptsWithoutCharge('own-file-merge-edit-delete');
+      // A file an EARLIER round removed is not put back in the baseline by
+      // main merely still holding it, in either spelling.
+      acceptsWithoutCharge('deleted-earlier-round-then-merge');
+      acceptsWithoutCharge('renamed-earlier-round-then-merge');
+      // Main's contribution is counted once across add / delete / re-add,
+      // not once per merge that sees it.
+      rejectsWeakening(
+        'main-adds-deletes-readds',
+        'net 1 assertion(s) removed',
+      );
       // ...but a path MAIN also added during the round is the baseline's,
       // and dropping it after the merge is the round's deletion.
       const addAdd = rejectsWeakening(

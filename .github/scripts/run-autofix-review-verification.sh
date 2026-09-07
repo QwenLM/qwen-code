@@ -1252,9 +1252,6 @@ weaken_blob() {
     printf '%s\n' "${out}"
   fi
 }
-# Main's side (parent ${3}) auto-merged onto the branch at merge commit
-# ${1} for file ${2}: print the blob file, or nothing when the auto-merge
-# holds no file.
 # One event, four lines, always: main's own side at the event, the merge
 # base to measure it against, the blob the merge commit actually landed,
 # and whether main held the file at all. Empty lines are absent sides.
@@ -1269,7 +1266,16 @@ weaken_emit() {
 # What the merge actually DID with that contribution rides along as the
 # landed blob, and the counter clamps by it.
 weaken_auto_blob() {
-  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p2 base res
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p2 base res holds='0'
+  # A criss-cross history has more than one equally valid merge base, and
+  # git picks one without promising which. Main's delta is measured against
+  # that base, so the pick would decide the verdict -- and one of them can
+  # credit main with the ROUND's own removal. Refuse to measure the file
+  # instead: the caller charges it as unmeasurable, which one ack entry
+  # answers, rather than certifying a verdict a tie-break chose.
+  if (( $(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null | wc -l) > 1 )); then
+    return 1
+  fi
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
   res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
@@ -1277,18 +1283,8 @@ weaken_auto_blob() {
   if [[ -n "${mb}" ]]; then
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
   fi
-  if [[ -z "${p2}" ]]; then
-    # Main holds no side here. It DELETED the file only if the base had one
-    # -- and that deletion is main's contribution only when the merge
-    # adopted it; a modify/delete conflict resolved for the branch leaves
-    # the file in the round's hands. Anything else means main never had
-    # this file, and a side main never held contributes nothing.
-    if [[ -n "${base}" ]] && ! weaken_is_blob "${c}" "${f}"; then
-      weaken_emit '' "${base}" "${res}" '0'
-    fi
-    return 0
-  fi
-  weaken_emit "${p2}" "${base}" "${res}" '1'
+  [[ -z "${p2}" ]] || holds='1'
+  weaken_emit "${p2}" "${base}" "${res}" "${holds}"
 }
 # Measure file ${1}: write the manifest (tip, pre-round, and every main
 # event that moved the file) and print the counter's verdict JSON. One
@@ -1321,13 +1317,6 @@ weaken_measure() {
       [[ -z "${after}" ]] || holds='1'
     else
       weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
-      if [[ -z "${weaken_pair}" ]]; then
-        # Main held no side and the merge left the file in the round's
-        # hands: no contribution, and nothing that could move the baseline
-        # either. Not an event at all.
-        j=$(( j - 1 ))
-        continue
-      fi
       # Main's own side, measured against the MERGE BASE -- not against the
       # branch's side, which is the round's own authorship and already
       # inside tip - pre-round.

@@ -65,20 +65,25 @@
 // collector names carried by a binding (`test('x', opts, fn)`,
 // `it[S]('x')`).
 //
-// `measure` takes {"path", "tip", "pre", "events": [{"before", "after"}]} —
-// blob files (null = absent) for the round's tip, the pre-round ref, and each
-// main-derived event the round's history carries (a merge of main, a
-// fast-forwarded main commit), before/after = the file at the commit's first
-// parent and as main's side auto-merges onto it. The round's own delta is
-// tip − pre − Σ(after − before) for each total: main's contribution
-// neither charges nor shields, whichever commit sequence produced the
-// tip, and the assertion delta reported is the lower of the two. Registrations are
+// `measure` takes {"path", "tip", "pre", "events":
+// [{"before", "after", "landed", "mainHolds"}]} — blob files (null =
+// absent) for the round's tip, the pre-round ref, and each main-derived
+// event the round's history carries (a merge of main, a fast-forwarded
+// main commit). For a merge, `after` is MAIN'S OWN side and `before` is
+// the merge base it is measured against; for a fast-forwarded commit they
+// are the commit and its first parent. `landed` is what the merge commit
+// actually holds, and `mainHolds` says whether main held the file at all.
+// The round's own delta is tip − pre − Σ(clamped after − before) for each
+// total: main's contribution neither charges nor shields, whichever commit
+// sequence produced the tip, and the assertion delta reported is the lower
+// of the two. Registrations are
 // tracked as multisets keyed `kind:title`: the baseline's enabled set is the
 // pre-round set plus what main itself enabled across the events minus what
 // main disabled, and a tip-disabled registration is charged only while the
 // baseline holds more enabled copies of its key than the tip does. An event
-// whose before and after are byte-identical (or both absent) moved nothing,
-// so it neither shields nor decides whether the baseline holds the file.
+// whose before and after are byte-identical (or both absent) moved no
+// content, so it neither charges nor shields; whether the baseline HOLDS
+// the file is decided separately, by main's side against the merge base.
 // Reports the net assertion and enabled-test deltas, the charged
 // registrations, and whether the baseline holds the file at all.
 import { readFileSync, realpathSync } from 'node:fs';
@@ -631,8 +636,8 @@ export function measure({ path, tip, pre, events = [] }) {
   };
   // What the event MODELLED, clamped by what it actually LANDED -- in ONE
   // direction. The two disagree whenever a merge resolution took neither
-  // side whole: the model is what git's auto-merge would have produced,
-  // the landed blob is what the merge commit holds.
+  // side whole: the model is main's own delta, the landed blob is what the
+  // merge commit holds.
   //
   // Main's ADDITIONS are never clamped. They raise the baseline whatever
   // the merge kept, or a round that drops what main added during the round
@@ -666,12 +671,28 @@ export function measure({ path, tip, pre, events = [] }) {
     // a blob main never held is how a file the round authored itself comes
     // to read as baseline coverage; reading it off the merge result is how
     // a round discards a test main added and answers for nothing.
-    if (ev.mainHolds !== undefined) baselinePresent = ev.mainHolds;
+    const landedRef = ev.landed !== undefined ? ev.landed : ev.after;
+    // PRESENCE moves only when main's side and the merge base DISAGREE
+    // about the file existing. Main adding it during the round puts it in
+    // the baseline, and the round answers for dropping it afterwards. Main
+    // deleting it takes it out only when the merge adopted that deletion;
+    // a resolution that kept the file leaves it in the round's hands.
+    // Main merely still HOLDING a file it has always held says nothing:
+    // the baseline there is the pre-round ref's, which is where a file the
+    // round removed in an EARLIER round already stands removed.
+    if (ev.mainHolds !== undefined) {
+      const baseHolds = ev.before !== null && ev.before !== undefined;
+      const landedHolds = landedRef !== null && landedRef !== undefined;
+      if (ev.mainHolds && !baseHolds) {
+        baselinePresent = true;
+      } else if (!ev.mainHolds && baseHolds && !landedHolds) {
+        baselinePresent = false;
+      }
+    }
     if (sameContent(ev.before, ev.after)) continue;
     if (ev.mainHolds === undefined) {
       baselinePresent = ev.after !== null && ev.after !== undefined;
     }
-    const landedRef = ev.landed !== undefined ? ev.landed : ev.after;
     const before = countFile(ev.before, path);
     const after = countFile(ev.after, path);
     const landed = sameContent(ev.after, landedRef)
