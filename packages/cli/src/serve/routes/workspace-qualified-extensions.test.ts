@@ -182,10 +182,7 @@ async function makeHarness(opts?: {
       ...(conversationWorkspace
         ? {
             liveConversationWorkspace: conversationWorkspace,
-            conversationRuntimeOwnershipFactory: () => ({
-              acquire: vi.fn(async () => ({ reclaimed: false })),
-              release: vi.fn(async () => false),
-            }),
+            checkLegacyConversationOwner: vi.fn(async () => undefined),
           }
         : {}),
     },
