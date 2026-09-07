@@ -2354,6 +2354,8 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
   'goals.subtitle':
     'A goal keeps its session working until the condition is met. Only sessions that are currently loaded appear here — a goal advances only while its session is running.',
@@ -5783,6 +5785,9 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) =>
+    `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': '目标',
   'goals.subtitle':
     '目标会让所在会话持续工作，直到条件满足。这里只列出当前已加载的会话——目标只在会话运行时才会推进。',
