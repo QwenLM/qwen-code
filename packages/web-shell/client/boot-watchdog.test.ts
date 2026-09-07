@@ -56,6 +56,14 @@ function stylesheetErrorEvent(url: string): void {
   link.dispatchEvent(new Event('error'));
 }
 
+function faviconErrorEvent(url: string): void {
+  const link = document.createElement('link');
+  link.rel = 'icon';
+  link.href = url;
+  document.body.appendChild(link);
+  link.dispatchEvent(new Event('error'));
+}
+
 function inlineScriptErrorEvent(message: string): void {
   const script = document.createElement('script');
   script.textContent = 'void 0;';
@@ -130,6 +138,22 @@ describe('boot watchdog', () => {
       expect(fallback()?.textContent).toContain(
         'http://localhost:5173/assets/index.css',
       );
+    });
+
+    it('does not treat a failing favicon as proof that boot is impossible', () => {
+      installBootWatchdog();
+      parseRoot();
+
+      // A white-label deployment points the favicon at an operator-supplied
+      // data URI that index.html's pre-paint brand script swaps in. A logo the
+      // browser refuses to decode is cosmetic and must not raise the terminal
+      // panel: the panel asks the user to reload, and the cached URI survives
+      // the reload, so it would be an unrecoverable dead end. The stylesheet
+      // case above is what keeps this from passing by disabling the whole
+      // LINK branch.
+      faviconErrorEvent('data:image/svg+xml,%3Csvg%3E');
+
+      expect(fallback()).toBeNull();
     });
 
     it('defers an inline-script runtime error to the grace timer', () => {

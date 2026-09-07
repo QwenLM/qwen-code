@@ -1137,6 +1137,27 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
+### `GET /brand`
+
+The Web Shell's product branding, for hosts that want to white-label the shell. Resolved from `ui.brand` in the operator settings scopes. Gated by the `web_shell_brand` feature tag; a daemon without the route answers 404.
+
+```json
+{
+  "name": "QiuQiu Code",
+  "logoDataUri": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E"
+}
+```
+
+> **Both fields are optional, and `{}` is a normal response.** An absent field means "use the client's built-in brand" — the Web Shell renders its own name and inline logo. Clients must not treat an empty body as an error.
+
+> **Always 200, even when the configured logo was rejected.** A missing file, a symlink, a hard-linked file, a directory, a non-SVG document, or content over 32 KiB yields a body with no `logoDataUri`, and the reason is written to the daemon's stderr as `qwen serve: GET /brand: ui.brand.logoPath …`. A client therefore cannot distinguish "no brand configured" from "the operator's logo was refused"; the operator-facing channel is the daemon log.
+
+> **Workspace settings never contribute.** The route loads settings with `skipWorkspaceSettings`, so a repository's `.qwen/settings.json` cannot rename the product or name a file for the daemon to read and inline into every connected browser. Only System Defaults, User and System are read, in that precedence.
+
+> **`logoDataUri` must be rendered as an image, never injected as markup.** The daemon does not sanitize the SVG it read. SVG loaded through an `img` src or a favicon href cannot execute script; SVG injected into the document can. The Web Shell only ever assigns it to an image context, and that invariant is what makes the absence of a sanitizer safe.
+
+> **Process-global.** The route takes no workspace selector and no session id: the value derives from user-global configuration, so it is the same for every workspace the daemon serves. It is registered after `bearerAuth` and the rate limiter, and before the Web Shell SPA fallback, so it answers JSON for any `Accept` header.
+
 ### `POST /workspaces`
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.

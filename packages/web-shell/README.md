@@ -229,16 +229,18 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 ### WebShell
 
-| 属性                       | 类型                                                                                                                                  | 说明                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报 |
-| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒      |
-| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                  |
-| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                           |
-| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                               |
-| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                     |
-| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                    |
-| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                         |
+| 属性                       | 类型                                                                                                                                  | 说明                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报    |
+| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒         |
+| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                     |
+| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                              |
+| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                  |
+| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                        |
+| `brand`                    | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」      |
+| `onBrandResolved`          | `(brand: WebShellBrand) => void`                                                                                                      | 品牌解析完成后触发，供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
+| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                       |
+| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                            |
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
@@ -294,6 +296,50 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+### 品牌（白标）
+
+独立部署（`qwen serve` 打开的 Web Shell）用 `settings.json` 换名换 Logo，嵌入宿主用
+`brand` 属性覆盖：
+
+```json
+{
+  "ui": {
+    "brand": {
+      "name": "QiuQiu Code",
+      "logoPath": "~/.qwen/brand/logo.svg"
+    }
+  }
+}
+```
+
+daemon 把该 SVG 读成 `data:image/svg+xml` URI，通过 `GET /brand` 下发。客户端始终以
+`<img>` 渲染它，绝不作为 markup 注入：作为图片加载的 SVG 不能执行脚本，注入的可以，而
+daemon 不净化它读到的文件。该配置只从 User / System / SystemDefaults 三层读取，工作区的
+`.qwen/settings.json` 无法改写品牌 —— 那份文件通常来自打开 shell 的人并未撰写的仓库。
+
+品牌名会替换 Sidebar 品牌行、Sidebar 底部版本 tooltip、欢迎页标题、About 面板的版本行
+标签，以及独立部署下的 `document.title`；Logo 会替换 Sidebar 标记与 favicon。它不会替换
+正文文案：本地化字符串里仍有若干处提到 Qwen Code，auth provider 标签也仍是 `Qwen OAuth`
+（那是身份提供方的名字，不是产品名）。
+
+嵌入宿主传 `brand` 时整体接管名称与 Logo。`logo` 可以是任意 React 节点，因为宿主拥有自己
+的文档与 CSP；宿主也拥有标签页标题和 favicon，shell 只在 standalone 入口写 `document`，
+嵌入时通过 `onBrandResolved` 把名称与 Logo URI 交回宿主自行处理。该回调只在品牌确定后、
+以及这两个值之一发生变化时触发，因此宿主可以直接传内联对象和内联函数，不会每次渲染都重放。
+名称为空字符串等同于未设置，回退到内置名称。
+
+优先级从高到低：`sidebar.branding.render`（整行替换，仍受支持）→ `brand` 属性 → daemon
+解析值 → 内置默认。
+
+```tsx
+<WebShellWithProviders
+  brand={{ name: 'QiuQiu Code', logo: <MyLogo /> }}
+  onBrandResolved={(brand) => {
+    document.title = `${brand.name ?? 'Qwen Code'} — My Host`;
+  }}
+/>
+```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

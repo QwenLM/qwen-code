@@ -685,6 +685,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
+  'web_shell_brand',
   'workspace_permissions',
   'workspace_trust',
   'workspace_init',

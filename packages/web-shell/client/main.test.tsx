@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import type { WebShellBrand } from './brandContext';
 
 interface CapturedWorkspaceSessionProps {
   sessionId?: string;
@@ -166,5 +167,85 @@ describe('StandaloneApp', () => {
     expect(new URLSearchParams(window.location.search).has('workspace')).toBe(
       false,
     );
+  });
+});
+
+describe('StandaloneApp brand', () => {
+  const BRAND_STORAGE_KEY = 'qwen-code-web-shell-brand';
+  let container: HTMLDivElement;
+  let root: Root;
+  let icon: HTMLLinkElement;
+
+  beforeEach(() => {
+    testState.props = undefined;
+    window.history.replaceState(null, '', '/');
+    window.localStorage.clear();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    icon = document.createElement('link');
+    icon.rel = 'icon';
+    icon.setAttribute('href', 'data:image/svg+xml,BUILT-IN');
+    document.head.appendChild(icon);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    icon.remove();
+    window.localStorage.clear();
+  });
+
+  function resolveBrand(brand: WebShellBrand): void {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    act(() => {
+      testState.props?.webShellProps.onBrandResolved?.(brand);
+    });
+  }
+
+  function readCachedBrand(): unknown {
+    const raw = window.localStorage.getItem(BRAND_STORAGE_KEY);
+    return raw === null ? null : JSON.parse(raw);
+  }
+
+  it('applies the brand name to the document title and caches it', () => {
+    resolveBrand({ name: 'QiuQiu Code' });
+
+    expect(document.title).toBe('QiuQiu Code Web chat');
+    expect(readCachedBrand()).toEqual({ title: 'QiuQiu Code Web chat' });
+  });
+
+  it('applies the logo to the favicon and caches both', () => {
+    resolveBrand({
+      name: 'QiuQiu Code',
+      logoDataUri: 'data:image/svg+xml,LOGO',
+    });
+
+    expect(icon.getAttribute('href')).toBe('data:image/svg+xml,LOGO');
+    expect(readCachedBrand()).toEqual({
+      title: 'QiuQiu Code Web chat',
+      logo: 'data:image/svg+xml,LOGO',
+    });
+  });
+
+  it('restores the built-in title and clears the cache when no brand is configured', () => {
+    window.localStorage.setItem(
+      BRAND_STORAGE_KEY,
+      JSON.stringify({
+        title: 'QiuQiu Code Web chat',
+        logo: 'data:image/svg+xml,LOGO',
+      }),
+    );
+
+    resolveBrand({});
+
+    expect(document.title).toBe('Qwen Code Web chat');
+    expect(readCachedBrand()).toBeNull();
+  });
+
+  it('does not write a cache entry for the built-in brand', () => {
+    resolveBrand({});
+
+    expect(readCachedBrand()).toBeNull();
   });
 });

@@ -83,6 +83,7 @@ import type {
   DaemonSkillMutationResult,
   DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
+  DaemonBrand,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonModelDeleteRequest,
@@ -153,6 +154,15 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  /**
+   * Web Shell branding resolved by the daemon from the operator settings scopes
+   * (system defaults, user, system). Fetched once per client instance beside
+   * capabilities and not retried: a fetch that fails during a cold boot stays
+   * `undefined` for the life of the page, so the client shows its built-in brand
+   * until reloaded. An older daemon without `GET /brand` also leaves it
+   * undefined.
+   */
+  brand?: DaemonBrand;
   getCapabilities?: () => Promise<DaemonCapabilities>;
   /**
    * Force a fresh `/capabilities` fetch and push the result into the

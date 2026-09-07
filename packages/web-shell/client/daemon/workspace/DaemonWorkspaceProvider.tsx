@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
+import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { createDaemonWorkspaceActions } from './actions.js';
 import type {
@@ -62,6 +62,7 @@ export function DaemonWorkspaceProvider({
   const [capabilities, setCapabilities] = useState<
     DaemonCapabilities | undefined
   >(undefined);
+  const [brand, setBrand] = useState<DaemonBrand | undefined>(undefined);
   const [status, setStatus] = useState<DaemonWorkspaceStatus>(
     autoConnect ? 'connecting' : 'idle',
   );
@@ -202,6 +203,32 @@ export function DaemonWorkspaceProvider({
     };
   }, [client, getCapabilities]);
 
+  // Brand is fetched beside capabilities but deliberately stays out of the
+  // connection status machine. An older daemon without `GET /brand`, a logo the
+  // daemon rejected, or a daemon still starting must leave the client's built-in
+  // brand in place rather than put the shell into an error state. The deferred
+  // call covers one more case: `@qwen-code/sdk` is a peer dependency, so a host
+  // on an older SDK has no `brand()` method, and calling it directly would throw
+  // a synchronous TypeError out of this effect — white-screening the shell over
+  // a cosmetic feature. Deferring turns that throw into a rejection the catch
+  // below swallows like any other.
+  useEffect(() => {
+    if (!client) return undefined;
+    let disposed = false;
+    setBrand(undefined);
+    void Promise.resolve()
+      .then(() => client.brand())
+      .then((resolved) => {
+        if (!disposed) setBrand(resolved);
+      })
+      .catch(() => {
+        // Silent by design; see the comment above.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [client]);
+
   resolvedCwdRef.current = capabilities?.workspaceCwd ?? workspaceCwd;
 
   const workspaceActions = useMemo<DaemonWorkspaceActions>(
@@ -225,6 +252,7 @@ export function DaemonWorkspaceProvider({
       status,
       error,
       capabilities,
+      brand,
       getCapabilities,
       refreshCapabilities,
       actions: workspaceActions,
@@ -237,6 +265,7 @@ export function DaemonWorkspaceProvider({
     status,
     error,
     capabilities,
+    brand,
     getCapabilities,
     refreshCapabilities,
     workspaceActions,

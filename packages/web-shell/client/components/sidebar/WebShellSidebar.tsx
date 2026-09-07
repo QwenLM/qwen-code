@@ -62,6 +62,7 @@ import {
   WorkflowIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
+import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
@@ -931,6 +932,8 @@ export function WebShellSidebar({
   onStandaloneNotice,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
+  const brand = useBrand();
+  const brandName = useBrandName();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
@@ -5268,10 +5271,15 @@ export function WebShellSidebar({
             ) : (
               <>
                 <span className={styles.brandLogo} aria-hidden="true">
-                  <IconQwenLogo />
+                  {brand.logo ??
+                    (brand.logoDataUri ? (
+                      <img src={brand.logoDataUri} alt="" />
+                    ) : (
+                      <IconQwenLogo />
+                    ))}
                 </span>
                 {!collapsed && (
-                  <span className={styles.brandName}>Qwen Code</span>
+                  <span className={styles.brandName}>{brandName}</span>
                 )}
               </>
             )}
@@ -6032,7 +6040,7 @@ export function WebShellSidebar({
                 footerItems.has('version') && (
                   <span
                     className={styles.version}
-                    title={`Qwen Code ${versionLabel}`}
+                    title={`${brandName} ${versionLabel}`}
                   >
                     {versionLabel}
                   </span>

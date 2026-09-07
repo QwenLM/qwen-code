@@ -211,6 +211,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP

@@ -16,6 +16,7 @@ import {
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { DEFAULT_BRAND_NAME, type WebShellBrand } from './brandContext';
 import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
@@ -26,6 +27,56 @@ const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
+const BRAND_STORAGE_KEY = 'qwen-code-web-shell-brand';
+
+/**
+ * Cached for index.html's pre-paint script so a renamed deployment does not
+ * flash the built-in title on every load. Mirrors THEME_STORAGE_KEY.
+ */
+interface StoredBrand {
+  title?: string;
+  logo?: string;
+}
+
+function webShellDocumentTitle(name?: string): string {
+  // Truthiness, not `??`: an empty name means the built-in one, matching
+  // useBrandName(), so the tab can never become " Web chat".
+  return `${name || DEFAULT_BRAND_NAME} Web chat`;
+}
+
+const DEFAULT_DOCUMENT_TITLE = webShellDocumentTitle(undefined);
+
+function storeBrand(brand: WebShellBrand): void {
+  try {
+    const title = webShellDocumentTitle(brand.name);
+    if (title === DEFAULT_DOCUMENT_TITLE && !brand.logoDataUri) {
+      window.localStorage.removeItem(BRAND_STORAGE_KEY);
+      return;
+    }
+    const stored: StoredBrand = { title };
+    if (brand.logoDataUri) stored.logo = brand.logoDataUri;
+    window.localStorage.setItem(BRAND_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Ignore storage failures in private browsing or locked-down browsers.
+  }
+}
+
+/**
+ * Apply the resolved brand to the browser tab.
+ *
+ * Only the standalone entry does this: an embedded shell must not hijack its
+ * host page's title or favicon. A removed logo cannot be undone here, because
+ * the built-in favicon lives in index.html and is not recoverable once
+ * overwritten — clearing the cache instead lets the next load restore it.
+ */
+function applyBrandToDocument(brand: WebShellBrand): void {
+  document.title = webShellDocumentTitle(brand.name);
+  if (brand.logoDataUri) {
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) link.href = brand.logoDataUri;
+  }
+  storeBrand(brand);
+}
 
 function parseTheme(value: string | null): WebShellTheme | undefined {
   if (value === WebShellThemeId.Dark || value === WebShellThemeId.Light) {
@@ -168,6 +219,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     setLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
+  const handleBrandResolved = useCallback((brand: WebShellBrand) => {
+    applyBrandToDocument(brand);
+  }, []);
   const handleSessionIdChange = useCallback(
     (
       nextSessionId?: string,
@@ -209,6 +263,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onThemeChange: handleThemeChange,
             language,
             onLanguageChange: handleLanguageChange,
+            onBrandResolved: handleBrandResolved,
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
             header: {

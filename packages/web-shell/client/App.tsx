@@ -351,6 +351,7 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import { BrandProvider, EMPTY_BRAND, type WebShellBrand } from './brandContext';
 import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
@@ -1059,6 +1060,21 @@ export interface WebShellProps {
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
+  /**
+   * Product branding for the embedded shell. Replaces the daemon-resolved brand
+   * wholesale when provided: a host that sets `brand` owns both the name and the
+   * logo. `logo` may be any node, because the host owns its own document and
+   * Content Security Policy.
+   */
+  brand?: WebShellBrand;
+  /**
+   * Called with the resolved brand's name and logo URI once the brand is known,
+   * and again only when one of those two values changes — so a host may pass an
+   * inline handler alongside an inline `brand` object without re-firing on every
+   * render. The shell itself never writes `document.title` or the favicon; an
+   * embedded shell must not hijack its host page's tab.
+   */
+  onBrandResolved?: (brand: WebShellBrand) => void;
   /** Additional CSS class name appended to the root element. */
   className?: string;
   /** Inline styles applied to the root element. */
@@ -2857,6 +2873,8 @@ export function App({
   onThemeChange,
   language: providedLanguage,
   onLanguageChange,
+  brand: providedBrand,
+  onBrandResolved,
   className: externalClassName,
   style: externalStyle,
   shadowDom,
@@ -10787,6 +10805,41 @@ export function App({
     }
   }, [providedLanguage, languageSetting?.values.effective]);
 
+  // A host that passes `brand` owns the name and the logo outright, mirroring
+  // how the `theme` and `language` props win above. The daemon-resolved brand
+  // arrives asynchronously and stays undefined on a daemon without `GET /brand`,
+  // in which case every consumer falls back to its built-in literal.
+  const resolvedBrand = providedBrand ?? workspace.brand ?? EMPTY_BRAND;
+
+  // `workspace.brand` is undefined both while the fetch is in flight and when a
+  // daemon has no brand route, so rendering can treat it as "built-in" but the
+  // resolution callback must not: firing with the built-in brand before the
+  // daemon answers would make the standalone entry reset the tab title and drop
+  // the pre-paint cache on every load, flashing branded → default → branded and
+  // defeating the whole point of caching it.
+  const brandResolved =
+    providedBrand !== undefined || workspace.brand !== undefined;
+
+  // Keyed on the two primitive fields with the callback behind a ref, so a host
+  // passing an inline `brand` object and an inline handler — the shape the
+  // README shows — does not re-fire on every render. Keying on identity loops
+  // forever against a handler that stores the value: each call hands it a fresh
+  // object, React never bails out, and the host re-renders into the next call.
+  // `logo` is left out because a document can only act on the title and the
+  // favicon, and a React node has no stable identity by construction.
+  const onBrandResolvedRef = useRef(onBrandResolved);
+  onBrandResolvedRef.current = onBrandResolved;
+  const brandNameValue = resolvedBrand.name;
+  const brandLogoUri = resolvedBrand.logoDataUri;
+
+  useEffect(() => {
+    if (!brandResolved) return;
+    onBrandResolvedRef.current?.({
+      ...(brandNameValue === undefined ? {} : { name: brandNameValue }),
+      ...(brandLogoUri === undefined ? {} : { logoDataUri: brandLogoUri }),
+    });
+  }, [brandResolved, brandNameValue, brandLogoUri]);
+
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       if (sessionWriteBlocked) return;
@@ -15952,8 +16005,13 @@ export function App({
   };
   const environmentPanelOwner = sessionOwnerGuard.capture();
 
+  // BrandProvider sits above I18nProvider so portals and every pane see it. The
+  // prettier-ignore keeps adding it from re-indenting the whole subtree, the
+  // same reason WebShellPortalRootContext below carries one.
   return (
     <ThemeProvider value={selectedTheme}>
+      {/* prettier-ignore */}
+      <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
@@ -18515,6 +18573,7 @@ export function App({
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
       </I18nProvider>
+      </BrandProvider>
     </ThemeProvider>
   );
 }

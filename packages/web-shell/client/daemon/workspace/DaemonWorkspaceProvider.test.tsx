@@ -20,6 +20,7 @@ import { useDaemonSessions } from './hooks/useDaemonSessions.js';
 
 const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
+  const brand = vi.fn();
   const workspaceMcp = vi.fn();
   const workspaceMcpTools = vi.fn();
   const workspaceMcpResources = vi.fn();
@@ -54,6 +55,7 @@ const sdkMocks = vi.hoisted(() => {
     }));
 
     capabilities = capabilities;
+    brand = brand;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
     workspaceMcpResources = workspaceMcpResources;
@@ -84,6 +86,7 @@ const sdkMocks = vi.hoisted(() => {
   return {
     MockDaemonClient,
     capabilities,
+    brand,
     workspaceMcp,
     workspaceMcpTools,
     workspaceMcpResources,
@@ -114,6 +117,8 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         features: [],
       });
+      brand.mockReset();
+      brand.mockResolvedValue({});
       workspaceMcp.mockReset();
       workspaceMcp.mockResolvedValue({
         v: 1,
@@ -302,6 +307,71 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeDefined();
     expect(context?.baseUrl).toBe('http://127.0.0.1:4170');
     expect(context?.workspaceCwd).toBe('/mock-workspace');
+  });
+
+  it('exposes the daemon-resolved brand on the workspace context', async () => {
+    sdkMocks.brand.mockResolvedValue({ name: 'QiuQiu Code' });
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+  });
+
+  it('keeps the connection healthy when the daemon has no /brand route', async () => {
+    // An older daemon answers 404. Branding is cosmetic, so the failure is
+    // swallowed and the client falls back to its built-in brand rather than
+    // putting the whole shell into an error state.
+    sdkMocks.brand.mockRejectedValue(new Error('404 not found'));
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(context?.brand).toBeUndefined();
+    expect(context?.status).toBe('connected');
+    expect(context?.error).toBeUndefined();
+  });
+
+  it('survives an SDK client that has no brand method at all', async () => {
+    // `@qwen-code/sdk` is a peer dependency, so a host on an older SDK hands the
+    // provider a client without `brand()`. Calling it throws a synchronous
+    // TypeError, which must not escape the effect: branding is cosmetic and must
+    // never white-screen the shell.
+    sdkMocks.brand.mockImplementation(() => {
+      throw new TypeError('client.brand is not a function');
+    });
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(context?.brand).toBeUndefined();
+    expect(context?.status).toBe('connected');
+    expect(context?.error).toBeUndefined();
   });
 
   it('refreshCapabilities re-fetches and updates capabilities state', async () => {
