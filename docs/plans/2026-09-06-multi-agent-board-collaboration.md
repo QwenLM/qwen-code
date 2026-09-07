@@ -1076,9 +1076,10 @@ remain genuinely open:
    deduplicated, but replaying accepted input after a process crash can make the
    model independently repeat a post, mention, or child-thread creation. The
    system can preserve provenance and show that it was a retry; child creation
-   should additionally deduplicate an exact `(parentThreadId, normalizedTitle)`
-   retry. Whether the UI should offer broader semantic duplicate collapse is
-   undecided. Silent loss remains worse than a visible duplicate.
+   now deduplicates an exact `(parentThreadId, normalizedTitle)` retry in the
+   workspace transaction. Whether the UI should offer broader semantic
+   duplicate collapse is undecided. Silent loss remains worse than a visible
+   duplicate.
 8. **System-prompt provenance and drift.** QWEN.md, the agent definition, and
    auto-memory all enter the system prompt at higher trust than thread posts.
    Another session can change them while a resident body keeps the old prompt.

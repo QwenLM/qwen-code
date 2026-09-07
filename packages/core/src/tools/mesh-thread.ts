@@ -373,6 +373,8 @@ class ThreadCreateInvocation extends BaseToolInvocation<
     try {
       const context = requireMeshRunContext('thread_create');
       const projectRoot = this.config.getProjectRoot();
+      const title = this.params.title.trim();
+      if (!title) return failed('A sub-thread title is required.');
       // Creating and assigning are one transaction: two would leave a crash
       // window in which an assigned sub-thread exists with nothing scheduled
       // to work it.
@@ -385,6 +387,18 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             'thread_create',
           );
           const agents = await transaction.readAgents();
+          const { threads, unreadable } = await transaction.listThreads();
+          if (unreadable.length > 0) {
+            throw new Error(
+              `Cannot create a sub-thread while thread records are unreadable: ${unreadable.join(', ')}.`,
+            );
+          }
+          const existing = threads.find(
+            (thread) =>
+              thread.parentThreadId === context.threadId &&
+              thread.title.trim().toLowerCase() === title.toLowerCase(),
+          );
+          if (existing) return { child: existing, reused: true as const };
           const assignee = this.params.assignee
             ? findAgentByName(
                 agents,
@@ -402,7 +416,7 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             );
           }
           const child = await prepareThreadInTransaction(transaction, {
-            title: this.params.title,
+            title,
             ...(this.params.body ? { body: this.params.body } : {}),
             createdBy: context.agentId,
             parentThreadId: context.threadId,
@@ -413,6 +427,7 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               child: await transaction.writeThread(child),
               booked: 0,
               assignee: undefined,
+              reused: false as const,
             };
           }
           // Assignment is a structured trigger through the same admission
@@ -435,11 +450,17 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             child: posted.thread,
             booked: posted.dispatched.length,
             assignee,
+            reused: false as const,
           };
         },
       );
 
       const shares = ` It shares this thread tree's budget.`;
+      if (created.reused) {
+        return ok(
+          `Reused existing sub-thread ${created.child.id}; no duplicate was created.${shares}`,
+        );
+      }
       return ok(
         created.assignee
           ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(created.assignee)}.${

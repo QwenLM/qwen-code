@@ -243,6 +243,9 @@ without promising channel delivery while §9.12 remains open.
 An unassigned `open` child no longer satisfies `thread_wait`: only a live run,
 pending parent report, or non-open descendant state is a future wake path, so a
 parent cannot silently sleep behind an inert child.
+An accepted delivery replay that repeats `thread_create` with the same parent
+and normalized title now reuses the existing child instead of duplicating the
+delegated work.
 
 ### Step 10 — Channel notifications
 
