@@ -6,10 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
-import type {
-  ServerLlmStreamEvent,
-  ToolCallRequestInfo,
-} from '../core/turn.js';
+import type { ServerLlmStreamEvent } from '../core/turn.js';
 import { LlmEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
@@ -36,15 +33,16 @@ import {
 // service's turn.js dependency.
 export { getToolCallRepeatKey };
 
-function getLoopDetectionToolCall(
-  toolCall: ToolCallRequestInfo,
-): ToolCallRequestInfo {
+function getLoopDetectionToolCall<T extends { name: string; args: object }>(
+  toolCall: T,
+): T {
   if (toolCall.name !== ToolNames.TOOL_CALL) return toolCall;
 
-  const targetName = toolCall.args['name'];
+  const envelopeArgs = toolCall.args as Record<string, unknown>;
+  const targetName = envelopeArgs['name'];
   if (typeof targetName !== 'string') return toolCall;
 
-  const targetArgs = toolCall.args['arguments'];
+  const targetArgs = envelopeArgs['arguments'];
   return {
     ...toolCall,
     name: targetName,
@@ -54,7 +52,7 @@ function getLoopDetectionToolCall(
       !Array.isArray(targetArgs)
         ? (targetArgs as Record<string, unknown>)
         : {},
-  };
+  } as T;
 }
 
 // Consecutive identical tool calls (same name + identical args) tolerated
@@ -465,12 +463,13 @@ export class LoopDetectionService {
   ): boolean {
     if (this.loopDetected) return true;
     if (this.disabledForSession) return false;
-    if (!this.isStatefulReadTool(toolCall.name)) return false;
+    const resolvedToolCall = getLoopDetectionToolCall(toolCall);
+    if (!this.isStatefulReadTool(resolvedToolCall.name)) return false;
 
     const resultText = LoopDetectionService.extractResultText(responseParts);
     if (resultText === null) return false;
     const fingerprint = createHash('sha256').update(resultText).digest('hex');
-    const key = this.getToolCallKey(toolCall);
+    const key = this.getToolCallKey(resolvedToolCall);
 
     // Consecutive-streak evidence for the always-on guard. The state entry
     // can predate the streak (lastFingerprint survives streak breaks), so
@@ -503,7 +502,7 @@ export class LoopDetectionService {
 
     // A changed result is observable progress: restart the same-name streak
     // so ACTION_STAGNATION does not fire on productive polling.
-    if (fingerprintChanged && this.lastSeenToolName === toolCall.name) {
+    if (fingerprintChanged && this.lastSeenToolName === resolvedToolCall.name) {
       this.sameNameStreak = 1;
     }
 

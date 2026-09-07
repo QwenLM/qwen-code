@@ -9478,7 +9478,7 @@ export class Config {
     await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
-      return new ToolCallTool();
+      return new ToolCallTool(registry);
     });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');

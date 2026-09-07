@@ -2335,12 +2335,20 @@ export async function runNonInteractive(
           const response = responseByRequest.get(request);
           return response ? [{ request, response }] : [];
         });
+        const resolvedResponses = orderedResponses.map(
+          ({ request, response }) => ({
+            request,
+            response,
+            executionRequest:
+              executionRequestByResponse.get(response) ??
+              getHeadlessExecutionRequest(request, config),
+          }),
+        );
         const finalized = await finalizeToolResponses(
           config,
-          orderedResponses.map(({ request, response }) => ({
+          resolvedResponses.map(({ request, response, executionRequest }) => ({
             callId: request.callId,
-            toolName:
-              executionRequestByResponse.get(response)?.name ?? request.name,
+            toolName: executionRequest.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
@@ -2355,11 +2363,12 @@ export async function runNonInteractive(
 
         const chatRecordingService = config.getChatRecordingService?.();
         const toolResponseParts: Part[] = [];
-        for (let index = 0; index < orderedResponses.length; index++) {
-          const { request, response } = orderedResponses[index];
+        for (let index = 0; index < resolvedResponses.length; index++) {
+          const { request, response, executionRequest } =
+            resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(request);
+          const goalProvenance = goalToolResultProvenance(executionRequest);
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {

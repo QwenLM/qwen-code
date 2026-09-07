@@ -29,6 +29,7 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
+import type { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
@@ -115,6 +116,13 @@ const ACTION_TERM_ALIASES = new Map<string, string[]>([
 interface ScoredTool {
   tool: AnyDeclarativeTool;
   score: number;
+}
+
+function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+  return Boolean(
+    registry.getTool(ToolNames.TOOL_SEARCH) &&
+      registry.getTool(ToolNames.TOOL_CALL),
+  );
 }
 
 const toolSearchDescription = `Reviews function declarations for deferred tools without changing the active tool list.
@@ -213,6 +221,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
+    if (!isDeferredToolBridgeAvailable(this.config.getToolRegistry())) {
+      const message =
+        'The deferred-tool bridge is unavailable in this session, so hidden tool schemas cannot be reviewed or invoked.';
+      return {
+        llmContent: `Error: ${message}`,
+        returnDisplay: 'Deferred-tool bridge unavailable',
+        error: { message },
+      };
+    }
+
     const candidates = this.collectCandidates();
     const scored: ScoredTool[] = [];
     for (const tool of candidates) {
@@ -286,6 +304,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const reviewed: AnyDeclarativeTool[] = [];
     const missing: string[] = [];
     const blocked: string[] = [];
+    const bridgeUnavailable: string[] = [];
+    const bridgeAvailable = isDeferredToolBridgeAvailable(registry);
 
     // Case-insensitive lookup across all known names (instance names + factory
     // names). Preserve the user-supplied casing in the error list so the
@@ -344,6 +364,14 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
+      // A visible tool remains safe to re-inspect and can be called directly.
+      // Hidden deferred tools require both discovery and invocation halves of
+      // the bridge; withholding their schemas keeps discovery consistent with
+      // the reminder/preload/invocation gates when tool_call is disabled.
+      if (registry.isDeferredAndHidden(tool.name) && !bridgeAvailable) {
+        bridgeUnavailable.push(tool.name);
+        continue;
+      }
       reviewed.push(tool);
     }
 
@@ -381,6 +409,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Unavailable: ${blockedErrorMessage}`;
     }
+    let bridgeUnavailableErrorMessage: string | undefined;
+    if (bridgeUnavailable.length > 0) {
+      bridgeUnavailableErrorMessage = `The deferred-tool bridge is incomplete in this session; hidden schemas were not returned for: ${bridgeUnavailable.join(', ')}`;
+      const header = llmContent ? '\n\n' : '';
+      llmContent += `${header}Unavailable: ${bridgeUnavailableErrorMessage}`;
+    }
     if (truncated.length > 0) {
       // Surface the dropped names so the model knows it must re-issue
       // another ToolSearch for them — without this, the model would
@@ -395,13 +429,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
       displayParts.push(`Reviewed ${reviewed.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
+    if (bridgeUnavailable.length > 0)
+      displayParts.push(`${bridgeUnavailable.length} bridge unavailable`);
     if (truncated.length > 0)
       displayParts.push(`${truncated.length} truncated`);
     const returnDisplay = displayParts.join(', ') || 'No tools reviewed';
 
     const result: ToolResult = { llmContent, returnDisplay };
-    if (blockedErrorMessage && reviewed.length === 0) {
-      result.error = { message: blockedErrorMessage };
+    if (reviewed.length === 0) {
+      const errorMessage = [blockedErrorMessage, bridgeUnavailableErrorMessage]
+        .filter((message): message is string => message !== undefined)
+        .join('\n');
+      if (errorMessage) result.error = { message: errorMessage };
     }
     return result;
   }

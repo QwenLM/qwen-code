@@ -194,11 +194,13 @@ describe('getInitialChatHistory', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
-      getTool: vi.fn().mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
-          ? {}
-          : null,
-      ),
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -422,11 +424,13 @@ describe('stripStartupContext', () => {
         getDeferredToolSummary: vi.fn().mockReturnValue([]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(false),
         getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
-        getTool: vi.fn().mockImplementation((name: string) =>
-          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
-            ? {}
-            : null,
-        ),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+              ? {}
+              : null,
+          ),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
@@ -492,11 +496,13 @@ describe('startup reminder builders', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
-      getTool: vi.fn().mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
-          ? {}
-          : null,
-      ),
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
       ...overrides,
     } as unknown as ToolRegistry;
   }
@@ -525,9 +531,11 @@ describe('startup reminder builders', () => {
     // session does not have).
     const reminder = buildDeferredToolsReminder(
       registry({
-        getDeferredToolSummary: vi.fn().mockReturnValue([
-          { name: 'write_file', description: 'Write a file.' },
-        ]),
+        getDeferredToolSummary: vi
+          .fn()
+          .mockReturnValue([
+            { name: 'write_file', description: 'Write a file.' },
+          ]),
         getTool: vi
           .fn()
           .mockImplementation((name: string) =>

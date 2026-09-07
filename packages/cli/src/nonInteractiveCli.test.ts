@@ -3315,9 +3315,15 @@ describe('runNonInteractive', () => {
         finalize: vi.fn(),
         flush: vi.fn().mockResolvedValue(undefined),
       });
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
-        kind: Kind.Read,
-      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name) =>
+          ({ name, kind: Kind.Read }) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name) => name === ToolNames.GET_GOAL || name === ToolNames.UPDATE_GOAL,
+      );
       const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
       mockCoreExecuteToolCall.mockImplementation(
         async (
@@ -3346,12 +3352,16 @@ describe('runNonInteractive', () => {
             : {}),
         }),
       );
-      const goalToolCall = (callId: string, name: string) => ({
+      const goalToolCall = (
+        callId: string,
+        name: string,
+        args: Record<string, unknown> = {},
+      ) => ({
         type: LlmEventType.ToolCallRequest,
         value: {
           callId,
           name,
-          args: {},
+          args,
           isClientInitiated: false,
           prompt_id: 'p-goal',
           goalContext: permit,
@@ -3362,6 +3372,10 @@ describe('runNonInteractive', () => {
           createStreamFromEvents([
             goalToolCall('shell-1', ToolNames.READ_FILE),
             goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('goal-update-bridged', ToolNames.TOOL_CALL, {
+              name: ToolNames.UPDATE_GOAL,
+              arguments: {},
+            }),
             goalToolCall('shell-failed', ToolNames.SHELL),
           ] as unknown as ServerLlmStreamEvent[]),
         )
@@ -3376,6 +3390,10 @@ describe('runNonInteractive', () => {
       expect(optionsByCallId.get('shell-1')).toEqual({ goalContext: permit });
       // ...while the Goal's own reads stay out of the catalog.
       expect(optionsByCallId.get('goal-read')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      expect(optionsByCallId.get('goal-update-bridged')).toEqual({
         goalContext: permit,
         provenance: 'goal_runtime',
       });

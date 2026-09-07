@@ -16,6 +16,7 @@ import {
   clearAutoMemoryRootCache,
 } from './paths.js';
 import type { Config } from '../config/config.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -179,11 +180,19 @@ describe('MemoryManager', () => {
     });
 
     it.each([
-      ['private', '.qwen/memory/user/test.md'],
-      ['team', '.qwen/team-memory/test.md'],
+      ['private', '.qwen/memory/user/test.md', false],
+      ['team', '.qwen/team-memory/test.md', false],
+      ['bridged private', '.qwen/memory/user/test.md', true],
+      ['bridged team', '.qwen/team-memory/test.md', true],
     ])(
       'skips extraction when history writes to a %s memory file',
-      async (_label, filePath) => {
+      async (_label, filePath, bridged) => {
+        const writeCall = {
+          name: 'write_file',
+          args: {
+            file_path: path.join(projectRoot, filePath),
+          },
+        };
         const mgr = new MemoryManager();
         const result = await mgr.scheduleExtract({
           projectRoot,
@@ -194,10 +203,13 @@ describe('MemoryManager', () => {
               parts: [
                 {
                   functionCall: {
-                    name: 'write_file',
-                    args: {
-                      file_path: path.join(projectRoot, filePath),
-                    },
+                    name: bridged ? ToolNames.TOOL_CALL : writeCall.name,
+                    args: bridged
+                      ? {
+                          name: writeCall.name,
+                          arguments: writeCall.args,
+                        }
+                      : writeCall.args,
                   },
                 },
               ],
@@ -209,6 +221,43 @@ describe('MemoryManager', () => {
         expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
       },
     );
+
+    it('does not treat an unrelated bridged call as a memory write', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: 'web_fetch',
+                    arguments: {
+                      file_path: path.join(
+                        projectRoot,
+                        '.qwen/memory/user/test.md',
+                      ),
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (

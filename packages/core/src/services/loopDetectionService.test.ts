@@ -2848,6 +2848,27 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
+    it('uses changing result evidence for bridged task-list polling', () => {
+      const bridgeArgs = {
+        name: 'task_list',
+        arguments: TASK_LIST_ARGS,
+      };
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent(ToolNames.TOOL_CALL, bridgeArgs),
+          ),
+        ).toBe(false);
+        expect(
+          service.recordToolResult(
+            { name: ToolNames.TOOL_CALL, args: bridgeArgs },
+            taskListResult(`bridged board state v${i}`),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
     it('keeps productive polling alive past the adaptive per-turn cap', () => {
       // With the default (adaptive) cap, a turn beyond the soft cap halts
       // only on a stuck-repetition signal. Changed results must not build

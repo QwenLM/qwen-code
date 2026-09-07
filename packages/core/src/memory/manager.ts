@@ -41,6 +41,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   logMemoryDream,
   logMemoryExtract,
@@ -271,9 +272,24 @@ function updateRecord(
 }
 
 function partWritesToMemory(part: Part, projectRoot: string): boolean {
-  const name = part.functionCall?.name;
+  let name = part.functionCall?.name
+    ? canonicalToolName(part.functionCall.name)
+    : undefined;
+  let args = part.functionCall?.args as Record<string, unknown> | undefined;
+  if (name === ToolNames.TOOL_CALL) {
+    const targetName = args?.['name'];
+    const targetArgs = args?.['arguments'];
+    if (typeof targetName === 'string') {
+      name = canonicalToolName(targetName);
+      args =
+        typeof targetArgs === 'object' &&
+        targetArgs !== null &&
+        !Array.isArray(targetArgs)
+          ? (targetArgs as Record<string, unknown>)
+          : undefined;
+    }
+  }
   if (name && WRITE_TOOL_NAMES.has(name)) {
-    const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (

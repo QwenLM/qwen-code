@@ -239,7 +239,7 @@ export class ToolCallTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.TOOL_CALL;
 
-  constructor() {
+  constructor(private readonly registry?: ToolRegistry) {
     super(
       ToolCallTool.Name,
       ToolDisplayNames.TOOL_CALL,
@@ -268,6 +268,52 @@ export class ToolCallTool extends BaseDeclarativeTool<
       true,
       'deferred bridge invoke execute',
     );
+  }
+
+  override toAutoClassifierInput(
+    params: ToolCallParams,
+  ): Record<string, unknown> {
+    const targetName = canonicalToolName(params.name);
+    let target = this.registry?.getTool(targetName);
+
+    // Keep classifier projection aligned with deferred-call resolution: the
+    // discovery side resolves names case-insensitively and uses the last
+    // registered match when names collide by case.
+    if (!target && this.registry) {
+      const lower = targetName.toLowerCase();
+      for (const name of this.registry.getAllToolNames?.() ?? []) {
+        if (name.toLowerCase() === lower) {
+          target = this.registry.getTool(name);
+        }
+      }
+    }
+
+    // Never expose the raw bridge envelope when the target is unavailable:
+    // it may contain secrets that only the target's projection knows how to
+    // redact. The target identity still preserves the prior-action chain.
+    if (!target) {
+      return { name: targetName };
+    }
+
+    try {
+      const projected = target.toAutoClassifierInput(
+        structuredClone(params.arguments) as never,
+      );
+      if (projected === '') {
+        return { name: target.name };
+      }
+      if (projected === undefined) {
+        return {
+          name: target.name,
+          arguments: structuredClone(params.arguments),
+        };
+      }
+      return { name: target.name, arguments: projected };
+    } catch {
+      // Projection errors must fail closed rather than leaking unprojected
+      // arguments into the AUTO classifier transcript.
+      return { name: target.name };
+    }
   }
 
   protected createInvocation(

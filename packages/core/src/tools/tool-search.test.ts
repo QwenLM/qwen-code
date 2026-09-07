@@ -33,13 +33,18 @@ const baseConfigParams: ConfigParameters = {
   approvalMode: ApprovalMode.DEFAULT,
 };
 
-function makeConfigWithRegistry(): {
+function makeConfigWithRegistry(options: { withToolCall?: boolean } = {}): {
   config: Config;
   registry: ToolRegistry;
 } {
+  const { withToolCall = true } = options;
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+  registry.registerTool(new ToolSearchTool(config));
+  if (withToolCall) {
+    registry.registerTool(new MockTool({ name: ToolNames.TOOL_CALL }));
+  }
   return { config, registry };
 }
 
@@ -202,6 +207,32 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"cron_create"');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
   });
+
+  it.each([
+    ['select', 'select:cron_create'],
+    ['keyword', 'schedule cron'],
+  ])(
+    '%s mode withholds hidden schemas when tool_call is not registered',
+    async (_mode, query) => {
+      const { config, registry } = makeConfigWithRegistry({
+        withToolCall: false,
+      });
+      registry.registerTool(
+        new MockTool({
+          name: 'cron_create',
+          description: 'schedule cron jobs',
+          shouldDefer: true,
+        }),
+      );
+
+      const result = await new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+
+      expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
+      expect(result.error?.message).toContain('bridge');
+    },
+  );
 
   it('escapes `<` in schema JSON so embedded </function> cannot close the wrapper', async () => {
     // MCP descriptions are remote-supplied untrusted text. A description
@@ -960,6 +991,8 @@ describe('ToolSearchTool', () => {
       visibleTools: ['web_fetch'],
     });
     const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(new ToolSearchTool(visibleConfig));
+    visibleRegistry.registerTool(new MockTool({ name: ToolNames.TOOL_CALL }));
     visibleRegistry.registerTool(
       new MockTool({
         name: 'web_fetch',
@@ -1020,6 +1053,7 @@ describe('ToolSearchTool', () => {
       visibleTools: ['web_fetch'],
     });
     const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(new ToolSearchTool(visibleConfig));
     visibleRegistry.registerTool(
       new MockTool({ name: 'web_fetch', shouldDefer: true }),
     );
@@ -1063,6 +1097,8 @@ describe('ToolSearchTool', () => {
       visibleTools: ['web_fetch'],
     });
     const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(new ToolSearchTool(visibleConfig));
+    visibleRegistry.registerTool(new MockTool({ name: ToolNames.TOOL_CALL }));
     visibleRegistry.registerTool(
       new MockTool({ name: 'web_fetch', shouldDefer: true }),
     );
