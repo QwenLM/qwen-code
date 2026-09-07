@@ -203,7 +203,7 @@ describe('dispatchOnce', () => {
     expect(stored!.deliveryByAgent[ALICE.id]?.committedThroughSequence).toBe(1);
     // The prompt the port received is the envelope, not a bare task string.
     const prompt = driver.start.mock.calls[0]![0].prompt as string;
-    expect(prompt).toContain('MESH RUN');
+    expect(prompt).toContain('YOUR RUN');
     expect(prompt).toContain(thread.id);
   });
 

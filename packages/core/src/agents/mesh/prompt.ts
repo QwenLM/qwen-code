@@ -157,7 +157,10 @@ export function assembleMeshPrompt(
 
   const lines: string[] = [];
   lines.push(
-    'MESH RUN (runtime-authenticated envelope; role transport pending)',
+    // "mesh" is this subsystem's internal module name, never a word the user
+    // or the model is taught. What an agent needs to know is that this block
+    // is authenticated by the runtime and the rest is not.
+    'YOUR RUN (runtime-authenticated; role transport pending)',
   );
   lines.push(
     `  workspace=${input.workspaceId} agent=${agent.id} definition=${input.definitionVersion ?? 'unversioned'}`,

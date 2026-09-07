@@ -168,7 +168,7 @@ export class ThreadPostTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'mesh thread post message reply mention hand off',
+      'thread post message reply mention hand off',
     );
   }
 
@@ -252,7 +252,7 @@ export class ThreadWaitTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'mesh thread wait delegate hand off pause',
+      'thread wait delegate hand off pause',
     );
   }
 
@@ -307,7 +307,7 @@ export class ThreadBlockTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'mesh thread block question ask person blocked',
+      'thread block question ask person blocked',
     );
   }
 
@@ -362,7 +362,7 @@ export class ThreadReviewTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'mesh thread review conclude summary hand back',
+      'thread review conclude summary hand back',
     );
   }
 
@@ -499,7 +499,7 @@ export class ThreadCreateTool extends BaseDeclarativeTool<
       false,
       false,
       false,
-      'mesh thread create sub-thread split delegate assign',
+      'thread create sub-thread split delegate assign',
     );
   }
 
@@ -597,7 +597,7 @@ export class ThreadReadTool extends BaseDeclarativeTool<
       false,
       true,
       false,
-      'mesh thread read history fetch earlier posts',
+      'thread read history fetch earlier posts',
     );
   }
 

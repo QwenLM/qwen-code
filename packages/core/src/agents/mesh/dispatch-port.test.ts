@@ -64,7 +64,7 @@ describe('createMeshDispatchPort', () => {
     createMeshDispatchPort(config).start({
       action,
       agent: ALICE,
-      prompt: 'MESH RUN ...',
+      prompt: 'YOUR RUN ...',
       threadId: 'th_1',
       rootThreadId: 'th_1',
       runId: 'rn_1',
@@ -80,7 +80,7 @@ describe('createMeshDispatchPort', () => {
     });
     expect(registry.continueResidentAgent).toHaveBeenCalledWith(
       'mesh-ag_alice',
-      'MESH RUN ...',
+      'YOUR RUN ...',
     );
     expect(config.reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
   });
@@ -139,7 +139,7 @@ describe('createMeshDispatchPort', () => {
     });
     expect(config.resumeBackgroundAgent).toHaveBeenCalledWith(
       'mesh-ag_alice',
-      'MESH RUN ...',
+      'YOUR RUN ...',
     );
   });
 

@@ -142,7 +142,7 @@ export async function checkMeshShellCommand(
     ? { allowed: true }
     : {
         allowed: false,
-        reason: `Mesh agents may only run read-only shell commands; classified as ${safety}.`,
+        reason: `You may only run read-only shell commands; this one is classified as ${safety}.`,
       };
 }
 
@@ -169,7 +169,7 @@ export function createMeshToolInvocationGuard(
     if (context.args['is_background'] === true) {
       return {
         allowed: false,
-        reason: 'Mesh agents may not start background shell processes.',
+        reason: 'You may not start background shell processes.',
       };
     }
     const command = context.args['command'];
