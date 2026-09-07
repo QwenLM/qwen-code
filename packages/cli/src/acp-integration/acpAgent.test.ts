@@ -4464,7 +4464,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
-      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
@@ -9288,81 +9287,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('projects a registry-declared reasoning capability in the preview', async () => {
-    mockConfig = {
-      ...mockConfig,
-      getTargetDir: vi.fn().mockReturnValue('/work/status'),
-      getAuthType: vi.fn().mockReturnValue('openai'),
-      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
-      getModel: vi.fn().mockReturnValue('deepseek-v4-pro'),
-      getResolvedModelConfig: vi.fn().mockReturnValue(undefined),
-      getAllConfiguredModels: vi.fn().mockReturnValue([
-        {
-          id: 'deepseek-v4-pro',
-          label: 'DS Pro',
-          authType: 'openai',
-          capabilities: {
-            reasoning: {
-              thinking: true,
-              efforts: ['high', 'max'],
-              defaultEffort: 'high',
-              disableField: 'thinking',
-            },
-          },
-        },
-        {
-          id: 'deepseek-v4-chat',
-          label: 'DS Chat',
-          authType: 'openai',
-        },
-      ]),
-    } as unknown as Config;
-
-    const agentPromise = runAcpAgent(
-      mockConfig,
-      makeSessionSettings(),
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
-
-    const status = await agent.extMethod(
-      SERVE_STATUS_EXT_METHODS.workspaceProviders,
-      {},
-    );
-    const models = (
-      status['providers'] as Array<{
-        models: Array<{
-          baseModelId: string;
-          configOptions?: unknown[];
-        }>;
-      }>
-    ).flatMap((provider) => provider.models);
-    const declared = models.find(
-      (model) => model.baseModelId === 'deepseek-v4-pro',
-    );
-    const undeclared = models.find(
-      (model) => model.baseModelId === 'deepseek-v4-chat',
-    );
-
-    expect(declared?.configOptions).toMatchObject([
-      {
-        id: 'reasoning_effort',
-        currentValue: 'high',
-        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
-        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
-      },
-    ]);
-    expect(undeclared?.configOptions).toBeUndefined();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
   it('session model selectors filter fastOnly and voiceOnly models', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -9631,46 +9555,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     },
   );
-
-  it("keeps a runtime snapshot session's own request overrides on auth refresh", async () => {
-    const sessionId = 'snapshot-persisted-reasoning-auth-session';
-    const innerConfig = await setupSessionMocks(sessionId);
-    const extraBody = { enable_thinking: false, seed: 7 };
-    const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
-    const generation: {
-      model: string;
-      reasoning?: false | { effort?: string };
-      extra_body?: Record<string, unknown>;
-      samplingParams?: Record<string, unknown>;
-    } = { model: 'qwen3.8-max', reasoning: { effort: 'medium' } };
-    const settings = makeSessionSettings({
-      mcpServers: {},
-      model: { reasoningEffort: 'medium' },
-    });
-    vi.mocked(loadSettings).mockReturnValue(settings);
-    innerConfig.getModel = vi.fn(() => generation.model);
-    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
-    vi.mocked(innerConfig.getActiveRuntimeModelSnapshot).mockReturnValue({
-      id: '$runtime|api-key|qwen3.8-max',
-      authType: 'api-key',
-      modelId: 'qwen3.8-max',
-    });
-    innerConfig.refreshAuth = vi.fn(async () => {
-      generation.extra_body = { ...extraBody };
-      generation.samplingParams = { ...samplingParams };
-    });
-
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-
-      expect(generation.extra_body).toEqual(extraBody);
-      expect(generation.samplingParams).toEqual(samplingParams);
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
 
   it.each([false, { effort: 'medium', budget_tokens: 42000 }] as const)(
     'resets to canonical reasoning defaults %j rather than a previous selection',

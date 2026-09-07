@@ -1833,10 +1833,7 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall['reasoning_effort']).toBeUndefined();
     });
 
-    it('still emits the generic disable shape when the capability is rejected', async () => {
-      // The fixture is refused for omitting `disableField`, not for
-      // `canDisable: false` (a valid value, covered by the forbids-disabling
-      // case above) — the generic disable path must be unaffected.
+    it('does not let an unparsable canDisable suppress the disable shape', async () => {
       const apiCall = await executeWithCapability(
         { thinking: true, toggleOnly: true, canDisable: false },
         { reasoning: false, samplingParams: undefined },
