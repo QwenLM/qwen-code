@@ -24428,9 +24428,8 @@ describe('Session', () => {
         await vi.waitFor(() => {
           expect(mockChat.sendMessageStream).toHaveBeenCalled();
         });
-        const request = (
-          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
-        ).mock.calls[0]?.[1] as { message: Array<Record<string, unknown>> };
+        const request = (mockChat.sendMessageStream as ReturnType<typeof vi.fn>)
+          .mock.calls[0]?.[1] as { message: Array<Record<string, unknown>> };
         expect(
           request.message.some(
             (part) =>
