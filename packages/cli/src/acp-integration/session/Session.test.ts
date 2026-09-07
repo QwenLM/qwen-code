@@ -4113,6 +4113,7 @@ describe('Session', () => {
   it('rejects a prompt while an exclusive history mutation is active', async () => {
     const releaseMutation = session.beginHistoryMutation();
 
+    expect(session.hasActiveTurn()).toBe(true);
     expect(session.isIdle()).toBe(false);
     expect(session.isTurnIdle()).toBe(false);
     await expect(
@@ -4136,6 +4137,29 @@ describe('Session', () => {
     expect(session.hasActiveTurn()).toBe(false);
     expect(session.isTurnIdle()).toBe(false);
     releaseClose();
+    expect(session.isTurnIdle()).toBe(true);
+  });
+
+  it('reports an active turn while a prompt is in flight', async () => {
+    let resolveStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      resolveStream = resolve;
+    });
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      await streamGate;
+      return createEmptyStream();
+    });
+
+    const prompt = session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'hello' }],
+    });
+    await vi.waitFor(() => expect(session.hasActiveTurn()).toBe(true));
+    expect(session.isTurnIdle()).toBe(false);
+
+    resolveStream();
+    await prompt;
+    expect(session.hasActiveTurn()).toBe(false);
     expect(session.isTurnIdle()).toBe(true);
   });
 
