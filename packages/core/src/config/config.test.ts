@@ -552,6 +552,44 @@ describe('bareEnabledGrantWarnings', () => {
       ).join('\n'),
     ).toContain("Replace the bare 'pdf' with 'rust:pdf' in both");
   });
+
+  it('drops the off-state claim when a qualified grant already enables the skill', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('already enables it');
+    expect(joined).not.toContain('which defaults off');
+  });
+
+  it('names granted and ungranted default-off members in separate warnings', () => {
+    const joined = bareEnabledGrantWarnings(
+      lists(['pdf', 'rust:pdf'], ['pdf']),
+      [rustPdf, { name: 'other:pdf', authoredName: 'pdf' }],
+      new Set(['rust:pdf', 'other:pdf']),
+    ).join('\n');
+    expect(joined).toContain(
+      "enables the extension skill 'other:pdf', which defaults off",
+    );
+    expect(joined).toContain(
+      "the qualified grant 'rust:pdf' in skills.enabled already enables",
+    );
+  });
+
+  it('keeps the off-state claim when a hard entry defeats the qualified grant', () => {
+    const joined = bareEnabledGrantWarnings(
+      {
+        enabled: new Set(['pdf', 'rust:pdf']),
+        defaultDisabled: new Set(['pdf']),
+        hardDisabled: new Set(['pdf']),
+      },
+      [rustPdf],
+      new Set(['rust:pdf']),
+    ).join('\n');
+    expect(joined).toContain('which defaults off');
+    expect(joined).not.toContain('already enables');
+  });
 });
 
 describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
@@ -851,6 +889,53 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getWarnings().join('\n')).toContain(
         'cancelled only by the identical spelling',
+      );
+    });
+
+    it('surfaces the default-off pair warning named by registry identity', async () => {
+      // The pure function is pinned above; this pins the caller half: the
+      // default-off set initialize() collects must carry registry names,
+      // or the pair warning goes silent while the skill stays off.
+      vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
+        {
+          name: 'rust:pdf',
+          authoredName: 'pdf',
+          level: 'extension',
+          extensionName: 'rust',
+        } as SkillConfig,
+      ]);
+      const config = new Config({
+        ...baseParams,
+        // baseParams pins overrideExtensions to []; lift it so the mocked
+        // loaded extension reaches getExtensions() and feeds the caller.
+        overrideExtensions: undefined,
+        skillSettingsListsProvider: () => ({
+          enabled: new Set(['pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        }),
+      });
+      const manager = config.getExtensionManager();
+      vi.spyOn(manager, 'getLoadedExtensions').mockReturnValue([
+        {
+          id: 'a'.repeat(64),
+          name: 'rust',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.0.0' },
+          contextFiles: [],
+          skills: [],
+        } as Extension,
+      ]);
+      vi.spyOn(manager, 'getExtensionSkillState').mockReturnValue({
+        defaultEnabled: false,
+        workspaceEnabled: null,
+      });
+      await config.initialize();
+
+      expect(config.getWarnings().join('\n')).toContain(
+        "enables the extension skill 'rust:pdf', which defaults off",
       );
     });
 

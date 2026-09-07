@@ -1610,9 +1610,20 @@ export function bareEnabledGrantWarnings(
       const offNames = registryNames.filter((name) =>
         defaultOffNames.has(name),
       );
-      if (offNames.length) {
-        const offPlural = offNames.length > 1;
-        const offList = offNames.map((name) => `'${name}'`).join(', ');
+      // A qualified grant in skills.enabled already enables its skill (the
+      // pair cancels the bare disablement) unless a hard entry blocks it
+      // under either spelling: calling such a skill default-off would
+      // contradict the panel on the same boot, so advise cleanup only.
+      const onNames = offNames.filter(
+        (name) =>
+          lists.enabled.has(name) &&
+          !lists.hardDisabled.has(name) &&
+          !lists.hardDisabled.has(authored),
+      );
+      const stillOff = offNames.filter((name) => !onNames.includes(name));
+      if (stillOff.length) {
+        const offPlural = stillOff.length > 1;
+        const offList = stillOff.map((name) => `'${name}'`).join(', ');
         warnings.push(
           `Warning: skills.enabled and skills.defaultDisabled both list ` +
             `'${authored}' by bare name. The pair cancels the disablement ` +
@@ -1622,6 +1633,20 @@ export function bareEnabledGrantWarnings(
             `'${authored}' with ${offList} in both skills.enabled and ` +
             `skills.defaultDisabled to enable ` +
             `${offPlural ? 'them' : 'it'}.`,
+        );
+      }
+      if (onNames.length) {
+        const onPlural = onNames.length > 1;
+        const onList = onNames.map((name) => `'${name}'`).join(', ');
+        warnings.push(
+          `Warning: skills.enabled and skills.defaultDisabled both list ` +
+            `'${authored}' by bare name, but the qualified grant ` +
+            `${onList} in skills.enabled already ` +
+            `${onPlural ? 'enable' : 'enables'} ` +
+            `${onPlural ? 'them' : 'it'}, so the bare pair changes ` +
+            `nothing. Replace the bare '${authored}' with ${onList} in ` +
+            `both skills.enabled and skills.defaultDisabled to drop ` +
+            `the dead entries.`,
         );
       }
       continue;
