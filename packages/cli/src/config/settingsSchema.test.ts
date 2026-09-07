@@ -328,6 +328,10 @@ describe('SettingsSchema', () => {
         { value: 'hold', label: 'Hold for review' },
         { value: 'refuse', label: 'Refuse' },
       ]);
+      expect(crossSessionInbound.description).toContain(
+        'user-minted controllers',
+      );
+      expect(crossSessionInbound.description).toContain('child processes');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {

@@ -336,9 +336,16 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 <WebShellWithProviders
   brand={{ name: 'QiuQiu Code', logo: <MyLogo /> }}
   onBrandResolved={(brand) => {
-    document.title = `${brand.name ?? 'Qwen Code'} — My Host`;
+    document.title = `${brand.name || 'Qwen Code'} — My Host`;
   }}
 />
+```
+
+`Live` 会话分组默认不向嵌入宿主展示；此前版本会默认展示，依赖该分组的宿主升级时
+需要显式开启：
+
+```tsx
+<WebShellWithProviders sidebar={{ showLive: true }} />
 ```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：

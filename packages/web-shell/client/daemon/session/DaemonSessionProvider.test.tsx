@@ -41,6 +41,7 @@ import {
   useDaemonTranscriptStore,
   useDaemonTurnNavigationState,
   useDaemonTurnNavigationStore,
+  useDaemonHistoryNavigationStore,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
@@ -577,6 +578,64 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
 });
 
 describe('DaemonSessionProvider', () => {
+  it('retains a persisted viewport boundary after the legacy live window reaches capacity', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replay = (id: number): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: `turn-${id}` },
+          _meta: {
+            'qwen.session.recordId': `record-${id}`,
+            qwenTranscript: { sourceRecordIds: [`record-${id}`] },
+          },
+        },
+      },
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [replay(1), replay(2), replay(3)],
+          liveJournal: [],
+        },
+      }),
+    );
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let navigation:
+      | ReturnType<typeof useDaemonHistoryNavigationStore>
+      | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      navigation = useDaemonHistoryNavigationStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true, maxBlocks: 2 });
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      events: [replay(0)],
+      hasMore: false,
+    });
+    expect(navigation?.captureLiveBoundary()).toMatchObject({
+      beforeRecordId: 'record-2',
+      reachable: true,
+    });
+    await act(async () => {
+      await history?.loadMore();
+    });
+    expect(history).toMatchObject({ hasMore: false, capacityReached: true });
+    expect(navigation?.captureLiveBoundary()).toMatchObject({
+      beforeRecordId: 'record-2',
+      reachable: true,
+    });
+  });
+
   let container: HTMLDivElement | null = null;
   let root: Root | null = null;
 
@@ -1308,6 +1367,78 @@ describe('DaemonSessionProvider', () => {
     ).toHaveBeenCalledOnce();
     expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [409, 'session_writer_conflict'],
+    [503, 'session_writer_unavailable'],
+    [409, 'session_writer_lost'],
+    [409, 'session_transcript_changed'],
+  ] as const)(
+    'pauses standalone restore on %s %s until explicit retry',
+    async (status, code) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1'],
+      });
+      sdkMocks.MockDaemonSessionClient.loadStandalone.mockRejectedValue(
+        new DaemonHttpError(status, { code, retryable: true }, 'writer fenced'),
+      );
+      let connection: DaemonConnectionState | undefined;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        reconnectDelayMs: 1,
+        sessionId: 'fenced',
+        sessionContext: { kind: 'standalone' },
+      });
+      await act(async () => {
+        await vi.waitFor(() => expect(connection?.status).toBe('error'));
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      expect(connection).toMatchObject({
+        sessionId: 'fenced',
+        standaloneSession: { errorCode: code },
+        error: 'writer fenced',
+      });
+      expect(
+        sdkMocks.MockDaemonSessionClient.loadStandalone,
+      ).toHaveBeenCalledOnce();
+      sdkMocks.MockDaemonSessionClient.loadStandalone.mockReset();
+      sdkMocks.MockDaemonSessionClient.loadStandalone.mockRejectedValue(
+        new DaemonHttpError(status, { code, retryable: true }, 'writer fenced'),
+      );
+      let retry!: Promise<void>;
+      act(() => {
+        retry = requireActions(actions).loadSession('fenced', {
+          sessionContext: { kind: 'standalone' },
+        });
+        void retry.catch(() => undefined);
+      });
+      await act(async () => {
+        await vi.waitFor(() =>
+          expect(
+            sdkMocks.MockDaemonSessionClient.loadStandalone,
+          ).toHaveBeenCalledOnce(),
+        );
+      });
+      await expect(retry).rejects.toMatchObject({ status });
+      expect(
+        sdkMocks.MockDaemonSessionClient.loadStandalone,
+      ).toHaveBeenCalledOnce();
+      expect(
+        sdkMocks.MockDaemonSessionClient.createStandalone,
+      ).not.toHaveBeenCalled();
+      expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    },
+  );
 
   it('loads Live sessions through the unique trusted runtime without exposing its cwd', async () => {
     sdkMocks.capabilities.mockResolvedValue({

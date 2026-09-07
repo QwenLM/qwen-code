@@ -113,6 +113,8 @@ const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
 const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
 const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
   'session_worktree_persistence_v1';
+const SESSION_WORKTREE_RESET_FEATURE: ServeFeature =
+  'session_worktree_reset_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
   CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
@@ -185,6 +187,20 @@ interface DaemonSessionClientStaticLike {
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
+  // The reset route registers no client for the caller, so unlike `create`
+  // and `resume` this takes no client id.
+  resetWorktree(
+    client: DaemonClientLike,
+    sessionId: string,
+    req: {
+      workspaceCwd: string;
+      modelServiceId?: string;
+      sessionScope: 'thread';
+      approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
+    },
+  ): Promise<DaemonChannelSessionClient>;
 }
 
 interface DaemonSdkLike {
@@ -251,6 +267,13 @@ export function createDaemonSessionFactory({
       // (dingtalk/feishu) is derivable from the name via the channel config.
       ...(req.sourceId ? { sourceId: req.sourceId } : {}),
     };
+    if (req.worktreeReset) {
+      return await DaemonSessionClient.resetWorktree(
+        client,
+        req.worktreeReset.sessionId,
+        daemonReq,
+      );
+    }
     if (req.sessionId) {
       return await DaemonSessionClient.resume(
         client,
@@ -312,6 +335,10 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.listSessions) {
     facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
+  if (bridge.resetWorktreeSession) {
+    facade.resetWorktreeSession = bridge.resetWorktreeSession.bind(bridge);
   }
 
   if (bridge.registerChannelLoopToolHandler) {
@@ -572,6 +599,9 @@ export async function runChannelDaemonWorker(
     ),
     sessionWorktreePersistence: capabilities.features.includes(
       SESSION_WORKTREE_PERSISTENCE_FEATURE,
+    ),
+    sessionWorktreeReset: capabilities.features.includes(
+      SESSION_WORKTREE_RESET_FEATURE,
     ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }

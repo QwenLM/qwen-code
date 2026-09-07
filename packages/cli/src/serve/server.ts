@@ -337,11 +337,11 @@ import {
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
+import { checkLegacyConversationRuntimeOwner } from './conversations/conversation-runtime-ownership.js';
 import {
-  createConversationRuntimeOwnership,
-  type ConversationRuntimeOwnership,
-} from './conversations/conversation-runtime-ownership.js';
-import { getStableLiveDiscoveryBaseDir } from './live/discovery.js';
+  assertLiveDiscoveryPublisher,
+  getStableLiveDiscoveryBaseDir,
+} from './live/discovery.js';
 import {
   installServeAppLifecycle,
   type ServeAppLifecycleController,
@@ -681,11 +681,7 @@ export interface ServeAppDeps {
     readonly DurableCronTask[]
   >;
   liveDiscoveryStableBaseDir?: string;
-  conversationRuntimeOwnershipFactory?: (
-    pid: number,
-    instanceNonce: string,
-    stableBaseDir: string,
-  ) => ConversationRuntimeOwnership;
+  checkLegacyConversationOwner?: () => Promise<void>;
   serveAppLifecycle?: ServeAppLifecycleController;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
@@ -1468,25 +1464,9 @@ export function createServeApp(
         }
       },
     });
-  const conversationRuntimeOwnership = deps.liveConversationWorkspace
-    ? (deps.conversationRuntimeOwnershipFactory?.(
-        process.pid,
-        liveCoordinator.daemonInstanceNonce,
-        path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      ) ??
-      createConversationRuntimeOwnership({
-        pid: process.pid,
-        instanceNonce: liveCoordinator.daemonInstanceNonce,
-        stableBaseDir: path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      }))
-    : undefined;
-  if (conversationRuntimeOwnership) {
-    serveAppLifecycle.setOwnership(conversationRuntimeOwnership);
-  }
+  const stableLiveDiscoveryBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+  );
   liveCoordinator.setAppshotReadiness(
     liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
@@ -1501,7 +1481,12 @@ export function createServeApp(
   let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
-        ownership: conversationRuntimeOwnership!,
+        checkLegacyOwner:
+          deps.checkLegacyConversationOwner ??
+          (() =>
+            checkLegacyConversationRuntimeOwner({
+              stableBaseDir: stableLiveDiscoveryBaseDir,
+            })),
         workspace: deps.liveConversationWorkspace,
         registry: workspaceRegistry,
         publishRuntime: async (canonicalRoot, validate) => {
@@ -1831,6 +1816,14 @@ export function createServeApp(
         liveTaskService.interruptWait(callerSessionId),
     });
   liveCoordinator.setHandlers({
+    beforeStart: async () => {
+      await ensureConversationRuntimeWithLifecycle();
+      await publishLiveVoiceEnabled(true);
+      await assertLiveDiscoveryPublisher(stableLiveDiscoveryBaseDir, {
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+      });
+    },
     onHostReady: () => {
       if (!liveVoiceEnabled) return;
       void verifyLiveAppshotChannel();
@@ -2279,10 +2272,6 @@ export function createServeApp(
   if (liveVoiceSurfaceAvailable) {
     registerLiveRoutes(app, {
       coordinator: liveCoordinator,
-      ensureRuntimeReady: async () => {
-        await ensureConversationRuntimeWithLifecycle();
-        await publishLiveVoiceEnabled(true);
-      },
       mutate,
       ...(deps.persistSetting
         ? {
