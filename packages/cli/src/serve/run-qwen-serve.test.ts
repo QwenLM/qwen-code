@@ -12639,6 +12639,7 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       const arg = mockRemoteQuickstart.print.mock.calls[0][0];
       expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe('0.0.0.0');
       expect(arg.port).toBe(
         (started.server.address() as { port: number }).port,
       );
@@ -12651,25 +12652,32 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('suppresses the quickstart when a DNS name binds loopback only', async () => {
+  it('hands the quickstart the bound address, not the operator spelling', async () => {
     mockRemoteQuickstart.print.mockClear();
-    // The trailing-dot root form of localhost resolves to 127.0.0.1 through
-    // every mainstream resolver while staying outside the loopback literal
-    // table, so the socket binds loopback and the quickstart must stay
-    // quiet (its QR would be undialable from anywhere else).
+    // The print-mode decision (full / token-only / silent) lives inside
+    // printRemoteQuickstart and is pinned by its own unit tests; boot's
+    // contract is to report the address the socket actually bound, which an
+    // IP-literal bind exercises without touching any resolver.
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-bound-pin');
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe(
         {
           port: 0,
-          hostname: 'localhost.',
+          hostname: '127.0.0.1',
           mode: 'http-bridge',
           serveWebShell: false,
         },
         { bridge: makeFakeBridge() },
       );
-      expect(mockRemoteQuickstart.print).not.toHaveBeenCalled();
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      expect(arg.bind).toBe('127.0.0.1');
+      expect(arg.boundAddress).toBe('127.0.0.1');
+      expect(arg.generated).toBe(false);
+      expect(arg.token).toBe('env-token-bound-pin');
     } finally {
+      vi.unstubAllEnvs();
       await started?.close();
     }
   });

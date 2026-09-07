@@ -26,6 +26,10 @@ import { Label } from './ui/label';
 // daemon cold-starts a runtime instead of hanging on one request.
 const PROBE_TIMEOUT_MS = 10_000;
 const RETRY_DELAY_MS = 2_000;
+// Ceiling for a server-supplied Retry-After: a front proxy or rate limiter
+// may ask for minutes, which would park the gate screen far past operator
+// patience; re-probing at the ceiling is cheap and self-correcting.
+const MAX_RETRY_DELAY_MS = 30_000;
 
 interface AuthCopy {
   heading: string;
@@ -87,10 +91,10 @@ function retryAfterMs(response: Response): number | undefined {
   if (!raw) return undefined;
   const seconds = Number.parseInt(raw, 10);
   if (Number.isFinite(seconds) && seconds >= 0)
-    return Math.max(seconds, 1) * 1000;
+    return Math.min(Math.max(seconds, 1) * 1000, MAX_RETRY_DELAY_MS);
   const date = Date.parse(raw);
   if (!Number.isFinite(date)) return undefined;
-  return Math.max(date - Date.now(), 1000);
+  return Math.min(Math.max(date - Date.now(), 1000), MAX_RETRY_DELAY_MS);
 }
 
 export function StandaloneAuth({

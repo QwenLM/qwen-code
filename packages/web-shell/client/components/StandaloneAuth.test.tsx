@@ -269,6 +269,58 @@ it('parses an HTTP-date Retry-After', async () => {
   expect(container.textContent).toBe('Connected ');
 });
 
+it('clamps an outsized Retry-After to the retry ceiling', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '3600' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(29_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('leaves the submit button enabled once the token form is up', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  expect(container.querySelector('input')).not.toBeNull();
+  expect(submitButton().disabled).toBe(false);
+});
+
+it('keeps a manually typed token after a rejected submit', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockResolvedValueOnce(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  act(() => {
+    const input = container.querySelector('input')!;
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'typo-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(container.textContent).toContain('Invalid or expired');
+  // Only a rejected initial credential is cleared; a typo the operator just
+  // made must stay editable instead of vanishing behind the masked input.
+  expect(container.querySelector('input')!.value).toBe('typo-token');
+});
+
 it('treats a bare 503 without the failure code as transient', async () => {
   vi.useFakeTimers();
   const fetch = vi

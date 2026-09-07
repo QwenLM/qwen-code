@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NetworkInterfaceInfo } from 'node:os';
 import {
   printRemoteQuickstart,
+  quickstartPrintMode,
   remoteQuickstartAddresses,
 } from './remote-quickstart.js';
 
@@ -73,59 +74,146 @@ const interfaces = {
   ],
 };
 
+describe('quickstartPrintMode', () => {
+  it('prints the full block for every non-loopback bound address', () => {
+    for (const bound of ['0.0.0.0', '::', '192.168.1.7', '2001:db8::2']) {
+      expect(quickstartPrintMode(bound, true)).toBe('full');
+      expect(quickstartPrintMode(bound, false)).toBe('full');
+    }
+  });
+
+  it('prints only the generated bearer on a loopback bound address', () => {
+    for (const bound of ['127.0.0.1', '127.0.0.53', '::1', '[::1]']) {
+      expect(quickstartPrintMode(bound, true)).toBe('token-only');
+    }
+  });
+
+  it('stays silent for an operator token on a loopback bound address', () => {
+    for (const bound of ['127.0.0.1', '::1', '[::1]']) {
+      expect(quickstartPrintMode(bound, false)).toBe('silent');
+    }
+  });
+
+  it('keys off the bound address, not the operator spelling', () => {
+    // A DNS name that resolves to loopback binds loopback only: its socket
+    // reports a loopback bound address, so no undialable LAN list or QR may
+    // follow — while a generated bearer still prints (the operator's only
+    // way in).
+    expect(quickstartPrintMode('127.0.0.1', true)).toBe('token-only');
+    expect(quickstartPrintMode('::1', true)).toBe('token-only');
+    expect(quickstartPrintMode('127.0.0.1', false)).toBe('silent');
+  });
+});
+
 it('advertises only the private LAN population for wildcard binds', () => {
   // docker0/br-*/utun4 are software networks, the public IPv6 and fe80:: are
   // not dialable-from-phone material: none may become a URL or the QR.
   expect(
-    remoteQuickstartAddresses('0.0.0.0', 43210, false, interfaces),
+    remoteQuickstartAddresses('0.0.0.0', '0.0.0.0', 43210, false, interfaces),
   ).toEqual([
     { label: 'Local', url: 'http://127.0.0.1:43210' },
     { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
   ]);
-  expect(remoteQuickstartAddresses('::', 43210, false, interfaces)).toEqual([
+  expect(
+    remoteQuickstartAddresses('::', '::', 43210, false, interfaces),
+  ).toEqual([
     { label: 'Local', url: 'http://[::1]:43210' },
     { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
     { label: 'Network (en0)', url: 'http://[fd12:3456::1]:43210' },
   ]);
 });
 
-it('canonicalises wildcard spellings before enumerating', () => {
-  const ipv4Shape = remoteQuickstartAddresses('0.0.0.0', 43210, false, {
-    en0: [iface('192.168.1.7', 'IPv4')],
-  });
+it('reads wildcard-ness from the bound address, not the spelling', () => {
+  const ipv4Shape = remoteQuickstartAddresses(
+    '0.0.0.0',
+    '0.0.0.0',
+    43210,
+    false,
+    { en0: [iface('192.168.1.7', 'IPv4')] },
+  );
+  // inet_aton abbreviations and IPv6-zero spellings bind to the canonical
+  // wildcard, and the IPv4-mapped wildcard plus the whitespace-bearing
+  // defensive fallback normalise here.
+  for (const spelling of ['0', '0.0', '0.0.0.0', ' 0.0.0.0 ']) {
+    expect(
+      remoteQuickstartAddresses(spelling, '0.0.0.0', 43210, false, {
+        en0: [iface('192.168.1.7', 'IPv4')],
+      }),
+    ).toEqual(ipv4Shape);
+  }
   expect(
-    remoteQuickstartAddresses('::ffff:0.0.0.0', 43210, false, {
-      en0: [iface('192.168.1.7', 'IPv4')],
-    }),
+    remoteQuickstartAddresses(
+      '::ffff:0.0.0.0',
+      '::ffff:0.0.0.0',
+      43210,
+      false,
+      {
+        en0: [iface('192.168.1.7', 'IPv4')],
+      },
+    ),
   ).toEqual(ipv4Shape);
   expect(
-    remoteQuickstartAddresses(' 0.0.0.0 ', 43210, false, {
+    remoteQuickstartAddresses('::0', '::', 43210, false, {
       en0: [iface('192.168.1.7', 'IPv4')],
     }),
-  ).toEqual(ipv4Shape);
-});
-
-it('picks the loopback the :: listener actually answers on', () => {
-  const noV6Loopback = { en0: [iface('192.168.1.7', 'IPv4')] };
-  expect(remoteQuickstartAddresses('::', 43210, false, noV6Loopback)).toEqual([
+  ).toEqual([
     { label: 'Local', url: 'http://127.0.0.1:43210' },
     { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
   ]);
 });
 
-it('uses concrete TLS IPv6 authorities and the actual bound port', () => {
-  expect(remoteQuickstartAddresses('2001:db8::2', 43210, true, {})).toEqual([
-    { label: 'Address', url: 'https://[2001:db8::2]:43210' },
+it('picks the loopback the :: listener actually answers on', () => {
+  const noV6Loopback = { en0: [iface('192.168.1.7', 'IPv4')] };
+  expect(
+    remoteQuickstartAddresses('::', '::', 43210, false, noV6Loopback),
+  ).toEqual([
+    { label: 'Local', url: 'http://127.0.0.1:43210' },
+    { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
   ]);
 });
 
-it('stays quiet about zone-scoped explicit binds and empty fixtures', () => {
-  expect(remoteQuickstartAddresses('fe80::1%en0', 43210, false, {})).toEqual(
-    [],
-  );
-  expect(remoteQuickstartAddresses('0.0.0.0', 43210, false, {})).toEqual([
-    { label: 'Local', url: 'http://127.0.0.1:43210' },
+it('prints Local as [::1] when the host assigns the IPv6 loopback', () => {
+  expect(
+    remoteQuickstartAddresses('::', '::', 43210, false, {
+      lo0: [iface('127.0.0.1', 'IPv4', true), iface('::1', 'IPv6', true)],
+      en0: [iface('192.168.1.7', 'IPv4')],
+    }),
+  ).toEqual([
+    { label: 'Local', url: 'http://[::1]:43210' },
+    { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
   ]);
+});
+
+it('never advertises a ULA parked on a software interface', () => {
+  // A VPN/VM adapter can hold a fc00::/7 address; the dual-stack ULA sweep
+  // must skip software interfaces exactly like the IPv4 LAN sweep does, or
+  // the QR would point at an address only the host can dial.
+  expect(
+    remoteQuickstartAddresses('::', '::', 43210, false, {
+      lo0: [iface('::1', 'IPv6', true)],
+      utun4: [iface('fd12:3456::9', 'IPv6')],
+      en0: [iface('192.168.1.7', 'IPv4'), iface('fd12:3456::1', 'IPv6')],
+    }),
+  ).toEqual([
+    { label: 'Local', url: 'http://[::1]:43210' },
+    { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
+    { label: 'Network (en0)', url: 'http://[fd12:3456::1]:43210' },
+  ]);
+});
+
+it('uses concrete TLS IPv6 authorities and the actual bound port', () => {
+  expect(
+    remoteQuickstartAddresses('2001:db8::2', '2001:db8::2', 43210, true, {}),
+  ).toEqual([{ label: 'Address', url: 'https://[2001:db8::2]:43210' }]);
+});
+
+it('stays quiet about zone-scoped explicit binds and empty fixtures', () => {
+  expect(
+    remoteQuickstartAddresses('fe80::1%en0', 'fe80::1%en0', 43210, false, {}),
+  ).toEqual([]);
+  expect(
+    remoteQuickstartAddresses('0.0.0.0', '0.0.0.0', 43210, false, {}),
+  ).toEqual([{ label: 'Local', url: 'http://127.0.0.1:43210' }]);
 });
 
 it('encodes credentials only in deliberate QR output, not address lines', async () => {
@@ -136,6 +224,7 @@ it('encodes credentials only in deliberate QR output, not address lines', async 
   );
   await printRemoteQuickstart({
     bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
     port: 4170,
     tls: false,
     token: 'a+b/c',
@@ -170,10 +259,63 @@ it('encodes credentials only in deliberate QR output, not address lines', async 
   ).toHaveLength(1);
 });
 
+it('prints the generated bearer line verbatim, exactly once', async () => {
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'gen-token-abc',
+    generated: true,
+    web: false,
+  });
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Generated bearer token (secret; changes on restart): gen-token-abc',
+  );
+  expect(
+    mocks.line.mock.calls.filter((call: string[]) =>
+      call[0].includes('gen-token-abc'),
+    ),
+  ).toHaveLength(1);
+});
+
+it('prints only the bearer and the loopback note on a loopback bind', async () => {
+  await printRemoteQuickstart({
+    bind: 'localhost',
+    boundAddress: '127.0.0.1',
+    port: 4170,
+    tls: false,
+    token: 'gen-token-abc',
+    generated: true,
+    web: true,
+  });
+  expect(mocks.line.mock.calls.flat()).toEqual([
+    'Generated bearer token (secret; changes on restart): gen-token-abc',
+    'The listener bound loopback, so no network address or QR is printed; ' +
+      'local clients must present this bearer.',
+  ]);
+  expect(mocks.generate).not.toHaveBeenCalled();
+});
+
+it('prints nothing for an operator token on a loopback bind', async () => {
+  await printRemoteQuickstart({
+    bind: 'localhost',
+    boundAddress: '::1',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+  });
+  expect(mocks.line).not.toHaveBeenCalled();
+  expect(mocks.generate).not.toHaveBeenCalled();
+});
+
 it('never QRs a stable operator token into captured stdout', async () => {
   stubIsTTY(undefined);
   await printRemoteQuickstart({
     bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
     port: 4170,
     tls: false,
     token: 'stable-secret',
@@ -195,6 +337,7 @@ it('QRs a stable token only at an interactive terminal', async () => {
   );
   await printRemoteQuickstart({
     bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
     port: 4170,
     tls: false,
     token: 'stable-secret',
@@ -209,6 +352,7 @@ it('prints generated API credentials but never QR for no-web', async () => {
   stubIsTTY(true);
   await printRemoteQuickstart({
     bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
     port: 4170,
     tls: false,
     token: 'secret',
@@ -226,6 +370,7 @@ it('prints generated API credentials but never QR for no-web', async () => {
 it('prints the QR fallback when no candidate address exists', async () => {
   await printRemoteQuickstart({
     bind: 'fe80::1%en0',
+    boundAddress: 'fe80::1%en0',
     port: 4170,
     tls: false,
     token: 'secret',
@@ -246,6 +391,7 @@ it('survives a throwing stdout writer', async () => {
     await expect(
       printRemoteQuickstart({
         bind: '192.168.1.2',
+        boundAddress: '192.168.1.2',
         port: 4170,
         tls: false,
         token: 'secret',
@@ -268,27 +414,9 @@ const lanInterfaces = {
 describe('wildcard enumeration and QR candidate', () => {
   afterEach(() => stubIsTTY(undefined));
 
-  it('treats inet_aton abbreviations as IPv4 wildcards', () => {
-    const expected = remoteQuickstartAddresses(
-      '0.0.0.0',
-      4170,
-      false,
-      lanInterfaces,
-    );
-    for (const abbreviated of ['0', '0.0', '0.0.0']) {
-      expect(
-        remoteQuickstartAddresses(abbreviated, 4170, false, lanInterfaces),
-      ).toEqual(expected);
-    }
-    expect(expected).toEqual([
-      { label: 'Local', url: 'http://127.0.0.1:4170' },
-      { label: 'Network (en0)', url: 'http://192.168.1.7:4170' },
-    ]);
-  });
-
   it('drops scoped ULA addresses on dual-stack wildcards', () => {
     expect(
-      remoteQuickstartAddresses('::', 4170, false, {
+      remoteQuickstartAddresses('::', '::', 4170, false, {
         en0: [iface('fd12::1%en0', 'IPv6'), iface('fd12::2', 'IPv6')],
       }),
     ).toEqual([
@@ -304,6 +432,7 @@ describe('wildcard enumeration and QR candidate', () => {
     );
     await printRemoteQuickstart({
       bind: '0.0.0.0',
+      boundAddress: '0.0.0.0',
       port: 4170,
       tls: false,
       token: 'generated-token-000000',
@@ -327,6 +456,7 @@ describe('wildcard enumeration and QR candidate', () => {
     );
     await printRemoteQuickstart({
       bind: '0.0.0.0',
+      boundAddress: '0.0.0.0',
       port: 4170,
       tls: false,
       token: 'generated-token-000000',
@@ -344,6 +474,7 @@ describe('wildcard enumeration and QR candidate', () => {
   it('says so when no QR candidate exists', async () => {
     await printRemoteQuickstart({
       bind: 'fe80::1%en0',
+      boundAddress: 'fe80::1%en0',
       port: 4170,
       tls: false,
       token: 'generated-token-000000',

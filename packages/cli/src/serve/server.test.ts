@@ -32690,6 +32690,55 @@ describe('createServeApp', () => {
         }),
       );
     });
+
+    it('logs origin-wall and Host-gate rejects, not just auth rejects', async () => {
+      // The access log mounts ahead of hostAllowlist and the CORS wall, so
+      // their 403 short-circuits are recorded like every other reject; a
+      // mount below either gate would silently drop the audit trail for
+      // rebinding and cross-origin attempts.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      const wall = await request(app)
+        .post('/session')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Origin', 'http://evil.test')
+        .set('Authorization', 'Bearer secret')
+        .send({ cwd: WS_BOUND });
+      expect(wall.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'POST /session',
+          status: 403,
+        }),
+      );
+
+      // The primary Host gate is live on loopback binds (non-loopback binds
+      // pass it through by design and rely on the bearer gate), so the
+      // rebinding reject is pinned there.
+      vi.mocked(daemonLog.warn).mockClear();
+      const loopbackApp = createServeApp(
+        { ...baseOpts, token: 'secret' },
+        undefined,
+        { daemonLog },
+      );
+      const rebinding = await request(loopbackApp)
+        .get('/capabilities')
+        .set('Host', `evil.test:${baseOpts.port}`);
+      expect(rebinding.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'GET /capabilities',
+          status: 403,
+        }),
+      );
+    });
   });
 
   describe('payload-too-large handling (A-UsP)', () => {

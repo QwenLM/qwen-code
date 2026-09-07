@@ -330,7 +330,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Refuse to start without a bearer token, even on loopback. ' +
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
-          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          '127.0.0.1. Requires --token, QWEN_SERVER_TOKEN, or --open-with-auth ' +
+          '(which installs its own generated loopback token); on non-loopback ' +
+          'binds the generated ephemeral token also satisfies it, so the ' +
+          'no-configured-secret fail-fast is loopback-only. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })

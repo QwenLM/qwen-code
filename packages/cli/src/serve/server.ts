@@ -2003,26 +2003,30 @@ export function createServeApp(
   // Access logging and trace-id capture sit ahead of the origin wall and the
   // same-origin credential check so their 403/401 short-circuits are recorded
   // like every other reject (the pre-change chain logged them because
-  // bearerAuth ran below the access log). Capture the caller trace id BEFORE
-  // authenticate / rate limiter / body parser: those layers short-circuit
-  // (401/429/400) before the telemetry middleware ever runs, and the access
-  // log still needs the captured id to join their log lines (and 404s) with
-  // the caller's trace.
+  // bearerAuth ran below the access log). The access log excludes GET /health
+  // and POST */heartbeat by path before attaching its finish logger, so
+  // liveness probes stay unlogged at any mount position; wall rejects on
+  // those exempt paths are likewise not logged. Capture the caller trace id
+  // BEFORE authenticate / rate limiter / body parser: those layers
+  // short-circuit (401/429/400) before the telemetry middleware ever runs,
+  // and the access log still needs the captured id to join their log lines
+  // (and 404s) with the caller's trace.
   installAccessLogMiddleware(app, daemonLog);
   app.use(daemonInboundTraceIdCaptureMiddleware);
 
   // The loopback Host allowlist stays ahead of the pre-auth health routes so
-  // the DNS-rebinding defense covers them; on non-loopback binds it is a
-  // deliberate no-op (the bearer gate is the authentication layer there).
+  // the DNS-rebinding defense covers them. On non-loopback binds only the
+  // PRIMARY gate is a pass-through (the bearer gate authenticates there);
+  // the Local Control listener keeps its own Host gate whatever the primary
+  // bind is.
   app.use(hostAllowlist(opts.hostname, getPort));
 
   installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   app.use(allowOriginCors(originAllowlist));
 
   // Pre-auth health sits below the origin wall so matched cross-origin health
-  // probes carry CORS headers, and below the access log — liveness probes
-  // therefore appear in the access log, the unavoidable price of logging the
-  // origin wall's rejects.
+  // probes carry CORS headers. It stays unlogged (path-exempt above), so the
+  // position costs nothing in log volume.
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,

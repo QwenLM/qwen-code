@@ -5,31 +5,13 @@
  */
 
 import { networkInterfaces } from 'node:os';
-import { formatHostForAuthority } from './loopback-binds.js';
+import { formatHostForAuthority, isLoopbackAddress } from './loopback-binds.js';
 import { hostAssignsIpv6Loopback } from './local-bind-addresses.js';
 import {
   isSoftwareNetwork,
   listLanCandidates,
 } from './local-control/lan-interfaces.js';
 import { writeStdoutLineSafe } from '../utils/stdioHelpers.js';
-
-/**
- * Bind literals that answer on every interface, compared after trimming and
- * lowercasing: `::ffff:0.0.0.0` is a working IPv4-mapped wildcard an operator
- * can copy from `ss`/`netstat`, `0`/`0.0`/`0.0.0` are the inet_aton
- * abbreviations Node also binds as `0.0.0.0`, and casing must not decide
- * whether the LAN addresses get enumerated. An empty value never reaches here:
- * the serve entry point refuses it as operator error.
- */
-const WILDCARD_BINDS = new Set([
-  '0.0.0.0',
-  '0',
-  '0.0',
-  '0.0.0',
-  '::',
-  '[::]',
-  '::ffff:0.0.0.0',
-]);
 
 /** RFC 4291 unique-local addresses (fc00::/7) — the IPv6 private space. */
 function isUlaIpv6(address: string): boolean {
@@ -41,25 +23,48 @@ function isLinkLocalIpv4(address: string): boolean {
   return address.startsWith('169.254.');
 }
 
+/**
+ * How much of the startup block a listener may print. Wildcard-ness and
+ * loopback-ness are read from the address the socket actually bound, not from
+ * the operator-typed spelling, so inet_aton and IPv6-zero variants (`0`,
+ * `0::`, `[::0]`, …) behave like the canonical wildcards and a DNS name that
+ * resolves to loopback never advertises undialable addresses. A generated
+ * bearer is printed even on a loopback bind — it is the operator's only way
+ * in — while an operator-supplied token on loopback prints nothing, matching
+ * the pre-quickstart behavior.
+ */
+export function quickstartPrintMode(
+  boundAddress: string,
+  generated: boolean,
+): 'full' | 'token-only' | 'silent' {
+  if (!isLoopbackAddress(boundAddress)) return 'full';
+  return generated ? 'token-only' : 'silent';
+}
+
 interface QuickstartAddress {
   label: string;
   url: string;
   address: string;
 }
 
+/**
+ * Enumerate the addresses worth printing for a listener.
+ */
 export function remoteQuickstartAddresses(
   bind: string,
+  boundAddress: string,
   port: number,
   tls: boolean,
   interfaces = networkInterfaces(),
 ): Array<{ label: string; url: string }> {
-  return remoteQuickstartEntries(bind, port, tls, interfaces).map(
+  return remoteQuickstartEntries(bind, boundAddress, port, tls, interfaces).map(
     ({ label, url }) => ({ label, url }),
   );
 }
 
 function remoteQuickstartEntries(
   bind: string,
+  boundAddress: string,
   port: number,
   tls: boolean,
   interfaces: ReturnType<typeof networkInterfaces>,
@@ -67,20 +72,19 @@ function remoteQuickstartEntries(
   const scheme = tls ? 'https' : 'http';
   const url = (host: string) =>
     `${scheme}://${formatHostForAuthority(host)}:${port}`;
-  const canonical = bind.trim().toLowerCase();
-  if (!WILDCARD_BINDS.has(canonical)) {
-    // A zone-scoped literal (fe80::1%en0) has no browser-usable URL form and
-    // the interface loop below drops the same class; the plain "listening on"
-    // line still prints, so the quickstart just stays quiet about it.
-    if (canonical.includes('%')) return [];
+  // Node canonicalises most wildcard spellings into the bound address (`0`
+  // → `0.0.0.0`, `::0` → `::`); the IPv4-mapped form and stray whitespace
+  // (the defensive fallback to the operator spelling) are normalised here so
+  // every wildcard listener enumerates alike.
+  const bound = boundAddress.trim().toLowerCase();
+  const ipv4Wildcard = bound === '0.0.0.0' || bound === '::ffff:0.0.0.0';
+  if (!ipv4Wildcard && bound !== '::') {
+    // An explicit bind: print exactly what the operator chose, except a
+    // zone-scoped literal (fe80::1%en0), which has no browser-usable URL
+    // form; the plain "listening on" line still prints.
+    if (bind.trim().includes('%')) return [];
     return [{ label: 'Address', url: url(bind), address: bind }];
   }
-  const ipv4Wildcard =
-    canonical === '0.0.0.0' ||
-    canonical === '0' ||
-    canonical === '0.0' ||
-    canonical === '0.0.0' ||
-    canonical === '::ffff:0.0.0.0';
   const localAddress =
     !ipv4Wildcard && hostAssignsIpv6Loopback(interfaces) ? '::1' : '127.0.0.1';
   const addresses: QuickstartAddress[] = [
@@ -122,6 +126,7 @@ function remoteQuickstartEntries(
 
 export async function printRemoteQuickstart(input: {
   bind: string;
+  boundAddress: string;
   port: number;
   tls: boolean;
   token: string;
@@ -130,10 +135,25 @@ export async function printRemoteQuickstart(input: {
   interfaces?: ReturnType<typeof networkInterfaces>;
 }): Promise<void> {
   // An informational block whose reader going away (`qwen serve | head`) must
-  // never take the already-listening daemon down with it.
+  // never take the already-listening daemon down with it: the serve entry
+  // point installs a broken-pipe guard, and every write here goes through
+  // the non-throwing helper.
   try {
+    const mode = quickstartPrintMode(input.boundAddress, input.generated);
+    if (mode === 'silent') return;
+    if (mode === 'token-only') {
+      writeStdoutLineSafe(
+        `Generated bearer token (secret; changes on restart): ${input.token}`,
+      );
+      writeStdoutLineSafe(
+        'The listener bound loopback, so no network address or QR is ' +
+          'printed; local clients must present this bearer.',
+      );
+      return;
+    }
     const addresses = remoteQuickstartEntries(
       input.bind,
+      input.boundAddress,
       input.port,
       input.tls,
       input.interfaces ?? networkInterfaces(),

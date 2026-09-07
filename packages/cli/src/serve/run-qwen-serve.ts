@@ -2601,13 +2601,16 @@ function createBootstrapServeApp(input: {
   const localTerminalOpenAvailable = isLocalTerminalAvailable();
 
   installSelfOriginStripMiddleware(app, getPort, opts.hostname);
+  // Same admission order as the runtime app (createServeApp): Host gate, then
+  // the remote same-origin check, then the CORS wall — so a request gets the
+  // same reject body in every boot phase.
+  app.use(hostAllowlist(opts.hostname, getPort));
   installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
     app.use(denyBrowserOriginCors);
   }
-  app.use(hostAllowlist(opts.hostname, getPort));
 
   const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
@@ -3112,9 +3115,14 @@ function runSynchronousRequestGate(
  * Token resolution order:
  *   1. explicit `opts.token`
  *   2. `QWEN_SERVER_TOKEN` env var
+ *   3. a generated ephemeral bearer when neither source is present and the
+ *      bind is non-loopback (printed once at startup; loopback binds never
+ *      generate and keep the trusted tokenless mode)
  *
- * Boot refuses to start when bound beyond loopback without a token; this is a
- * hard rule, not a warning, per the threat model in the design issue.
+ * Boot refuses to start when a supplied token source is explicitly empty;
+ * that is a hard rule, not a warning, per the threat model in the design
+ * issue. A non-loopback bind with no source at all generates instead of
+ * refusing.
  */
 interface DaemonLoggerLifecycleCallbacks {
   initialized(logger: DaemonLogger): void;
@@ -3235,11 +3243,33 @@ export async function runQwenServe(
   }
 }
 
+let brokenPipeGuardInstalled = false;
+
+/**
+ * stdout/stderr may be pipes whose reader leaves (`qwen serve | head -n 1`,
+ * a log shipper closing its end). Node reports EPIPE as an asynchronous
+ * 'error' event that no try/catch around write() can see; without a listener
+ * it becomes an uncaught exception and kills the already-listening daemon
+ * together with its sessions and channel workers. The daemon's job is
+ * serving; a vanished log reader is not a reason to stop it. Non-EPIPE
+ * stream errors are re-thrown so real faults still surface.
+ */
+function installServeBrokenPipeGuard(): void {
+  if (brokenPipeGuardInstalled) return;
+  brokenPipeGuardInstalled = true;
+  const ignoreEpipe = (err: NodeJS.ErrnoException): void => {
+    if (err.code !== 'EPIPE') throw err;
+  };
+  process.stdout.on('error', ignoreEpipe);
+  process.stderr.on('error', ignoreEpipe);
+}
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
+  installServeBrokenPipeGuard();
   const runStartedAt = performance.now();
   // Embedded callers pass the credential through `optsIn`. Remove any ambient
   // copy before freezing runtime environments or starting auxiliary workers.
@@ -4273,18 +4303,21 @@ async function runQwenServeImpl(
             'bind (the static shell has no secrets; the API stays token-gated). ' +
             'Pass --no-web to disable the UI.',
         );
-        // The remote same-origin exception covers HTTP API requests to the
-        // direct listener only. The WebSocket upgrade gate (terminal, voice)
-        // still admits loopback/allowlisted origins alone, and a TLS front
-        // proxy presents an https Origin this daemon cannot match from its
-        // plain socket — name both so the operator is not left with a
-        // silently read-only shell.
+        // The remote same-origin exception matches the browser's Origin
+        // against the scheme and Host the daemon's own socket sees, so it
+        // covers direct listeners only. WebSocket upgrades (terminal, voice)
+        // admit loopback/allowlisted origins alone, and ANY intermediary
+        // that terminates TLS or rewrites Host / serves from a different
+        // port (nginx's default proxy_set_header, k8s Ingress, tunnels)
+        // presents an Origin this daemon cannot match — name them so the
+        // operator is not left with a silently read-only shell.
         if (!opts.allowOrigins || opts.allowOrigins.length === 0) {
           writeStderrLine(
             'qwen serve: same-origin Web Shell HTTP requests work without ' +
               '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
-              'and browsers reaching the daemon through a TLS front proxy ' +
-              'still need --allow-origin <origin>.',
+              'and browsers reaching the daemon through a TLS-terminating or ' +
+              'Host-rewriting proxy still need --allow-origin <origin> (or a ' +
+              'same-origin proxy that preserves Host).',
           );
         }
       }
@@ -9471,19 +9504,17 @@ async function runQwenServeImpl(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
-      // A DNS name that resolves to loopback (hosts file, dev.localhost) binds
-      // loopback only, so its QR would be undialable from anywhere else —
-      // suppress the quickstart on the address the socket actually bound,
-      // not just on the requested hostname string.
+      // The quickstart block keys off the address the socket actually bound:
+      // a DNS name that resolves to loopback binds loopback only, so its
+      // addresses and QR would be undialable from anywhere else, while a
+      // generated bearer is still printed because it is the operator's only
+      // way in.
       const boundAddress =
         typeof addr === 'object' && addr ? addr.address : opts.hostname;
-      if (
-        !isLoopbackBind(opts.hostname) &&
-        !isLoopbackAddress(boundAddress) &&
-        token
-      ) {
+      if (token) {
         void printRemoteQuickstart({
           bind: opts.hostname,
+          boundAddress,
           port: actualPort,
           tls: Boolean(tlsOptions),
           token,
