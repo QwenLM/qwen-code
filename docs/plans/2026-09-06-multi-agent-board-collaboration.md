@@ -937,7 +937,7 @@ cross-issue references have no equivalent.
 
 | Capability                       | Target reach | Note                                                                                             |
 | -------------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
-| Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, serialisation, gates; mid-run steering remains unproved |
+| Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, concurrent runs, and accepted mid-run steering observed; forced delivery miss remains unproved |
 | Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified |
 | Skills                           | ~70%         | carried by the agent definition                                                                  |
 | Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                            |
@@ -1129,12 +1129,12 @@ write code, which decision 1 defers until isolation is settled.
 
 **这是什么**：持久的 Agent 身份在共享线程上协作。人开一个线程、指派一个 agent，之后 agent 们自己读、发帖、互相 @、拆子线程、干完交回验收，人随时可以插话。就是 Multica 那套形态，但建立在 qwen 已有的机器上。Agent Team 原封不动保留，作为单次 run 内部的紧耦合协作手段。
 
-**源码纠错**：Multica 的延续会话是 `(agent, issue)` 维度，WebSocket 唤醒同时保留 HTTP polling fallback；active run 收不到新评论，但完成时会 reconcile，并不是丢弃。Qwen 的运行中送信也不能调用 `resumeBackgroundAgent`，而要走 registry 的直接输入队列；mesh 需用带 delivery id 的 `queueExternalInput`，分别记录「队列接受」和 `EXTERNAL_MESSAGE` 的「实际消费」，并处理 finishing 窗口返回 `false`。所以「更快中途纠偏」只是待端到端证明的潜在优势，投递可靠性不能先假定。
+**源码纠错**：Multica 的延续会话是 `(agent, issue)` 维度，WebSocket 唤醒同时保留 HTTP polling fallback；active run 收不到新评论，但完成时会 reconcile，并不是丢弃。Qwen 的运行中送信也不能调用 `resumeBackgroundAgent`，而要走 registry 的直接输入队列；mesh 需用带 delivery id 的 `queueExternalInput`，分别记录「队列接受」和 `EXTERNAL_MESSAGE` 的「实际消费」，并处理 finishing 窗口返回 `false`。真实 daemon 已证明队列接受与实际消费的直接路径，且模型把中途追加要求纳入同一个 run 的最终结论；finishing 竞态返回 `false` 后的持久重订仍未端到端证明，因此完整投递可靠性不能先假定。
 
 **执行模型**：本方案仍选择「每工作空间每 agent 一个跨线程长期后台执行体」，这是主动区别于 Multica 的产品选择。好处是同事式长期记忆；代价是串行吞吐、跨线程串台和持久化 prompt 注入。每次 turn 都必须在真正的 background-turn 调用点重新绑定 `(agent, run, thread)`，工具只信 ambient binding，prompt 每次都带完整线程帧、最近消息、确认水位后的增量和明确 gap。
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 
-**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。真实 daemon + Web Shell 的 demo 路径也已跑通 roster/create/list/detail、实时派发和父级续跑，最终根线程进入 `in_review`，树内计费 186,317/200,000。浏览器首轮同时发现 result 文本里的 peer mention 会按规则继续 booking 并形成回环，因此 §6 补了「at-sign address 等于 booking，子线程完成已自动回报父级」约束；fresh agent 重跑后没有多余 booking。后续同一真实环境又跑通 running → stopping → cancelled、`thread_block` 问题与聚合原因、精确 run transcript byte range、inline child、mark done，以及删除 agent 后保留 `name (removed)` 历史署名。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、host 替换/reaper、bare 模式、视觉 CI 和通知仍未端到端验证。
+**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。真实 daemon + Web Shell 的 demo 路径也已跑通 roster/create/list/detail、实时派发和父级续跑，最终根线程进入 `in_review`，树内计费 186,317/200,000。浏览器首轮同时发现 result 文本里的 peer mention 会按规则继续 booking 并形成回环，因此 §6 补了「at-sign address 等于 booking，子线程完成已自动回报父级」约束；fresh agent 重跑后没有多余 booking。后续同一真实环境又跑通 running → stopping → cancelled、`thread_block` 问题与聚合原因、精确 run transcript byte range、inline child、mark done，以及删除 agent 后保留 `name (removed)` 历史署名。最新真实 run 还证明了两件事：人在 Alice `running` 时追加的消息被同一个 run 接受并消费，Alice 的最终 `thread_review` 明确纳入追加要求；Alice 与 Bob 在同一线程相差 138ms 进入 `running`，各自提交 review 后线程聚合为 `in_review`。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、host 替换/reaper、bare 模式、视觉 CI 和通知仍未端到端验证。
 
 </details>
