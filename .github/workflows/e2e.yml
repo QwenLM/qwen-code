@@ -127,8 +127,8 @@ jobs:
         sandbox:
           - 'sandbox:none'
           - 'sandbox:docker'
-        # Benchmark one runner with three Vitest forks against the existing
-        # three-runner, one-fork-per-shard baseline.
+        # Keep three-way test concurrency inside one runner so each sandbox
+        # shares setup work instead of occupying three pool runners.
         shard:
           - '1/1'
         node-version:

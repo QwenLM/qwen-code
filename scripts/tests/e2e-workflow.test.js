@@ -34,7 +34,7 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
-  it('benchmarks three Vitest forks on one Linux runner per sandbox', () => {
+  it('runs three Vitest forks on one Linux runner per sandbox', () => {
     const linuxJob = yml.jobs['e2e-test-linux'];
     const runStep = linuxJob.steps.find(
       (step) => step.name === 'Run E2E tests',
