@@ -90,6 +90,31 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
+    it('reaps only the sandbox containers owned by its matrix job', () => {
+      const owner =
+        '${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}';
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Remove job-owned E2E containers',
+      );
+
+      expect(yml.jobs['e2e-test-linux'].env.E2E_CONTAINER_OWNER).toBe(owner);
+      expect(runStep.env.SANDBOX_FLAGS).toContain(
+        'org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}',
+      );
+      expect(runStep.run).toContain('trap cleanup_e2e_job EXIT');
+      expect(runStep.run).toContain("trap 'exit 1' INT TERM");
+      expect(runStep.run).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.if).toContain('always()');
+      expect(cleanupStep.run).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.run).toContain('docker rm -f > /dev/null || true');
+      expect(cleanupStep.run.match(/docker ps -aq/g)).toHaveLength(2);
+      expect(cleanupStep.run).toContain('E2E containers remain');
+    });
+
     it('never waits on a lock another run holds through its tests', () => {
       // Run 33637097713 lost two Docker shards to the #10605 protocol on one
       // host: shard 1/3 held the per-commit coordinator lock and polled 30
@@ -357,6 +382,6 @@ describe('e2e workflow', () => {
       (step) => step.name === 'Run E2E tests',
     );
     expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
-    expect(runStep.run).toContain('trap \'rm -rf "$TMPDIR"');
+    expect(runStep.run).toContain('rm -rf "$QWEN_CI_TMPDIR"');
   });
 });
