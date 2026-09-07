@@ -437,14 +437,14 @@ export async function assertLiveDiscoveryPublisher(
       await assertDirectoryIdentity(target);
       lock.assertHealthy();
       if (!current) throw conversationRuntimeUnavailableError();
-      if (current.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION) {
-        throw new LiveDiscoveryStateError();
-      }
       if (
         current.pid !== owner.pid ||
         current.instanceNonce !== owner.instanceNonce
       ) {
         throw conversationRuntimeInUseError();
+      }
+      if (current.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION) {
+        throw new LiveDiscoveryStateError();
       }
     } catch (error) {
       operationError = error;

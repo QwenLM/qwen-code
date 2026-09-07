@@ -59,6 +59,7 @@ describe('StandaloneRecents', () => {
 
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocks.t.mockImplementation((key: string) => key);
     mocks.list.mockReset();
     mocks.archive.mockReset();
     mocks.unarchive.mockReset();
@@ -566,28 +567,30 @@ describe('StandaloneRecents', () => {
     expect(mocks.rename).toHaveBeenCalledWith('active', 'Renamed chat');
     expect(onRenameSession).toHaveBeenCalledWith('active', 'Renamed chat');
   });
-  it.each(['session_writer_conflict', 'session_writer_unavailable'])(
-    'leaves %s open feedback to the active conversation',
-    async (code) => {
-      const onLoadSession = vi.fn().mockRejectedValue(
-        Object.assign(new Error('writer'), {
-          body: { code },
-        }),
-      );
-      const { onError } = await render({
-        onLoadSession,
-        currentSessionId: 'active',
-      });
-      await act(async () =>
-        Array.from(container.querySelectorAll('button'))
-          .find((button) => button.textContent === 'Active chat')
-          ?.click(),
-      );
-      expect(onLoadSession).toHaveBeenCalledOnce();
-      expect(container.querySelector('[role="alert"]')).toBeNull();
-      expect(onError).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    'session_writer_conflict',
+    'session_writer_unavailable',
+    'session_writer_lost',
+    'session_transcript_changed',
+  ])('leaves %s open feedback to the active conversation', async (code) => {
+    const onLoadSession = vi.fn().mockRejectedValue(
+      Object.assign(new Error('writer'), {
+        body: { code },
+      }),
+    );
+    const { onError } = await render({
+      onLoadSession,
+      currentSessionId: 'active',
+    });
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Active chat')
+        ?.click(),
+    );
+    expect(onLoadSession).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
 
   it('clears an open error when the same session recovers outside Recents', async () => {
     const onLoadSession = vi
@@ -763,30 +766,47 @@ describe('StandaloneRecents', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('preserves writer classification inside a successful batch envelope', async () => {
-    mocks.archive.mockResolvedValue({
-      archived: [],
-      alreadyArchived: [],
-      errors: [
-        {
-          sessionId: 'active',
-          code: 'session_writer_conflict',
-          message: 'writer conflict',
-        },
-      ],
-    });
-    const { onError } = await render();
-    await act(async () =>
-      Array.from(container.querySelectorAll('button'))
-        .find((button) => button.textContent === 'sidebar.archive')
-        ?.click(),
-    );
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-      'session.writerBlocked',
-    );
-    expect(container.textContent).toContain('Active chat');
-    expect(onError).not.toHaveBeenCalled();
-  });
+  it.each([
+    'session_writer_conflict',
+    'session_writer_unavailable',
+    'session_writer_lost',
+    'session_transcript_changed',
+  ])(
+    'preserves %s in batch diagnostics and translated local feedback',
+    async (code) => {
+      mocks.archive.mockResolvedValue({
+        archived: [],
+        alreadyArchived: [],
+        errors: [
+          {
+            sessionId: 'active',
+            code,
+            message: 'writer conflict',
+          },
+        ],
+      });
+      const { onError } = await render();
+      await act(async () =>
+        Array.from(container.querySelectorAll('button'))
+          .find((button) => button.textContent === 'sidebar.archive')
+          ?.click(),
+      );
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'session.writerBlocked',
+      );
+      expect(container.textContent).toContain('Active chat');
+      expect(onError).not.toHaveBeenCalled();
+      expect(console.warn).toHaveBeenCalledWith(
+        '[web-shell] standalone session action blocked by writer fence:',
+        expect.objectContaining({ body: expect.objectContaining({ code }) }),
+      );
+      mocks.t.mockImplementation((key: string) => `ZH:${key}`);
+      await render({ onError });
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'ZH:session.writerBlocked',
+      );
+    },
+  );
 
   it('keeps a mutation failure visible after navigating to another session', async () => {
     let rejectArchive!: (error: Error) => void;

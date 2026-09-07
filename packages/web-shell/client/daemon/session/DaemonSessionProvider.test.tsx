@@ -1306,6 +1306,8 @@ describe('DaemonSessionProvider', () => {
   it.each([
     [409, 'session_writer_conflict'],
     [503, 'session_writer_unavailable'],
+    [409, 'session_writer_lost'],
+    [409, 'session_transcript_changed'],
   ] as const)(
     'pauses standalone restore on %s %s until explicit retry',
     async (status, code) => {

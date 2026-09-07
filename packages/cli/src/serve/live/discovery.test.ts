@@ -93,6 +93,26 @@ describe('Live discovery file', () => {
     });
   });
 
+  it('classifies a foreign legacy publisher as retryable without changing its record', async () => {
+    const runtime = await temporaryRuntime();
+    const current = record('daemon_instance_nonce_admission');
+    const file = await writeLiveDiscoveryFile(runtime, current);
+    const foreign = {
+      ...current,
+      instanceNonce: 'daemon_instance_nonce_foreign',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION - 1,
+    };
+    const bytes = JSON.stringify(foreign);
+    await fs.writeFile(file, bytes);
+    await expect(
+      assertLiveDiscoveryPublisher(runtime, current),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_in_use',
+      retryable: true,
+    });
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(bytes);
+  });
+
   it('retains both admission and lock release failures in the cause chain', async () => {
     const runtime = await temporaryRuntime();
     const current = record('daemon_instance_nonce_admission');

@@ -144,7 +144,7 @@ export function StandaloneRecents({
   const [sessionError, setSessionError] = useState<{
     sessionId: string;
     kind: 'open' | 'action';
-    message: string;
+    messageKey: 'session.writerBlocked' | 'session.loadFailed';
     retry: () => void;
   }>();
   const [renameCandidate, setRenameCandidate] =
@@ -281,6 +281,10 @@ export function StandaloneRecents({
         return true;
       } catch (error) {
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
+          console.warn(
+            '[web-shell] standalone session action blocked by writer fence:',
+            error,
+          );
           setRenameCandidate((current) =>
             current?.sessionId === sessionId ? undefined : current,
           );
@@ -290,7 +294,7 @@ export function StandaloneRecents({
           setSessionError({
             sessionId,
             kind: 'action',
-            message: t('session.writerBlocked'),
+            messageKey: 'session.writerBlocked',
             retry: () => {
               void run(sessionId, action);
             },
@@ -411,14 +415,14 @@ export function StandaloneRecents({
         setSessionError({
           sessionId,
           kind: 'open',
-          message: t('session.loadFailed'),
+          messageKey: 'session.loadFailed',
           retry: () => {
             void openSession(sessionId);
           },
         });
       }
     },
-    [onLoadSession, t],
+    [onLoadSession],
   );
 
   if (!supported) return null;
@@ -500,7 +504,7 @@ export function StandaloneRecents({
         {sessionError && (
           <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
             <span>
-              {sessionError.sessionId.slice(0, 8)}: {sessionError.message}
+              {sessionError.sessionId.slice(0, 8)}: {t(sessionError.messageKey)}
             </span>
             <Button
               variant="ghost"

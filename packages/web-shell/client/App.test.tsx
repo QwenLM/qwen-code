@@ -34028,9 +34028,11 @@ describe('Standalone writer-blocked navigation', () => {
       mockConnection.standaloneSession = {
         errorCode: 'session_writer_conflict',
       };
-      throw new DaemonHttpError(409, 'writer fenced', {
-        body: { code: 'session_writer_conflict' },
-      });
+      throw new DaemonHttpError(
+        409,
+        { code: 'session_writer_conflict' },
+        'writer fenced',
+      );
     });
     await act(async () =>
       container
@@ -34057,9 +34059,14 @@ describe('Standalone writer-blocked navigation', () => {
     expect
       .soft(testState.latestChatEditorProps)
       .toMatchObject({ disabled: true });
-    const reportsAfterFirstFailure = onError.mock.calls.length;
-    const repeatLoad = deferred<void>();
-    mockSessionActions.loadSession.mockReturnValueOnce(repeatLoad.promise);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.error = 'writer still fenced';
+      throw new DaemonHttpError(
+        409,
+        { code: 'session_writer_conflict' },
+        'writer still fenced',
+      );
+    });
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
@@ -34067,33 +34074,33 @@ describe('Standalone writer-blocked navigation', () => {
         )
         ?.click(),
     );
+    rerender({ onError });
     await flush();
-    await act(async () =>
-      repeatLoad.reject(
-        new DaemonHttpError(409, 'writer fenced', {
-          body: { code: 'session_writer_conflict' },
-        }),
-      ),
-    );
-    await flush();
-    expect.soft(onError).toHaveBeenCalledTimes(reportsAfterFirstFailure);
+    expect.soft(onError).not.toHaveBeenCalled();
   });
 
-  it('blocks queued writes when the standalone writer banner is visible', async () => {
+  it.each([
+    'session_writer_conflict',
+    'session_writer_unavailable',
+    'session_writer_lost',
+    'session_transcript_changed',
+  ])('blocks queued writes and shows local feedback for %s', async (code) => {
     mockConnection.sessionContext = { kind: 'standalone' };
     mockConnection.workspaceCwd = '';
     mockConnection.sessionId = 'fenced';
     mockConnection.status = 'error';
     mockConnection.error = 'writer fenced';
     mockConnection.loadingTranscript = false;
-    mockConnection.standaloneSession = { errorCode: 'session_writer_conflict' };
-    const { container } = renderApp();
+    mockConnection.standaloneSession = { errorCode: code };
+    const onError = vi.fn();
+    const { container } = renderApp({ onError });
     await flush();
     expect(
       container.querySelector('[data-testid="standalone-writer-blocked"]'),
     ).not.toBeNull();
     expect(testState.latestChatEditorProps).toMatchObject({ disabled: true });
     expect(testState.queuedPromptWriteBlocked).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('keeps direct submit rejected by connection error status', async () => {

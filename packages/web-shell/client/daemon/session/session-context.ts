@@ -157,7 +157,10 @@ export function getDaemonErrorCode(error: unknown): string | undefined {
 
 export function isSessionWriterBlockedCode(code: string | undefined): boolean {
   return (
-    code === 'session_writer_conflict' || code === 'session_writer_unavailable'
+    code === 'session_writer_conflict' ||
+    code === 'session_writer_unavailable' ||
+    code === 'session_writer_lost' ||
+    code === 'session_transcript_changed'
   );
 }
 

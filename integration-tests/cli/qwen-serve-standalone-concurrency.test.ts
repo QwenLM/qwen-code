@@ -26,7 +26,7 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
       fixtureDirectory = await fs.realpath(
         await fs.mkdtemp(path.join(tmpdir(), 'qwen-standalone-concurrency-')),
       );
-      sharedRuntime = path.join(fixtureDirectory, '.qwen');
+      sharedRuntime = path.join(fixtureDirectory, 'shared-runtime');
       await fs.mkdir(sharedRuntime, { mode: 0o700 });
       for (const name of ['workspace-a', 'workspace-b']) {
         const workspaceCwd = path.join(fixtureDirectory, name);
@@ -38,8 +38,8 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
             env: {
               // Stable Live discovery uses the OS home, independently of QWEN_HOME.
               HOME: fixtureDirectory,
-              QWEN_HOME: sharedRuntime,
-              QWEN_RUNTIME_DIR: '',
+              QWEN_HOME: path.join(fixtureDirectory, `config-${name}`),
+              QWEN_RUNTIME_DIR: sharedRuntime,
               OPENAI_API_KEY: 'fake-key',
               OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
               OPENAI_MODEL: 'fake-model',
@@ -61,7 +61,8 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
       const [first, second] = daemons;
       expect(first.daemon.pid).not.toBe(second.daemon.pid);
       const ownerPath = path.join(
-        sharedRuntime,
+        fixtureDirectory,
+        '.qwen',
         'conversations',
         'runtime-owner.json',
       );
