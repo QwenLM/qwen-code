@@ -6,14 +6,25 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawn, getPty, spawnSync } = vi.hoisted(() => ({
+const { spawn, getPty, spawnSync, osPlatform } = vi.hoisted(() => ({
   spawn: vi.fn(),
   getPty: vi.fn(),
   spawnSync: vi.fn(),
+  osPlatform: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ getPty }));
+// Only conpty-host reads os.platform(); killPtyTree branches on
+// process.platform, so this steers the ConPTY release without touching it.
+// Windows CI is skipped on PRs, so the win32 path has to be reachable here.
+// Everything else passes through -- Storage (via debugLogger) needs the real
+// os.homedir()/os.tmpdir().
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const patched = { ...actual, platform: osPlatform };
+  return { ...patched, default: patched };
+});
 
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
@@ -42,6 +53,7 @@ describe('WebTerminalRegistry', () => {
     disposeData = vi.fn();
     disposeExit = vi.fn();
     spawnSync.mockReturnValue({ stdout: '' });
+    osPlatform.mockReturnValue(process.platform);
     spawn.mockReturnValue({
       pid: 1,
       write,
@@ -255,6 +267,7 @@ describe('WebTerminalRegistry', () => {
   });
 
   it('releases an exited session by tearing down the host, never by signalling the pid', async () => {
+    osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
       terminalId: 'terminal:release-exited',
@@ -270,14 +283,27 @@ describe('WebTerminalRegistry', () => {
     expect(kill).not.toHaveBeenCalled();
     // node-pty releases neither the ConPTY host nor its conout worker on a
     // natural exit, so the release goes at the agent directly.
-    if (process.platform === 'win32') {
-      expect(nativeKill).toHaveBeenCalledOnce();
-      expect(conoutDispose).toHaveBeenCalledOnce();
-    } else {
-      expect(nativeKill).not.toHaveBeenCalled();
-    }
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
+  });
+
+  it('leaves an exited session alone off Windows', async () => {
+    osPlatform.mockReturnValue('linux');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited-posix',
+      workspaceCwd: '/workspace',
+    });
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited-posix')).toBe(true);
+    // No ConPTY host and no conout worker to release, and UnixTerminal.kill()
+    // would signal an already-exited, possibly recycled pid.
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(conoutDispose).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it('forwards live output and bounds unacknowledged PTY input', async () => {
