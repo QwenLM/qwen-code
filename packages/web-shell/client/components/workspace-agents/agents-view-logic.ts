@@ -125,7 +125,6 @@ export interface RunView {
   endedAt?: number;
   /** The agent session this run took its turn in, once one is bound. */
   sessionId?: string;
-  hasTranscriptSlice: boolean;
 }
 
 export interface RunRow {

@@ -87,7 +87,15 @@ export {
   requireAgentRunContext,
   runWithAgentRunContext,
 } from './workspace-agents/run-context.js';
-export type { DispatchRecord } from './workspace-agents/dispatcher.js';
+export type {
+  DispatchRecord,
+  // The port contract the daemon implements. Exported because the
+  // implementation lives in the cli package, which can only see this barrel.
+  AgentBodyState,
+  AgentDispatchPort,
+  AgentStartResult,
+  AgentStartAction,
+} from './workspace-agents/dispatcher.js';
 export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,

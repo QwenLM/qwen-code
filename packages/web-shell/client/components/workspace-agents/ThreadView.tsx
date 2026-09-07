@@ -58,14 +58,6 @@ export interface ThreadChildView {
   reason: string;
 }
 
-export interface TranscriptSliceView {
-  runId: string;
-  agentName: string;
-  startOffset: number;
-  endOffset: number;
-  content: string;
-}
-
 export interface ThreadViewProps {
   thread: ThreadDetailView;
   agents: readonly {
@@ -81,8 +73,6 @@ export interface ThreadViewProps {
   onReply: () => void;
   onBack: () => void;
   onOpenThread?: (threadId: string) => void;
-  onOpenTranscript: (runId: string) => void;
-  onCloseTranscript?: () => void;
   /**
    * Opens the agent session a run ran in. Absent where the shell has no
    * session view to switch to, which is why every use of it is guarded.
@@ -91,7 +81,6 @@ export interface ThreadViewProps {
   onCancelRun?: (runId: string) => void;
   onMarkDone?: () => void;
   onAssign?: (assignee?: string) => void;
-  transcript?: TranscriptSliceView;
   replyPending?: boolean;
 }
 
@@ -104,12 +93,10 @@ function formatTime(at: number): string {
 
 function RunRowView({
   row,
-  onOpenTranscript,
   onOpenAgentSession,
   onCancelRun,
 }: {
   row: RunRow;
-  onOpenTranscript: (runId: string) => void;
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
 }) {
@@ -143,18 +130,6 @@ function RunRowView({
       </span>
       <span className={styles.runTrigger}>
         {row.run.trigger}
-        {row.run.hasTranscriptSlice ? (
-          <>
-            {' · '}
-            <button
-              type="button"
-              className={styles.runLink}
-              onClick={() => onOpenTranscript(row.run.id)}
-            >
-              transcript
-            </button>
-          </>
-        ) : null}
         {sessionId && onOpenAgentSession ? (
           <>
             {' · '}
@@ -172,28 +147,6 @@ function RunRowView({
         <span className={styles.runError}>{row.run.error}</span>
       ) : null}
     </div>
-  );
-}
-
-function TranscriptPanel({
-  transcript,
-  onClose,
-}: {
-  transcript: TranscriptSliceView;
-  onClose: () => void;
-}) {
-  return (
-    <aside className={styles.transcriptPanel}>
-      <div className={styles.transcriptHeader}>
-        <strong>
-          run {transcript.runId} · {transcript.agentName} · this thread only
-        </strong>
-        <button type="button" className={styles.runLink} onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <pre className={styles.transcriptContent}>{transcript.content}</pre>
-    </aside>
   );
 }
 
@@ -263,13 +216,10 @@ export function ThreadView({
   onReply,
   onBack,
   onOpenThread,
-  onOpenTranscript,
-  onCloseTranscript,
   onOpenAgentSession,
   onCancelRun,
   onMarkDone,
   onAssign,
-  transcript,
   replyPending,
 }: ThreadViewProps) {
   const { live, past } = useMemo(
@@ -451,69 +401,56 @@ export function ThreadView({
           </div>
         </div>
 
-        {transcript ? (
-          <TranscriptPanel
-            transcript={transcript}
-            onClose={onCloseTranscript ?? (() => {})}
-          />
-        ) : (
-          <aside className={styles.sidebar}>
-            <section>
-              <h2 className={styles.sectionTitle}>Runs</h2>
-              {live.length === 0 && past.length === 0 ? (
-                <p className={styles.budgetLine}>
-                  Nothing has run on this thread yet.
-                </p>
-              ) : null}
-              {live.map((row) => (
-                <RunRowView
-                  key={row.run.id}
-                  row={row}
-                  onOpenTranscript={onOpenTranscript}
-                  {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
-                  {...(onCancelRun ? { onCancelRun } : {})}
-                />
-              ))}
-              {past.length > 0 ? (
-                <>
+        <aside className={styles.sidebar}>
+          <section>
+            <h2 className={styles.sectionTitle}>Runs</h2>
+            {live.length === 0 && past.length === 0 ? (
+              <p className={styles.budgetLine}>
+                Nothing has run on this thread yet.
+              </p>
+            ) : null}
+            {live.map((row) => (
+              <RunRowView
+                key={row.run.id}
+                row={row}
+                {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+                {...(onCancelRun ? { onCancelRun } : {})}
+              />
+            ))}
+            {past.length > 0 ? (
+              <>
+                {showPast
+                  ? past.map((row) => (
+                      <RunRowView
+                        key={row.run.id}
+                        row={row}
+                        {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+                        {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+                        {...(onCancelRun ? { onCancelRun } : {})}
+                      />
+                    ))
+                  : null}
+                <button
+                  type="button"
+                  className={styles.pastToggle}
+                  onClick={() => setShowPast((open) => !open)}
+                  aria-expanded={showPast}
+                >
                   {showPast
-                    ? past.map((row) => (
-                        <RunRowView
-                          key={row.run.id}
-                          row={row}
-                          onOpenTranscript={onOpenTranscript}
-                          {...(onOpenAgentSession
-                            ? { onOpenAgentSession }
-                            : {})}
-                          {...(onOpenAgentSession
-                            ? { onOpenAgentSession }
-                            : {})}
-                          {...(onCancelRun ? { onCancelRun } : {})}
-                        />
-                      ))
-                    : null}
-                  <button
-                    type="button"
-                    className={styles.pastToggle}
-                    onClick={() => setShowPast((open) => !open)}
-                    aria-expanded={showPast}
-                  >
-                    {showPast
-                      ? 'Hide past runs'
-                      : `Show past runs (${past.length})`}
-                  </button>
-                </>
-              ) : null}
-            </section>
+                    ? 'Hide past runs'
+                    : `Show past runs (${past.length})`}
+                </button>
+              </>
+            ) : null}
+          </section>
 
-            <section>
-              <h2 className={styles.sectionTitle}>Budget</h2>
-              <p className={styles.budgetLine}>{budget.turns}</p>
-              <p className={styles.budgetLine}>{budget.tokens}</p>
-              <p className={styles.budgetLine}>{budget.scope}</p>
-            </section>
-          </aside>
-        )}
+          <section>
+            <h2 className={styles.sectionTitle}>Budget</h2>
+            <p className={styles.budgetLine}>{budget.turns}</p>
+            <p className={styles.budgetLine}>{budget.tokens}</p>
+            <p className={styles.budgetLine}>{budget.scope}</p>
+          </section>
+        </aside>
       </div>
     </div>
   );

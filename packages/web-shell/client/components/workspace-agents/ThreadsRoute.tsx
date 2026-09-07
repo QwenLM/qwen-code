@@ -18,11 +18,7 @@ import {
   type AgentConfigPatch,
   type AgentCapabilitiesView,
 } from './ThreadsPage';
-import {
-  ThreadView,
-  type ThreadDetailView,
-  type TranscriptSliceView,
-} from './ThreadView';
+import { ThreadView, type ThreadDetailView } from './ThreadView';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -55,10 +51,6 @@ export interface ThreadsApi {
   postReply(id: string, text: string): Promise<unknown>;
   markDone(id: string): Promise<unknown>;
   cancelRun(threadId: string, runId: string): Promise<unknown>;
-  getRunTranscript(
-    threadId: string,
-    runId: string,
-  ): Promise<TranscriptSliceView>;
 }
 
 function createThreadsHttpApi(
@@ -120,10 +112,6 @@ function createThreadsHttpApi(
         `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
         {},
       ),
-    getRunTranscript: (threadId, runId) =>
-      request(
-        `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/transcript`,
-      ),
   };
 }
 
@@ -132,17 +120,12 @@ const REFRESH_MS = 1_000;
 
 export interface ThreadsRouteProps {
   api?: ThreadsApi;
-  onOpenTranscript?: (runId: string) => void;
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
   onOpenAgentSession?: (sessionId: string) => void;
 }
 
-export function ThreadsRoute({
-  api,
-  onOpenTranscript,
-  onOpenAgentSession,
-}: ThreadsRouteProps) {
+export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
   const workspace = useWorkspace();
   const connection = useConnection();
   const workspaceCwd =
@@ -165,9 +148,6 @@ export function ThreadsRoute({
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
   const [createPreview, setCreatePreview] = useState<
     RoutingPreviewTarget[] | undefined
-  >();
-  const [transcript, setTranscript] = useState<
-    TranscriptSliceView | undefined
   >();
   const [pending, setPending] = useState(false);
   const [refreshError, setRefreshError] = useState<string | undefined>();
@@ -292,25 +272,11 @@ export function ThreadsRoute({
             })
           }
           onBack={() => {
-            setTranscript(undefined);
             setOpenId(undefined);
           }}
           onOpenThread={(threadId) => {
-            setTranscript(undefined);
             setOpenId(threadId);
           }}
-          onOpenTranscript={(runId) => {
-            onOpenTranscript?.(runId);
-            void client
-              .getRunTranscript(openId, runId)
-              .then(setTranscript)
-              .catch((cause) =>
-                setActionError(
-                  cause instanceof Error ? cause.message : String(cause),
-                ),
-              );
-          }}
-          onCloseTranscript={() => setTranscript(undefined)}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onCancelRun={(runId) =>
             void mutate(() => client.cancelRun(openId, runId))
@@ -318,7 +284,6 @@ export function ThreadsRoute({
           onMarkDone={() =>
             void mutate(async () => {
               const result = await client.markDone(openId);
-              setTranscript(undefined);
               return result;
             })
           }
@@ -327,7 +292,6 @@ export function ThreadsRoute({
           }
           replyPending={pending}
           {...(preview ? { preview } : {})}
-          {...(transcript ? { transcript } : {})}
         />
       </>
     );

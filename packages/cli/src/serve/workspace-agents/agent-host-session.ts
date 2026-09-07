@@ -15,6 +15,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
 import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import { createSessionDispatchPort } from './session-dispatch-port.js';
 
 const DEFAULT_AGENT_KEEPALIVE_INTERVAL_MS = 1_000;
 const DEFAULT_AGENT_RESUME_TIMEOUT_MS = 70_000;
@@ -24,9 +25,10 @@ interface AgentHostBridge {
   resumeSession(
     request: Parameters<AcpSessionBridge['resumeSession']>[0],
   ): Promise<unknown>;
-  spawnOrAttach(
-    request: Parameters<AcpSessionBridge['spawnOrAttach']>[0],
-  ): Promise<{ sessionId: string }>;
+  // Not narrowed to `{ sessionId }`: the same object is handed to the dispatch
+  // port as an `AgentSessionBridge`, which is a `Pick` of the real bridge, so
+  // a narrower return here makes it unassignable there.
+  spawnOrAttach: AcpSessionBridge['spawnOrAttach'];
   closeSession(sessionId: string): Promise<unknown>;
   // Dispatch reads and writes sessions, which live in this process's bridge,
   // so the loop runs here rather than being forwarded into a child. The ACP
@@ -35,6 +37,9 @@ interface AgentHostBridge {
   sendPrompt: AcpSessionBridge['sendPrompt'];
   listWorkspaceSessions: AcpSessionBridge['listWorkspaceSessions'];
   cancelSession: AcpSessionBridge['cancelSession'];
+  // Read by the port's `totalTokens`: an agent session reports what it has
+  // spent, and the per-tree budget charges the difference across a run.
+  getSessionStatsStatus: AcpSessionBridge['getSessionStatsStatus'];
 }
 
 export interface AgentHostSessionOwner {

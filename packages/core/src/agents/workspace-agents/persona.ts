@@ -100,16 +100,25 @@ export async function resolveAgentPersona(
     // set for this identity, and the definition is shared across identities.
     const definition = agent.model ? { ...loaded, model: agent.model } : loaded;
     const runtime = await manager.convertToRuntimeConfig(definition, config);
+    // `renderedSystemPrompt` may be a structured `Content`, but only ever for
+    // a fork sharing a parent's byte-identical cache prefix — and a workspace
+    // agent is its own top-level session with no parent to share one with.
+    // Flattening it would hand the agent a different prompt than its
+    // definition specifies, so this refuses instead, like every other way
+    // resolution can fail.
+    const rendered = runtime.promptConfig.renderedSystemPrompt;
+    if (rendered !== undefined && typeof rendered !== 'string') {
+      return {
+        status: 'unavailable',
+        error: `Agent definition "${agentType}" carries a pre-rendered structured prompt, which only a forked subagent can use.`,
+      };
+    }
+    const basePrompt = runtime.promptConfig.systemPrompt ?? rendered ?? '';
     return {
       status: 'resolved',
       agent,
       definition,
-      systemPrompt: appendInstructions(
-        runtime.promptConfig.systemPrompt ??
-          runtime.promptConfig.renderedSystemPrompt ??
-          '',
-        agent.instructions,
-      ),
+      systemPrompt: appendInstructions(basePrompt, agent.instructions),
       // The read-only ceiling is applied here, in the process that will run the
       // tools, so a session cannot be started with a wider surface than the
       // boundary allows and then narrowed afterwards.

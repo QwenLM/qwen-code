@@ -24,8 +24,6 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
-import { open } from 'node:fs/promises';
-
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   assignThread,
@@ -60,9 +58,6 @@ import {
   HUMAN_AUTHOR_ID,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
-  Storage,
-  getAgentJsonlPath,
-  agentBodyId,
   type WorkspaceAgent,
   type Thread,
   type ThreadRun,
@@ -255,33 +250,7 @@ function runView(
     // thread-scoped slice below answers the narrower question of what it did
     // *here*, which a session serving several threads cannot.
     ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
-    hasTranscriptSlice:
-      agent !== undefined &&
-      run.transcriptStartOffset !== undefined &&
-      run.transcriptEndOffset !== undefined &&
-      run.sessionId !== undefined,
   };
-}
-
-async function readTranscriptSlice(
-  path: string,
-  startOffset: number,
-  endOffset: number,
-): Promise<string> {
-  const length = endOffset - startOffset;
-  const buffer = Buffer.alloc(length);
-  const handle = await open(path, 'r');
-  try {
-    const { bytesRead } = await handle.read(buffer, 0, length, startOffset);
-    if (bytesRead !== length) {
-      throw new Error(
-        `Transcript ended at ${startOffset + bytesRead}; expected ${endOffset}.`,
-      );
-    }
-    return buffer.toString('utf8');
-  } finally {
-    await handle.close();
-  }
 }
 
 /**
@@ -396,14 +365,16 @@ export function registerWorkspaceAgentRoutes(
     } finally {
       await flushNotifications(runtime);
     }
+    // Explicit: a dispatch that threw returns its message above, and one that
+    // did not has no error to report. Falling off the end would say the same
+    // thing while `noImplicitReturns` refuses it.
+    return undefined;
   };
 
   for (const runtime of deps.workspaceRegistry.list()) {
     if (!runtime.trusted) continue;
     void readWorkspaceAgents(runtime.workspaceCwd)
-      .then((agents) => {
-        if (agents.length > 0) return dispatch(runtime);
-      })
+      .then((agents) => (agents.length > 0 ? dispatch(runtime) : undefined))
       .catch(() => {});
   }
 
@@ -597,62 +568,6 @@ export function registerWorkspaceAgentRoutes(
       fail(res, error);
     }
   });
-
-  app.get(
-    `${prefix}/threads/:id/runs/:runId/transcript`,
-    async (req: Request, res: Response) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      try {
-        const thread = await readThread(
-          runtime.workspaceCwd,
-          String(req.params['id']),
-        );
-        const run = thread?.runs.find(
-          (candidate) => candidate.id === String(req.params['runId']),
-        );
-        if (!thread || !run) {
-          res.status(404).json({ error: 'run_not_found' });
-          return;
-        }
-        const { sessionId, transcriptStartOffset, transcriptEndOffset } = run;
-        if (
-          !sessionId ||
-          transcriptStartOffset === undefined ||
-          transcriptEndOffset === undefined ||
-          transcriptEndOffset < transcriptStartOffset
-        ) {
-          res.status(409).json({ error: 'transcript_slice_unavailable' });
-          return;
-        }
-        const projectDir = new Storage(
-          runtime.workspaceCwd,
-          runtime.sessionRuntimeBaseDir,
-        ).getProjectDir();
-        const path = getAgentJsonlPath(
-          projectDir,
-          sessionId,
-          agentBodyId({ id: run.agentId }),
-        );
-        res.json({
-          runId: run.id,
-          agentName: agentName(
-            await readWorkspaceAgents(runtime.workspaceCwd),
-            run.agentId,
-          ),
-          startOffset: transcriptStartOffset,
-          endOffset: transcriptEndOffset,
-          content: await readTranscriptSlice(
-            path,
-            transcriptStartOffset,
-            transcriptEndOffset,
-          ),
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
 
   app.post(`${prefix}/threads/preview`, async (req, res) => {
     const runtime = runtimeFor(req, res);
@@ -861,6 +776,8 @@ export function registerWorkspaceAgentRoutes(
         const payload = (req.body ?? {}) as {
           title?: unknown;
           body?: unknown;
+          acceptanceCriteria?: unknown;
+          priority?: unknown;
           assignee?: unknown;
         };
         const title = String(payload.title ?? '').trim();
@@ -961,20 +878,21 @@ export function registerWorkspaceAgentRoutes(
           String(req.params['id']),
           assigneeName,
         );
-        if (result.kind === 'thread_not_found') {
-          res.status(404).json({ error: 'thread_not_found' });
-          return;
-        }
-        if (result.kind === 'thread_done') {
-          res.status(409).json({ error: 'thread_done' });
-          return;
-        }
-        if (result.kind === 'agent_unknown') {
-          res.status(400).json({ error: 'assignee_unknown' });
-          return;
-        }
-        if (result.kind === 'agent_disabled') {
-          res.status(409).json({ error: 'assignee_disabled' });
+        // Narrowed by excluding the success kind rather than by ruling out
+        // each failure in turn: the failures share one variant whose `kind` is
+        // a union of literals, and TypeScript does not drop such a variant
+        // even once every literal has been excluded. Same statuses, same
+        // bodies; only the shape of the check changed.
+        if (result.kind !== 'updated') {
+          const [status, error] =
+            result.kind === 'thread_not_found'
+              ? ([404, 'thread_not_found'] as const)
+              : result.kind === 'thread_done'
+                ? ([409, 'thread_done'] as const)
+                : result.kind === 'agent_unknown'
+                  ? ([400, 'assignee_unknown'] as const)
+                  : ([409, 'assignee_disabled'] as const);
+          res.status(status).json({ error });
           return;
         }
         const booked =

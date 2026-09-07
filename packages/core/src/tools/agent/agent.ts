@@ -122,7 +122,6 @@ import {
   getAgentMetaPath,
   getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
-  readAgentMeta,
   patchAgentMeta,
   writeAgentMeta,
   type AgentPersistedCliFlags,
@@ -3838,11 +3837,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     recordOutcome,
                     fireStartHook,
                   );
-                return runWithAgentContext(
-                  hookOpts.agentId,
-                  body,
-                  launchDepth,
-                );
+                return runWithAgentContext(hookOpts.agentId, body, launchDepth);
               },
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();

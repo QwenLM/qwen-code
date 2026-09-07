@@ -1,0 +1,23 @@
+{
+  "extends": "../../packages/cli/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true, "composite": false, "incremental": false,
+    "declaration": false, "outDir": null, "types": ["node"],
+    "baseUrl": "../..",
+    "paths": {
+      "@qwen-code/qwen-code-core": ["packages/core/index.ts"],
+      "@qwen-code/qwen-code-core/*": ["packages/core/src/*"],
+      "@qwen-code/acp-bridge/bridgeTypes": ["packages/acp-bridge/src/bridgeTypes.ts"],
+      "@qwen-code/acp-bridge/bridge": ["packages/acp-bridge/src/bridge.ts"],
+      "@qwen-code/acp-bridge/status": ["packages/acp-bridge/src/status.ts"],
+      "@qwen-code/acp-bridge/bridgeErrors": ["packages/acp-bridge/src/bridgeErrors.ts"],
+      "@lydell/node-pty": ["node_modules/@lydell/node-pty/node-pty.d.ts"]
+    }
+  },
+  "include": [
+    "../../packages/cli/src/serve/workspace-agents/**/*.ts",
+    "../../packages/cli/src/serve/routes/workspace-agents.ts",
+    "../../packages/cli/src/acp-integration/session/agent-run-meta.ts"
+  ],
+  "exclude": ["../../packages/cli/src/**/*.test.ts"]
+}
