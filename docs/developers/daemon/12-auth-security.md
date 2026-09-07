@@ -73,13 +73,13 @@ daemon bind beyond loopback in the open.
 
 ```mermaid
 flowchart LR
-    REQ[Request] --> H["pre-auth /health<br/>(loopback, unless --require-auth)"]
-    H --> LOG["access-log middleware<br/>(DaemonLogger)"]
+    REQ[Request] --> LOG["access-log middleware<br/>(DaemonLogger)"]
     LOG --> TID["inbound trace-id capture"]
-    TID --> SO["same-origin Origin strip<br/>+ credential check"]
+    TID --> HA["hostAllowlist<br/>(loopback DNS-rebinding defense;<br/>no-op on non-loopback binds)"]
+    HA --> SO["same-origin Origin strip<br/>+ credential check"]
     SO --> AO["allowOriginCors<br/>(mutable allowlist: --allow-origin<br/>patterns + Local Control LAN origin)"]
-    AO --> HA["hostAllowlist"]
-    HA --> WH{"Channel webhook?"}
+    AO --> H["pre-auth /health<br/>(loopback, unless --require-auth)"]
+    H --> WH{"Channel webhook?"}
     WH -->|yes| WS["x-qwen-webhook-secret<br/>+ webhook rate/body limits"]
     WH -->|no| BA["bearerAuth"]
     BA --> RL["rate-limit middleware<br/>(when enabled)"]
@@ -95,8 +95,11 @@ time. It is not a global `app.use()` middleware. Access logging and inbound
 trace-id capture are registered ahead of the origin wall and the same-origin
 credential check, so those 403/401 short-circuits are logged like every other
 reject and the log line still joins the caller's trace id; both also precede
-`bearerAuth`, so 401 rejects are still logged. Pre-auth `/health` stays above
-the access log so liveness probes do not fill it. Normal API rate limiting
+`bearerAuth`, so 401 rejects are still logged. The loopback Host allowlist is registered ahead of the pre-auth health
+route so the DNS-rebinding defense covers it. Pre-auth `/health` sits below
+the origin wall (matched cross-origin probes carry CORS headers) and below
+the access log, so liveness probes appear in the access log — the unavoidable
+price of logging the origin wall's rejects. Normal API rate limiting
 runs after `bearerAuth` and before `express.json()`, so only authenticated
 requests count and large bodies are rejected before parsing when a limit is
 exceeded. Channel webhook ingress branches before bearer auth and applies its

@@ -4443,6 +4443,16 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
     });
+
+    it('keeps the loopback Host gate ahead of pre-auth health', async () => {
+      // The DNS-rebinding defense must cover the pre-auth health route: a
+      // rebinding page probing /health with its own Host must be rejected,
+      // not answered 200 by the pre-auth handler.
+      const app = createServeApp(baseOpts);
+      const res = await request(app).get('/health').set('Host', 'evil.example');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Invalid Host header' });
+    });
   });
 
   describe('GET /workspace/channel/observed-contacts', () => {

@@ -2000,6 +2000,29 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
+  // Access logging and trace-id capture sit ahead of the origin wall and the
+  // same-origin credential check so their 403/401 short-circuits are recorded
+  // like every other reject (the pre-change chain logged them because
+  // bearerAuth ran below the access log). Capture the caller trace id BEFORE
+  // authenticate / rate limiter / body parser: those layers short-circuit
+  // (401/429/400) before the telemetry middleware ever runs, and the access
+  // log still needs the captured id to join their log lines (and 404s) with
+  // the caller's trace.
+  installAccessLogMiddleware(app, daemonLog);
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
+  // The loopback Host allowlist stays ahead of the pre-auth health routes so
+  // the DNS-rebinding defense covers them; on non-loopback binds it is a
+  // deliberate no-op (the bearer gate is the authentication layer there).
+  app.use(hostAllowlist(opts.hostname, getPort));
+
+  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  app.use(allowOriginCors(originAllowlist));
+
+  // Pre-auth health sits below the origin wall so matched cross-origin health
+  // probes carry CORS headers, and below the access log — liveness probes
+  // therefore appear in the access log, the unavoidable price of logging the
+  // origin wall's rejects.
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
@@ -2016,22 +2039,6 @@ export function createServeApp(
     });
     healthRoutes.register(app);
   }
-
-  // Access logging and trace-id capture sit ahead of the origin wall and the
-  // same-origin credential check so their 403/401 short-circuits are recorded
-  // like every other reject; the pre-auth health routes stay above them so
-  // liveness probes do not fill the access log.
-  installAccessLogMiddleware(app, daemonLog);
-
-  // Capture the caller trace id BEFORE authenticate / rate limiter / body
-  // parser: those layers short-circuit (401/429/400) before the telemetry
-  // middleware ever runs, and the access log still needs the captured id
-  // to join their log lines (and 404s) with the caller's trace.
-  app.use(daemonInboundTraceIdCaptureMiddleware);
-
-  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
-  app.use(allowOriginCors(originAllowlist));
-  app.use(hostAllowlist(opts.hostname, getPort));
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
