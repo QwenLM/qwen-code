@@ -229,6 +229,8 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  runWithAgentRunContext,
+  type AgentRunContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -246,6 +248,7 @@ import {
   type ActiveWorkHoldV1,
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -1581,6 +1584,60 @@ function commitChannelDeliveryResponseBlock(
     if (capture?.channelDelivery) capture.channelDelivery.finalText = finalText;
     if (capture?.turnResult) capture.turnResult.finalText = finalText;
   }
+}
+
+/**
+ * The workspace-agent run this prompt is a turn of, if it is one.
+ *
+ * The bridge strips this key from every caller and re-injects it only from the
+ * daemon dispatcher's request context, so reaching here means the daemon said
+ * it. Validated field by field anyway: a frame built from a half-formed record
+ * would name a thread that may not be the one the envelope describes, and the
+ * thread tools would act on it.
+ */
+function parsePromptAgentRun(
+  params: PromptRequest,
+): AgentRunContext | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> })._meta;
+  const value = meta?.[DAEMON_AGENT_RUN_META_KEY];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const run = value as Record<string, unknown>;
+  const text = (key: string): string | undefined =>
+    typeof run[key] === 'string' && (run[key] as string).length > 0
+      ? (run[key] as string)
+      : undefined;
+  const workspaceId = text('workspaceId');
+  const agentId = text('agentId');
+  const runId = text('runId');
+  const threadId = text('threadId');
+  const rootThreadId = text('rootThreadId');
+  const attempt = run['attempt'];
+  if (
+    !workspaceId ||
+    !agentId ||
+    !runId ||
+    !threadId ||
+    !rootThreadId ||
+    typeof attempt !== 'number' ||
+    !Number.isInteger(attempt) ||
+    attempt < 1
+  ) {
+    return undefined;
+  }
+  const through = run['contextThroughSequence'];
+  return {
+    workspaceId,
+    agentId,
+    runId,
+    threadId,
+    rootThreadId,
+    attempt,
+    ...(typeof through === 'number' && Number.isInteger(through)
+      ? { contextThroughSequence: through }
+      : {}),
+  };
 }
 
 function parsePromptChannelDelivery(
@@ -5193,20 +5250,30 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    const execute = () =>
-      runWithInvocationContext(invocationContext, () =>
-        sessionIdContext.run(sessionId, () =>
-          this.#executePromptInner(
-            params,
-            pendingSend,
-            responseCapture,
-            modelPrompt,
-            rejectOnLoopDetected,
-            goalTurn,
-            channelTurn,
+    // Per turn, not per session. An agent session works many threads over its
+    // life, so a frame established once at spawn would bind the body to its
+    // first thread forever — the exact failure `runWithAgentRunContext`
+    // refuses to allow. Wrapping here means every prompt carries its own, and
+    // a prompt with no agent-run metadata (a person typing into the session)
+    // establishes none, so the thread tools correctly refuse.
+    const agentRun = parsePromptAgentRun(params);
+    const execute = () => {
+      const inner = () =>
+        runWithInvocationContext(invocationContext, () =>
+          sessionIdContext.run(sessionId, () =>
+            this.#executePromptInner(
+              params,
+              pendingSend,
+              responseCapture,
+              modelPrompt,
+              rejectOnLoopDetected,
+              goalTurn,
+              channelTurn,
+            ),
           ),
-        ),
-      );
+        );
+      return agentRun ? runWithAgentRunContext(agentRun, inner) : inner();
+    };
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
       : goalTurnContext.exit(execute);

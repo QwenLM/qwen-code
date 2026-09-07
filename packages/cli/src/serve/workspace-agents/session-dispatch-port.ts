@@ -27,6 +27,7 @@ import type {
   AgentBodyState,
   AgentDispatchPort,
   AgentStartResult,
+  AgentRunContext,
   WorkspaceAgent,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
@@ -77,10 +78,21 @@ export function createSessionDispatchPort(
 ): AgentDispatchPort {
   const { bridge, workspaceCwd } = input;
 
+  /**
+   * Sends one turn to an agent's session, saying which run it is a turn of.
+   *
+   * `agentRun` is the whole reason the child can act. The envelope names the
+   * thread in prose, but prose is not something the thread tools can trust or
+   * parse; this is the structured half, and the bridge treats it as trusted
+   * daemon metadata, stripping the same key from every other caller. Without
+   * it the child boots with the right persona and then cannot post, because
+   * every thread tool requires a run frame this is the only source of.
+   */
   const send = async (
     sessionId: string,
     prompt: string,
     deliveryId: string,
+    agentRun: AgentRunContext,
   ): Promise<void> => {
     await bridge.sendPrompt(
       sessionId,
@@ -89,7 +101,20 @@ export function createSessionDispatchPort(
         prompt: [{ type: 'text', text: prompt }],
       } as Parameters<AgentSessionBridge['sendPrompt']>[1],
       undefined,
-      { promptId: deliveryId },
+      {
+        promptId: deliveryId,
+        agentRun: {
+          workspaceId: agentRun.workspaceId,
+          agentId: agentRun.agentId,
+          runId: agentRun.runId,
+          threadId: agentRun.threadId,
+          rootThreadId: agentRun.rootThreadId,
+          attempt: agentRun.attempt,
+          ...(agentRun.contextThroughSequence !== undefined
+            ? { contextThroughSequence: agentRun.contextThroughSequence }
+            : {}),
+        },
+      },
     );
   };
 
@@ -106,7 +131,16 @@ export function createSessionDispatchPort(
         : { kind: 'completed' };
     },
 
-    async start({ agent, prompt, runId }): Promise<AgentStartResult> {
+    async start({
+      agent,
+      prompt,
+      runId,
+      workspaceId,
+      threadId,
+      rootThreadId,
+      attempt,
+      contextThroughSequence,
+    }): Promise<AgentStartResult> {
       try {
         // Spawn-or-attach is idempotent on the deterministic id, so `launch`,
         // `resume` and `continue_completed` collapse into one call: the three
@@ -119,7 +153,15 @@ export function createSessionDispatchPort(
           sourceId: agent.id,
           sessionScope: 'thread',
         });
-        await send(session.sessionId, prompt, runId);
+        await send(session.sessionId, prompt, runId, {
+          workspaceId,
+          agentId: agent.id,
+          runId,
+          threadId,
+          rootThreadId,
+          attempt,
+          contextThroughSequence,
+        });
         return {
           status: 'started',
           sessionId: session.sessionId,
@@ -143,11 +185,32 @@ export function createSessionDispatchPort(
       }
     },
 
-    async deliver({ agent, prompt, deliveryId }): Promise<boolean> {
+    async deliver({
+      agent,
+      prompt,
+      deliveryId,
+      workspaceId,
+      threadId,
+      rootThreadId,
+      runId,
+      attempt,
+      contextThroughSequence,
+    }): Promise<boolean> {
       const session = sessionFor(bridge, workspaceCwd, agent);
       if (!session) return false;
       try {
-        await send(session.sessionId, prompt, deliveryId);
+        // A mid-run delivery is still a turn of the same run, so it carries
+        // the same frame. Sending it without one would land a message the
+        // agent can read and cannot answer.
+        await send(session.sessionId, prompt, deliveryId, {
+          workspaceId,
+          agentId: agent.id,
+          runId,
+          threadId,
+          rootThreadId,
+          attempt,
+          contextThroughSequence,
+        });
         return true;
       } catch {
         // A refused delivery is a miss, not a failure: the run's terminal

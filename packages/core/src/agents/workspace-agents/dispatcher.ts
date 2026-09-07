@@ -102,9 +102,15 @@ export interface AgentDispatchPort {
     agent: WorkspaceAgent;
     prompt: string;
     deliveryId: string;
+    // The same identity `start` carries. A mid-run delivery is another turn of
+    // the same run, and the runtime has to be able to tell the body which run
+    // that is — it cannot infer it from a session that serves many threads.
+    workspaceId: string;
     threadId: string;
+    rootThreadId: string;
     runId: string;
     attempt: number;
+    contextThroughSequence: number;
   }): Promise<boolean>;
   start(input: {
     action: AgentStartAction;
@@ -549,9 +555,12 @@ async function deliverRunningInputs(
               agent,
               prompt: prompt.text,
               deliveryId: through.id,
+              workspaceId,
               threadId: thread.id,
+              rootThreadId: thread.rootThreadId,
               runId: run.id,
               attempt: run.attempts,
+              contextThroughSequence: prompt.contextThroughSequence,
             });
             if (delivered) {
               delivered = await acceptRunningDelivery(projectRoot, {

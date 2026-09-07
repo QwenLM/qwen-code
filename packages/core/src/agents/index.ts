@@ -80,6 +80,13 @@ export {
 export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export type { AgentPersonaResolution } from './workspace-agents/persona.js';
+export type { AgentRunContext } from './workspace-agents/run-context.js';
+export {
+  getAgentRunContext,
+  isAgentRun,
+  requireAgentRunContext,
+  runWithAgentRunContext,
+} from './workspace-agents/run-context.js';
 export type { DispatchRecord } from './workspace-agents/dispatcher.js';
 export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,

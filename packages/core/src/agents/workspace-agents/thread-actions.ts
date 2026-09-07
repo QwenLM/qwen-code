@@ -19,7 +19,6 @@ import {
   finishRunInTransaction,
 } from './run-lifecycle.js';
 import { acknowledgeCloseObligations } from './thread-status.js';
-import type { AgentRunContext } from './run-context.js';
 import {
   decideDispatch,
   resolveTargets,
@@ -653,71 +652,6 @@ export async function bindRunSession(
                 : {}),
             }
           : run,
-      ),
-    });
-  });
-}
-
-export async function consumeRunDelivery(
-  projectRoot: string,
-  context: AgentRunContext,
-  deliveryId = context.runId,
-): Promise<Thread> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(context.threadId);
-    const run = thread?.runs.find((entry) => entry.id === context.runId);
-    if (
-      transaction.workspaceId !== context.workspaceId ||
-      thread?.rootThreadId !== context.rootThreadId ||
-      !run ||
-      run.agentId !== context.agentId ||
-      run.attempts !== context.attempt ||
-      (run.status !== 'running' && run.status !== 'finishing')
-    ) {
-      throw new Error(
-        `Run "${context.runId}" is no longer the active delivery attempt.`,
-      );
-    }
-
-    const deliveredMessage = thread.messages.find(
-      (message) => message.id === deliveryId,
-    );
-    const through =
-      deliveryId === context.runId
-        ? (context.contextThroughSequence ?? run.contextThroughSequence)
-        : deliveredMessage?.sequence;
-    if (through === undefined) return thread;
-    const previousCommitted =
-      thread.deliveryByAgent[run.agentId]?.committedThroughSequence ?? 0;
-    const deliveredMessageIds = thread.messages
-      .filter(
-        (message) =>
-          message.sequence > previousCommitted && message.sequence <= through,
-      )
-      .map((message) => message.id);
-    const acceptedMessageIds = Array.from(
-      new Set([...run.acceptedMessageIds, ...deliveredMessageIds]),
-    );
-
-    return transaction.writeThread({
-      ...thread,
-      deliveryByAgent: {
-        ...thread.deliveryByAgent,
-        [run.agentId]: {
-          committedThroughSequence: Math.max(previousCommitted, through),
-        },
-      },
-      runs: thread.runs.map((entry) =>
-        entry.id === run.id
-          ? {
-              ...entry,
-              acceptedMessageIds,
-              consumedMessageIds: Array.from(
-                new Set([...entry.consumedMessageIds, ...deliveredMessageIds]),
-              ),
-              contextThroughSequence: through,
-            }
-          : entry,
       ),
     });
   });
