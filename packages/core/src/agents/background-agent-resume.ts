@@ -90,6 +90,7 @@ import {
   buildMeshToolConfig,
   createMeshToolInvocationGuard,
 } from './mesh/capability.js';
+import { runMeshTurn } from './mesh/runtime-bridge.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -1419,10 +1420,22 @@ export class BackgroundAgentResumeService {
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
+        const meshRun = readAgentMeta(metaPath)?.meshRun;
+        const body = () =>
+          runBody(turnContextState, turnAbortController, fireStartHook);
         const framedRunBody = () =>
           runWithAgentContext(
             meta.agentId,
-            () => runBody(turnContextState, turnAbortController, fireStartHook),
+            meshRun
+              ? () =>
+                  runMeshTurn({
+                    projectRoot: this.config.getProjectRoot(),
+                    context: meshRun,
+                    emitter: bgEmitter,
+                    metaPath,
+                    body,
+                  })
+              : body,
             normalizeResumedAgentDepth(meta.depth),
           );
         const invocationRunBody = () =>

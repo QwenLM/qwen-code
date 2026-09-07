@@ -14,6 +14,19 @@ import {
 } from './dispatch-port.js';
 import type { MeshAgent } from './types.js';
 
+vi.mock('../agent-transcript.js', () => ({
+  getAgentMetaPath: () => '/mesh-agent.meta.json',
+  patchAgentMeta: () => {},
+  readAgentMeta: () => ({
+    meshRun: {
+      workspaceId: 'ws_1',
+      threadId: 'th_1',
+      runId: 'rn_1',
+      attempt: 1,
+    },
+  }),
+}));
+
 const ALICE: MeshAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 
 function makeConfig(
@@ -29,6 +42,7 @@ function makeConfig(
     continueResidentAgent: vi.fn(() => overrides.continueResult ?? 'continued'),
   };
   const config = {
+    getProjectRoot: () => '/workspace',
     getBackgroundTaskRegistry: () => registry,
     getSessionId: () => 'se_host',
     reviveCompletedBackgroundAgent: vi.fn(async () => overrides.revive),
@@ -65,10 +79,12 @@ describe('createMeshDispatchPort', () => {
       action,
       agent: ALICE,
       prompt: 'YOUR RUN ...',
+      workspaceId: 'ws_1',
       threadId: 'th_1',
       rootThreadId: 'th_1',
       runId: 'rn_1',
       attempt: 1,
+      contextThroughSequence: 1,
     });
 
   it('continues a completed body hot without touching the transcript', async () => {
@@ -77,10 +93,12 @@ describe('createMeshDispatchPort', () => {
     await expect(start(config, 'continue_completed')).resolves.toEqual({
       status: 'started',
       sessionId: 'se_host',
+      consumedOnStart: false,
     });
     expect(registry.continueResidentAgent).toHaveBeenCalledWith(
       'mesh-ag_alice',
       'YOUR RUN ...',
+      'rn_1',
     );
     expect(config.reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
   });

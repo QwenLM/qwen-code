@@ -31,6 +31,8 @@ export interface MeshRunContext {
   rootThreadId: string;
   /** 1 for the first execution of this run; higher after a revive. */
   attempt: number;
+  /** Last thread message included in this turn's delivery. */
+  contextThroughSequence?: number;
 }
 
 const store = new AsyncLocalStorage<MeshRunContext>();

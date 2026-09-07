@@ -61,7 +61,12 @@ export type MeshBodyState =
 export type MeshStartAction = 'launch' | 'resume' | 'continue_completed';
 
 export type MeshStartResult =
-  | { status: 'started'; sessionId: string; transcriptStartOffset?: number }
+  | {
+      status: 'started';
+      sessionId: string;
+      transcriptStartOffset?: number;
+      consumedOnStart?: boolean;
+    }
   | { status: 'capacity_wait' }
   | { status: 'agent_unavailable'; error: string }
   | { status: 'launch_failed'; error: string; failureStage?: string };
@@ -72,10 +77,12 @@ export interface MeshDispatchPort {
     action: MeshStartAction;
     agent: MeshAgent;
     prompt: string;
+    workspaceId: string;
     threadId: string;
     rootThreadId: string;
     runId: string;
     attempt: number;
+    contextThroughSequence: number;
   }): Promise<MeshStartResult>;
   /** Definition content hash, when the port can supply one (§9.4). */
   definitionVersion?(agent: MeshAgent): Promise<string | undefined>;
@@ -215,10 +222,12 @@ export async function dispatchOnce(
       action,
       agent,
       prompt: prompt.text,
+      workspaceId: workspace.workspaceId,
       threadId: thread.id,
       rootThreadId: thread.rootThreadId,
       runId: run.id,
       attempt: claimed.run.attempts,
+      contextThroughSequence: prompt.contextThroughSequence,
     });
 
     if (result.status === 'started') {
@@ -228,6 +237,7 @@ export async function dispatchOnce(
         attempt: claimed.run.attempts,
         sessionId: result.sessionId,
         contextThroughSequence: prompt.contextThroughSequence,
+        consumedOnStart: result.consumedOnStart,
         ...(definitionVersion ? { definitionVersion } : {}),
         ...(result.transcriptStartOffset !== undefined
           ? { transcriptStartOffset: result.transcriptStartOffset }
