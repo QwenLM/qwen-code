@@ -244,6 +244,39 @@ describe('DiffManager permission diff dismissal', () => {
     expect(closed).not.toHaveBeenCalled();
   });
 
+  // R4-1: the IDE-mode MCP tool closes by path alone, so its close lands on a
+  // diff an approval owns while the caller knows nothing about that request.
+  it('reports a permission diff an id-less close took away', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const rightUri = lastOpenedRightUri();
+
+    await manager.closeDiff('/workspace/foo.ts', true);
+    // The entry is already gone, so this hop cannot be what reports it.
+    await manager.cancelDiff(rightUri as never);
+
+    expect(closed).toHaveBeenCalledWith({ permissionRequestId: 'req-1' });
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when an id-less close matches a diff no approval owns', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+
+    await manager.closeDiff('/workspace/foo.ts', true);
+
+    expect(closed).not.toHaveBeenCalled();
+  });
+
   it('stops notifying once the manager is disposed', async () => {
     const manager = createManager();
     const closed = vi.fn();

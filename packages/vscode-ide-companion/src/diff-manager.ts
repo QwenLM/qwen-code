@@ -379,6 +379,7 @@ export class DiffManager {
   ) {
     const normalizedPath = path.normalize(filePath);
     let uriToClose: vscode.Uri | undefined;
+    let matchedRequestId: string | undefined;
     for (const [, diffInfo] of this.diffDocuments.entries()) {
       if (
         diffInfo.originalFilePath === normalizedPath &&
@@ -386,6 +387,7 @@ export class DiffManager {
           diffInfo.permissionRequestId === permissionRequestId)
       ) {
         uriToClose = diffInfo.rightDocUri;
+        matchedRequestId = diffInfo.permissionRequestId;
         break;
       }
     }
@@ -394,6 +396,19 @@ export class DiffManager {
       const rightDoc = await vscode.workspace.openTextDocument(uriToClose);
       const modifiedContent = rightDoc.getText();
       await this.closeDiffEditor(uriToClose);
+      // An id-less close matches by path alone: that caller does not know an
+      // approval owns this diff, so it cannot tell the surface holding the
+      // request. Fire the dismissal here, because closeDiffEditor already
+      // dropped the entry and the onDidCloseTextDocument -> cancelDiff hop that
+      // follows finds nothing (#10557 through a second door: an IDE-mode CLI
+      // closing the tab leaves the shell locked on a diff that is gone). A
+      // caller that passed the id *is* that surface and has cleared its own
+      // state, so its close must not echo back.
+      if (permissionRequestId === undefined && matchedRequestId) {
+        this.onDidClosePermissionDiffEmitter.fire({
+          permissionRequestId: matchedRequestId,
+        });
+      }
       if (!suppressNotification) {
         this.onDidChangeEmitter.fire(
           IdeDiffClosedNotificationSchema.parse({
