@@ -597,6 +597,53 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     );
   });
 
+  it('retries a failed checkout once, behind a workspace reset', () => {
+    // The pool's two transient checkout killers outlast the action's own
+    // three fetch retries: minutes-long github.com outages (runs
+    // 34088422718 and 34098892239, each losing one shard after ~8 minutes
+    // of connect timeouts) and a corrupt object in the reused workspace's
+    // .git (run 33851931669, #11016). The retry must stay bounded (one),
+    // gated on the primary's real outcome, and must be the step that fails
+    // the job when the failure is real.
+    const checkouts = job.steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    assert.equal(checkouts.length, 2, 'exactly the primary and one retry');
+    const [primary, retry] = checkouts;
+    assert.equal(primary.id, 'checkout');
+    assert.equal(
+      primary['continue-on-error'],
+      true,
+      'a failed primary must not pre-fail the job, or the retry could never run',
+    );
+    assert.equal(retry.if, "${{ steps.checkout.outcome == 'failure' }}");
+    assert.ok(
+      !('continue-on-error' in retry),
+      'a persistent failure must fail the job, not downgrade to a warning',
+    );
+    assert.equal(
+      primary.uses,
+      retry.uses,
+      'both attempts must pin the same actions/checkout revision',
+    );
+    const names = job.steps.map((s) => s.name);
+    const reset = names.indexOf('Reset workspace after failed checkout');
+    assert.ok(reset !== -1, 'the workspace reset must exist');
+    assert.equal(
+      job.steps[reset].if,
+      "${{ steps.checkout.outcome == 'failure' }}",
+    );
+    assert.match(job.steps[reset].run, /rm -rf -- "\$GITHUB_WORKSPACE"/);
+    assert.match(job.steps[reset].run, /sudo -n rm -rf/);
+    assert.match(job.steps[reset].run, /mkdir -p "\$GITHUB_WORKSPACE"/);
+    const primaryIdx = job.steps.indexOf(primary);
+    const retryIdx = job.steps.indexOf(retry);
+    assert.ok(
+      primaryIdx < reset && reset < retryIdx,
+      'the reset must sit between the primary and the retry',
+    );
+  });
+
   it('keeps setup-node off the pool', () => {
     // The action's post step uploads the npm cache to GitHub; on the
     // pool's slow egress that save ran 14+ minutes and timed out

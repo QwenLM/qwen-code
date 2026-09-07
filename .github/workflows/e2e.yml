@@ -171,7 +171,35 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # continue-on-error is load-bearing: a failed first attempt must not
+      # pre-fail the job, or the retry below could never run — the job fails
+      # only when the retry fails too (same contract as
+      # build-and-publish-image.yml's build-and-push).
       - name: 'Checkout'
+        id: 'checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        continue-on-error: true
+
+      # The pool fails checkout in two transient shapes the action's own
+      # three fetch retries cannot ride out: github.com unreachable for
+      # minutes at a time (runs 34088422718 and 34098892239 each lost a
+      # shard after ~8 minutes of connect timeouts), and a corrupt object
+      # in the reused workspace's .git (run 33851931669, #11016). Nothing
+      # this job needs lives in the workspace yet — the npm cache and the
+      # docker locks are under $HOME — so wipe it and let the retry fetch
+      # into an empty root: no corrupt object survives, and the outage has
+      # had one attempt's span to clear.
+      - name: 'Reset workspace after failed checkout'
+        if: "${{ steps.checkout.outcome == 'failure' }}"
+        run: |-
+          set -uo pipefail
+          rm -rf -- "$GITHUB_WORKSPACE" 2>/dev/null ||
+            sudo -n rm -rf -- "$GITHUB_WORKSPACE" 2>/dev/null ||
+            echo "::warning::could not clear the workspace; the checkout retry proceeds in place"
+          mkdir -p "$GITHUB_WORKSPACE"
+
+      - name: 'Checkout (retry)'
+        if: "${{ steps.checkout.outcome == 'failure' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       # Hosted-only, mirroring ci.yml: on the pool, nodejs.org may be
