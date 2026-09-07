@@ -3157,6 +3157,107 @@ describe('task activity key', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('restores preview settings under their owning session', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:stored',
+          tabs: [
+            {
+              id: 'web-preview:stored',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543/settings',
+              viewport: 'mobile',
+              html: 'do not persist page content',
+            },
+          ],
+        },
+      }),
+    );
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['webPreview'] },
+    });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+    expect(
+      container.querySelector<HTMLIFrameElement>(
+        'iframe[title="Web preview frame"]',
+      )?.style.width,
+    ).toBe('390px');
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Desktop width"]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'].tabs,
+    ).toEqual([
+      {
+        id: 'web-preview:stored',
+        kind: 'web_preview',
+        title: 'http://localhost:6543/settings',
+        url: 'http://localhost:6543/settings',
+        viewport: 'desktop',
+      },
+    ]);
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    expect(container.querySelector('[data-web-shell-web-preview]')).toBeNull();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        'input[aria-label="Development URL"]',
+      )?.value,
+    ).toBe('http://localhost:6543/settings');
+  });
+
+  it('rejects a persisted preview URL targeting the shell', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'web-preview:unsafe',
+          tabs: [
+            {
+              id: 'web-preview:unsafe',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: window.location.href,
+              viewport: 'desktop',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('iframe[title="Web preview frame"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'development address',
+    );
+  });
+
   it('restores terminal tabs without persisting terminal output', async () => {
     mockConnection.capabilities.features = ['web_terminal'];
     window.localStorage.setItem(

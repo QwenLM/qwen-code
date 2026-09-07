@@ -475,7 +475,13 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size, blockedReason]
+            {[
+              artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
+                ? t('webPreview.saved')
+                : getArtifactTypeLabel(artifact),
+              size,
+              blockedReason,
+            ]
               .filter(Boolean)
               .join(' · ')}
           </div>

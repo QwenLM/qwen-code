@@ -429,6 +429,52 @@ describe('ArtifactPanel terminal tabs', () => {
   });
 });
 
+describe('ArtifactPanel web previews', () => {
+  it('keeps the application frame mounted across tab and viewport changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (
+      activeTabId: string,
+      viewport: 'desktop' | 'mobile' = 'desktop',
+    ) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'preview',
+              kind: 'web_preview',
+              title: 'Web preview',
+              url: 'http://localhost:6543',
+              viewport,
+            },
+            { id: 'terminal', kind: 'terminal', title: 'Terminal' },
+          ]}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel('preview')));
+    const frame = container.querySelector('iframe');
+    expect(frame).not.toBeNull();
+    act(() => root.render(renderPanel('terminal')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).not.toBeNull();
+    act(() => root.render(renderPanel('preview', 'mobile')));
+    expect(container.querySelector('iframe')).toBe(frame);
+    expect(frame?.closest('[hidden]')).toBeNull();
+    expect(frame?.style.width).toBe('390px');
+  });
+});
+
 describe('artifact workspace authority', () => {
   it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
     let resolveRead:
@@ -771,9 +817,11 @@ describe('ArtifactPanel code review artifacts', () => {
       ).click();
     });
     await flush();
-    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
-      '<h1>Attachment page</h1>',
-    );
+    expect(
+      new DOMParser()
+        .parseFromString(container.querySelector('iframe')!.srcdoc, 'text/html')
+        .querySelector('iframe')!.srcdoc,
+    ).toContain('<h1>Attachment page</h1>');
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
@@ -2762,7 +2810,12 @@ describe('ArtifactPanel workspace artifact previews', () => {
       );
     } else {
       expect(
-        container.querySelector('iframe')?.getAttribute('srcdoc'),
+        new DOMParser()
+          .parseFromString(
+            container.querySelector('iframe')!.srcdoc,
+            'text/html',
+          )
+          .querySelector('iframe')!.srcdoc,
       ).toContain(testCase.content);
     }
   });

@@ -1,5 +1,9 @@
 import './styles/globals.css';
 import {
+  parseWebPreviewUrl,
+  type WebPreviewState,
+} from './components/preview/web-preview';
+import {
   forwardRef,
   memo,
   useCallback,
@@ -1581,6 +1585,7 @@ interface ArtifactPanelPersistedState {
 }
 
 type PersistedArtifactPanelTab =
+  | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'review' }>,
       | 'id'
@@ -1803,6 +1808,19 @@ function parsePersistedArtifactPanelTab(
         parentSessionId: tab['parentSessionId'],
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
+    case 'web_preview':
+      if (
+        typeof tab['url'] !== 'string' ||
+        (tab['viewport'] !== 'desktop' && tab['viewport'] !== 'mobile')
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'web_preview',
+        url: tab['url'],
+        viewport: tab['viewport'],
+      };
     case 'terminal':
       return {
         ...common,
@@ -1836,6 +1854,10 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'web_preview':
+        return [
+          { id, title, kind: tab.kind, url: tab.url, viewport: tab.viewport },
+        ];
       case 'review':
         return [
           {
@@ -4578,6 +4600,38 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
+  const openWebPreviewTab = useCallback(() => {
+    const id = `web-preview:${crypto.randomUUID()}`;
+    setArtifactPanelTabs((tabs) => [
+      ...tabs,
+      {
+        id,
+        kind: 'web_preview',
+        title: t('webPreview.title'),
+        url: '',
+        viewport: 'desktop',
+      },
+    ]);
+    setActiveArtifactPanelTabId(id);
+    setArtifactPanelOpen(true);
+  }, [t]);
+  const updateWebPreviewTab = useCallback(
+    (tabId: string, state: WebPreviewState) => {
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.id === tabId && tab.kind === 'web_preview'
+            ? {
+                ...tab,
+                title: state.url || tab.title,
+                url: state.url,
+                viewport: state.viewport,
+              }
+            : tab,
+        ),
+      );
+    },
+    [],
+  );
   const openTerminalTab = useCallback(() => {
     const id = `terminal:${crypto.randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
@@ -5815,6 +5869,8 @@ export function App({
                         }
                       : undefined;
                 }
+                case 'web_preview':
+                  return tab;
                 case 'file': {
                   return tab;
                 }
@@ -6236,6 +6292,43 @@ export function App({
         );
         return;
       }
+      const previewUrl =
+        rightPanelItems.includes('webPreview') &&
+        request.artifact.metadata?.['artifactType'] !==
+          'web_preview_snapshot' &&
+        (request.artifact.storage === 'external_url' ||
+          request.artifact.storage === 'published') &&
+        request.artifact.status === 'available' &&
+        (request.artifact.kind === 'html' ||
+          request.artifact.kind === 'link') &&
+        request.artifact.url
+          ? parseWebPreviewUrl(
+              request.artifact.url,
+              window.location.href,
+              workspace.baseUrl,
+            )
+          : undefined;
+      if (previewUrl) {
+        const tab: ArtifactPanelTab = {
+          id: `web-preview:${request.sourceSessionId ?? connection.sessionId}:${request.turnId}:${request.artifactId}`,
+          kind: 'web_preview',
+          title: request.title,
+          url: previewUrl.href,
+          viewport: 'desktop',
+        };
+        rememberArtifactPanelTrigger();
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id)
+            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        return;
+      }
       // Cache the opened row so the tab keeps rendering through transient
       // gaps in the live artifact lists (an SSE reconnect, or the source
       // pane closing); the snapshot/live-list reconciles drop the copy once
@@ -6258,8 +6351,8 @@ export function App({
         artifactId: request.artifactId,
         ...(request.workspaceCwd ? { workspaceCwd: request.workspaceCwd } : {}),
         ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
-        ...(request.sourceSessionId
-          ? { sourceSessionId: request.sourceSessionId }
+        ...((request.sourceSessionId ?? connection.sessionId)
+          ? { sourceSessionId: request.sourceSessionId ?? connection.sessionId }
           : {}),
         ...(request.previewContent !== undefined
           ? { previewContent: request.previewContent }
@@ -6287,6 +6380,10 @@ export function App({
       openImagePanel,
       openAttachmentPanel,
       openSubagentPanelForSession,
+      rightPanelItems,
+      workspace.baseUrl,
+      connection.sessionId,
+      rememberArtifactPanelTrigger,
     ],
   );
   const openFilePreview = useCallback(
@@ -15910,6 +16007,8 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenWebPreview: workspaceContextActive ? openWebPreviewTab : undefined,
+    onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
     items: rightPanelItems,

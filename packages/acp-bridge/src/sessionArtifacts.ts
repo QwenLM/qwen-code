@@ -15,6 +15,7 @@ import {
   isRecordableDerivedChild,
   isAdoptableContentFingerprintKey,
   isReservedWorkspaceMetadataKey,
+  getWebPreviewSnapshotId,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   PUBLISHED_CONTENT_SHA256_METADATA_KEY,
@@ -757,7 +758,8 @@ export class SessionArtifactStore {
             input,
             ++this.receivedSeq,
             artifact.storage === 'published' &&
-              !isFileArtifactUrl(artifact.url),
+              (!isFileArtifactUrl(artifact.url) ||
+                Boolean(getWebPreviewSnapshotId(artifact))),
             {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -907,7 +909,9 @@ export class SessionArtifactStore {
       const normalized = await this.normalizeInput(
         input,
         ++this.receivedSeq,
-        artifact.storage === 'published' && !isFileArtifactUrl(artifact.url),
+        artifact.storage === 'published' &&
+          (!isFileArtifactUrl(artifact.url) ||
+            Boolean(getWebPreviewSnapshotId(artifact))),
         {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),

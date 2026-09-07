@@ -16,6 +16,7 @@ import {
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
 import {
+  rebuildSessionArtifactSnapshot,
   stableSessionArtifactId,
   type RebuiltSessionArtifactSnapshot,
   type SessionArtifactEventRecordPayload,
@@ -6191,6 +6192,104 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [],
     });
+  });
+
+  it('restores saved webpage records and deletion markers without reading their files', async () => {
+    const sessionId = 'saved-webpages';
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+        '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+      ].map((uuid) => ({
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        toolCallId: `call-${uuid}`,
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(
+          path.join(workspace, 'artifacts', 'snapshots', uuid, 'index.html'),
+        ).href,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.published.sha256': 'a'.repeat(64),
+        },
+      })),
+      { strict: true, trustedPublisher: true },
+    );
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    await expect(restored.restore(rebuilt)).resolves.toEqual([]);
+    const listed = await restored.list();
+    for (const saved of rebuilt.artifacts) {
+      expect(listed.artifacts).toContainEqual(
+        expect.objectContaining({ ...saved, restoreState: 'restored' }),
+      );
+    }
+    const first = rebuilt.artifacts[0]!;
+    await expect(
+      restored.restore({
+        ...rebuilt,
+        artifacts: [rebuilt.artifacts[1]!],
+        tombstonedIds: [first.id],
+        markerArtifacts: [first],
+      }),
+    ).resolves.toEqual([]);
+    await restored.recordSnapshot();
+    expect(snapshots.at(-1)?.markerArtifacts).toEqual([
+      expect.objectContaining(first),
+    ]);
+    expect((await restored.list()).artifacts.map((entry) => entry.id)).toEqual([
+      rebuilt.artifacts[1]!.id,
+    ]);
+
+    for (const override of [
+      { source: 'client' as const },
+      { source: 'hook' as const },
+      { toolName: 'record_artifact' },
+    ]) {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, ...override }],
+      });
+      expect(warnings).toContain(
+        'artifact snapshot restore failed; kept existing live artifacts',
+      );
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
   });
 
   it('does not trust persisted published file urls during restore', async () => {

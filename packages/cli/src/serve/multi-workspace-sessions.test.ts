@@ -5,6 +5,8 @@
  */
 
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -3371,6 +3373,115 @@ describe('multi-workspace session dispatch', () => {
     } finally {
       await fsp.rm(secondaryPath, { force: true });
     }
+  });
+
+  it('reads a saved HTML version only from its registered session and owner runtime', async () => {
+    const root = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-route-'),
+    );
+    const primaryRoot = path.join(root, 'primary');
+    const secondaryRoot = path.join(root, 'secondary');
+    const id = 'fce7cbe1-15de-422d-9b9a-2e2ab3370ca4';
+    const relativeFile = path.join('artifacts', 'snapshots', id, 'index.html');
+    const file = path.join(secondaryRoot, relativeFile);
+    const html = '<h1>Saved secondary version</h1>';
+    try {
+      for (const runtimeRoot of [primaryRoot, secondaryRoot]) {
+        await fsp.mkdir(path.dirname(path.join(runtimeRoot, relativeFile)), {
+          recursive: true,
+        });
+        await fsp.writeFile(path.join(runtimeRoot, relativeFile), html);
+      }
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        token: TEST_TOKEN,
+        primaryRuntimeBaseDir: primaryRoot,
+        secondaryRuntimeBaseDir: secondaryRoot,
+      });
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const artifact = {
+        id: 'saved-version',
+        title: 'Saved version',
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        url: pathToFileURL(file).href,
+        managedId: `preview-${id}`,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+      const listSecondary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId,
+        artifacts: [artifact],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      const listPrimary = vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: '11111111-1111-4111-a111-111111111111',
+        artifacts: [],
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: 200 },
+      }));
+      secondaryBridge.getSessionArtifacts = listSecondary;
+      primaryBridge.getSessionArtifacts = listPrimary;
+      const read = (ownerId = sessionId, artifactId = artifact.id) =>
+        request(app)
+          .get(`/session/${ownerId}/artifacts/${artifactId}/content`)
+          .set('Host', host())
+          .set('Authorization', TEST_AUTHORIZATION)
+          .set('X-Qwen-Client-Id', 'secondary-client');
+      const response = await read();
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(html);
+      expect(response.headers['content-disposition']).toContain('attachment');
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['cache-control']).toBe('private, no-store');
+      expect(listSecondary).toHaveBeenCalledWith(sessionId, {
+        clientId: 'secondary-client',
+      });
+      expect(listPrimary).not.toHaveBeenCalled();
+      expect((await read(sessionId, 'unregistered')).status).toBe(404);
+      expect((await read('11111111-1111-4111-a111-111111111111')).status).toBe(
+        404,
+      );
+      await fsp.writeFile(file, '<h1>Modified</h1>');
+      expect((await read()).status).toBe(404);
+      await fsp.unlink(file);
+      expect((await read()).status).toBe(404);
+      // An identical version in the primary runtime must never be a fallback.
+      expect(
+        await fsp.readFile(path.join(primaryRoot, relativeFile), 'utf8'),
+      ).toBe(html);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects saved HTML reads for an untrusted owner before listing its artifacts', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const listArtifacts = vi.fn();
+    primaryBridge.getSessionArtifacts = listArtifacts;
+    secondaryBridge.getSessionArtifacts = listArtifacts;
+    const response = await request(app)
+      .get(
+        '/session/22222222-2222-4222-a222-222222222222/artifacts/saved/content',
+      )
+      .set('Host', host());
+    expect(response.status).toBe(403);
+    expect(listArtifacts).not.toHaveBeenCalled();
   });
 
   it('routes continue, language, and artifact mutations to the owning non-primary bridge', async () => {

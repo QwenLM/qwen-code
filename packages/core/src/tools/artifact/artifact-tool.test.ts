@@ -14,6 +14,7 @@ import { ToolErrorType } from '../tool-error.js';
 import { ArtifactTool, type UrlOpener } from './artifact-tool.js';
 import { LocalPublisher } from './local-publisher.js';
 import { MAX_ARTIFACT_BYTES } from './html.js';
+import { readArtifactSnapshot } from './artifact-snapshots.js';
 
 const signal = new AbortController().signal;
 
@@ -40,6 +41,7 @@ describe('ArtifactTool', () => {
   beforeEach(async () => {
     workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-src-'));
     outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-out-'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', path.join(outDir, 'runtime'));
     openSpy = vi.fn(async () => {});
     tool = new ArtifactTool(
       makeConfig(),
@@ -53,6 +55,7 @@ describe('ArtifactTool', () => {
     await fs.rm(outDir, { recursive: true, force: true });
     delete process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'];
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('describes browser opening as settings-dependent', () => {
@@ -76,6 +79,12 @@ describe('ArtifactTool', () => {
         storage: 'published',
         title: 'My Report',
         mimeType: 'text/html',
+      },
+      {
+        kind: 'html',
+        storage: 'published',
+        title: 'My Report',
+        metadata: { artifactType: 'web_preview_snapshot' },
       },
     ]);
     expect(res.artifacts?.[0]?.url).toMatch(/^file:\/\//);
@@ -108,6 +117,29 @@ describe('ArtifactTool', () => {
     expect(second.artifacts?.[0]?.metadata?.['qwen.published.sha256']).not.toBe(
       first.artifacts?.[0]?.metadata?.['qwen.published.sha256'],
     );
+    const firstSnapshot = first.artifacts![1]!;
+    const secondSnapshot = second.artifacts![1]!;
+    expect(firstSnapshot.managedId).not.toBe(secondSnapshot.managedId);
+    await fs.unlink(file);
+    await fs.unlink(second.resultFilePaths![0]);
+    const runtime = path.join(outDir, 'runtime');
+    await expect(
+      readArtifactSnapshot(firstSnapshot, runtime),
+    ).resolves.toContain('<p>v1</p>');
+    await expect(
+      readArtifactSnapshot(secondSnapshot, runtime),
+    ).resolves.toContain('<p>v2</p>');
+  });
+
+  it('reports a saved-version failure even when latest publication succeeded', async () => {
+    const file = await writeFragment('page.html', '<p>Published</p>');
+    vi.stubEnv('QWEN_RUNTIME_DIR', file);
+    const result = await tool.build({ file_path: file }).execute(signal);
+    expect(result.error?.message).toContain(
+      'historical version could not be saved',
+    );
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.llmContent).toContain('Published artifact');
   });
 
   it('rejects a fragment with external references and does not publish', async () => {

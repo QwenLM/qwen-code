@@ -72,6 +72,26 @@ export function getArtifactsByTurn(
       }
     }
   }
+  for (const [turnId, list] of byTurn) {
+    const savedUrls = new Set(
+      list
+        .filter(
+          (artifact) =>
+            artifact.metadata?.['artifactType'] === 'web_preview_snapshot',
+        )
+        .map((artifact) => artifact.metadata?.['publishedUrl']),
+    );
+    byTurn.set(
+      turnId,
+      list.filter(
+        (artifact) =>
+          artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+          artifact.storage !== 'published' ||
+          !artifact.url ||
+          !savedUrls.has(artifact.url),
+      ),
+    );
+  }
   return byTurn;
 }
 

@@ -90,6 +90,7 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
+    headers: { 'Content-Security-Policy': "frame-ancestors 'self'" },
     port: 5173,
     proxy: {
       '/health': daemonProxy,

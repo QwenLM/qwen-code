@@ -9,7 +9,6 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import { isLoopbackAddress } from './loopback-binds.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -38,54 +37,6 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "base-uri 'none'",
 ];
 
-/**
- * Loopback origins the Web Shell may frame for the MCP App sandbox, pinned to
- * the request's Host port. Wildcard ports would let a compromised shell embed
- * any loopback listener.
- */
-export function loopbackSandboxOrigins(
-  hostHeader: string | undefined,
-): string[] {
-  const port = portFromHostHeader(hostHeader);
-  const suffix = port ? `:${port}` : '';
-  // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
-  // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
-  const hosts = ['localhost', '127.0.0.1'];
-  try {
-    const requestHostname = new URL(`http://${hostHeader}`).hostname;
-    if (
-      isLoopbackAddress(requestHostname) &&
-      !requestHostname.includes(':') &&
-      !hosts.includes(requestHostname)
-    ) {
-      hosts.push(requestHostname);
-    }
-  } catch {
-    // Ignore malformed Host headers; the fixed loopback aliases remain safe.
-  }
-  return (['http', 'https'] as const).flatMap((scheme) =>
-    hosts.map((host) => `${scheme}://${host}${suffix}`),
-  );
-}
-
-export function portFromHostHeader(
-  hostHeader: string | undefined,
-): string | undefined {
-  if (!hostHeader) return undefined;
-  if (hostHeader.startsWith('[')) {
-    const end = hostHeader.indexOf(']');
-    if (end === -1) return undefined;
-    const rest = hostHeader.slice(end + 1);
-    return rest.startsWith(':') && /^\d+$/u.test(rest.slice(1))
-      ? rest.slice(1)
-      : undefined;
-  }
-  const colon = hostHeader.lastIndexOf(':');
-  if (colon === -1) return undefined;
-  const port = hostHeader.slice(colon + 1);
-  return /^\d+$/u.test(port) ? port : undefined;
-}
-
 export function buildWebShellPermissionsPolicy(): string {
   return [
     'camera=()',
@@ -106,12 +57,12 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
-  frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  // Live previews use a script-free wrapper that pins its child frame source.
+  const frameSrc = 'frame-src http: https:';
   return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 
@@ -188,9 +139,8 @@ function createSendIndex(
   frameAncestors: readonly string[] = [],
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  return (req: Request, res: Response): void => {
-    const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
-    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
+  return (_req: Request, res: Response): void => {
+    const csp = buildWebShellCsp(frameAncestors);
     res
       .status(200)
       .set('Content-Security-Policy', csp)

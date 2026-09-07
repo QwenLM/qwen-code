@@ -103,6 +103,42 @@ export interface PersistedSessionArtifact {
   clientId?: string;
 }
 
+export function getWebPreviewSnapshotId(
+  artifact: Partial<PersistedSessionArtifact>,
+): string | undefined {
+  const id =
+    /^preview-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(
+      artifact.managedId ?? '',
+    )?.[1];
+  const sha256 = artifact.metadata?.[PUBLISHED_CONTENT_SHA256_METADATA_KEY];
+  if (
+    !id ||
+    artifact.kind !== 'html' ||
+    artifact.storage !== 'published' ||
+    artifact.metadata?.['artifactType'] !== 'web_preview_snapshot' ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    (artifact.source !== undefined &&
+      (artifact.source !== 'tool' ||
+        artifact.toolName?.toLowerCase() !== 'artifact'))
+  )
+    return undefined;
+  try {
+    const url = new URL(artifact.url ?? '');
+    if (
+      url.protocol === 'file:' &&
+      !url.host &&
+      !url.search &&
+      !url.hash &&
+      url.pathname.endsWith(`/artifacts/snapshots/${id}/index.html`)
+    )
+      return id;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 export type SessionArtifactPersistedChangeAction =
   | 'created'
   | 'updated'
@@ -602,7 +638,11 @@ function isForkSafeArtifact(artifact: PersistedSessionArtifact): boolean {
   if (artifact.metadata && hasRestoreUnsafeMetadata(artifact.metadata)) {
     return false;
   }
-  if (artifact.url && hasRestoreUnsafeUrl(artifact.url)) {
+  if (
+    artifact.url &&
+    hasRestoreUnsafeUrl(artifact.url) &&
+    !getWebPreviewSnapshotId(artifact)
+  ) {
     return false;
   }
   return true;
