@@ -91,6 +91,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import { FileTypeIcon } from './FileTypeIcon';
+import { FileAttachmentContent } from './FileAttachmentContent';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -401,7 +402,11 @@ function TopComposerTag({
     </span>
   );
   const tagElement = (
-    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+    <span
+      ref={anchorRef}
+      className={`${styles.tag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}`}
+      data-web-shell-composer-tag
+    >
       {hasTooltip ? (
         <TooltipPrimitive.Trigger asChild>
           {tagContent}
@@ -1570,6 +1575,7 @@ export const ChatEditor = memo(
       atProviders: contextAtProviders,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     } = useWebShellCustomization();
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
@@ -1637,7 +1643,7 @@ export const ChatEditor = memo(
     );
     useLayoutEffect(() => {
       setPendingDropFiles(null);
-    }, [disabled, uploadTargetKey]);
+    }, [disabled, uploadTargetKey, attachmentsEnabled, fileDropAction]);
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1692,7 +1698,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: attachmentsEnabled && fileUploadEnabled !== false,
+      fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
       skills,
@@ -1854,27 +1860,36 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
-        if (fileUploadEnabled === false) {
-          // Host force-disables file drag-in entirely: cancel the drop so
-          // the browser cannot navigate to the file, but ingest nothing on
-          // any lane (the image lane is gated off too).
-          event.preventDefault();
-          return;
-        }
         if (!uploadEnabled || files.length === 0) {
-          core.imageTransferHandlers.onDropCapture(event);
+          if (attachmentsEnabled) {
+            core.imageTransferHandlers.onDropCapture(event);
+          } else {
+            event.preventDefault();
+            event.stopPropagation();
+          }
           return;
         }
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        setPendingDropFiles(files);
+        if (!attachmentsEnabled || fileDropAction === 'upload') {
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+        } else if (fileDropAction === 'attach') {
+          ingestFiles(files);
+        } else {
+          setPendingDropFiles(files);
+        }
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
-        fileUploadEnabled,
+        attachmentsEnabled,
+        fileDropAction,
+        fileUploadDirectory,
+        ingestFiles,
+        insertUploadReference,
+        uploadFiles,
         pendingDropFiles,
         uploadEnabled,
       ],
@@ -2397,13 +2412,22 @@ export const ChatEditor = memo(
       }
       return (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.tagIcon}
               style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -2705,18 +2729,26 @@ export const ChatEditor = memo(
                       })
                     }
                   >
-                    {busy ? (
-                      <LoaderCircleIcon
-                        className={styles.uploadRowSpinner}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <UploadIcon aria-hidden="true" />
-                    )}
-                    <span className={styles.uploadRowName}>
+                    <FileTypeIcon
+                      name={upload.file.name}
+                      mimeType={upload.file.type}
+                      size={20}
+                      className={styles.uploadRowIcon}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className={styles.uploadRowName}
+                      title={upload.file.name}
+                    >
                       {upload.file.name}
                     </span>
                     <span className={styles.uploadRowStatus}>
+                      {busy && (
+                        <LoaderCircleIcon
+                          className={styles.uploadRowSpinner}
+                          aria-hidden="true"
+                        />
+                      )}
                       {uploadStatusText(upload)}
                     </span>
                   </button>
@@ -2967,16 +2999,10 @@ export const ChatEditor = memo(
                             })
                           }
                         >
-                          <FileTypeIcon
+                          <FileAttachmentContent
                             name={file.name}
                             mimeType={file.media_type}
-                            size={14}
-                            className={styles.fileChipIcon}
-                            aria-hidden="true"
                           />
-                          <span className={styles.fileChipName}>
-                            {file.name}
-                          </span>
                         </button>
                         <button
                           type="button"
@@ -3112,6 +3138,7 @@ export const ChatEditor = memo(
                       disabled={disabled}
                       availabilityKey={JSON.stringify([
                         fileUploadEnabled === false,
+                        attachmentsEnabled,
                         uploadEnabled,
                         Boolean(
                           core.workspaceActionsRef.current?.globWorkspace ??
@@ -3126,9 +3153,7 @@ export const ChatEditor = memo(
                         ),
                         Boolean(skills?.length),
                       ])}
-                      addFileAvailable={
-                        attachmentsEnabled && fileUploadEnabled !== false
-                      }
+                      addFileAvailable={attachmentsEnabled}
                       uploadAvailable={uploadEnabled}
                       onAddFiles={handleAddMenuFiles}
                       onFilePickerCancel={focusComposer}

@@ -2154,13 +2154,12 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: 240px;
-  padding: 4px 8px;
+  box-sizing: border-box;
+  width: 272px;
+  max-width: 100%;
+  padding: 8px 32px 8px 8px;
   border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 16px;
+  border-radius: 16px;
   color: var(--chat-editor-text-primary);
 }
 
@@ -2176,8 +2175,9 @@
 .fileChipPreview {
   display: inline-flex;
   min-width: 0;
+  width: 100%;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -2190,25 +2190,15 @@
   cursor: default;
 }
 
-.fileChipIcon {
-  flex: 0 0 auto;
-  color: var(--chat-editor-text-secondary, currentColor);
-}
-
-.fileChipName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .fileChipRemove {
   position: absolute;
-  top: 50%;
-  right: 4px;
+  top: 8px;
+  right: 8px;
   z-index: 1;
-  transform: translateY(-50%);
-  pointer-events: none;
+  width: 20px;
+  height: 20px;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .fileChip:hover .fileChipRemove:not(:disabled),
@@ -2341,22 +2331,16 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 10px;
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) 8%,
-    var(--chat-editor-bg-primary)
-  );
+  background: var(--chat-editor-bg-primary);
   color: var(--chat-editor-text-primary);
   font-size: 12px;
   line-height: 1.4;
-}
-
-.uploadRow[data-status='done'] {
-  border-color: color-mix(in srgb, var(--success-color) 24%, transparent);
-  background: var(--success-bg);
 }
 
 .uploadRow[data-status='error'] {
@@ -2387,11 +2371,25 @@
   font: inherit;
 }
 
+.uploadRowIcon {
+  flex: 0 0 auto;
+}
+
+.uploadRowName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
 .uploadRowPreview:disabled {
   cursor: default;
 }
 
-.uploadRow svg {
+.uploadRowAction svg,
+.uploadRowSpinner {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
@@ -2416,18 +2414,13 @@
   }
 }
 
-.uploadRowName {
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-}
-
 .uploadRowStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
-  flex: 1 1 auto;
+  max-width: 40%;
+  flex: 0 0 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2436,18 +2429,6 @@
 }
 
 .uploadRow[data-status='error'] .uploadRowStatus {
-  color: var(--error-color);
-}
-
-.uploadRow[data-status='done'] .uploadRowStatus {
-  color: var(--success-color);
-}
-
-.uploadRow[data-status='done'] .uploadRowPreview > svg {
-  color: var(--success-color);
-}
-
-.uploadRow[data-status='error'] .uploadRowPreview > svg {
   color: var(--error-color);
 }
 
@@ -2489,4 +2470,17 @@
   color: var(--chat-editor-text-primary);
   font-size: 13px;
   pointer-events: none;
+}
+
+.fileTag {
+  background: var(--chat-editor-bg-primary);
+  min-height: 28px;
+  border-radius: 8px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.fileTagIcon {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: var(--muted-foreground);
 }
