@@ -44,6 +44,7 @@ import {
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -334,6 +335,18 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
+const grammarSchemaValidationCache = new WeakMap<object, boolean>();
+
+function isStrictlyValidSchema(schema: object): boolean {
+  const cached = grammarSchemaValidationCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const valid = SchemaValidator.compileStrict(schema) === null;
+  grammarSchemaValidationCache.set(schema, valid);
+  return valid;
+}
+
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -373,6 +386,13 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const sourceSchema = func.parametersJsonSchema;
+            const canValidateLocally =
+              typeof sourceSchema === 'object' &&
+              sourceSchema !== null &&
+              !Array.isArray(sourceSchema) &&
+              !('$id' in sourceSchema) &&
+              isStrictlyValidSchema(sourceSchema);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -380,7 +400,10 @@ export async function convertLlmToolsToOpenAI(
             // mutually exclusive optional fields (Agent working_dir vs
             // isolation). Relax the wire schema; client-side
             // validateToolParams still enforces the source schema.
-            parameters = relaxSchemaForFunctionCalling(parameters);
+            parameters = relaxSchemaForFunctionCalling(
+              parameters,
+              canValidateLocally,
+            );
           }
 
           openAITools.push({
