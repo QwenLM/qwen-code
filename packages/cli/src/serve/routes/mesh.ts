@@ -281,21 +281,9 @@ export function registerMeshRoutes(
 
   for (const runtime of deps.workspaceRegistry.list()) {
     if (!runtime.trusted) continue;
-    void Promise.all([
-      readMeshAgents(runtime.workspaceCwd),
-      listThreads(runtime.workspaceCwd),
-    ])
-      .then(([agents, { threads }]) => {
-        if (
-          agents.length > 0 ||
-          threads.some(
-            (thread) =>
-              liveRunCount(thread) > 0 ||
-              thread.outbox.some((event) => event.status === 'pending'),
-          )
-        ) {
-          return dispatch(runtime);
-        }
+    void readMeshAgents(runtime.workspaceCwd)
+      .then((agents) => {
+        if (agents.length > 0) return dispatch(runtime);
       })
       .catch(() => {});
   }
@@ -899,7 +887,11 @@ export function registerMeshRoutes(
         });
         return;
       }
-      res.json({ id: created?.id });
+      const dispatchError = await startBookedRuns(runtime);
+      res.json({
+        id: created?.id,
+        ...(dispatchError ? { dispatchError } : {}),
+      });
     } catch (error) {
       fail(res, error);
     }
@@ -922,13 +914,17 @@ export function registerMeshRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        const dispatchError = await startBookedRuns(runtime);
+        const remainingAgents = await readMeshAgents(runtime.workspaceCwd);
+        const dispatchError =
+          remainingAgents.length > 0
+            ? await startBookedRuns(runtime)
+            : undefined;
         await deleteMeshAgentTranscripts(
           runtime.workspaceCwd,
           runtime.sessionRuntimeBaseDir,
           agentId,
         );
-        if ((await readMeshAgents(runtime.workspaceCwd)).length === 0) {
+        if (remainingAgents.length === 0) {
           owners.get(runtime.workspaceCwd)?.owner.stop();
           owners.delete(runtime.workspaceCwd);
           const workspace = await readMeshWorkspace(runtime.workspaceCwd);

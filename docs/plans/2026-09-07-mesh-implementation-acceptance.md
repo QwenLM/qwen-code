@@ -227,6 +227,9 @@ and removes that deterministic body's transcript and sidecar from every host
 session directory under the selected workspace runtime; historical thread posts
 keep their name snapshot. Removing the last identity also stops the owner,
 releases its workspace claim, and closes the now-unused hidden host session.
+Creating the first identity starts that host immediately; daemon startup only
+restores it for a non-empty roster, so retained notification events cannot
+resurrect a host after every identity was removed.
 The thread header also supports atomic human reassignment: changing the default
 assignee writes a structured assignment through admission without cancelling
 work already booked for another agent; choosing no assignee only clears the
