@@ -4831,7 +4831,7 @@ function promptSettledFromTurnEvent(
   const promptId = eventPromptId(event);
   if (!promptId) return undefined;
   if (event.type === 'turn_error') {
-    const data = isRecord(event.data) ? event.data : undefined;
+    const data = isRecord(event.data) ? event.data : {};
     const code = getString(data, 'code');
     return {
       sessionId,
@@ -4849,7 +4849,12 @@ function promptSettledFromTurnEvent(
   return {
     sessionId,
     promptId,
-    outcome: stopReason === 'cancelled' ? 'cancelled' : 'completed',
+    outcome:
+      stopReason === 'cancelled'
+        ? 'cancelled'
+        : stopReason === 'error'
+          ? 'failed'
+          : 'completed',
     stopReason,
   };
 }
@@ -5254,7 +5259,7 @@ export function useDaemonPromptSettled(
     () => subscribe?.((event) => listenerRef.current?.(event)),
     [subscribe],
   );
-  if (!subscribe) {
+  if (listener !== undefined && !subscribe) {
     throw new Error(
       'useDaemonPromptSettled must be used within DaemonSessionProvider',
     );

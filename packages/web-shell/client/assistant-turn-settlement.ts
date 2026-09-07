@@ -61,16 +61,18 @@ export function useAssistantTurnSettlementProjection(
 ): void {
   const store = useTranscriptStore();
   const connection = useConnection();
-  useDaemonPromptSettled((event) => {
-    if (!onAssistantTurnSettled) return;
-    onAssistantTurnSettled(
-      projectAssistantTurnSettlement(
-        event,
-        connection.sessionId,
-        store.getSnapshot().blocks,
-      ),
-    );
-  });
+  useDaemonPromptSettled(
+    onAssistantTurnSettled
+      ? (event) =>
+          onAssistantTurnSettled(
+            projectAssistantTurnSettlement(
+              event,
+              connection.sessionId,
+              store.getSnapshot().blocks,
+            ),
+          )
+      : undefined,
+  );
 }
 
 export function AssistantTurnSettlementObserver({
