@@ -35,6 +35,8 @@ export { decideDispatch, resolveTargets } from '${repo}/${src}/dispatch-policy.j
 export * from '${repo}/${src}/thread-actions.js';
 export { resolveThreadStatus } from '${repo}/${src}/thread-status.js';
 export * from '${repo}/${src}/run-lifecycle.js';
+export { runWithAgentRunContext, getAgentRunContext } from '${repo}/${src}/run-context.js';
+export { ThreadPostTool, ThreadReviewTool, ThreadReadTool } from '${repo}/packages/core/src/tools/thread-tools.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
@@ -610,6 +612,202 @@ ok(
     limits: { tokens: 10 },
   }).reason === 'token_budget_exhausted',
 );
+
+console.log('\n13. an agent actually posting, under a real run frame');
+// The break this whole review started from: the thread tools require an
+// ambient run frame, and deleting runtime-bridge.ts took the only production
+// call that established one. Reading could not tell me whether the
+// replacement works. This runs it.
+const cfg = { getProjectRoot: () => ROOT };
+const ws = await M.readAgentWorkspace(ROOT);
+await M.updateWorkspaceAgents(ROOT, () => [
+  { id: 'ag_p', name: 'pat', createdAt: 1 },
+  { id: 'ag_q', name: 'quinn', createdAt: 1 },
+  { id: 'ag_s', name: 'sam', createdAt: 1 },
+]);
+const wt2 = await M.createThread(ROOT, {
+  title: 'Real work',
+  assigneeAgentId: 'ag_p',
+});
+const bk = await M.postMessage(ROOT, wt2.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'start',
+});
+const wrid = bk.dispatched[0].id;
+await M.claimRun(ROOT, { threadId: wt2.id, runId: wrid });
+const frame = {
+  workspaceId: ws.workspaceId,
+  agentId: 'ag_p',
+  runId: wrid,
+  threadId: wt2.id,
+  rootThreadId: wt2.rootThreadId,
+  attempt: 1,
+};
+
+ok(
+  'a thread tool outside any frame refuses',
+  await (async () => {
+    const r = await new M.ThreadPostTool(cfg).buildAndExecute(
+      { text: 'x' },
+      new AbortController().signal,
+    );
+    return Boolean(r.error);
+  })(),
+  'it should not have been allowed to post',
+);
+
+const postRes = await M.runWithAgentRunContext(frame, () =>
+  new M.ThreadPostTool(cfg).buildAndExecute(
+    { text: 'Looking now.' },
+    new AbortController().signal,
+  ),
+);
+ok(
+  'inside its frame the agent posts',
+  !postRes.error,
+  JSON.stringify(postRes.error),
+);
+const afterPost = await M.readThread(ROOT, wt2.id);
+ok(
+  'the post is on the thread',
+  afterPost.messages.some((m) => m.text.includes('Looking now.')),
+);
+ok(
+  'and is attributed to the agent, not a person',
+  afterPost.messages.at(-1).from === 'ag_p' &&
+    afterPost.messages.at(-1).authorKind === 'agent',
+  afterPost.messages.at(-1).from,
+);
+ok(
+  'and carries the run that wrote it',
+  afterPost.messages.at(-1).sourceRunId === wrid,
+);
+
+const handoff = await M.runWithAgentRunContext(frame, () =>
+  new M.ThreadPostTool(cfg).buildAndExecute(
+    { text: 'over to you @quinn' },
+    new AbortController().signal,
+  ),
+);
+ok(
+  'a mention hands work to a peer',
+  !handoff.error,
+  JSON.stringify(handoff.error),
+);
+const afterHandoff = await M.readThread(ROOT, wt2.id);
+ok(
+  'which books a run for that peer',
+  afterHandoff.runs.some((r) => r.agentId === 'ag_q' && r.status === 'queued'),
+  JSON.stringify(afterHandoff.runs.map((r) => [r.agentId, r.status])),
+);
+
+const readRes = await M.runWithAgentRunContext(frame, () =>
+  new M.ThreadReadTool(cfg).buildAndExecute({}, new AbortController().signal),
+);
+ok(
+  'the agent can read its own thread',
+  !readRes.error,
+  JSON.stringify(readRes.error),
+);
+
+// pat is still running the thread above and the default maxConcurrentRuns is
+// 1, so pat cannot be claimed onto a second thread. That refusal is the
+// concurrency limit working, and it is worth asserting rather than tiptoeing
+// around — an earlier version of this section used pat here and read the
+// refusal as a bug in thread_review.
+const capT = await M.createThread(ROOT, {
+  title: 'Second',
+  assigneeAgentId: 'ag_p',
+});
+const capBk = await M.postMessage(ROOT, capT.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'also this',
+});
+ok(
+  'an agent already at its concurrency limit cannot be claimed again',
+  (await M.claimRun(ROOT, {
+    threadId: capT.id,
+    runId: capBk.dispatched[0].id,
+  })) === undefined,
+);
+
+// The review flow needs an idle agent and a thread with nothing else live: a
+// queued run counts as live, so a thread carrying a hand-off legitimately
+// reads in_progress.
+const rt = await M.createThread(ROOT, {
+  title: 'Review flow',
+  assigneeAgentId: 'ag_s',
+});
+const rbk = await M.postMessage(ROOT, rt.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'start',
+});
+const rrid = rbk.dispatched[0].id;
+await M.claimRun(ROOT, { threadId: rt.id, runId: rrid });
+const rframe = {
+  workspaceId: ws.workspaceId,
+  agentId: 'ag_s',
+  runId: rrid,
+  threadId: rt.id,
+  rootThreadId: rt.rootThreadId,
+  attempt: 1,
+};
+const reviewRes = await M.runWithAgentRunContext(rframe, () =>
+  new M.ThreadReviewTool(cfg).buildAndExecute(
+    { summary: 'Reproduced; the cause is a race.' },
+    new AbortController().signal,
+  ),
+);
+ok(
+  'handing back for review succeeds',
+  !reviewRes.error,
+  JSON.stringify(reviewRes.error),
+);
+const afterReview = await M.readThread(ROOT, rt.id);
+const own = afterReview.runs.find((r) => r.id === rrid);
+ok(
+  'the run closes as review',
+  own.closeKind === 'review',
+  String(own.closeKind),
+);
+// The close is two writes by design: the tool marks the run `finishing` and
+// records why, and the dispatcher writes the terminal status afterwards. An
+// earlier version of this assertion expected `in_review` straight after the
+// tool and blamed the resolver for the gap — a `finishing` run is still live,
+// so in_progress was the honest reading.
+ok(
+  'the tool leaves the run finishing, not terminal',
+  own.status === 'finishing',
+  own.status,
+);
+ok(
+  'and mid-close the thread still reads in_progress',
+  M.resolveThreadStatus({ thread: afterReview, hasLiveChildDependency: false })
+    .status === 'in_progress',
+);
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: rt.id,
+    runId: rrid,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+const settled = await M.readThread(ROOT, rt.id);
+ok(
+  'once the dispatcher closes it the thread reads in_review',
+  M.resolveThreadStatus({ thread: settled, hasLiveChildDependency: false })
+    .status === 'in_review',
+  M.resolveThreadStatus({ thread: settled, hasLiveChildDependency: false })
+    .status,
+);
+ok(
+  'and the review obligation is the one outstanding',
+  M.resolveThreadStatus({
+    thread: settled,
+    hasLiveChildDependency: false,
+  }).outstanding.some((o) => o.kind === 'review'),
+);
+ok('an agent cannot mark a thread done', afterReview.status !== 'done');
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
