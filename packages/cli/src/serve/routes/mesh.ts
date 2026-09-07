@@ -50,6 +50,7 @@ import {
   setMeshAgentEnabled,
   updateMeshAgents,
   updateThread,
+  withMeshStoreTransaction,
   resolveTargets,
   hasLiveDescendant,
   HUMAN_AUTHOR_ID,
@@ -914,75 +915,94 @@ export function registerMeshRoutes(
       const root = runtime.workspaceCwd;
       try {
         const threadId = String(req.params['id']);
-        const { threads } = await listThreads(root);
-        const target = threads.find((thread) => thread.id === threadId);
-        if (!target) {
+        const result = await withMeshStoreTransaction(
+          root,
+          async (transaction) => {
+            const { threads, unreadable } = await transaction.listThreads();
+            if (unreadable.length > 0) {
+              throw new Error(
+                `Cannot close a thread while records are unreadable: ${unreadable.join(', ')}.`,
+              );
+            }
+            const target = threads.find((thread) => thread.id === threadId);
+            if (!target) return { kind: 'thread_not_found' as const };
+            const byId = new Map(
+              threads.map((thread) => [thread.id, thread]),
+            );
+            const isDescendant = (candidate: Thread) => {
+              const seen = new Set<string>();
+              let parentId = candidate.parentThreadId;
+              while (parentId && !seen.has(parentId)) {
+                if (parentId === threadId) return true;
+                seen.add(parentId);
+                parentId = byId.get(parentId)?.parentThreadId;
+              }
+              return false;
+            };
+            const openDescendants = threads.filter(
+              (thread) => thread.status !== 'done' && isDescendant(thread),
+            );
+            if (openDescendants.length > 0) {
+              return {
+                kind: 'descendants_not_done' as const,
+                descendants: openDescendants.map((thread) => ({
+                  id: thread.id,
+                  title: thread.title,
+                })),
+              };
+            }
+            const now = Date.now();
+            const updated = await transaction.writeThread({
+              ...target,
+              status: 'done',
+              runs: target.runs.map((run) =>
+                run.status === 'queued'
+                  ? { ...run, status: 'cancelled' as const, endedAt: now }
+                  : run.status === 'running' || run.status === 'finishing'
+                    ? { ...run, status: 'cancelling' as const }
+                    : run,
+              ),
+              outbox:
+                target.parentThreadId &&
+                !target.outbox.some(
+                  (event) =>
+                    event.payload['event'] === 'child_done',
+                )
+                  ? [
+                      ...target.outbox,
+                      {
+                        id: generateEventId(),
+                        kind: 'parent_report' as const,
+                        payload: {
+                          event: 'child_done',
+                          threadId: target.id,
+                          parentThreadId: target.parentThreadId,
+                        },
+                        status: 'pending' as const,
+                        attempts: 0,
+                        createdAt: now,
+                      },
+                    ]
+                  : target.outbox,
+            });
+            return { kind: 'updated' as const, thread: updated };
+          },
+        );
+        if (result.kind === 'thread_not_found') {
           res.status(404).json({ error: 'thread_not_found' });
           return;
         }
-        const byId = new Map(threads.map((thread) => [thread.id, thread]));
-        const isDescendant = (candidate: Thread) => {
-          const seen = new Set<string>();
-          let parentId = candidate.parentThreadId;
-          while (parentId && !seen.has(parentId)) {
-            if (parentId === threadId) return true;
-            seen.add(parentId);
-            parentId = byId.get(parentId)?.parentThreadId;
-          }
-          return false;
-        };
-        const openDescendants = threads.filter(
-          (thread) => thread.status !== 'done' && isDescendant(thread),
-        );
-        if (openDescendants.length > 0) {
+        if (result.kind === 'descendants_not_done') {
           res.status(409).json({
             error: 'descendants_not_done',
-            descendants: openDescendants.map((thread) => ({
-              id: thread.id,
-              title: thread.title,
-            })),
+            descendants: result.descendants,
           });
           return;
         }
-        const now = Date.now();
-        const updated = await updateThread(root, threadId, (thread) => ({
-          ...thread,
-          status: 'done',
-          runs: thread.runs.map((run) =>
-            run.status === 'queued'
-              ? { ...run, status: 'cancelled' as const, endedAt: now }
-              : run.status === 'running' || run.status === 'finishing'
-                ? { ...run, status: 'cancelling' as const }
-                : run,
-          ),
-          outbox:
-            thread.parentThreadId &&
-            !thread.outbox.some(
-              (event) =>
-                event.payload['event'] === 'child_done' &&
-                event.status === 'pending',
-            )
-              ? [
-                  ...thread.outbox,
-                  {
-                    id: generateEventId(),
-                    kind: 'parent_report' as const,
-                    payload: {
-                      event: 'child_done',
-                      threadId: thread.id,
-                      parentThreadId: thread.parentThreadId,
-                    },
-                    status: 'pending' as const,
-                    attempts: 0,
-                    createdAt: now,
-                  },
-                ]
-              : thread.outbox,
-        }));
         const dispatchError = await startBookedRuns(runtime);
         res.json({
-          id: updated.id,
-          status: updated.status,
+          id: result.thread.id,
+          status: result.thread.status,
           ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {

@@ -204,7 +204,11 @@ that refuses live or queued work, so a booking cannot race the roster change.
 The thread header also supports atomic human reassignment: changing the default
 assignee writes a structured assignment through admission without cancelling
 work already booked for another agent; choosing no assignee only clears the
-future fallback.
+future fallback. Marking a thread done now scans its complete descendant tree,
+refuses live children, cancels its own work, and writes the terminal state in
+one workspace transaction, so a racing agent cannot create an open child after
+the check. Repeating the command does not enqueue another `child_done` report.
+This path was source-inspected only.
 
 ### Step 10 — Channel notifications
 

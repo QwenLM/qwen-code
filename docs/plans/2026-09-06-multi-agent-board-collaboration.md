@@ -792,6 +792,11 @@ has just completed. `failed` and `cancelled` are true terminal states: their
 unaccepted trigger ids remain audit evidence and are never turned into a new run
 by a later dispatcher sweep.
 
+The human `done` transition is one workspace transaction: it scans the full
+descendant tree, refuses any non-done child, marks the target terminal, and
+cancels its queued or active work while holding the same lock. It therefore
+cannot race a live agent creating a new child between validation and commit.
+
 ## 6. What an agent actually receives
 
 The thread frame is necessary but not a security boundary. A long-lived body may
