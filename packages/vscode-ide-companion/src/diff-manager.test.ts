@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 
 const executeCommand = vi.fn().mockResolvedValue(undefined);
 
@@ -209,9 +210,12 @@ describe('DiffManager permission diff dismissal', () => {
     });
     await manager.cancelDiff(lastOpenedRightUri() as never);
 
+    // The payload carries the normalized path `showDiff` stored, not the
+    // caller's argument, so derive the expectation from the same transform:
+    // on Windows `path.normalize('/workspace/foo.ts')` is '\workspace\foo.ts'.
     expect(closed).toHaveBeenCalledWith({
       permissionRequestId: 'req-1',
-      filePath: '/workspace/foo.ts',
+      filePath: path.normalize('/workspace/foo.ts'),
     });
   });
 
