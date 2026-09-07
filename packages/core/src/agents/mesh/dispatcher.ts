@@ -21,7 +21,9 @@
 import { assembleMeshPrompt } from './prompt.js';
 import {
   generateRunId,
+  isAgentAddressable,
   listThreads,
+  maxConcurrentRunsFor,
   readMeshAgents,
   readMeshWorkspace,
   reconcileThreadOutbox,
@@ -309,28 +311,50 @@ export function selectCandidates(
   agents: readonly MeshAgent[],
   threads: readonly Thread[],
 ): Candidate[] {
-  const byAgent = new Map<string, Candidate>();
-  const busy = new Set<string>();
+  // "Busy" is a count against each agent's own limit, not a flag. An agent
+  // owns a process now, so working two threads at once is a policy its
+  // `maxConcurrentRuns` sets; the default of 1 keeps the old behaviour for
+  // anyone who has not raised it.
+  const live = new Map<string, number>();
   for (const thread of threads) {
     for (const run of thread.runs) {
-      if (LIVE.has(run.status)) busy.add(run.agentId);
-    }
-  }
-  for (const thread of threads) {
-    if (thread.status === 'done') continue;
-    for (const run of thread.runs) {
-      if (run.status !== 'queued' || busy.has(run.agentId)) continue;
-      const agent = agents.find((candidate) => candidate.id === run.agentId);
-      if (!agent) continue;
-      const held = byAgent.get(run.agentId);
-      if (!held || run.queueSequence < held.run.queueSequence) {
-        byAgent.set(run.agentId, { agent, thread, run });
+      if (LIVE.has(run.status)) {
+        live.set(run.agentId, (live.get(run.agentId) ?? 0) + 1);
       }
     }
   }
-  return [...byAgent.values()].sort(
-    (a, b) => a.run.queueSequence - b.run.queueSequence,
-  );
+
+  const queued: Candidate[] = [];
+  for (const thread of threads) {
+    if (thread.status === 'done') continue;
+    for (const run of thread.runs) {
+      if (run.status !== 'queued') continue;
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      // A retired or disabled agent keeps its history and its name but takes
+      // no new work; the roster entry survives so its old posts still read.
+      if (!agent || !isAgentAddressable(agent)) continue;
+      queued.push({ agent, thread, run });
+    }
+  }
+
+  // One global FIFO, then fill each agent up to its remaining capacity. Sorting
+  // first is what keeps the order a workspace-wide queue rather than a
+  // per-agent one: an agent with room does not jump ahead of older work it
+  // could also have taken.
+  queued.sort((a, b) => a.run.queueSequence - b.run.queueSequence);
+  const taken: Candidate[] = [];
+  const room = new Map<string, number>();
+  for (const candidate of queued) {
+    const id = candidate.agent.id;
+    if (!room.has(id)) {
+      room.set(id, maxConcurrentRunsFor(candidate.agent) - (live.get(id) ?? 0));
+    }
+    const remaining = room.get(id)!;
+    if (remaining <= 0) continue;
+    room.set(id, remaining - 1);
+    taken.push(candidate);
+  }
+  return taken;
 }
 
 function actionFor(state: MeshBodyState): MeshStartAction | undefined {

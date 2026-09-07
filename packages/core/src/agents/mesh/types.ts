@@ -93,11 +93,35 @@ export interface MeshAgent {
   enabled?: boolean;
   createdAt: number;
   /**
+   * Set when a person deletes this agent. The entry stays so every post it
+   * made keeps its author — those posts are evidence other agents reasoned
+   * from — but it stops being addressable and reads `offline`.
+   */
+  retiredAt?: number;
+  /**
    * The background agent carrying this identity's long-lived body, once it has
    * been started. Its transcript is this agent's memory across every thread.
    * Absent until the first dispatch.
    */
-  backgroundAgentId?: string;
+  /**
+   * Where this identity's body runs.
+   *
+   * A discriminated union from the first version so a remote or cloud runtime
+   * can be added without a migration, matching Multica's `runtime_mode`. Local
+   * means one session process on this machine; `sessionId` is absent until it
+   * has been started, and is the only handle anything needs to reach the body.
+   */
+  runtime?: { mode: 'local'; sessionId?: string };
+  /**
+   * How many threads this agent may work at once. Absent means 1.
+   *
+   * Multica's `max_concurrent_tasks`. Serial was a consequence of an agent
+   * being a subagent that owned one chat inside a shared process; with a
+   * process of its own it is a policy. Distinct from {@link queueLimit}, which
+   * bounds how much may *wait* — throughput and backlog are different
+   * questions.
+   */
+  maxConcurrentRuns?: number;
   /**
    * Runtime carrying this identity. V1 also keeps the local
    * `backgroundAgentId`; later runtime adapters bind through this generic id.
@@ -113,6 +137,21 @@ export interface MeshAgent {
  * while it waits. `done` is deliberately a human's call — an agent may push a
  * thread to `in_review`, never past it.
  */
+/**
+ * What a person sees beside an agent's name.
+ *
+ * Derived, never stored: the body's liveness is the runtime's fact, and a
+ * stored copy would be wrong every time a process died without saying so.
+ * `offline` is the honest reading of "no session", which is also what a
+ * retired agent reports.
+ */
+export type MeshAgentStatus =
+  | 'offline'
+  | 'idle'
+  | 'working'
+  | 'blocked'
+  | 'error';
+
 export type ThreadStatus =
   | 'open'
   | 'in_progress'

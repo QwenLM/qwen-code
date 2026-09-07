@@ -155,6 +155,20 @@ export function isValidAgentName(value: unknown): value is string {
   return typeof value === 'string' && AGENT_NAME_PATTERN.test(value);
 }
 
+/**
+ * Absent is valid: an agent that has never been started has no body yet. A
+ * half-written binding is not — it would name a session that may not exist,
+ * and the dispatcher would treat a stale handle as a live one.
+ */
+function isValidAgentRuntime(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (value['mode'] !== 'local') return false;
+  return (
+    value['sessionId'] === undefined || isNonEmptyString(value['sessionId'])
+  );
+}
+
 function isValidAgent(value: unknown): value is MeshAgent {
   if (!isRecord(value)) return false;
   return (
@@ -173,6 +187,11 @@ function isValidAgent(value: unknown): value is MeshAgent {
     (value['enabled'] === undefined || typeof value['enabled'] === 'boolean') &&
     (value['backgroundAgentId'] === undefined ||
       isNonEmptyString(value['backgroundAgentId'])) &&
+    (value['retiredAt'] === undefined ||
+      isFiniteTimestamp(value['retiredAt'])) &&
+    (value['maxConcurrentRuns'] === undefined ||
+      isPositiveInteger(value['maxConcurrentRuns'])) &&
+    isValidAgentRuntime(value['runtime']) &&
     (value['runtimeId'] === undefined || isNonEmptyString(value['runtimeId']))
   );
 }
@@ -1199,6 +1218,23 @@ export function findAgentByName(
 
 export function isAgentEnabled(agent: MeshAgent): boolean {
   return agent.enabled !== false;
+}
+
+/** How many threads this agent may work at once. Absent means one. */
+export function maxConcurrentRunsFor(agent: MeshAgent): number {
+  return agent.maxConcurrentRuns ?? 1;
+}
+
+/**
+ * Whether this identity can still be given work.
+ *
+ * Retired and disabled are different refusals with the same answer here, and
+ * both are kept apart from "unknown": a retired agent's name still resolves, so
+ * a post that mentions it gets `agent_disabled` and a person is told the agent
+ * is gone rather than that they mistyped.
+ */
+export function isAgentAddressable(agent: MeshAgent): boolean {
+  return agent.retiredAt === undefined && agent.enabled !== false;
 }
 
 export function queueLimitFor(agent: MeshAgent): number {

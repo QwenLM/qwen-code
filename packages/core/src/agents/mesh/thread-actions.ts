@@ -10,6 +10,8 @@ import {
   prepareThreadInTransaction,
   withMeshStoreTransaction,
   type MeshStoreTransaction,
+  isAgentAddressable,
+  maxConcurrentRunsFor,
 } from './mesh-store.js';
 import { mentionToken, parseMentions } from './mentions.js';
 import {
@@ -506,17 +508,29 @@ export async function claimRun(
         `Cannot claim a run while thread records are unreadable: ${unreadable.join(', ')}.`,
       );
     }
-    const alreadyLive = threads.some((candidate) =>
-      candidate.runs.some(
-        (run) =>
-          run.id !== target.id &&
-          run.agentId === target.agentId &&
-          (run.status === 'running' ||
-            run.status === 'finishing' ||
-            run.status === 'cancelling'),
-      ),
+    // The last line of defence against an agent taking more work than it can
+    // hold. The dispatcher checks the same limit when it selects, but that read
+    // happens outside this lock, so two passes could both decide there was room
+    // for the same slot. Counting here, under the lock, is what makes the limit
+    // a property rather than a hope.
+    const liveElsewhere = threads.reduce(
+      (count, candidate) =>
+        count +
+        candidate.runs.filter(
+          (run) =>
+            run.id !== target.id &&
+            run.agentId === target.agentId &&
+            (run.status === 'running' ||
+              run.status === 'finishing' ||
+              run.status === 'cancelling'),
+        ).length,
+      0,
     );
-    if (alreadyLive) return undefined;
+    const agent = (await transaction.readAgents()).find(
+      (candidate) => candidate.id === target.agentId,
+    );
+    if (!agent || !isAgentAddressable(agent)) return undefined;
+    if (liveElsewhere >= maxConcurrentRunsFor(agent)) return undefined;
 
     const claimed: ThreadRun = {
       ...target,
