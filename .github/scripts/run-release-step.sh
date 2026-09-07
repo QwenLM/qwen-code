@@ -133,6 +133,10 @@ case "${step}" in
       # Keep the write credential unavailable until the push step needs it.
       export GH_TOKEN="${CI_BOT_PAT}"
       gh auth setup-git
+      # Guard exit codes: 0 unreleased, 2 probe failure (the only retryable
+      # one), 3 already shipped, 4 malformed version. Anything but 2 breaks
+      # out on the first attempt so a decisive refusal is not logged three
+      # times as a connectivity problem.
       for attempt in 1 2 3; do
         guard_status=0
         node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}" || guard_status=$?

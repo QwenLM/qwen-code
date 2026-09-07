@@ -2239,8 +2239,8 @@ describe('release workflow', () => {
     // pinned too: notify_failure's refusal gate reads the guard's exit
     // code through it, and the retry loop is pinned around the call:
     // GUARD_STATUS is reset each attempt and only exit 2 (a probe
-    // failure) retries — exit 0 and exit 3 stay decisive on the first
-    // attempt.
+    // failure) retries — exit 0, exit 3 (already shipped) and exit 4
+    // (malformed version) all stay decisive on the first attempt.
     const releaseBranchStep = releaseYaml.jobs.publish.steps.find(
       (step) => step.id === 'release_branch',
     );
