@@ -91,11 +91,7 @@ async function continueCompleted(
 ): Promise<MeshStartResult> {
   const registry = config.getBackgroundTaskRegistry();
   const agentId = meshBackgroundAgentId(agent);
-  const outcome = registry.continueResidentAgent(
-    agentId,
-    prompt,
-    deliveryId,
-  );
+  const outcome = registry.continueResidentAgent(agentId, prompt, deliveryId);
   if (outcome === 'continued') {
     return {
       status: 'started',
@@ -159,6 +155,18 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
   return {
     async inspect(agent) {
       return inspectBody(config, agent);
+    },
+    async deliver({ agent, text, deliveryId }) {
+      // Structured input, not the plain string path: only the structured form
+      // carries a delivery id, and the id is what lets the drain event be
+      // matched back to this run rather than guessed at from the text.
+      return config
+        .getBackgroundTaskRegistry()
+        .queueExternalInput(meshBackgroundAgentId(agent), {
+          kind: 'message',
+          text,
+          deliveryId,
+        });
     },
     async start({
       action,

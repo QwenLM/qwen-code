@@ -96,6 +96,9 @@ Writing the production port corrected the design's four-branch idle path to thre
 
 **Local demo recipe (needs a build-capable machine and a model key).** `qwen serve`, then `POST /mesh/agents` twice (alice, bob — each `agentType` an existing read-only definition), then `POST /mesh/threads` with a body and `assignee: "alice"`. Within one keepalive interval the daemon spawns the hidden host; within 2 s the host's supervisor launches alice. Watch `Agents → Shared threads` in Web Shell (#11260) for the run row, alice's `thread_create` of a child for bob, her `thread_wait`, bob's `thread_review`, the parent report waking alice, and both threads reaching `in_review`. `qwen serve --debug` shows `MESH_SUPERVISOR` ticks.
 
+**Mid-run steering landed, ahead of step 8.** It was scheduled with the reliability work, which left the system's one advantage over Multica unbuilt while the path through it looked supported: a post into a running turn was coalesced onto the run, charged, and then never delivered or rebooked. The dispatcher now pushes pending triggers into a running body through `queueExternalInput` with the run id as the delivery id, records them as accepted (not consumed — the drain event still commits), and the terminal write rebooks anything the run was told to answer and never read. Human and system triggers are replayed; an agent-authored post that missed is not, because its author is still on the thread and the turn gate exists to stop two agents re-triggering each other.
+Observed: `src/agents/mesh/` 14 files / 144 tests, including steering a running agent, a refused delivery rebooked at finish, a consumed trigger not replayed, an agent post not replayed, and no rebook onto a `done` thread.
+
 ### Step 7 — Live vertical slice (first integration gate)
 
 Lands: normally nothing; the first run may carry only defects that directly

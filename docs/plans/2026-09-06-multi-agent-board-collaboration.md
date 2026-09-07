@@ -655,9 +655,12 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    Alice body continued and closed the root `review`. The first continuation
    attempt exposed and fixed the sidecar storage-root mismatch described in
    §0.2.
-8. **Dispatcher reliability** — direct running delivery,
-   acceptance recording, completion reconciliation, launch failure, done/
-   cancellation, restart and stall recovery, and full outbox replay.
+8. **Dispatcher reliability** — launch failure, done/cancellation, restart and
+   stall recovery, and full outbox replay. Direct running delivery, acceptance
+   recording and unconsumed-trigger reconciliation moved ahead of step 7: they
+   are what "a person can interject at any moment" means, and until they
+   existed a post into a running turn was recorded on the run and then
+   silently dropped — the one failure this design says it will not have.
 9. **REST routes and Web Shell** — roster, thread list/view, busy reason, gates,
    failures, cancellation, and transcript slices; absorb #11140's entry.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate

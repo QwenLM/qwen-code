@@ -30,6 +30,7 @@ import {
 } from './mesh-store.js';
 import { finishRunInTransaction, hasLiveDescendant } from './run-lifecycle.js';
 import {
+  acceptRunDelivery,
   bindRunSession,
   claimRun,
   postMessageInTransaction,
@@ -73,6 +74,21 @@ export type MeshStartResult =
 
 export interface MeshDispatchPort {
   inspect(agent: MeshAgent): Promise<MeshBodyState>;
+  /**
+   * Pushes input into a turn that is already executing, returning whether the
+   * runtime queue took it. `false` is a delivery miss, not a failure: the run
+   * is finishing, or the body moved. The terminal write rebooks what was
+   * missed, so a refusal costs latency and never a message.
+   *
+   * Optional so a port that cannot reach a live body — a future remote
+   * runtime — degrades to "wait for the next run" instead of failing.
+   */
+  deliver?(input: {
+    agent: MeshAgent;
+    text: string;
+    /** Correlates the drain event back to this run. */
+    deliveryId: string;
+  }): Promise<boolean>;
   start(input: {
     action: MeshStartAction;
     agent: MeshAgent;
@@ -90,6 +106,8 @@ export interface MeshDispatchPort {
 
 export type DispatchResultKind =
   | 'started'
+  | 'delivered_mid_run'
+  | 'delivery_race'
   | 'busy_other_thread'
   | 'capacity_wait'
   | 'launch_failed'
@@ -179,6 +197,51 @@ export async function dispatchOnce(
   const agents = await readMeshAgents(projectRoot);
   const { threads } = await listThreads(projectRoot);
   const records: DispatchRecord[] = [];
+
+  // Steering first. A person posting while their agent is mid-turn is the one
+  // thing this system does that Multica cannot, and it is worth nothing if the
+  // message waits for the run to end. Everything not taken here is rebooked by
+  // the terminal write, so this pass is pure latency.
+  for (const thread of threads) {
+    if (thread.status === 'done') continue;
+    for (const run of thread.runs) {
+      if (run.status !== 'running') continue;
+      const accepted = new Set(run.acceptedMessageIds);
+      const pending = thread.messages.filter(
+        (message) =>
+          run.triggerMessageIds.includes(message.id) &&
+          !accepted.has(message.id) &&
+          message.sequence > (run.contextThroughSequence ?? 0),
+      );
+      if (pending.length === 0) continue;
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      if (!agent || !port.deliver) continue;
+      const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
+      const text = pending
+        .map(
+          (message) =>
+            `[${message.sequence} · ${message.authorKind}/${message.authorNameSnapshot}] ${message.text}`,
+        )
+        .join('\n\n');
+      const took = await port.deliver({
+        agent,
+        text,
+        deliveryId: run.id,
+      });
+      if (!took) {
+        records.push({ ...base, kind: 'delivery_race' });
+        continue;
+      }
+      await acceptRunDelivery(projectRoot, {
+        threadId: thread.id,
+        runId: run.id,
+        agentId: agent.id,
+        attempt: run.attempts,
+        throughSequence: pending[pending.length - 1]!.sequence,
+      });
+      records.push({ ...base, kind: 'delivered_mid_run' });
+    }
+  }
 
   for (const candidate of selectCandidates(agents, threads)) {
     const { agent, thread, run } = candidate;

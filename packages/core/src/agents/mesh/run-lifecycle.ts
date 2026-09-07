@@ -24,6 +24,7 @@
 import {
   generateEventId,
   generateMessageId,
+  generateRunId,
   withMeshStoreTransaction,
   type MeshStoreTransaction,
 } from './mesh-store.js';
@@ -375,6 +376,56 @@ export async function applyAggregateStatus(
  * A run that already reached a terminal state is left alone so a late
  * completion cannot overwrite a cancellation.
  */
+/**
+ * Books a fresh run for whatever this one was told to answer but never read.
+ *
+ * A message can be attached to a run and never reach the model: it was
+ * coalesced into a run that was already executing and the runtime queue
+ * refused it, or accepted it after the final drain, or the process died in
+ * between. Delivery is at-least-once by design — a duplicate is acceptable and
+ * silent loss is not — so the terminal write is where the difference is
+ * settled, because it is the last moment at which "this run will never read
+ * it" becomes true.
+ *
+ * Only human- and system-authored triggers are rebooked. An agent-authored
+ * post that missed its target is already covered: the author is still on the
+ * thread and the turn gate exists to stop two agents re-triggering each other
+ * forever, so replaying one would spend budget to repeat a conversation
+ * nobody is waiting on.
+ */
+function rebookUnconsumedTriggers(
+  thread: Thread,
+  run: ThreadRun,
+  now: number,
+  nextQueueSequence: () => number,
+): Thread {
+  if (thread.status === 'done') return thread;
+  const consumed = new Set(run.consumedMessageIds);
+  const missed = run.triggerMessageIds
+    .filter((id) => !consumed.has(id))
+    .map((id) => thread.messages.find((message) => message.id === id))
+    .filter(
+      (message): message is ThreadMessage =>
+        message !== undefined && message.authorKind !== 'agent',
+    );
+  if (missed.length === 0) return thread;
+  // One run answers all of them, the same way admission coalesces: the agent
+  // reads a window, not a message at a time.
+  const rebooked: ThreadRun = {
+    id: generateRunId(),
+    agentId: run.agentId,
+    status: 'queued',
+    triggerMessageIds: missed.map((message) => message.id),
+    acceptedMessageIds: [],
+    consumedMessageIds: [],
+    usageByRound: [],
+    queueSequence: nextQueueSequence(),
+    queuedAt: now,
+    attempts: 0,
+  };
+  return { ...thread, runs: [...thread.runs, rebooked] };
+}
+
 export async function finishRunInTransaction(
   transaction: MeshStoreTransaction,
   input: {
@@ -391,6 +442,7 @@ export async function finishRunInTransaction(
   const now = input.now ?? Date.now();
   const thread = await transaction.readThread(input.threadId);
   if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+  let sequence = await transaction.allocateRunSequence();
 
   let next: Thread = {
     ...thread,
@@ -417,6 +469,18 @@ export async function finishRunInTransaction(
         : run,
     ),
   };
+
+  const finished = next.runs.find((run) => run.id === input.runId);
+  if (finished) {
+    next = rebookUnconsumedTriggers(
+      next,
+      finished,
+      now,
+      // Allocated from the workspace counter so the rebooked run takes its
+      // place in the same global FIFO as any other.
+      () => sequence++,
+    );
+  }
 
   next = await applyAggregateStatus(transaction, next, now);
   return transaction.writeThread(next);

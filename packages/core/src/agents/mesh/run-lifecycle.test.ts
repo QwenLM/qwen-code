@@ -318,6 +318,111 @@ describe('mesh run lifecycle', () => {
     ).toBe(true);
   });
 
+  it('does not rebook a trigger the run actually read', async () => {
+    const thread = await seed({
+      runs: [
+        run({
+          triggerMessageIds: ['ms_seen'],
+          consumedMessageIds: ['ms_seen'],
+        }),
+      ],
+      messages: [
+        {
+          id: 'ms_seen',
+          sequence: 1,
+          authorKind: 'human',
+          from: HUMAN_AUTHOR_ID,
+          authorNameSnapshot: 'user',
+          text: 'have a look',
+          mentions: [],
+          outcomes: [],
+          at: 1,
+        },
+      ],
+      nextMessageSequence: 2,
+    });
+
+    const finished = await finish(thread.id, 'rn_alice', {
+      status: 'completed',
+    });
+
+    expect(finished.runs.filter((entry) => entry.status === 'queued')).toEqual(
+      [],
+    );
+  });
+
+  it('does not replay an agent post that missed, only a person or the system', async () => {
+    // The author is still on the thread and the turn gate exists to stop two
+    // agents re-triggering each other, so replaying one would spend budget to
+    // repeat a conversation nobody is waiting on.
+    const thread = await seed({
+      runs: [run({ triggerMessageIds: ['ms_agent', 'ms_human'] })],
+      messages: [
+        {
+          id: 'ms_agent',
+          sequence: 1,
+          authorKind: 'agent',
+          from: BOB.id,
+          authorNameSnapshot: 'bob',
+          text: 'over to you',
+          mentions: [],
+          outcomes: [],
+          at: 1,
+        },
+        {
+          id: 'ms_human',
+          sequence: 2,
+          authorKind: 'human',
+          from: HUMAN_AUTHOR_ID,
+          authorNameSnapshot: 'user',
+          text: 'check the retry logic',
+          mentions: [],
+          outcomes: [],
+          at: 2,
+        },
+      ],
+      nextMessageSequence: 3,
+    });
+
+    const finished = await finish(thread.id, 'rn_alice', {
+      status: 'completed',
+    });
+    const rebooked = finished.runs.filter((entry) => entry.status === 'queued');
+
+    expect(rebooked).toHaveLength(1);
+    expect(rebooked[0]?.triggerMessageIds).toEqual(['ms_human']);
+    expect(rebooked[0]?.agentId).toBe(ALICE.id);
+  });
+
+  it('does not rebook onto a thread a person already closed', async () => {
+    const thread = await seed({
+      status: 'done',
+      runs: [run({ triggerMessageIds: ['ms_late'] })],
+      messages: [
+        {
+          id: 'ms_late',
+          sequence: 1,
+          authorKind: 'human',
+          from: HUMAN_AUTHOR_ID,
+          authorNameSnapshot: 'user',
+          text: 'one more thing',
+          mentions: [],
+          outcomes: [],
+          at: 1,
+        },
+      ],
+      nextMessageSequence: 2,
+    });
+
+    const finished = await finish(thread.id, 'rn_alice', {
+      status: 'completed',
+    });
+
+    expect(finished.runs.filter((entry) => entry.status === 'queued')).toEqual(
+      [],
+    );
+  });
+
   it('leaves a thread in_progress while another run is still live', async () => {
     const thread = await seed({
       runs: [

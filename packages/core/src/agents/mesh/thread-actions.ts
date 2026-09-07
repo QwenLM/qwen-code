@@ -519,6 +519,68 @@ export async function bindRunSession(
   });
 }
 
+export interface AcceptRunDeliveryInput {
+  threadId: string;
+  runId: string;
+  agentId: string;
+  attempt: number;
+  /** Highest sequence the runtime queue has now been given. */
+  throughSequence: number;
+}
+
+/**
+ * Records that the runtime accepted input for a run that is already executing.
+ *
+ * Acceptance is not consumption. The queue took it; the model has not seen it
+ * yet, and the correlated drain event is what commits the watermark. So this
+ * writes `acceptedMessageIds` and extends the run's context window — which is
+ * what the drain event then commits — and deliberately does not touch
+ * `consumedMessageIds` or `deliveryByAgent`.
+ */
+export async function acceptRunDelivery(
+  projectRoot: string,
+  input: AcceptRunDeliveryInput,
+): Promise<Thread> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+    const run = thread.runs.find((entry) => entry.id === input.runId);
+    if (
+      !run ||
+      run.agentId !== input.agentId ||
+      run.attempts !== input.attempt ||
+      run.status !== 'running'
+    ) {
+      throw new Error(
+        `Run "${input.runId}" is not the running attempt on thread "${input.threadId}".`,
+      );
+    }
+    const previous = run.contextThroughSequence ?? 0;
+    if (input.throughSequence <= previous) return thread;
+    const accepted = thread.messages
+      .filter(
+        (message) =>
+          message.sequence > previous &&
+          message.sequence <= input.throughSequence,
+      )
+      .map((message) => message.id);
+    return transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              acceptedMessageIds: Array.from(
+                new Set([...entry.acceptedMessageIds, ...accepted]),
+              ),
+              contextThroughSequence: input.throughSequence,
+            }
+          : entry,
+      ),
+    });
+  });
+}
+
 export async function consumeRunDelivery(
   projectRoot: string,
   context: MeshRunContext,

@@ -83,19 +83,27 @@ function port(
     state?: MeshBodyState;
     result?: MeshStartResult;
   } = {},
-): MeshDispatchPort & { start: ReturnType<typeof vi.fn> } {
+): MeshDispatchPort & {
+  start: ReturnType<typeof vi.fn>;
+  deliver: ReturnType<typeof vi.fn>;
+} {
   const start = vi.fn(
     async () =>
       overrides.result ?? ({ status: 'started', sessionId: 'se_1' } as const),
   );
+  const deliver = vi.fn(overrides.deliver ?? (async () => true));
   return {
     inspect:
       overrides.inspect ?? (async () => overrides.state ?? { kind: 'absent' }),
     start,
+    deliver,
     ...(overrides.definitionVersion
       ? { definitionVersion: overrides.definitionVersion }
       : {}),
-  } as MeshDispatchPort & { start: ReturnType<typeof vi.fn> };
+  } as MeshDispatchPort & {
+    start: ReturnType<typeof vi.fn>;
+    deliver: ReturnType<typeof vi.fn>;
+  };
 }
 
 async function seedQueued(overrides: Partial<Thread> = {}): Promise<Thread> {
@@ -279,6 +287,95 @@ describe('dispatchOnce', () => {
     expect(driver.start).not.toHaveBeenCalled();
     const stored = await readThread(PROJECT_ROOT, thread.id);
     expect(stored!.runs[0]?.status).toBe('queued');
+  });
+
+  it('steers a running agent instead of making the person wait for its turn', async () => {
+    // The one thing this system does that Multica cannot. It is worth nothing
+    // if the message waits for the run to end.
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'have a look',
+    });
+    // A launch prompt is in the model's history when start returns, which is
+    // what `consumedOnStart` records; only the steer is still outstanding.
+    const driver = port({
+      result: { status: 'started', sessionId: 'se_1', consumedOnStart: true },
+    });
+    await dispatchOnce(PROJECT_ROOT, driver);
+
+    const steer = await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'check the retry logic first',
+    });
+    const records = await dispatchOnce(PROJECT_ROOT, driver);
+
+    expect(records).toContainEqual({
+      agentId: ALICE.id,
+      threadId: thread.id,
+      runId: 'rn_1',
+      kind: 'delivered_mid_run',
+    });
+    const delivered = driver.deliver.mock.calls[0]![0];
+    expect(delivered.text).toContain('check the retry logic first');
+    // The delivery id is what lets the drain event be matched back to this
+    // run rather than guessed at from the text.
+    expect(delivered.deliveryId).toBe('rn_1');
+
+    const stored = await readThread(PROJECT_ROOT, thread.id);
+    const live = stored!.runs.find((entry) => entry.id === 'rn_1')!;
+    expect(live.acceptedMessageIds).toContain(steer.message.id);
+    // Accepted is not consumed: the queue took it, the model has not read it.
+    // The drain event is what commits, and this fake never emits one.
+    expect(live.consumedMessageIds).not.toContain(steer.message.id);
+
+    // Nothing is delivered twice.
+    await dispatchOnce(PROJECT_ROOT, driver);
+    expect(driver.deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebooks a steer the runtime refused, so it is late and never lost', async () => {
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'have a look',
+    });
+    const refusing = port({
+      deliver: async () => false,
+      result: { status: 'started', sessionId: 'se_1', consumedOnStart: true },
+    });
+    await dispatchOnce(PROJECT_ROOT, refusing);
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'check the retry logic first',
+    });
+
+    const records = await dispatchOnce(PROJECT_ROOT, refusing);
+    expect(records).toContainEqual({
+      agentId: ALICE.id,
+      threadId: thread.id,
+      runId: 'rn_1',
+      kind: 'delivery_race',
+    });
+
+    // The terminal write is the last moment at which "this run will never read
+    // it" becomes true, so that is where the miss is settled.
+    await withMeshStoreTransaction(PROJECT_ROOT, (transaction) =>
+      finishRunInTransaction(transaction, {
+        threadId: thread.id,
+        runId: 'rn_1',
+        outcome: { status: 'completed' },
+      }),
+    );
+    const stored = await readThread(PROJECT_ROOT, thread.id);
+    const rebooked = stored!.runs.filter((entry) => entry.status === 'queued');
+    expect(rebooked).toHaveLength(1);
+    expect(rebooked[0]!.triggerMessageIds).toHaveLength(1);
+    expect(
+      stored!.messages.find(
+        (message) => message.id === rebooked[0]!.triggerMessageIds[0],
+      )?.text,
+    ).toBe('check the retry logic first');
   });
 
   it('delivers a child review to its parent exactly once across replays', async () => {
