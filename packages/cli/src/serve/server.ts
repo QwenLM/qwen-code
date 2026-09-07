@@ -147,6 +147,7 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { registerMeshRoutes } from './routes/mesh.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -3134,6 +3135,8 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+
+  registerMeshRoutes(app, { workspaceRegistry, mutate });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron

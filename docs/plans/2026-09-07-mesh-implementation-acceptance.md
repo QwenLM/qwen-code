@@ -132,6 +132,32 @@ Lands: routes for agents, threads, posts, runs; roster, thread list, thread view
 Gate: Playwright visuals for roster, thread view with two agents' posts attributed by name snapshot, a `blocked` thread with its question, and a run slice rendered from `transcriptStartOffset..EndOffset` showing only that run; deleting an agent keeps old posts readable with the tombstoned name.
 Evidence: screenshots from the visuals config, in CI.
 
+**Demo-path observation (2026-09-07).** A real `qwen serve` daemon and Web
+Shell created two fresh persistent identities and an assigned root thread from
+the Agents page. `alice-demo` created one child for `bob-demo`, closed
+`waiting`, received the durable child report, resumed the same body, and closed
+the root `review`. `bob-demo` closed the child `review`. The page updated from
+the resolver reason while the runs were active and finished with the root in
+`in_review`, Alice's two past runs collapsed behind their count, and Alice's
+attributed result visible in the ledger. The tree accounted 186,317 of 200,000
+tokens.
+
+The first browser-driven attempt exposed an actual prompt failure: agents put
+peer mentions in ordinary result prose, which booked unintended runs back and
+forth and exhausted the tree budget before the parent could resume. The turn
+envelope now states that an at-sign address books work, forbids it in status or
+result prose unless another wake is intended, and states that child completion
+already reports to the parent. A fresh run with that wording completed without
+the extra bookings. A separate draft containing the literal word `@mentions`
+was correctly rejected as an unknown agent name; creation-time routing preview
+is not implemented yet.
+
+This proves the roster/create/list/detail/reply-preview and live-dispatch demo
+path only. Cancellation, transcript-slice reading, tombstoned-agent visuals,
+the blocked-question visual, and CI screenshots remain open, so the full
+step-9 gate is not claimed. No local unit tests, lint, typecheck, or build were
+run for this demo-first slice.
+
 ### Step 10 — Channel notifications
 
 Lands: four events to the channel workers.

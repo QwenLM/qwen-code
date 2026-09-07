@@ -230,6 +230,7 @@ import type {
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
+  BridgeMeshDispatchRecord,
   BridgeMeshAgentLaunchResult,
 } from './bridgeTypes.js';
 import {
@@ -12366,6 +12367,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch,
         { agentId, prompt },
       );
+    },
+
+    async dispatchMeshRuns(sessionId) {
+      const result = await requestSessionStatus<{
+        records: BridgeMeshDispatchRecord[];
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch);
+      return result.records;
     },
 
     async controlSessionWorkflowTask(sessionId, taskId, action, context) {

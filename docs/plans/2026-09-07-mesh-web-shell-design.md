@@ -3,7 +3,7 @@
 > For §5.2 step 9, written before any UI exists so the build does not start from a blank page or from whichever list component was nearest to hand.
 > Grounded in Multica's shipped UI, read at `multica-ai/multica@7a438bd5b`: `packages/views/issues/components/{issue-detail,execution-log-section,comment-trigger-chips,thread-nav-panel}.tsx` and `packages/views/issues/blocked-trigger-copy.ts`. Where this design diverges from theirs, the reason is stated.
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) and [`2026-09-07-mesh-implementation-acceptance.md`](./2026-09-07-mesh-implementation-acceptance.md).
-> Nothing here has been rendered. Screenshots are step 9's own evidence.
+> The first demo path was rendered on 2026-09-07 through a real daemon and Web Shell. It covers roster/create/list/detail, reply routing preview, live dispatch, parent-report continuation, and the final review state. Cancellation, transcript slices, tombstone visuals, and CI screenshots remain step 9 work.
 
 ## 1. Who this is for
 

@@ -219,6 +219,12 @@ export function assembleMeshPrompt(
   lines.push(...renderPeers(input));
   lines.push(`You can: ${MESH_THREAD_TOOL_NAMES.join(' · ')}`);
   lines.push(
+    'Addressing a peer by at-sign name books another run. Do not do that in status or result posts unless you intend to wake them.',
+  );
+  lines.push(
+    'Completing a child thread reports its result to the parent automatically.',
+  );
+  lines.push(
     'Before ending this run: use thread_wait() after delegating live work,',
   );
   lines.push(

@@ -113,11 +113,30 @@ root as the launcher fixed the next run. A separate first attempt mentioned
 both `@alice` and `@bob` in the human instruction and correctly woke both; the
 demo input was corrected to address only Alice, with no routing-rule change.
 
+**Verified through the real daemon and Web Shell demo path (2026-09-07).** The
+Agents page created persistent identities and a root thread, the workspace-
+qualified REST surface resolved the exact runtime, and the hidden host
+dispatched bookings while the browser polled the ledger. With fresh
+`alice-demo` and `bob-demo` bodies, Alice created one child and waited, Bob
+reviewed it, the parent report woke Alice, and Alice reviewed the root. The UI
+finished with the root `in_review`, the attributed result visible, and the two
+Alice runs collapsed as history. The tree accounted 186,317 of 200,000 tokens.
+This is a demo-path observation, not the full step-9 acceptance gate.
+
+An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
+peer mentions in result prose, and each mention correctly booked another run.
+That tree reached 253,320 accounted tokens and blocked before the parent could
+resume. The prompt now says that an at-sign address books work, forbids it in
+status/result prose unless another wake is intended, and reminds the agent that
+child completion already reports to the parent. Re-running with fresh bodies
+removed the unintended bookings and completed the loop.
+
 **Still unverified.** Running-delivery miss reconciliation, the 12-turn
-ping-pong gate, restart and stall recovery, the real daemon host/reaper path,
-bare-mode tool exposure, REST/Web Shell, and notifications have not been run
-end to end. The negative paths in §4 therefore remain reasoned and locally
-checked contracts, not live-system evidence.
+ping-pong gate, restart and stall recovery, daemon host replacement/reaper,
+bare-mode tool exposure, the remaining step-9 surfaces (cancel, transcript
+slices, tombstones and visual CI), and notifications have not been run end to
+end. The negative paths in §4 therefore remain reasoned and locally checked
+contracts, not live-system evidence.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -646,6 +665,11 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    cancellation, restart and stall recovery, and full outbox replay.
 9. **REST routes and Web Shell** — roster, thread list/view, busy reason, gates,
    failures, cancellation, and transcript slices; absorb #11140's entry.
+   The 2026-09-07 demo slice reached `in_review` through a real daemon and Web
+   Shell: Alice created Bob's child, waited, received its parent report, and
+   reviewed the root. The landed surface covers roster/create/list/detail,
+   reply routing preview, and live dispatch. Cancellation, transcript-slice
+   reading, tombstone visuals, and visual CI remain before this step is complete.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate
     tripped, and terminal failure. Last because it consumes state transitions
     proven by steps 7-9.
@@ -828,6 +852,10 @@ Eight rules:
 - **Mention tokens are handed over verbatim for enabled peers only**, excluding
   self. Unknown/disabled targets are surfaced by routing rather than wasting a
   model turn.
+- **A mention is a booking, not decoration.** Result and status prose must not
+  address a peer by at-sign name unless another run is intended. Completing a
+  child already reports to its parent; repeating the hand-off with a mention
+  creates a ping-pong rather than adding provenance.
 - **A run must close explicitly.** The prompt requires `thread_wait`,
   `thread_review`, or `thread_block`. Runtime final text is still captured, but
   a run that exits without one is a visible `unclosed_run`, never implicit
@@ -1065,6 +1093,6 @@ write code, which decision 1 defers until isolation is settled.
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 
-**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。这次运行发现并修复了续跑时 agent sidecar 使用错误存储根目录的问题，没有为了跑通修改 §6 提示词。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、真实 daemon host、bare 模式、REST、Web Shell 和通知仍未端到端验证。
+**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。真实 daemon + Web Shell 的 demo 路径也已跑通 roster/create/list/detail、实时派发和父级续跑，最终根线程进入 `in_review`，树内计费 186,317/200,000。浏览器首轮同时发现 result 文本里的 peer mention 会按规则继续 booking 并形成回环，因此 §6 补了「at-sign address 等于 booking，子线程完成已自动回报父级」约束；fresh agent 重跑后没有多余 booking。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、host 替换/reaper、bare 模式、取消、transcript slice、tombstone 视觉、视觉 CI 和通知仍未端到端验证。
 
 </details>

@@ -1,0 +1,252 @@
+/* Threads list — grouped by what each thread needs, never by recency. */
+
+.page {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  margin: -16px -20px 0;
+}
+
+.pageHeader {
+  display: flex;
+  min-height: 46px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-block-end: 1px solid var(--border);
+}
+
+.title {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  outline: none;
+}
+
+.headerActions,
+.formActions {
+  display: flex;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+
+.createForm {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.field {
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.roster {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sectionTitle {
+  margin-bottom: 6px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agentRow {
+  display: grid;
+  grid-template-columns: 10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 34px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.agentDot,
+.agentDotDisabled {
+  width: 8px;
+  height: 8px;
+  border: 2px solid currentcolor;
+  border-radius: 50%;
+  background: currentcolor;
+  color: var(--status-running-fg);
+}
+
+.agentDotDisabled {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.agentDescription,
+.agentActivity,
+.agentWaiting,
+.emptyRoster {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentWaiting {
+  font-variant-numeric: tabular-nums;
+}
+
+.emptyRoster {
+  padding: 8px;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .agentRow {
+    grid-template-columns: 10px minmax(80px, 1fr) auto;
+  }
+
+  .agentDescription,
+  .agentActivity {
+    display: none;
+  }
+}
+
+.pageBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px 24px 32px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Sentence case, not a tracked-out eyebrow. The count is part of the
+   heading because "how many need me" is the question being answered. */
+.groupHeading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: start;
+  cursor: default;
+}
+
+.groupHeadingToggle {
+  cursor: pointer;
+}
+
+.groupHeadingToggle:hover {
+  color: var(--foreground);
+}
+
+.groupCount {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 8px 10px 9px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--secondary);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* The single attention treatment. Carried by nothing else on the page, and
+   always paired with the sentence below the title so it is never colour
+   alone. `blocked` and `in_review` share it: they are opposite in valence but
+   they are the same query — this is waiting on me. */
+.attention {
+  border-inline-start: 2px solid var(--status-attention-fg);
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  padding-inline-start: 8px;
+}
+
+.rowTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The resolver's own sentence, rendered verbatim. */
+.rowReason {
+  grid-column: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowId {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.emptyState {
+  padding: 40px 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.emptyLead {
+  color: var(--foreground);
+  font-size: 14px;
+}

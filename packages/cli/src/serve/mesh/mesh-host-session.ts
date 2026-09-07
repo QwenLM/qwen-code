@@ -14,7 +14,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
 import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
 
-const DEFAULT_MESH_KEEPALIVE_INTERVAL_MS = 30_000;
+const DEFAULT_MESH_KEEPALIVE_INTERVAL_MS = 1_000;
 const DEFAULT_MESH_RESUME_TIMEOUT_MS = 70_000;
 
 interface MeshHostBridge {
@@ -27,11 +27,13 @@ interface MeshHostBridge {
   ): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   launchMeshAgent: AcpSessionBridge['launchMeshAgent'];
+  dispatchMeshRuns?: AcpSessionBridge['dispatchMeshRuns'];
 }
 
 export interface MeshHostSessionOwner {
   ensureResident(): Promise<string>;
   launch(agent: MeshAgent, prompt: string): Promise<MeshAgentLaunchResult>;
+  dispatch(): ReturnType<AcpSessionBridge['dispatchMeshRuns']>;
   tick(): Promise<void>;
   stop(): void;
 }
@@ -109,7 +111,9 @@ export function startMeshHostSessionOwner(options: {
 
   const tick = async (): Promise<void> => {
     const workspace = await readMeshWorkspace(workspaceCwd);
-    if (workspace.hostSessionId) await ensureResident();
+    if (!workspace.hostSessionId) return;
+    const sessionId = await ensureResident();
+    await bridge.dispatchMeshRuns?.(sessionId);
   };
 
   let running = false;
@@ -130,6 +134,12 @@ export function startMeshHostSessionOwner(options: {
     async launch(agent, prompt) {
       const sessionId = await ensureResident();
       return bridge.launchMeshAgent(sessionId, agent.id, prompt);
+    },
+    async dispatch() {
+      if (!bridge.dispatchMeshRuns) {
+        throw new Error('Mesh dispatch is unavailable in this runtime.');
+      }
+      return bridge.dispatchMeshRuns(await ensureResident());
     },
     tick,
     stop() {

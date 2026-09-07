@@ -9,6 +9,7 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  DispatchRecord,
   MeshAgentLaunchResult,
   SessionGroupPresetColor,
   TurnResultCode,
@@ -652,6 +653,7 @@ export interface BridgeForkAgentResult {
 }
 
 export type BridgeMeshAgentLaunchResult = MeshAgentLaunchResult;
+export type BridgeMeshDispatchRecord = DispatchRecord;
 
 export interface BridgeConversationDirectoryExpectation {
   canonicalSessionId: string;
@@ -1990,6 +1992,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     agentId: string,
     prompt: string,
   ): Promise<BridgeMeshAgentLaunchResult>;
+
+  /** Dispatch durable mesh bookings inside their hidden host session. */
+  dispatchMeshRuns(sessionId: string): Promise<BridgeMeshDispatchRecord[]>;
 
   /** Control a run, delete history, or start a saved workflow definition. */
   controlSessionWorkflowTask(
