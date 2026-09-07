@@ -34,6 +34,48 @@
 // fiddly half — a detached add at the right SHA, a leftover from a crashed run,
 // a dependency farm so a unit harness can actually start — and hands back a
 // path. WHAT to probe is the verifier's question, and no fixed scenario fits it.
+//
+// Two shapes of tree, chosen by the caller. The verifier's is a LINKED
+// worktree: fast to reset, and its `.git` is a pointer into the user's own
+// repository — hooks, config and refs are shared, which the report says
+// plainly and the verifier brief treats as out of bounds. `--standalone` is
+// for an agent whose INPUT is untrusted — the prose-execution audit executes
+// instructions the PR author wrote — and it is a repository of its own: a
+// fresh `git init` whose object store is the user's, reached through an
+// alternates pointer, checked out at the reviewed head. Whatever a recipe
+// step writes into that tree's config, hooks, refs or index lands there and
+// dies with the tree — the STATE does. A command-valued key written there
+// (`core.hooksPath`, `core.fsmonitor`, a `filter.*`, an `alias.*`) is live
+// at the next git command run IN the tree, as the reviewer — `git config
+// core.hooksPath .githooks`, a committed hook, then `git commit` ran the
+// hook, measured — and that reach is the brief's to judge, step by step,
+// not this command's to screen. And nothing that could execute the user's repo-local
+// config is run in their repository to build it: no clone (a local `git
+// clone` spawns `upload-pack` in the SOURCE repository), no `worktree add`,
+// no checkout, no index refresh, no residue `status` — the standalone
+// shape's git in the user's repository is the `rev-parse` reads both shapes
+// make, the checkout's object reads through the alternates file, and, when a
+// LINKED tree from an earlier call stands at the path, the unregistration
+// the linked shape would make. So the repo-local config screen below, which guards the
+// git this command runs in the user's repository for the LINKED shape (its
+// checkouts and the residue measurement), has nothing to guard for a
+// standalone tree, and the standalone path returns before it — reporting the
+// shared tree as unmeasured, never as clean. That shape is the lesson of its
+// own history: every attempt to make a tree that SHARED the user's `.git`
+// safe for untrusted input grew a screen over the shared surface, and no
+// such screen closed — the surface is git-defined and grows across versions,
+// its inputs are same-user-writable, and it refused the config state the
+// pipeline's own CI checkout writes. A tree that shares nothing but an
+// object store needs none.
+//
+// What neither shape is: a sandbox against the agent itself. A same-user
+// process — and the agent IS one — can aim git at any path (`git -C`, a
+// `git push <path>`, `git config --global`), and nothing in this file can
+// tell that apart from the user doing it. The contract here is where writes
+// made INSIDE the tree land; the briefs, not this command, forbid the rest.
+// For the same reason no check here races a same-user process: a symlink
+// swapped in between two of this command's syscalls is that process, and a
+// gate against it certifies nothing.
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
@@ -42,8 +84,8 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -57,8 +99,10 @@ import {
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   RESIDUE_PATH_CAP,
+  describeFilterScreen,
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -80,6 +124,21 @@ export interface ScratchTreeReport {
    * to "where did my probe file go" — every call hands back a PRISTINE tree.
    */
   reused: boolean;
+  /**
+   * True when the tree is a standalone repository (`--standalone`) rather
+   * than a linked worktree: its `.git` is its own, so config, hooks, refs
+   * and index written inside it stay inside it. That is the whole claim,
+   * and it is a claim about STATE: a command-valued key written into that
+   * config executes at the next git command run in the tree, and the
+   * brief's reach rule, not this command, judges the step that writes it —
+   * the object store is the user's, reached through an alternates pointer,
+   * and a git command aimed at another path or at the global config is
+   * outside the tree and outside this contract (the dependency farm's links
+   * point back at the review worktree too; the note discloses the
+   * write-through). Disclosed so a reader of the report knows which of the
+   * two contracts the note is stating.
+   */
+  standalone: boolean;
   /**
    * The `node_modules` farm: how many packages were symlinked in from the
    * review worktree, how many could not be, and whether a farm was already
@@ -107,10 +166,12 @@ export interface ScratchTreeReport {
    */
   sharedTreeResidueTotal: number;
   /**
-   * Set when the residue check could not run at all. An empty
-   * `sharedTreeResidue` means "clean" only while this is absent — a `git status`
-   * that died on a tree too dirty for its buffer answers with the same empty
-   * list a pristine tree does.
+   * Set when the residue check could not run at all, or was not run: a
+   * standalone tree never measures it, because the measurement is a `git
+   * status` in the shared worktree and that shape runs no git there. An
+   * empty `sharedTreeResidue` means "clean" only while this is absent — a
+   * `git status` that died on a tree too dirty for its buffer answers with
+   * the same empty list a pristine tree does.
    */
   sharedTreeUnmeasured?: string;
   /** What happened, in one line. Rendered to the verifier verbatim. */
@@ -129,11 +190,20 @@ export interface ScratchTreeArgs {
    * resetting anything: a scratch tree may only stand at the reviewed head.
    */
   fetchedSha?: string;
+  /**
+   * Stand the tree up as a STANDALONE repository — its own `.git`, with the
+   * object store reached through an alternates pointer — instead of a linked
+   * worktree, and rebuild it on every call rather than reset it. For an agent
+   * that executes PR-authored instructions: a `git config`, hook or ref write
+   * inside the tree stays inside it, and nothing that could execute the
+   * user's repo-local config is run in their repository to build it.
+   */
+  standalone?: boolean;
   out?: string;
 }
 
 /**
- * `git`, with the user's hooks out of the way.
+ * `git`, with the user's hooks and filesystem monitor out of the way.
  *
  * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
  * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
@@ -144,80 +214,108 @@ export interface ScratchTreeArgs {
  * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
  * whichever ones an attributes file selects. `runScratchTree` detects that
  * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
+ * `localFilterCommands` in worktree.ts — the residue measurement screens the
+ * same surface before its `status`, whose index refresh runs the clean
+ * side). What a probe does with its own shell is the probe's
  * business, and the report says plainly that the common dir is shared rather
- * than isolated.
+ * than isolated. `core.fsmonitor` is the other command-valued key the same
+ * checkouts execute — a value in the user's config fires on `worktree add`
+ * and on the reset's `checkout --force` alike (measured live) — so it is
+ * blanked here the way worktreeResidue blanks it on the residue measurement:
+ * the user's monitor is their contract for their own git commands, and this
+ * command's checkouts are not theirs.
  */
-const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+const NO_HOOKS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
 
 /**
- * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
+ * Stand `tree` up as a standalone repository checked out at `headSha`, whose
+ * object store is the review worktree's, reached through an alternates
+ * pointer.
  *
- * The reset's and rebuild's checkouts EXECUTE these — hooks are disabled above,
- * filters are not — and the planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * Not a clone. `git clone <path>` spawns `upload-pack` in the SOURCE
+ * repository — a git process running under the user's repo-local config —
+ * and leaves a remote behind whose name the user's `clone.defaultRemoteName`
+ * chooses. A fresh `git init` plus one line in `objects/info/alternates` is
+ * what `clone --shared` produces (that file is exactly what `--shared`
+ * writes), with no git run in the user's repository at all: the directory is
+ * created here, the repository is initialised in it with `--template=`
+ * (empty, so no hook arrives from git's template directory), the alternates
+ * file names the object store, and the one checkout is the detached one at
+ * the reviewed head — under NO_HOOKS like every other checkout here, reading
+ * the new repository's own config, which holds none of the user's repo-local
+ * keys. The object format follows the source's: an alternates pointer into a
+ * store of another format is unusable. The user's GLOBAL config still
+ * applies, the way it applies to every git command they run. A throw is the
+ * caller's rebuild-failure path.
+ *
+ * What the alternates pointer does NOT share: anything outside git's object
+ * store. A repository whose checkout needs git-lfs content fails here with
+ * the reason in the report, because LFS objects are not in that store.
  */
-function localFilterCommands(worktree: string): string[] {
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+function buildStandaloneTree(
+  worktree: string,
+  tree: string,
+  headSha: string,
+): void {
+  const objects = realpathSync(
+    gitOut(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'objects',
+    ),
   );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
-  }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  const common = resolve(worktree, commonDir);
-  const candidates = [
-    join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
-  ];
-  // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
-  // planted there executed during the reset while this function reported the
-  // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
+  const format = gitOut(worktree, 'rev-parse', '--show-object-format');
+  // Created here rather than by `git init <path>`: `mkdirSync` refuses a path
+  // that already exists — a symlink included — instead of following it, so
+  // the discard's rmSync is the only thing that can clear the leaf.
+  mkdirSync(tree);
+  // Named explicitly in BOTH directions: a bare `git init` follows
+  // `init.defaultObjectFormat` / `GIT_DEFAULT_HASH`, so a sha1 source under
+  // a sha256 default would get a store that cannot read the source's objects
+  // through the alternates pointer. `--show-object-format` and
+  // `--object-format` arrived together (git 2.29), so a source whose format
+  // could be read is a git that accepts the flag.
+  git(tree, 'init', '--quiet', '--template=', `--object-format=${format}`);
+  writeFileSync(
+    join(tree, '.git', 'objects', 'info', 'alternates'),
+    `${objects}\n`,
+  );
+  git(tree, 'checkout', '--quiet', '--force', '--detach', headSha);
+}
+
+/**
+ * Clear a standalone tree's path — leaving git's worktree registry alone,
+ * because a standalone tree was never in it.
+ *
+ * `discardWorktree` is for LINKED trees: it unregisters before it removes, and
+ * its fallback prunes registrations whose directory is gone. A standalone tree
+ * has no registration to drop, and a leftover from a crashed run needs only
+ * the `rmSync`. But the path is the one the linked shape would use for the
+ * same label, so a `.git` FILE there — a gitfile, i.e. a linked worktree an
+ * earlier non-standalone call created — goes through `discardWorktree` as it
+ * should. Anything else, a symlink included (`rmSync` unlinks it rather than
+ * following it), is plainly removed.
+ */
+function discardStandaloneTree(worktree: string, tree: string): void {
+  let linked = false;
   try {
-    for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
-    }
+    linked =
+      lstatSync(tree).isDirectory() && lstatSync(join(tree, '.git')).isFile();
   } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
+    // Absent, or no `.git` at all: nothing to unregister.
   }
-  const found: string[] = [];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--get-regexp',
-        '^filter\\..*\\.(smudge|clean)$',
-      ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-    );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
-    }
+  if (linked) {
+    discardWorktree(worktree, tree);
+    return;
   }
-  return found;
+  rmSync(tree, { recursive: true, force: true });
 }
 
 function gitOut(cwd: string, ...args: string[]): string {
@@ -400,6 +498,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   const unavailable = (note: string): ScratchTreeReport => ({
     available: false,
     reused: false,
+    standalone: Boolean(args.standalone),
     dependencies: null,
     sharedTreeResidue: [],
     sharedTreeResidueTotal: 0,
@@ -491,19 +590,94 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     }
   }
 
+  const tree = scratchWorktreePath(worktree, label);
+
+  if (args.standalone) {
+    // Returns BEFORE the screen and the residue measurement below: both exist
+    // for git this command runs in the user's repository — the linked shape's
+    // checkouts and the `status` that measures the shared worktree — and the
+    // standalone shape runs none there (see the file comment). The residue is
+    // therefore reported as unmeasured, never as clean: a `status` in the
+    // shared worktree is exactly the execution this shape declines to make.
+    // Rebuilt, never reset: a checkout costs a checkout, and "what you wrote
+    // last time is gone" is a simpler contract than the reset's identity gate
+    // for a tree whose `.git` nothing shares.
+    const unmeasured =
+      'not measured for a standalone tree: the measurement is a `git status` ' +
+      'in the shared review worktree, and this shape runs no checkout or ' +
+      'status there';
+    try {
+      discardStandaloneTree(worktree, tree);
+      buildStandaloneTree(worktree, tree, headSha);
+    } catch (e) {
+      return {
+        available: false,
+        reused: false,
+        standalone: true,
+        dependencies: null,
+        sharedTreeResidue: [],
+        sharedTreeResidueTotal: 0,
+        sharedTreeUnmeasured: unmeasured,
+        note:
+          `could not stand up a standalone scratch tree at ${shellQuotePath(tree)}: ` +
+          `${inertPath((e as Error).message)}. Do NOT fall back to running in ` +
+          'the review worktree — other agents are reading it. A step you ' +
+          'cannot isolate is reported as not-executed, never simulated.',
+      };
+    }
+    const dependencies = farmDependencies(tree, worktree, { rebuild: true });
+    return {
+      available: true,
+      path: tree,
+      headSha,
+      reused: false,
+      standalone: true,
+      dependencies,
+      sharedTreeResidue: [],
+      sharedTreeResidueTotal: 0,
+      sharedTreeUnmeasured: unmeasured,
+      note:
+        `your scratch tree is at ${shellQuotePath(tree)}, a STANDALONE repository checked out at ${headSha.slice(0, 9)}. ` +
+        'Its `.git` is its own: config, hooks, refs and index written there ' +
+        'stay there and die with the tree — the STATE does; a command-valued ' +
+        'key written into that config (`core.hooksPath`, `core.fsmonitor`, ' +
+        '`filter.*`, `alias.*`, `core.pager`, `credential.helper`) executes ' +
+        'at your next git command in the tree, as you, so a git step there ' +
+        "is judged by what it reaches (your brief's `git config --local " +
+        "--list --includes` rule), never by its text. Its object store is the user's " +
+        "repository's, read through an alternates pointer — so this isolates " +
+        'what you write INSIDE the tree, and nothing more: git aimed at ' +
+        'another path (`git -C`, `git push <path>`) or at your global config ' +
+        'is outside it, and outside your brief. And this tree sits INSIDE ' +
+        "the user's checkout: remove or replace its `.git` and every later " +
+        'git command here answers for THEIR repository through upward ' +
+        `discovery — run your git commands with GIT_CEILING_DIRECTORIES=${shellQuotePath(dirname(tree))} ` +
+        'so that fails loudly instead, and treat a step that removes or ' +
+        'replaces `.git` as leaving the tree. Every call rebuilds it from ' +
+        'the commit under review: what you wrote last time is gone. Run the ' +
+        'writing steps there; the review worktree stays read-only, and this ' +
+        'shape did not measure whether it is clean. `cleanup` sweeps this at ' +
+        'the end of the review.' +
+        dependencyNote(dependencies),
+    };
+  }
+
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
   // `worktree add` both execute configured content filters.
   const filters = localFilterCommands(worktree);
   if (filters.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
-        .map(inertPath)
-        .join(', ')} — ` +
+      "the repository's local config defines content filter(s), or includes " +
+        `config this screen could not read to the bottom: ${describeFilterScreen(
+          filters.map(inertPath),
+        )} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
         'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
+        'enough to plant both the filter and the attributes that select it — or ' +
+        'one `include.path` line that delivers a filter from a file the PR ' +
+        'commits. Remove the filter config, the attributes file that uses it, or ' +
+        'the include, if it is not yours; until then no scratch tree is safe to ' +
+        'create or reset.',
     );
   }
 
@@ -544,7 +718,6 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         'instead of clearing one).'
       : '';
 
-  const tree = scratchWorktreePath(worktree, label);
   if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
@@ -564,6 +737,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       path: tree,
       headSha,
       reused: true,
+      standalone: false,
       dependencies,
       sharedTreeResidue,
       sharedTreeResidueTotal: residue.total,
@@ -592,6 +766,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     return {
       available: false,
       reused: false,
+      standalone: false,
       dependencies: null,
       sharedTreeResidue,
       sharedTreeResidueTotal: residue.total,
@@ -614,6 +789,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     path: tree,
     headSha,
     reused: false,
+    standalone: false,
     dependencies,
     sharedTreeResidue,
     sharedTreeResidueTotal: residue.total,
@@ -683,7 +859,16 @@ function dependencyNote(farm: DependencyFarm | null): string {
     ` ${farm.linked} dependencies linked in` +
     (farm.failed > 0
       ? `, ${farm.failed} could not be${farm.linked === 0 ? ' — so a JS unit harness may not start here' : ''}: a harness that cannot resolve a package is an environment gap, not a finding, and never a reason to probe in the review worktree instead.`
-      : '.')
+      : '.') +
+    // The note's "the review worktree stays read-only" has exactly one
+    // exception — the links themselves — and the `standalone` field's doc
+    // says this note discloses it.
+    (farm.linked > 0
+      ? ' The links point back at the review worktree — a write THROUGH one of ' +
+        'them (a rebuild, an install script, a patch) lands in the tree every ' +
+        'other agent is reading; replace the link with a copy before modifying ' +
+        'a dependency.'
+      : '')
   );
 }
 
@@ -718,6 +903,19 @@ export const scratchTreeCommand: CommandModule = {
           'Without it an empty measurement is reported as unmeasured, never ' +
           'clean; malformed or disagreeing with the worktree HEAD, the ' +
           'command refuses before creating or resetting anything.',
+      })
+      .option('standalone', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Stand the tree up as a standalone repository (its own .git, with ' +
+          'the object store reached through an alternates pointer) instead ' +
+          'of a linked worktree, so a git config, hook or ref write inside ' +
+          'it stays inside it (the state does — a command-valued key written ' +
+          'there still executes at the next git command run in the tree); ' +
+          'rebuilt on every call, with no checkout or ' +
+          "index refresh run in the user's repository to build it. For an " +
+          'agent that executes PR-authored instructions.',
       })
       .option('out', {
         type: 'string',

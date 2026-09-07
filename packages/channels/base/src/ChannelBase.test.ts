@@ -92,6 +92,7 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     segment?: unknown;
   }> = [];
+  retiringSessions: string[] = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
@@ -230,6 +231,10 @@ class TestChannel extends ChannelBase {
     this.promptStarts.push({ chatId, sessionId, messageId });
   }
 
+  protected override onSessionRetiring(sessionId: string): void {
+    this.retiringSessions.push(sessionId);
+  }
+
   protected override onPromptEnd(
     chatId: string,
     sessionId: string,
@@ -357,24 +362,91 @@ class UnsafeProcessChannel extends TestChannel {
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
+  const sessions = new Map<
+    string,
+    {
+      sessionId: string;
+      workspaceCwd: string;
+      hasActivePrompt: boolean;
+      worktree?: { slug: string; path: string; branch: string };
+      worktreeState?: 'persisted-v1';
+    }
+  >();
   let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
   const bridge = Object.assign(emitter, {
-    newSession: vi.fn().mockImplementation(() => `s-${++sessionCounter}`),
-    loadSession: vi.fn(async (sessionId: string) => sessionId),
+    newSession: vi.fn().mockImplementation((workspaceCwd: string, options) => {
+      const sessionId = `s-${++sessionCounter}`;
+      sessions.set(
+        sessionId,
+        options?.worktree
+          ? {
+              sessionId,
+              workspaceCwd,
+              hasActivePrompt: false,
+              worktree: {
+                slug: sessionId,
+                path: `/worktrees/${sessionId}`,
+                branch: sessionId,
+              },
+              worktreeState: 'persisted-v1',
+            }
+          : { sessionId, workspaceCwd, hasActivePrompt: false },
+      );
+      return sessionId;
+    }),
+    loadSession: vi.fn(async (sessionId: string, workspaceCwd: string) => {
+      sessions.set(
+        sessionId,
+        sessions.get(sessionId) ?? {
+          sessionId,
+          workspaceCwd,
+          hasActivePrompt: false,
+        },
+      );
+      return sessionId;
+    }),
+    resetWorktreeSession: vi
+      .fn()
+      .mockImplementation(async (sessionId: string, workspaceCwd: string) => {
+        // The daemon transfers the checkout: the replacement session owns the
+        // SAME worktree path, and the superseded session leaves the map.
+        const previous = sessions.get(sessionId);
+        const replacementId = `s-${++sessionCounter}`;
+        sessions.set(
+          replacementId,
+          previous?.worktree
+            ? {
+                sessionId: replacementId,
+                workspaceCwd,
+                hasActivePrompt: false,
+                worktree: previous.worktree,
+                worktreeState: 'persisted-v1' as const,
+              }
+            : {
+                sessionId: replacementId,
+                workspaceCwd,
+                hasActivePrompt: false,
+              },
+        );
+        sessions.delete(sessionId);
+        return replacementId;
+      }),
     prompt: vi.fn().mockResolvedValue('agent response'),
     btw: vi.fn().mockResolvedValue({
       sessionId: 's-1',
       answer: 'side answer',
     }),
     cancelSession: vi.fn().mockResolvedValue(undefined),
-    discardSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockImplementation(async (sessionId: string) => {
+      sessions.delete(sessionId);
+    }),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
     respondToPermission: vi.fn().mockResolvedValue(true),
-    listSessions: vi.fn(() => []),
+    listSessions: vi.fn(() => [...sessions.values()]),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -410,6 +482,17 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
     isReplyToBot: false,
     ...overrides,
   };
+}
+
+/** A daemon conflict error by shape (channels/base keeps no SDK dependency). */
+function daemonError(
+  code: string,
+  extraBody: Record<string, unknown> = {},
+): Error {
+  const error = new Error(`daemon rejected with ${code}`);
+  error.name = 'DaemonHttpError';
+  Object.assign(error, { status: 409, body: { code, ...extraBody } });
+  return error;
 }
 
 function pairingCodeOf(result: CreatePairingRequestResult): string {
@@ -645,6 +728,144 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
+    it('filters and strips configured message prefixes before dispatch', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      await ch.handleInbound(envelope({ text: '@Qwen /review inspect this' }));
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        'inspect this',
+        expect.any(Object),
+      );
+    });
+
+    it('checks a prepared envelope once and rejects before preparation', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+      const prepare = vi.fn(async () => {});
+      const rejected = envelope({ text: 'hello' });
+
+      await ch.handlePreparedInbound(rejected, prepare);
+      await ch.handlePreparedInbound(rejected, prepare);
+      expect(prepare).not.toHaveBeenCalled();
+
+      await ch.handlePreparedInbound(
+        envelope({ text: '/review inspect this' }),
+        prepare,
+      );
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        'inspect this',
+        expect.any(Object),
+      );
+    });
+
+    it('documents the prefix on shared command replies', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(envelope({ text: '/review /help' }));
+
+      expect(ch.sent[0]?.text).toContain('/review /help — Show this help');
+      expect(ch.sent[0]?.text).toContain(
+        '/review /approve [request-id] — Approve a pending permission request',
+      );
+    });
+
+    it('keeps permission and shared-clear instructions usable with a prefix', async () => {
+      const ch = createChannel({
+        messagePrefix: '/review',
+        sessionScope: 'single',
+      });
+      await ch.handleInbound(envelope({ text: '/review start' }));
+      ch.sent = [];
+      for (const requestId of ['req-1', 'req-2']) {
+        await ch.dispatchPermissionRequest({
+          requestId,
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: `Run ${requestId}` },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+              { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+            ],
+          },
+        });
+      }
+      expect(ch.sent).toHaveLength(2);
+
+      expect(ch.sent[0]?.text).toContain('/review /approve');
+      expect(ch.sent[0]?.text).toContain('/review /deny');
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/review /approve' }));
+      expect(ch.sent[0]?.text).toContain('/review /approve <request-id>');
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/review /clear' }));
+      expect(ch.sent[0]?.text).toContain('/review /clear confirm');
+    });
+
+    it('logs prefix mismatches for DMs but not ambient group traffic', async () => {
+      const ch = createChannel({
+        messagePrefix: '/review',
+        groupPolicy: 'open',
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: 'ambient',
+          isGroup: true,
+          isMentioned: false,
+          isReplyToBot: false,
+        }),
+      );
+      expect(
+        writeSpy.mock.calls.some(([message]) =>
+          String(message).includes('message_prefix_mismatch'),
+        ),
+      ).toBe(false);
+
+      await ch.handleInbound(envelope({ text: 'direct' }));
+      expect(
+        writeSpy.mock.calls.some(([message]) =>
+          String(message).includes('message_prefix_mismatch'),
+        ),
+      ).toBe(true);
+    });
+
+    it('requires the prefix on a pairing first contact too', async () => {
+      // Deliberate ordering: the prefix gate runs ahead of the pairing
+      // gates. A pairing code is a reply, and replying to every unprefixed
+      // message is exactly the traffic the prefix suppresses.
+      const ch = createChannel({
+        messagePrefix: '/review',
+        senderPolicy: 'pairing',
+        allowedUsers: [],
+      });
+
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      expect(ch.sent).toEqual([]);
+
+      await ch.handleInbound(envelope({ text: '/review hello' }));
+      expect(ch.sent[0]?.text).toContain('pairing code');
+    });
+
+    it('allows explicitly marked system envelopes through', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(
+        envelope({ text: 'system event', bypassMessagePrefix: true }),
+      );
+
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('silently drops group messages when groupPolicy=disabled', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ isGroup: true }));
@@ -2070,9 +2291,12 @@ describe('ChannelBase', () => {
     });
 
     it('requires card-presented questions to be submitted or denied', async () => {
-      const ch = createChannel();
+      const ch = createChannel({ messagePrefix: '/review' });
       ch.userInputPresentationResult = { kind: 'presented' };
-      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      const active = await startActiveSession(ch, {
+        senderId: 'owner-1',
+        text: '/review run tests',
+      });
       emitUserQuestion(active.sessionId, 'req-card-command');
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
       const settled = vi.fn();
@@ -2081,7 +2305,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/approve req-card-command',
+          text: '/review /approve req-card-command',
         }),
       );
 
@@ -2089,11 +2313,12 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Submit this question through its interactive card',
       );
+      expect(ch.sent.at(-1)?.text).toContain('/review /deny [request-id]');
 
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/deny req-card-command',
+          text: '/review /deny req-card-command',
         }),
       );
 
@@ -2857,6 +3082,44 @@ describe('ChannelBase', () => {
       expect(prompt).toBe('[User 1] @bot current');
     });
 
+    it('keeps adapter media placeholders out of the recorded history', async () => {
+      // A `(image)` placeholder is adapter text, not something a member
+      // typed, so quoting it back would put it in the next prompt as if
+      // Alice had written it.
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          senderId: 'u1',
+          senderName: 'Alice',
+          text: '(image)',
+          syntheticText: true,
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'u2',
+          senderName: 'Bob',
+          text: '@bot summarize',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe('[Bob] @bot summarize');
+    });
+
     it('injects authorized unmentioned group messages on the next trigger', async () => {
       const ch = createChannel(
         {
@@ -3591,6 +3854,29 @@ describe('ChannelBase', () => {
   });
 
   describe('slash commands', () => {
+    it('keeps task creation details out of chat while logging the sanitized cause', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      vi.mocked(bridge.newSession).mockRejectedValueOnce(
+        new Error('session secret-session-id\nfailed'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+
+        expect(ch.sent.at(-1)?.text).toBe('Could not create task "review".');
+        expect(ch.sent.at(-1)?.text).not.toContain('secret-session-id');
+        expect(stderrSpy).toHaveBeenCalledWith(
+          '[test-chan] named-session operation failed: Could not create task "review". | cause: session secret-session-id\\nfailed\n',
+        );
+      } finally {
+        stderrSpy.mockRestore();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps named task catalogs isolated by sender without exposing session IDs', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel(
@@ -4119,6 +4405,285 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('accepts only the exact worktree task syntax and reports isolation', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Created and selected task "feature" (worktree workspace).',
+        );
+        expect(bridge.newSession).toHaveBeenCalledWith(
+          '/tmp',
+          expect.objectContaining({ worktree: {} }),
+          expect.anything(),
+        );
+
+        vi.mocked(bridge.newSession).mockClear();
+        await ch.handleInbound(
+          envelope({ text: '/session new --worktree invalid' }),
+        );
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
+
+        // The flag alone is missing the task name: it must return the usage
+        // line, not fall through to a confusing name-validation error.
+        await ch.handleInbound(envelope({ text: '/session new --worktree' }));
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
+
+        // Any leading-flag token is missing the task name, not just
+        // --worktree: the guard covers the class, and no legal task name
+        // starts with '-' (TASK_NAME_PATTERN requires a leading
+        // alphanumeric).
+        await ch.handleInbound(envelope({ text: '/session new --force' }));
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resets a selected worktree task and keeps its worktree', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.newSession).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "feature" reset with a fresh conversation; its worktree and files were kept.',
+        );
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledWith(
+          's-1',
+          '/tmp',
+          { sourceId: 'test-chan' },
+          expect.anything(),
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
+
+        // The next turn binds to the replacement session in the kept worktree.
+        await ch.handleInbound(envelope({ text: 'continue the task' }));
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-2',
+          expect.stringContaining('continue the task'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the plain reset message for a shared task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "review" reset with a fresh conversation.',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects clearing a busy worktree task before any reset call', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        const running = ch.handleInbound(envelope({ text: 'long task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "feature" is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+        );
+        expect(bridge.resetWorktreeSession).not.toHaveBeenCalled();
+        expect(bridge.discardSession).not.toHaveBeenCalled();
+
+        finishPrompt('done');
+        await running;
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports a daemon-rejected worktree reset as a busy task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValueOnce(
+          daemonError('worktree_reset_active'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+        );
+        // The daemon busy signal is not retried.
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports an interrupted transfer when the task is selected or messaged', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const recoveredBridge = createBridge();
+      // The daemon's restore route reports the interrupted transfer, so it
+      // surfaces when the task is loaded — never from the reset itself.
+      vi.mocked(recoveredBridge.loadSession).mockRejectedValue(
+        daemonError('worktree_reset_interrupted'),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      const interrupted =
+        'Task "feature" was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        ch.setBridge(recoveredBridge);
+
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+        expect(ch.sent.at(-1)?.text).toBe(interrupted);
+
+        await ch.handleInbound(envelope({ text: 'continue the task' }));
+        expect(ch.sent.at(-1)?.text).toBe(interrupted);
+
+        expect(recoveredBridge.prompt).not.toHaveBeenCalled();
+        expect(recoveredBridge.resetWorktreeSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('names the broken task instead of pointing a clear at the selected one', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: '/session new review --worktree' }),
+        );
+        // Only feature reports the interrupted transfer; review, the task a
+        // clear would act on, is healthy.
+        vi.mocked(bridge.loadSession).mockImplementation(
+          async (sessionId: string) => {
+            if (sessionId === 's-1') {
+              throw daemonError('worktree_reset_interrupted');
+            }
+            return sessionId;
+          },
+        );
+        ch.setBridge(bridge);
+
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+
+        const reply = ch.sent.at(-1)?.text ?? '';
+        expect(reply).toContain('feature');
+        expect(reply).toContain('/session close feature');
+        // Telling the user to clear again would run a full ownership transfer
+        // against review and destroy a conversation that is not broken.
+        expect(reply).not.toContain('Clear the task again');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: review');
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+        expect(bridge.resetWorktreeSession).toHaveBeenCalledWith(
+          's-2',
+          '/tmp',
+          { sourceId: 'test-chan' },
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports a missing worktree marker when the task is selected', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const recoveredBridge = createBridge();
+      vi.mocked(recoveredBridge.loadSession).mockRejectedValue(
+        daemonError('worktree_marker_missing'),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        ch.setBridge(recoveredBridge);
+
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Task "feature" cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.',
+        );
+        expect(recoveredBridge.resetWorktreeSession).not.toHaveBeenCalled();
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('falls back to the generic named-session error for other reset failures', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.resetWorktreeSession!).mockRejectedValueOnce(
+          daemonError('session_not_found'),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toBe('Could not reset task "feature".');
+        expect(ch.sent.at(-1)?.text).not.toContain('s-1');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: feature');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('runs three selected tasks concurrently without retargeting their results', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const finishPrompts = new Map<string, (response: string) => void>();
@@ -4527,6 +5092,23 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('retires a closed named task so buffered output is drained', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.retiringSessions = [];
+
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+
+        expect(ch.sent.at(-1)!.text).toContain('Closed task "review"');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps a named task busy for the full shell command', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishShell!: (result: {
@@ -4562,6 +5144,9 @@ describe('ChannelBase', () => {
         expect(ch.sent.at(-1)!.text).toContain(
           'still running or waiting for permission',
         );
+        // A refused close must not retire the task: draining a live task's
+        // buffer would flush output the turn has not finished producing.
+        expect(ch.retiringSessions).toEqual([]);
 
         finishShell({ exitCode: 0, output: 'ok', aborted: false });
         await running;
@@ -4691,6 +5276,171 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('dispatches a collected turn onto the session its reload healed to', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishFirst!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = resolve;
+          }),
+      );
+      // While the second message waits in the collect buffer, an external
+      // client resets the task: the daemon supersedes s-1 and its restore
+      // reports the replacement that now owns the same checkout.
+      const healedBridge = createBridge();
+      vi.mocked(healedBridge.loadSession).mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 's-1') {
+            throw daemonError('worktree_session_superseded', {
+              replacementSessionId: 's-2',
+            });
+          }
+          return sessionId;
+        },
+      );
+      vi.mocked(healedBridge.listSessions!).mockReturnValue([
+        {
+          sessionId: 's-2',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: { slug: 's-1', path: '/worktrees/s-1', branch: 's-1' },
+          worktreeState: 'persisted-v1',
+        },
+      ]);
+      const ch = createChannel(
+        { multiSession: true, dispatchMode: 'collect' },
+        { stateDir },
+      );
+      const namedSessions = (
+        ch as unknown as {
+          namedSessions: {
+            resumeReserved: (
+              input: unknown,
+              sessionId: string,
+            ) => Promise<string | undefined>;
+          };
+        }
+      ).namedSessions;
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+
+        const first = ch.handleInbound(envelope({ text: 'build feature' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        // Buffered behind the running prompt, so the turn is bound to s-1
+        // before the transfer becomes visible to this worker.
+        await ch.handleInbound(envelope({ text: 'update feature' }));
+
+        ch.setBridge(healedBridge);
+        const resumeSpy = vi.spyOn(namedSessions, 'resumeReserved');
+        finishFirst('done');
+        await first;
+
+        await vi.waitFor(() =>
+          expect(healedBridge.prompt).toHaveBeenCalledTimes(1),
+        );
+        // The drained turn reloads the session it was bound to and must then
+        // dispatch on the healed replacement.
+        expect(resumeSpy).toHaveBeenCalledWith(expect.anything(), 's-1');
+        expect(healedBridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('update feature'),
+          expect.anything(),
+        );
+        expect(ch.sent.map((message) => message.text)).not.toContain(
+          'Could not identify the selected task. Use /sessions, select it again, and retry.',
+        );
+        // The queue reservation moved with the binding: the superseded id is
+        // not left busy forever.
+        await vi.waitFor(() =>
+          expect(
+            (ch as unknown as { queuedTurns: Map<string, number> }).queuedTurns
+              .size,
+          ).toBe(0),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('dispatches a collected turn whose id another turn already healed', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishFirst!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = resolve;
+          }),
+      );
+      const healedBridge = createBridge();
+      vi.mocked(healedBridge.loadSession).mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 's-1') {
+            throw daemonError('worktree_session_superseded', {
+              replacementSessionId: 's-2',
+            });
+          }
+          return sessionId;
+        },
+      );
+      vi.mocked(healedBridge.listSessions!).mockReturnValue([
+        {
+          sessionId: 's-2',
+          workspaceCwd: '/tmp',
+          hasActivePrompt: false,
+          worktree: { slug: 's-1', path: '/worktrees/s-1', branch: 's-1' },
+          worktreeState: 'persisted-v1',
+        },
+      ]);
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel(
+        { multiSession: true, dispatchMode: 'collect' },
+        { stateDir },
+      );
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+
+        const first = ch.handleInbound(envelope({ text: 'build feature' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        // Buffered behind the running prompt, so this turn is bound to s-1 and
+        // keeps that binding until it drains.
+        await ch.handleInbound(envelope({ text: 'update feature' }));
+
+        // A different turn heals the task onto the replacement first, so the
+        // buffered turn is left holding an id no task names any more.
+        ch.setBridge(healedBridge);
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+
+        finishFirst('done');
+        await first;
+
+        await vi.waitFor(() =>
+          expect(healedBridge.prompt).toHaveBeenCalledTimes(1),
+        );
+        expect(healedBridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('update feature'),
+          expect.anything(),
+        );
+        // The user-visible half: the buffered turn is answered instead of
+        // vanishing behind an operator-only log line.
+        expect(
+          writeSpy.mock.calls.some(([message]) =>
+            String(message).includes('dropped collected turn'),
+          ),
+        ).toBe(false);
+      } finally {
+        writeSpy.mockRestore();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('cancels the exact named owner when legacy route keys collide', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const finishPrompts = new Map<string, (response: string) => void>();
@@ -4751,9 +5501,13 @@ describe('ChannelBase', () => {
           expect.anything(),
         );
 
+        ch.retiringSessions = [];
         await ch.handleInbound(envelope({ text: '/clear' }));
         expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        // /clear of a named task retires it through the removedIds loop, the
+        // only path that lets an adapter drain what the task had buffered.
+        expect(ch.retiringSessions).toEqual(['s-1']);
 
         await ch.handleInbound(envelope({ text: '/session use feature' }));
         await ch.handleInbound(envelope({ text: '/session use review' }));
@@ -8587,6 +9341,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
       expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+      expect(ch.retiringSessions).toEqual(['s-1']);
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -10316,6 +11071,55 @@ describe('ChannelBase', () => {
         registerBridgeEvents: true,
       } as unknown as ChannelBaseOptions);
       ch.proactiveSupported = true;
+      const dispatch = vi.spyOn(ch, 'dispatchBackgroundResponse');
+      const context = {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent' as const,
+        turnComplete: true,
+      };
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+        context,
+      );
+
+      await vi.waitFor(() => {
+        expect(dispatch).toHaveBeenCalledWith(
+          's-1',
+          'Background final answer.',
+          context,
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactiveTargets).toEqual([target]);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('drops a background response whose route disappeared during resolution', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi
+          .fn()
+          .mockReturnValueOnce(target)
+          .mockReturnValue(undefined),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+      ch.proactiveSupported = true;
 
       (bridge as unknown as EventEmitter).emit(
         'backgroundResponse',
@@ -10323,12 +11127,10 @@ describe('ChannelBase', () => {
         'Background final answer.',
       );
 
-      await vi.waitFor(() => {
-        expect(ch.proactive).toEqual([
-          { chatId: 'chat1', text: 'Background final answer.' },
-        ]);
-      });
-      expect(ch.proactiveTargets).toEqual([target]);
+      await vi.waitFor(() =>
+        expect(router.getTarget.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
+      expect(ch.proactive).toEqual([]);
       expect(ch.sent).toEqual([]);
     });
 
@@ -20965,6 +21767,7 @@ describe('ChannelBase', () => {
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
         expect(btwSignal?.aborted).toBe(true);
         expect(
           (

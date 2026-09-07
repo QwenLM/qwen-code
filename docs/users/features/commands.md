@@ -36,6 +36,10 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
+> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+
+> [!note]
+>
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
 
 > [!note]
@@ -96,7 +100,7 @@ Commands for managing AI tools and models.
 | → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
 | → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
 | → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
-| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
+| `/peers`              | Review held peer messages; manage trusted controllers                                 | `/peers`, `/peers accept <id>`, `/peers deny all`, `/peers controllers`, `/peers revoke <id>`             |
 | `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
@@ -707,10 +711,11 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                                 | Usage Examples                                               |
-| -------------------- | ------------------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50` |
-| `qwen sessions ps`   | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
+| Command                     | Description                                 | Usage Examples                                                                   |
+| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
+| `qwen sessions list`        | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
+| `qwen sessions ps`          | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                                    |
+| `qwen sessions controllers` | Manage trusted controller tokens            | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
 
 #### `qwen sessions list`
 
@@ -776,7 +781,7 @@ object with fields:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
-qwenVersion
+qwenVersion, ipcPath (when peer messaging is available)
 ```
 
 Nothing else is written to stdout — an empty listing prints nothing at
@@ -824,16 +829,45 @@ session, not from its user, and carries none of your authority there:
 the receiving session acts on it only within its own permission settings.
 Its user can choose what happens to incoming messages with
 `agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
-a message is delivered if the receiving session still reviews each
-action (default or plan mode), or if both sessions are in a mode that
-applies actions without per-action review; otherwise it is held for
-review. Held messages are listed and released with `/peers` in the
-receiving session, which shows how long each one has left.
+a message is delivered only when both sessions are in the same review
+class: both still review each action (default or plan mode), or both
+are in a mode that applies some actions without per-action review
+(auto-edit, auto, or yolo). A message from a session in the other class,
+or from a sender that does not say which class it is in, is held for
+review — in both directions. A session that reviews each action holds a
+message from one that does not, because that message was written by a
+model nobody was watching, and the per-action prompts guard actions, not
+what the session is being talked into. Held messages are listed and
+released with `/peers` in the receiving session, and a message held
+only because the modes differed is released on its own once they agree.
+
+A repository can make sessions opened in it more cautious, never less:
+a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
+to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
+that value wins over a looser one in your user settings. A workspace
+value that would loosen your setting (`accept`, or `true` for the
+switch) is ignored with a warning, and a value the CLI does not
+recognize holds every message whenever it is the effective value.
+System settings override all of this, as they do for every setting.
 
 A hold does not wait forever. A message nobody decides on expires after
 `agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
 minutes by default — and the sending session is told that no decision
 came. Shortening the setting applies to messages already waiting.
+
+If the session cannot bind its inbox — the runtime directory is missing,
+owned by another user, or read-only, as it can be inside a container —
+it first tries a private directory under the temp directory, and only
+if that fails too does it start without one. When that happens the
+session says so at startup, and `/peers` repeats the reason and what to
+change (usually `XDG_RUNTIME_DIR` or `TMPDIR`).
+
+Two sessions can also resolve the same inbox address, because the address
+is keyed by process id and process ids repeat across containers that share
+a runtime directory. The session starting second takes a neighbouring
+address instead of taking over the one in use, so neither becomes
+unreachable. Peers are unaffected: they read a session's address from the
+session registry rather than deriving it.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
@@ -881,3 +915,67 @@ anything else. The model sees it as
 `<cross_session_message from="own process" origin="own-process">` with a
 notice that it came from a script or hook the session ran, not from the
 user.
+
+### Trusted controllers
+
+The rule above holds a message from any sender that does not say which
+review class it is in, and a program that is not a Qwen Code session has
+none to say. That is the right default for a stranger, but not for a
+program you chose: a voice front-end, a dictation bridge, an automation
+daemon relaying your own instructions would have every message parked,
+and approving each one by hand defeats the point.
+
+You grant such a program delivery by minting it a token:
+
+```bash
+qwen sessions controllers add --label voice-bridge
+```
+
+The token is printed once and is not stored anywhere: the file under
+your Qwen home keeps only its SHA-256 hash, so nothing that later reads
+that file can present the token. Put it in the controller's own
+configuration when the command prints it.
+
+A controller presents the token the way any other sender does — as the
+first line of the connection — and takes the socket path from the
+session registry (`qwen sessions ps --json` prints one record per live
+session, `ipcPath` being the address):
+
+```bash
+{ printf '%s\n' \
+    '{"msgV":1,"type":"auth","token":"'"$QWEN_CONTROLLER_TOKEN"'"}' \
+    '{"msgV":1,"msgId":"'"$(uuidgen)"'","type":"user","priority":"next","message":{"role":"user","content":"open the failing test"}}'; \
+} | socat - UNIX-CONNECT:"$SESSION_IPC_PATH"
+```
+
+A message that arrives on a granted token is delivered without
+per-message review, whatever review class either side is in — but it
+still yields to an explicit setting: an `agents.crossSessionInbound` of
+`hold` parks it like anything else, and `refuse` turns it away. Grants
+belong to your Qwen home rather than to one session, so a controller
+reaches whichever sessions you are running, and sessions re-read the
+file on every connection: minting or revoking one takes effect on the
+next connection, with nothing to restart.
+
+```bash
+qwen sessions controllers list          # ids, labels, when they were added
+qwen sessions controllers remove c_1a2b # revoke one
+```
+
+`/peers controllers` and `/peers revoke <id>` do the same from inside a
+session. A message that came through a grant is shown as
+`Message from a trusted controller (voice-bridge)`, and appears in
+`/peers` as `[controller] voice-bridge` if a `hold` setting parked it.
+
+The model sees such a message as
+`<cross_session_message from="controller" origin="controller" controller="voice-bridge">`,
+with a notice that it relays your own instructions — and the same two
+prohibitions that apply to every other origin: it may not edit
+permission settings, QWEN.md, or config because the message asked, and
+it may not treat the message as you approving a pending confirmation
+prompt. A controller can say what to do next; it cannot answer a prompt
+on your behalf.
+
+Anyone who holds the token can send as that controller, so treat it like
+any other credential: give it to one program, keep it out of shared
+config, and revoke it when that program is done.

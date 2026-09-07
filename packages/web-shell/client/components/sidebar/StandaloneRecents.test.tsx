@@ -3,7 +3,11 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { STANDALONE_SESSIONS_CAPABILITY } from '@qwen-code/sdk/daemon';
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonSessionArchiveState,
+  type DaemonStandaloneSessionSummary,
+} from '@qwen-code/sdk/daemon';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -12,11 +16,16 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   exportSession: vi.fn(),
   t: vi.fn((key: string) => key),
+  streamingState: 'idle',
+  connection: { sessionContext: { kind: 'standalone' } } as {
+    sessionContext?: { kind: string; cwd?: string };
+  },
   workspace: {} as Record<string, unknown>,
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useStreamingState: () => 'idle',
+  useConnection: () => mocks.connection,
+  useStreamingState: () => mocks.streamingState,
   useWorkspace: () => mocks.workspace,
 }));
 
@@ -26,20 +35,6 @@ vi.mock('../../i18n', () => ({
 
 vi.mock('../dialogs/DialogShell', () => ({
   DialogShell: ({ children }: { children: ReactNode }) => children,
-}));
-
-vi.mock('../ui/dropdown-menu', () => ({
-  DropdownMenu: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuContent: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuGroup: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuItem: ({
-    children,
-    onSelect,
-  }: {
-    children: ReactNode;
-    onSelect?: () => void;
-  }) => <button onClick={onSelect}>{children}</button>,
 }));
 
 import { StandaloneRecents } from './StandaloneRecents';
@@ -67,6 +62,8 @@ describe('StandaloneRecents', () => {
     mocks.unarchive.mockReset();
     mocks.rename.mockReset();
     mocks.exportSession.mockReset();
+    mocks.streamingState = 'idle';
+    mocks.connection = { sessionContext: { kind: 'standalone' } };
     mocks.rename.mockResolvedValue(undefined);
     mocks.exportSession.mockResolvedValue({
       content: '<p>chat</p>',
@@ -116,31 +113,101 @@ describe('StandaloneRecents', () => {
 
   async function render(
     options: {
+      archiveState?: DaemonSessionArchiveState;
+      currentSessionId?: string;
+      refreshKey?: number;
+      searchQuery?: string;
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onNewSession?: () => void;
+      onMutated?: () => void;
     } = {},
   ) {
     const onError = options.onError ?? vi.fn();
     const onRenameSession = options.onRenameSession ?? vi.fn();
+    const onMutated = options.onMutated ?? vi.fn();
+    const renderSession = vi.fn(
+      (
+        session: DaemonStandaloneSessionSummary,
+        actions: {
+          onOpen: () => void;
+          onRename: () => void;
+          onExport: () => void;
+          onArchive?: () => void;
+          onUnarchive?: () => void;
+          onDelete: () => void;
+        },
+      ) => (
+        <div key={session.sessionId}>
+          <button onClick={actions.onOpen}>{session.displayName}</button>
+          <button onClick={actions.onRename}>sidebar.rename</button>
+          <button onClick={actions.onExport}>sidebar.export</button>
+          {actions.onArchive && (
+            <button onClick={actions.onArchive}>sidebar.archive</button>
+          )}
+          {actions.onUnarchive && (
+            <button onClick={actions.onUnarchive}>sidebar.unarchive</button>
+          )}
+          <button onClick={actions.onDelete}>sidebar.delete</button>
+        </div>
+      ),
+    );
     await act(async () => {
       root.render(
         <StandaloneRecents
-          collapsed={false}
-          onExpand={vi.fn()}
+          archiveState={options.archiveState ?? 'active'}
+          currentSessionId={options.currentSessionId}
+          refreshKey={options.refreshKey}
+          searchQuery={options.searchQuery}
+          onNewSession={options.onNewSession}
+          renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
           onError={onError}
           onRenameSession={onRenameSession}
+          onMutated={onMutated}
           onNotice={vi.fn()}
         />,
       );
     });
-    return { onError, onRenameSession };
+    return { onError, onRenameSession, onMutated, renderSession };
   }
 
-  it('lists only top-level active chats without exposing the internal cwd', async () => {
-    await render();
+  it('lists only top-level active chats under No workspace', async () => {
+    const onNewSession = vi.fn();
+    await render({ onNewSession });
 
+    expect(container.textContent).toContain('sidebar.noWorkspaceSessions');
+    expect(
+      container
+        .querySelector('[data-testid="standalone-active-group"] > div > button')
+        ?.querySelectorAll('svg'),
+    ).toHaveLength(1);
+    const newSession = container.querySelector<HTMLButtonElement>(
+      '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
+    );
+    expect(newSession?.parentElement?.className).toContain('invisible');
+    const sessions = container.querySelector(
+      '[data-testid="standalone-active-group"] > div:nth-child(2)',
+    );
+    expect(sessions?.className).not.toContain('pl-5');
+    const header = container.querySelector<HTMLButtonElement>(
+      '[data-testid="standalone-active-group"] > div > button',
+    )!;
+    header.focus();
+    await act(async () =>
+      header.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      ),
+    );
+    expect(document.activeElement).not.toBe(header);
+    await act(async () =>
+      header.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      ),
+    );
+    await act(async () => newSession?.click());
+    expect(onNewSession).toHaveBeenCalledOnce();
     expect(container.textContent).toContain('Active chat');
     expect(container.textContent).not.toContain('Child chat');
     expect(container.textContent).not.toContain('/private/standalone');
@@ -148,139 +215,197 @@ describe('StandaloneRecents', () => {
       archiveState: 'active',
       pageSize: 50,
     });
-    expect(mocks.list).not.toHaveBeenCalledWith(
-      expect.objectContaining({ archiveState: 'archived' }),
-    );
   });
 
-  it('loads archived chats only after the archived lane is expanded', async () => {
-    await render();
-    const archivedToggle = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
-
-    await act(async () => archivedToggle?.click());
+  it('loads only the requested archived group', async () => {
+    const { renderSession } = await render({ archiveState: 'archived' });
 
     expect(container.textContent).toContain('Archived chat');
+    expect(container.textContent).not.toContain('Active chat');
+    expect(renderSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'archived' }),
+      expect.objectContaining({
+        active: false,
+        busy: false,
+        isArchived: true,
+        onUnarchive: expect.any(Function),
+      }),
+    );
     expect(mocks.list).toHaveBeenCalledWith({
       archiveState: 'archived',
       pageSize: 50,
     });
   });
 
-  it('preserves appended active pages across export and archived expansion', async () => {
-    mocks.list.mockImplementation(
-      async ({
-        archiveState,
-        cursor,
-      }: {
-        archiveState: string;
-        cursor?: string;
-      }) => {
-        if (archiveState === 'archived') {
-          return {
-            sessions: [
-              summary('archived', 'Archived chat', { isArchived: true }),
-            ],
-          };
-        }
-        return cursor === 'page-2'
-          ? { sessions: [summary('page-2', 'Page two chat')] }
-          : {
-              sessions: [summary('page-1', 'Page one chat')],
-              nextCursor: 'page-2',
-            };
-      },
-    );
-    await render();
-    const showAll = Array.from(container.querySelectorAll('button')).find(
+  it('keeps archived pagination reachable after an empty page', async () => {
+    mocks.list
+      .mockResolvedValueOnce({ sessions: [], nextCursor: 'next' })
+      .mockResolvedValueOnce({
+        sessions: [
+          summary('later', 'Later archived chat', { isArchived: true }),
+        ],
+      });
+    await render({ archiveState: 'archived' });
+
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'sidebar.showAllSessions',
     );
-    await act(async () => showAll?.click());
-    expect(container.textContent).toContain('Page two chat');
+    expect(loadMore).toBeDefined();
+    await act(async () => loadMore!.click());
 
-    const exportButtons = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button'),
-    ).filter((button) => button.textContent === 'sidebar.export');
-    await act(async () => exportButtons.at(-1)?.click());
-    await vi.waitFor(() => expect(mocks.exportSession).toHaveBeenCalledOnce());
-    expect(container.textContent).toContain('Page two chat');
-    expect(
-      mocks.list.mock.calls.filter(
-        ([options]) =>
-          options.archiveState === 'active' && options.cursor === undefined,
-      ),
-    ).toHaveLength(1);
-
-    const archivedToggle = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
-    await act(async () => archivedToggle?.click());
-
-    expect(container.textContent).toContain('Page two chat');
-    expect(container.textContent).toContain('Archived chat');
-    expect(
-      mocks.list.mock.calls.filter(
-        ([options]) =>
-          options.archiveState === 'active' && options.cursor === undefined,
-      ),
-    ).toHaveLength(1);
+    expect(mocks.list).toHaveBeenLastCalledWith({
+      archiveState: 'archived',
+      cursor: 'next',
+      pageSize: 50,
+    });
+    expect(container.textContent).toContain('Later archived chat');
   });
 
-  it('preserves appended archived pages across collapse and reopen', async () => {
-    mocks.list.mockImplementation(
-      async ({
-        archiveState,
-        cursor,
-      }: {
-        archiveState: string;
-        cursor?: string;
-      }) => {
-        if (archiveState === 'active') {
-          return { sessions: [summary('active', 'Active chat')] };
-        }
-        return cursor === 'archived-page-2'
-          ? {
-              sessions: [
-                summary('archived-2', 'Archived page two', {
-                  isArchived: true,
-                }),
-              ],
-            }
-          : {
-              sessions: [
-                summary('archived-1', 'Archived page one', {
-                  isArchived: true,
-                }),
-              ],
-              nextCursor: 'archived-page-2',
-            };
-      },
-    );
+  it('aligns the empty state with the workspace label', async () => {
+    mocks.list.mockResolvedValue({ sessions: [] });
     await render();
-    const archivedToggle = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
 
-    await act(async () => archivedToggle?.click());
+    expect(container.querySelector('div[class*="empty"]')?.textContent).toBe(
+      'sidebar.noSessions',
+    );
+  });
+
+  it('does not reload when the selected session changes', async () => {
+    const onError = vi.fn();
+    await render({ onError });
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+
+    await render({ currentSessionId: 'active', onError });
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes on standalone completion but not workspace completion', async () => {
+    mocks.streamingState = 'responding';
+    mocks.connection = {
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+    };
+    await render();
+
+    mocks.streamingState = 'idle';
+    await render();
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+
+    mocks.connection = { sessionContext: { kind: 'standalone' } };
+    mocks.streamingState = 'responding';
+    await render();
+    mocks.streamingState = 'idle';
+    await render();
+
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('filters sessions by label or id', async () => {
+    await render({ searchQuery: 'missing' });
+    expect(container.textContent).not.toContain('Active chat');
+    expect(container.textContent).toContain('sidebar.noSessions');
+
+    await render({ searchQuery: 'ACTIVE' });
+    expect(container.textContent).toContain('Active chat');
+  });
+
+  it('shows five sessions until expanded', async () => {
+    mocks.list.mockResolvedValue({
+      sessions: Array.from({ length: 6 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+
+    await act(async () => showAll?.click());
+
+    expect(container.textContent).toContain('Chat 6');
+    expect(showAll?.isConnected).toBe(false);
+  });
+
+  it('unlocks pagination when a refresh replaces an in-flight page', async () => {
+    let resolveMore!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    mocks.list
+      .mockResolvedValueOnce({
+        sessions: [summary('active', 'Active chat')],
+        nextCursor: 'next',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveMore = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        sessions: [summary('active', 'Active chat')],
+        nextCursor: 'next',
+      });
+    await render({ refreshKey: 0 });
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    )!;
+
+    await act(async () => {
+      showAll.click();
+      await Promise.resolve();
+    });
+    expect(showAll.disabled).toBe(true);
+
+    await render({ refreshKey: 1 });
+    expect(showAll.disabled).toBe(false);
+
+    await act(async () => {
+      resolveMore({ sessions: [summary('late', 'Late page')] });
+      await Promise.resolve();
+    });
+    expect(showAll.disabled).toBe(false);
+    expect(container.textContent).not.toContain('Late page');
+  });
+
+  it('reloads the loaded depth and drops sessions removed elsewhere', async () => {
+    mocks.list
+      .mockResolvedValueOnce({
+        sessions: [
+          summary('kept', 'Kept chat'),
+          summary('removed', 'Removed chat'),
+        ],
+        nextCursor: 'next',
+      })
+      .mockResolvedValueOnce({
+        sessions: [summary('later', 'Later chat')],
+      })
+      .mockResolvedValueOnce({
+        sessions: [summary('kept', 'Kept chat')],
+        nextCursor: 'next',
+      })
+      .mockResolvedValueOnce({
+        sessions: [summary('later', 'Later chat')],
+      });
+    await render({ refreshKey: 0 });
     const showAll = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'sidebar.showAllSessions',
     );
     await act(async () => showAll?.click());
-    expect(container.textContent).toContain('Archived page two');
+    expect(container.textContent).toContain('Removed chat');
+    expect(container.textContent).toContain('Later chat');
 
-    await act(async () => archivedToggle?.click());
-    await act(async () => archivedToggle?.click());
+    await render({ refreshKey: 1 });
 
-    expect(container.textContent).toContain('Archived page two');
-    expect(container.textContent).not.toContain('sidebar.showAllSessions');
-    expect(
-      mocks.list.mock.calls.filter(
-        ([options]) =>
-          options.archiveState === 'archived' &&
-          options.cursor === 'archived-page-2',
-      ),
-    ).toHaveLength(1);
+    expect(container.textContent).not.toContain('Removed chat');
+    expect(container.textContent).toContain('Later chat');
+    expect(mocks.list).toHaveBeenLastCalledWith({
+      archiveState: 'active',
+      cursor: 'next',
+      pageSize: 50,
+    });
   });
 
   it('reports a failed standalone session open', async () => {
@@ -297,7 +422,7 @@ describe('StandaloneRecents', () => {
     expect(onError).toHaveBeenCalledWith(error, 'session.loadFailed');
   });
 
-  it('keeps a row visible when a batch archive reports an item error', async () => {
+  it('keeps a row visible when archive reports an item error', async () => {
     mocks.archive.mockResolvedValue({
       archived: [],
       alreadyArchived: [],
@@ -317,76 +442,84 @@ describe('StandaloneRecents', () => {
     expect(container.textContent).toContain('Active chat');
   });
 
-  it('treats an already-missing archive target as terminal success', async () => {
+  it('removes a successfully archived row and notifies its parent', async () => {
     mocks.archive.mockResolvedValue({
-      archived: [],
+      archived: ['active'],
       alreadyArchived: [],
-      notFound: ['active'],
       errors: [],
     });
-    const { onError } = await render();
+    const { onMutated } = await render();
     const archiveButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('sidebar.archive'),
     );
 
     await act(async () => archiveButton?.click());
 
-    expect(onError).not.toHaveBeenCalled();
-    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain('Active chat');
+    expect(onMutated).toHaveBeenCalledOnce();
   });
 
-  it('treats an already-missing unarchive target as terminal success', async () => {
-    mocks.unarchive.mockResolvedValue({
-      unarchived: [],
-      alreadyActive: [],
-      notFound: ['archived'],
+  it('treats an already archived row as a completed archive', async () => {
+    mocks.archive.mockResolvedValue({
+      archived: [],
+      alreadyArchived: ['active'],
       errors: [],
     });
-    const { onError } = await render();
-    const archivedToggle = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('sidebar.archivedTitle'));
-    await act(async () => archivedToggle?.click());
-    const unarchiveButton = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('sidebar.unarchive'));
+    const { onError, onMutated } = await render();
+    const archiveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('sidebar.archive'),
+    );
 
-    await act(async () => unarchiveButton?.click());
+    await act(async () => archiveButton?.click());
 
+    expect(container.textContent).not.toContain('Active chat');
+    expect(onMutated).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
-    expect(mocks.list).toHaveBeenCalledWith({
-      archiveState: 'archived',
-      pageSize: 50,
-    });
-    expect(mocks.list.mock.calls.length).toBeGreaterThan(2);
   });
 
-  it('dispatches a lifecycle action only once before React commits busy state', async () => {
-    let resolveArchive:
-      | ((value: {
-          archived: string[];
-          alreadyArchived: string[];
-          errors: unknown[];
-        }) => void)
-      | undefined;
+  it('treats an already active row as a completed restore', async () => {
+    mocks.unarchive.mockResolvedValue({
+      unarchived: [],
+      alreadyActive: ['archived'],
+      errors: [],
+    });
+    const { onError, onMutated } = await render({ archiveState: 'archived' });
+    const restoreButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('sidebar.unarchive'),
+    );
+
+    await act(async () => restoreButton?.click());
+
+    expect(container.textContent).not.toContain('Archived chat');
+    expect(onMutated).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('ignores a second mutation while one is in flight', async () => {
+    let finishArchive!: (value: {
+      archived: string[];
+      alreadyArchived: string[];
+      errors: never[];
+    }) => void;
     mocks.archive.mockReturnValue(
       new Promise((resolve) => {
-        resolveArchive = resolve;
+        finishArchive = resolve;
       }),
     );
     await render();
     const archiveButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('sidebar.archive'),
-    );
+    )!;
 
-    act(() => {
-      archiveButton?.click();
-      archiveButton?.click();
-    });
-
-    expect(mocks.archive).toHaveBeenCalledOnce();
     await act(async () => {
-      resolveArchive?.({
+      archiveButton.click();
+      archiveButton.click();
+      await Promise.resolve();
+    });
+    expect(mocks.archive).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      finishArchive({
         archived: ['active'],
         alreadyArchived: [],
         errors: [],
@@ -395,23 +528,39 @@ describe('StandaloneRecents', () => {
     });
   });
 
-  it('reports a confirmed rename after the exact standalone route succeeds', async () => {
+  it('downloads an exported standalone conversation', async () => {
+    await render();
+    const exportButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('sidebar.export'),
+    );
+
+    await act(async () => {
+      exportButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.exportSession).toHaveBeenCalledWith('active', {
+      format: 'html',
+    });
+    expect(URL.createObjectURL).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:standalone-export');
+  });
+
+  it('reports a confirmed rename', async () => {
     const { onRenameSession } = await render();
     const renameButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('sidebar.rename'),
     );
-
     await act(async () => renameButton?.click());
     const input = container.querySelector('input');
     expect(input).not.toBeNull();
     await act(async () => {
-      if (!input) return;
       const setter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
         'value',
       )?.set;
       setter?.call(input, 'Renamed chat');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => {
       input

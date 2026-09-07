@@ -140,7 +140,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */
@@ -241,6 +243,15 @@ export interface WebShellSessionArtifactsChange {
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -537,6 +548,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;

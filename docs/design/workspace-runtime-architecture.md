@@ -6,12 +6,13 @@
 Workspace-runtime-centric 的目标设计与堆叠交付契约。该设计由四个可独立合并的
 PR 渐进落地；本文描述最终形态，不表示 foundation PR 已实现所有 capability。
 
-> **当前落地进度（Foundation + MCP）**：已实现 Bridge 权威的五态 lifecycle snapshot、
+> **当前落地进度（Foundation + Skills + MCP）**：已实现 Bridge 权威的五态 lifecycle snapshot、
 > workspace 级单调 epoch、完整物理 work lease、绝对启动 deadline、无参数
 > `ensure/status`、10 分钟可续期保活、drain/removal/shutdown admission，以及
-> SDK 的 primary/qualified runtime 方法，以及 MCP 的 revision、Catalog 和
-> runtime management。当前 `ensure` 会在同一观察预算内准备 MCP；Extensions、
-> Skills、Tools 的 generation/revision、Catalog 投影和 operation 状态机仍属于后续阶段。
+> SDK 的 primary/qualified runtime 方法。Skills 与 MCP 的 revision/epoch、
+> config/runtime Catalog、capability status 与 reconcile 均已落地，`ensure` 会在
+> 同一观察预算内继续准备 Skills 与 MCP；Extensions、Tools 等其余领域的
+> capability generation/revision、Catalog 投影和 operation 状态机仍属于后续阶段。
 
 ### 1.1 当前实现与目标设计
 
@@ -21,15 +22,15 @@ PR 渐进落地；本文描述最终形态，不表示 foundation PR 已实现�
 - **Target（未实现）**：后续 PR 的目标契约，当前调用方不得依赖；
 - **Legacy（兼容）**：迁移期间保留的旧入口，新调用方不应采用。
 
-| 领域              | Foundation（已实现）                                                                           | Target（后续阶段）                                                |
-| ----------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Runtime lifecycle | Bridge 权威五态、workspace 单调 epoch、物理 work lease、启动 deadline、drain/removal admission | capability 健康状态参与统一对外投影                               |
-| `ensure`          | 无参数；确保 ACP Channel 完成 initialize 并准备 MCP；成功后续期 10 分钟                        | 准备 Extensions、Skills、Tools，并通过 capability status 表达收敛 |
-| `status`          | lifecycle、`runtimeLive`、`runtimeEpoch` 与 MCP capability 快照                                | 其他 capability、generation、revision、error 和 operation 投影    |
-| SDK               | primary/qualified runtime 与 MCP config/runtime 方法                                           | 其他 Catalog、operation 和统一 deadline 的完整 owner-aware API    |
+| 领域              | Foundation（已实现）                                                                               | Target（后续阶段）                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Runtime lifecycle | Bridge 权威五态、workspace 单调 epoch、物理 work lease、启动 deadline、drain/removal admission     | capability 健康状态参与统一对外投影                            |
+| `ensure`          | 无参数；确保 ACP Channel 完成 initialize，并在同一观察预算内准备 Skills 与 MCP；成功后续期 10 分钟 | 继续准备 Extensions、Tools，并通过 capability status 表达收敛  |
+| `status`          | lifecycle、`runtimeLive`、`runtimeEpoch` 与 Skills、MCP capability 快照                            | 其余 capability、generation、error 和 operation 投影           |
+| SDK               | primary/qualified `ensure`/`status` REST 方法，Skills 与 MCP 的 config/runtime Catalog 方法        | 其他 Catalog、operation 和统一 deadline 的完整 owner-aware API |
 
-除明确标为当前实现的 MCP 契约外，第 9～14 节中其他 capability、Catalog、generation、
-revision 和 operation 的详细状态机均是 Target 契约。
+除明确标为 Foundation、Skills 或 MCP 已落地的段落外，第 9～14 节中 capability、
+Catalog、generation、revision 和 operation 的详细状态机均是 Target 契约。
 
 核心目标只有一个：
 
@@ -313,8 +314,9 @@ Foundation Bridge 用 session 集合、spawn/restore 计数、workspace-control 
 MCP discovery 标记和 server-name 级 MCP auth 集合表示物理 work。已接入的
 status、Catalog、Extension refresh、Skills refresh、MCP discovery/auth、普通 runtime
 mutation 以及 Session create/load/resume/close 都在对应物理工作期间持 lease。
-物理 startup 本身也受启动 lease 和 deadline 保护。当前 `ensure` 只覆盖
-preheat/initialize，并在成功后登记 keepalive；它尚不串联 capability 阶段。
+物理 startup 本身也受启动 lease 和 deadline 保护。当前 `ensure` 覆盖
+preheat/initialize 与 Skills prepare，并在成功后登记 keepalive；其余 capability
+仍由后续阶段接入。
 
 Foundation 在 OAuth 返回 pending 后保留 owning Channel 的 auth lease。明确观察到
 同一 Channel 上的 server 已变为 non-pending 时释放；Catalog 中缺少 server 不是完成
@@ -510,30 +512,35 @@ POST /workspaces/:workspace/runtime/ensure
 primary workspace 使用等价的 `POST /workspace/runtime/ensure`。两个入口都拒绝非空
 body；调用方不选择 capability，也不传 timeout、keepalive 或初始化顺序。
 
-#### 当前实现（Foundation + MCP capability）
+#### Foundation + Skills + MCP（已实现）
 
-当前 Coordinator：
+当前 Coordinator 的职责：
 
 1. 校验 workspace 已准确解析、受信任且未 draining；
 2. 调用 Bridge 的物理 preheat/initialize，等待 ACP Channel handshake 完成；
 3. 将本次成功转换为 workspace 级 10 分钟 keepalive；并发调用保留最长窗口；
-4. 在同一请求观察预算内准备 MCP，并返回 lifecycle 与 `capabilities.mcp`。
+4. 在同一观察预算内准备当前 revision 的 Skills 与 MCP catalog，并返回对应
+   capability 状态；
+5. 从 Bridge 读取 lifecycle snapshot 并返回。
 
-`ensure` 成功证明 ACP Channel 已完成 initialize，并启动或继续当前 MCP revision 的
-准备。只有 `capabilities.mcp.state === 'ready'`、epoch 与 lifecycle 一致且 MCP status
-来自 live runtime 时，调用方才可读取 MCP Catalog。若同一物理启动正在进行，并发
-`ensure` 复用 Bridge 的启动 Promise；每个成功调用都从自己的成功时刻续期
-keepalive。若启动卡住，Bridge 的绝对启动 deadline 会中止并清理该次启动，后续显式
-`ensure` 可以发起新的尝试。
+`ensure` 成功证明 ACP Channel 已完成 initialize 且可由后续请求复用；Skills 与 MCP
+capability 会返回 `starting`、`ready`、`stale` 或 `error`，调用方必须按状态和 epoch
+判断 catalog 是否可用。只有 `capabilities.<name>.state === 'ready'`、epoch 与
+lifecycle 一致且 status 来自 live runtime 时，调用方才可读取对应 Catalog。它不证明
+Extension refresh 或其他未迁移 capability 已 ready。若同一物理启动正在进行，并发
+`ensure` 复用 Bridge 的启动 Promise；每个成功调用都从自己的成功时刻续期 keepalive。
+若启动卡住，Bridge 的绝对启动 deadline 会中止并清理该次启动，后续显式 `ensure`
+可以发起新的尝试。
 
-服务端观察预算为 60 秒。ACP Channel 尚未就绪时，预算耗尽以可重试的
-`runtime_still_starting` 错误结束；Channel 已就绪但 MCP 尚未完成时，返回 capability
-`starting`，后台继续有界收敛。`GET /runtime/status` 只观察 lifecycle 和 capability，
-不启动或重试 runtime。
+服务端观察预算为 60 秒。物理启动在预算内未完成时，请求以可重试的
+`runtime_still_starting` 错误结束；Channel 已就绪但 Skills 或 MCP 尚未完成时，返回
+live runtime 和非 ready capability，后台工作继续有界收敛。底层物理启动仍由独立的
+绝对启动 deadline 约束。`GET /runtime/status` 只观察 lifecycle 和 capability，不启动
+或重试 runtime。
 
 #### Target（部分实现）
 
-后续 Coordinator 将在同一次 workspace runtime command 中固定准备标准能力
+后续 Coordinator 将把其余标准能力纳入同一次 workspace runtime command，目标顺序为
 `extensions -> (mcp, skills, tools)`：
 
 1. 获取覆盖整个命令的外层 runtime-control lease；
@@ -954,11 +961,12 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
 - 保持现有领域 mutation 路由不变，不在 foundation 中引入 MCP、Extension 或 Skills
   专属状态。
 
-### 阶段二：收口状态与 operation（部分完成）
+### 阶段二：收口状态与 operation（Skills + MCP 已完成）
 
-- 已完成：Coordinator 增加 MCP capability 与 revision 投影并绑定 epoch，清除 MCP
-  跨 epoch ready 合并；
-- 待完成：Extension generation、Skills revision 和 operation 投影；
+- 已完成：Coordinator 增加 Skills 与 MCP 的 capability、revision 和 epoch 投影；
+- 已完成：MCP 与 Skills 均清除跨 epoch ready 合并，状态绑定 live epoch；
+- 待完成：其余 capability、Extension generation 和 operation 投影；
+- 所有已迁移 capability 状态绑定 epoch；
 - 将 Extension desired/applied generation 更新改为同一 runtime 回执，MCP/Skills 使用
   revision + epoch 丢弃迟到结果；
 - 使用绝对 deadline；幂等收敛由 status、命令型长任务由 operation 暴露终态；
@@ -968,11 +976,13 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
 ### 阶段三：迁移模块和 SDK（部分完成）
 
 - 已完成：Workspace SDK 的 foundation ensure/status 对 runtime 路由显式使用 REST；
-- 已完成：SDK MCP config/runtime Catalog 与 capability status 契约；
-- 待完成：其他模块的 config/runtime Catalog 与 operation 契约；
-- 待完成：Skills snapshot 增加 live source、runtime epoch 和 revision freshness；
-- 已完成：Web Shell MCP 页面接入 primary/qualified ensure 和统一 config/runtime 模型；
-- 待完成：Extensions、Skills 页面迁移到统一 config/runtime/operation 模型；
+- 已完成：Skills 与 MCP 的 config/runtime Catalog、runtime epoch、capability status
+  的 SDK 契约；
+- 已完成：Skills 与 MCP 管理页和新会话消费方接入 primary/qualified ensure 与统一
+  config/runtime 模型；
+- 待完成：其余领域（Extensions、Tools）的 config/runtime Catalog 与 operation SDK
+  契约；
+- 待完成：Extensions 页面迁移到统一 config/runtime/operation 模型；
 - 管理区域以无参数 runtime ensure 启动完整标准能力，各页面不再传 capability；
 - Extensions 页面从 runtime Catalog 取得实际状态，不从 config refresh 调 Bridge；
 - User scope 状态失效覆盖所有受影响工作区；可选事件也要 fan out；

@@ -134,6 +134,36 @@ describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
       sentToModel: false,
     });
   });
+
+  it('collapses the same user text folded twice in a row', () => {
+    // ink's addItem drops a user item identical to its predecessor; steering
+    // the same text twice mid-turn reaches this fold as two events.
+    const steer = {
+      type: 'user',
+      text: 'continue',
+      sentToModel: false,
+    } as const;
+    let items = foldLiveEvent([], steer);
+    items = foldLiveEvent(items, steer);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'continue' });
+  });
+
+  it('keeps two different user texts folded in a row', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'first',
+      sentToModel: false,
+    });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: 'second',
+      sentToModel: false,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'first' });
+    expect(items[1]).toMatchObject({ kind: 'user', text: 'second' });
+  });
 });
 
 describe('foldLiveEvent image', () => {
@@ -624,6 +654,47 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
         }),
       ),
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
+  });
+
+  it('carries spend in the subtitle, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          activeTimeMs: 61000,
+          tokensUsed: 1234,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns · 1m 1s · 1.2k/30.0m tokens' });
+  });
+
+  it('carries spend alone when the Goal has no budget', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 1,
+          tokensUsed: 900,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '1 turn · 900 tokens' });
+  });
+
+  it('says nothing about spend before a turn has billed', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns' });
   });
 
   it('shows the reason only off-active or verifying', () => {

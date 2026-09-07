@@ -969,6 +969,35 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(editor.restoreImages).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, 'client-1'])(
+    'retains unmatched started-event identity with originator %s',
+    (originatorClientId) => {
+      const { actions } = createActions();
+      const { render, store } = mount('responding', actions);
+      expect(latest.queuedPrompts).toEqual([]);
+
+      sdk.pendingEvents = [
+        {
+          type: 'pending_prompt_started',
+          originatorClientId,
+          data: {
+            sessionId: 'session-1',
+            promptId: 'server-unmatched',
+            text: 'started without a local queue row',
+          },
+        },
+      ];
+      render('responding');
+
+      expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'started without a local queue row',
+        undefined,
+        { promptId: 'server-unmatched' },
+      );
+    },
+  );
+
   it('buffers an image-only started event until its exact response binds', async () => {
     const { actions, pendingSubmit } = createActions();
     const { render, store } = mount('responding', actions);
@@ -998,7 +1027,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'Ym1w', mimeType: 'image/bmp' }],
-      undefined,
+      { promptId: 'server-image' },
       undefined,
     );
     expect(latest.queuedPrompts).toMatchObject([
@@ -1048,7 +1077,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
-      undefined,
+      { promptId: 'server-second' },
       undefined,
     );
   });
@@ -1088,7 +1117,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
-      undefined,
+      { promptId: 'server-terminal' },
       undefined,
     );
   });

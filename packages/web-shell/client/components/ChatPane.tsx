@@ -12,7 +12,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -91,7 +91,7 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
@@ -271,7 +271,9 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
+  // live prompt state into its own provider (#9487).
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
@@ -969,7 +971,11 @@ export function ChatPane({
   previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
-    (src: string, alt?: string) => {
+    (
+      src: string,
+      alt?: string,
+      source?: { kind: 'attachment'; attachmentId: string },
+    ) => {
       if (!connection.sessionId) return;
       handleRightPanelOpen({
         id: 'image',
@@ -978,6 +984,7 @@ export function ChatPane({
         turnId: connection.sessionId,
         src,
         ...(alt ? { alt } : {}),
+        ...(source ? { attachmentId: source.attachmentId } : {}),
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
@@ -996,6 +1003,9 @@ export function ChatPane({
           ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
           ...(resolvedFile.text !== undefined
             ? { text: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
             : {}),
           ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
           ...(resolvedFile.workspacePath
@@ -1286,11 +1296,10 @@ export function ChatPane({
                           : 'splitView.maximizePane',
                       )}
                     >
-                      {/* Same icon vocabulary as the dialog fullscreen toggle. */}
                       {isMaximized ? (
-                        <Minimize2Icon size={16} aria-hidden />
+                        <ShrinkIcon size={16} aria-hidden />
                       ) : (
-                        <Maximize2Icon size={16} aria-hidden />
+                        <ExpandIcon size={16} aria-hidden />
                       )}
                     </button>
                   )}
@@ -1401,6 +1410,11 @@ export function ChatPane({
               onConfirm={handleConfirm}
               variant="floating"
               planTodos={planTodos}
+              generateContent={
+                connection.capabilities?.features.includes('session_generation')
+                  ? actions.generateSessionContent
+                  : undefined
+              }
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval

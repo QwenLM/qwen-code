@@ -92,6 +92,7 @@ export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/output-styles.js';
+export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
@@ -147,6 +148,11 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  // `applySkillHooks` is deliberately not exported: it is the one entry point
+  // whose caller must apply the folder-trust gate itself, and skipping that
+  // gate is how #11067 happened. Callers outside this module use
+  // `applySkillSideEffects`, which applies the gate for them.
+  applySkillSideEffects,
   canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
@@ -303,6 +309,12 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
+export {
+  isApiUserPrompt,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
+  type ApiUserPromptOptions,
+} from './services/api-user-prompt.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
@@ -356,6 +368,7 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
@@ -373,9 +386,12 @@ export {
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
+  decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
+  encodeSessionTranscriptSnapshot,
   findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
@@ -383,6 +399,7 @@ export {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,
@@ -397,8 +414,13 @@ export type {
   SessionRestoreReplaySelection,
   SessionRuntimeResumeState,
   SessionTranscriptCursorState,
+  SessionTranscriptNavigationTurn,
+  SessionTranscriptNavigationTurnKind,
   SessionTranscriptReadPageOptions,
+  SessionTranscriptReadTurnIndexOptions,
   SessionTranscriptRecordPage,
+  SessionTranscriptSnapshotState,
+  SessionTranscriptTurnIndexPage,
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
@@ -642,6 +664,7 @@ export * from './utils/github-prs.js';
 export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
+export * from './utils/conversations-runtime-marker.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,

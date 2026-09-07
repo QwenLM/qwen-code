@@ -386,7 +386,7 @@ function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
   }
   if (diffs.length > 0) return diffs;
   if (tool.toolName.toLowerCase() === 'write_file') {
-    const newText = getStringContentField(tool.args, 'content');
+    const newText = getStringContentField(tool.args, 'content', 'newText');
     return newText !== undefined
       ? [{ oldText: '', newText, fullContent: true }]
       : [];

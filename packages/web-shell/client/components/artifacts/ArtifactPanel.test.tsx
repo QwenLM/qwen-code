@@ -370,7 +370,7 @@ afterEach(() => {
 });
 
 describe('ArtifactPanel terminal tabs', () => {
-  const renderPanel = (activeTabId: string) => (
+  const renderPanel = (activeTabId: string, restoring = false) => (
     <I18nProvider language="en">
       <ArtifactPanel
         artifacts={[]}
@@ -379,6 +379,7 @@ describe('ArtifactPanel terminal tabs', () => {
           { id: 'terminal-two', kind: 'terminal', title: 'Terminal (2)' },
         ]}
         activeTabId={activeTabId}
+        restoring={restoring}
         reviewChanges={[]}
         selectedReviewPath={null}
         onSelectTab={() => {}}
@@ -409,6 +410,22 @@ describe('ArtifactPanel terminal tabs', () => {
     expect(
       container.querySelectorAll('[data-testid="terminal-panel"]'),
     ).toHaveLength(2);
+  });
+
+  it('keeps an active terminal visible while restoring', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(renderPanel('terminal-one', true)));
+
+    expect(
+      container.querySelector('[data-terminal-id="terminal-one"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="right-panel-loading-skeleton"]'),
+    ).toBeNull();
   });
 });
 
@@ -585,6 +602,45 @@ async function flush() {
 }
 
 describe('ArtifactPanel code review artifacts', () => {
+  it('uses the artifact format icon in the panel tab', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    expect(
+      container.querySelector('[role="tab"] [data-artifact-icon="link"]'),
+    ).not.toBeNull();
+  });
+
+  it('marks overflowing panel tab titles for hover scrolling', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    const tab = container.querySelector<HTMLElement>('[role="tab"]')!;
+    const title = tab.querySelector<HTMLElement>(
+      '[data-web-shell-session-title]',
+    )!;
+    Object.defineProperty(title, 'clientWidth', { value: 80 });
+    Object.defineProperty(title.firstElementChild, 'scrollWidth', {
+      value: 180,
+    });
+    act(() =>
+      tab.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+
+    expect(title.hasAttribute('data-web-shell-title-overflow')).toBe(true);
+    expect(
+      title.style.getPropertyValue('--session-title-scroll-distance'),
+    ).toBe('100px');
+  });
+
   it('fails closed when an artifact tab has no workspace owner', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: 'PRIMARY_WORKSPACE_SECRET',
@@ -724,6 +780,7 @@ describe('ArtifactPanel code review artifacts', () => {
                 kind: 'file',
                 title: 'page.html',
                 workspacePath: 'page.html',
+                attachmentId: 'page.html',
                 previewContent: '<h1>Attachment page</h1>',
                 previewMimeType: 'text/html',
                 previewOnly: true,
@@ -2601,6 +2658,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle?.querySelector('.lucide-expand')).not.toBeNull();
     act(() => {
       toggle?.click();
     });
@@ -2619,6 +2677,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle?.querySelector('.lucide-shrink')).not.toBeNull();
   });
 
   it('omits the toggle when fullscreen is unsupported', () => {
