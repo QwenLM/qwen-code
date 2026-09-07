@@ -10,9 +10,84 @@ import {
   REASONING_EFFORT_TIERS,
   applyReasoningEffort,
   clampReasoningEffort,
+  getGpt5ReasoningCapabilities,
   normalizeReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
+
+describe('getGpt5ReasoningCapabilities', () => {
+  it.each([
+    ['gpt-5', ['low', 'medium', 'high'], 'medium', true, true],
+    ['gpt-5-mini', ['low', 'medium', 'high'], 'medium', true, true],
+    ['gpt-5.1', ['low', 'medium', 'high'], 'medium', false, false],
+    ['gpt-5.1-codex', ['low', 'medium', 'high'], 'medium', true, true],
+    [
+      'gpt-5.1-codex-max',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      true,
+      true,
+    ],
+    ['gpt-5.2', ['low', 'medium', 'high', 'xhigh'], 'medium', false, false],
+    ['gpt-5.3-codex', ['low', 'medium', 'high', 'xhigh'], 'medium', true, true],
+    [
+      'gpt-5.4-2026-03-05',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
+    [
+      'openai/gpt-5.4',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
+    ['GPT-5.5', ['low', 'medium', 'high', 'xhigh'], 'medium', true, false],
+    [
+      'gpt-5.6',
+      ['low', 'medium', 'high', 'xhigh', 'max'],
+      'medium',
+      true,
+      false,
+    ],
+    [
+      'gpt-5.6-sol',
+      ['low', 'medium', 'high', 'xhigh', 'max'],
+      'medium',
+      true,
+      false,
+    ],
+    ['gpt-5-pro', ['high'], 'high', true, true],
+    ['gpt-5.2-pro', ['medium', 'high', 'xhigh'], 'medium', true, true],
+    ['gpt-5.5-pro', ['medium', 'high', 'xhigh'], 'high', true, true],
+  ] as const)(
+    'describes %s',
+    (model, efforts, defaultEffort, defaultEnabled, thinkingMandatory) => {
+      expect(getGpt5ReasoningCapabilities(model)).toEqual({
+        efforts,
+        defaultEffort,
+        defaultEnabled,
+        thinkingMandatory,
+      });
+    },
+  );
+
+  it.each([
+    undefined,
+    '',
+    'gpt-4.1',
+    'gpt-50',
+    'my-gpt-5.4',
+    'gpt-5.4custom',
+    'gpt-5-chat-latest',
+    'openai/gpt-5.2-chat-latest',
+    'qwen3.8-max',
+  ])('does not assign GPT reasoning controls to %s', (model) => {
+    expect(getGpt5ReasoningCapabilities(model)).toBeUndefined();
+  });
+});
 
 describe('REASONING_EFFORT_TIERS', () => {
   it('is ordered weakest to strongest', () => {

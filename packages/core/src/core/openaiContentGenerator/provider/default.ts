@@ -16,7 +16,9 @@ import type { ReasoningEffort } from '../../reasoning-effort.js';
 import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
+  getGpt5ReasoningCapabilities,
 } from '../../reasoning-effort.js';
+import { isOpenRouterHostname } from './openrouter.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -142,9 +144,11 @@ export class DefaultOpenAICompatibleProvider
    * `super.buildRequest` path.
    */
   protected supportedReasoningEffortsFor(
-    _model: string | undefined,
+    model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return OPENAI_COMPATIBLE_EFFORTS;
+    return (
+      getGpt5ReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
+    );
   }
 
   /**
@@ -211,11 +215,27 @@ export class DefaultOpenAICompatibleProvider
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
-    return {
+    const result = {
       ...requestWithTokenLimits,
       messages,
       ...(extraBody ? extraBody : {}),
     };
+    if (
+      getGpt5ReasoningCapabilities(request.model) &&
+      !isOpenRouterHostname(this.contentGeneratorConfig) &&
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      extraBody?.['reasoning'] === undefined
+    ) {
+      const body = result as unknown as Record<string, unknown>;
+      const reasoning = body['reasoning'] as { effort?: unknown } | undefined;
+      if (reasoning?.effort !== undefined) {
+        if (!('reasoning_effort' in body)) {
+          body['reasoning_effort'] = reasoning.effort;
+        }
+        delete body['reasoning'];
+      }
+    }
+    return result;
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {

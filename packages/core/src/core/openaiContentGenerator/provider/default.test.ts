@@ -504,7 +504,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('leaves an accepted effort tier untouched', () => {
@@ -519,7 +520,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
@@ -534,7 +536,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
+      expect(result['reasoning_effort']).toBe('ludicrous');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('warns once however many requests the same provider clamps', () => {
@@ -549,6 +552,59 @@ describe('DefaultOpenAICompatibleProvider', () => {
       provider.buildRequest(req, 'second');
 
       expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['gpt-5.1', 'max', 'high'],
+      ['gpt-5.1-codex-max', 'max', 'xhigh'],
+      ['gpt-5.4', 'max', 'xhigh'],
+      ['gpt-5.6-sol', 'max', 'max'],
+      ['gpt-5-pro', 'low', 'high'],
+      ['gpt-5.4-pro', 'low', 'medium'],
+    ])(
+      'maps %s effort %s to %s without mutating the input',
+      (model, effort, expected) => {
+        const request = {
+          model,
+          messages: [{ role: 'user' as const, content: 'Hello' }],
+          reasoning: { effort },
+        };
+        const result = provider.buildRequest(
+          request,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['reasoning']).toBeUndefined();
+        expect(request.reasoning).toEqual({ effort });
+      },
+    );
+
+    it('keeps the OpenRouter nested reasoning protocol', () => {
+      mockContentGeneratorConfig.baseUrl = 'https://openrouter.ai/api/v1';
+      const result = provider.buildRequest(
+        {
+          model: 'openai/gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBeUndefined();
+    });
+
+    it('preserves an explicit flat effort over the configured effort', () => {
+      mockContentGeneratorConfig.extra_body = { reasoning_effort: 'low' };
+      const result = provider.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'high' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['reasoning_effort']).toBe('low');
+      expect(result['reasoning']).toBeUndefined();
     });
 
     it('answers the ceiling for the request model, not the configured one', () => {

@@ -6,6 +6,7 @@
 
 import {
   REASONING_EFFORT_TIERS,
+  getGpt5ReasoningCapabilities,
   type Config,
   type ContentGeneratorConfig,
   type ReasoningEffort,
@@ -22,6 +23,8 @@ export type ModelReasoningConfiguration =
       readonly toggleOnly?: false;
       readonly efforts: readonly ReasoningEffort[];
       readonly defaultEffort: ReasoningEffort;
+      readonly defaultEnabled?: boolean;
+      readonly thinkingMandatory?: boolean;
     };
 
 const MODEL_CONFIGURATIONS: Readonly<
@@ -83,6 +86,8 @@ export function resolvePersistedReasoningConfigState(
   value: unknown,
   thinkingMandatory = false,
 ): ModelReasoningConfigState {
+  thinkingMandatory ||=
+    getGpt5ReasoningCapabilities(modelId)?.thinkingMandatory === true;
   const selection = parseReasoningSelection(value);
   if (
     !selection ||
@@ -101,7 +106,12 @@ export function getModelConfiguration(modelId: string | undefined):
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
-  return modelId ? MODEL_CONFIGURATIONS[modelId] : undefined;
+  const gptReasoning = getGpt5ReasoningCapabilities(modelId);
+  return gptReasoning
+    ? { reasoning: { thinking: true, ...gptReasoning } }
+    : modelId
+      ? MODEL_CONFIGURATIONS[modelId]
+      : undefined;
 }
 
 export function parseReasoningSelection(
@@ -126,7 +136,12 @@ export function isReasoningSelectionSupported(
       return false;
   }
   if (selection === REASONING_EFFORT_DEFAULT) return true;
-  if (selection === REASONING_EFFORT_NONE) return !thinkingMandatory;
+  if (selection === REASONING_EFFORT_NONE) {
+    return (
+      !thinkingMandatory &&
+      !(reasoning && !reasoning.toggleOnly && reasoning.thinkingMandatory)
+    );
+  }
   return reasoning?.thinking
     ? !reasoning.toggleOnly && reasoning.efforts.includes(selection)
     : REASONING_EFFORT_TIERS.includes(selection);
@@ -135,6 +150,7 @@ export function isReasoningSelectionSupported(
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
 ): void {
+  if (getGpt5ReasoningCapabilities(generation.model)) return;
   for (const source of ['extra_body', 'samplingParams'] as const) {
     const layer = generation[source];
     if (!layer) continue;
@@ -194,10 +210,17 @@ export function buildModelReasoningConfigOption(
 ): SessionConfigOption | undefined {
   const reasoning = getModelConfiguration(modelId)?.reasoning;
   if (!reasoning?.thinking) return undefined;
-  const thinkingMandatory = state.thinkingMandatory === true;
+  const thinkingMandatory =
+    state.thinkingMandatory === true ||
+    (!reasoning.toggleOnly && reasoning.thinkingMandatory === true);
+  const enabled =
+    state.enabled ??
+    (state.effort !== undefined ||
+      reasoning.toggleOnly ||
+      reasoning.defaultEnabled !== false);
 
   const currentValue =
-    state.enabled === false && !thinkingMandatory
+    !enabled && !thinkingMandatory
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT

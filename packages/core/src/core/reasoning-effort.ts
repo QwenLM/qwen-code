@@ -40,6 +40,43 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
   max: 70,
 };
 
+export function getGpt5ReasoningCapabilities(model: string | undefined):
+  | {
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort;
+      defaultEnabled: boolean;
+      thinkingMandatory: boolean;
+    }
+  | undefined {
+  const normalized = model?.toLowerCase() ?? '';
+  const match = /^(?:openai\/)?gpt-5(?:\.(\d+))?(?:-|$)/.exec(normalized);
+  if (!match || /-chat(?:-|$)/.test(normalized)) return undefined;
+
+  const minor = Number(match[1] ?? 0);
+  const pro = /-pro(?:-|$)/.test(normalized);
+  const codex = /-codex(?:-|$)/.test(normalized);
+  const thinkingMandatory = minor === 0 || pro || codex;
+  const efforts: ReasoningEffort[] = pro
+    ? minor === 0
+      ? ['high']
+      : ['medium', 'high', 'xhigh']
+    : [
+        'low',
+        'medium',
+        'high',
+        ...(minor >= 2 || /-codex-max(?:-|$)/.test(normalized)
+          ? (['xhigh'] as const)
+          : []),
+        ...(minor >= 6 ? (['max'] as const) : []),
+      ];
+  return {
+    efforts,
+    defaultEffort: pro && (minor === 0 || minor >= 5) ? 'high' : 'medium',
+    defaultEnabled: thinkingMandatory || minor >= 5,
+    thinkingMandatory,
+  };
+}
+
 /**
  * Normalize free-form user input to a canonical tier. Accepts separators and a
  * few common aliases (`x-high`, `extra-high`, `maximum`). Returns `undefined`

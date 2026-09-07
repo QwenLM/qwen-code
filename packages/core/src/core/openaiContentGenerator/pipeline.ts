@@ -29,6 +29,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { getGpt5ReasoningCapabilities } from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
@@ -985,6 +986,15 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
+      const gptReasoning = getGpt5ReasoningCapabilities(model);
+      if (
+        gptReasoning &&
+        !gptReasoning.thinkingMandatory &&
+        !thinkingMandatory &&
+        !isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning_effort'] = 'none';
+      }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
       // the effort knob alone leaves thinking on. Emit the explicit
       // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
@@ -1169,6 +1179,14 @@ export class ContentGenerationPipeline {
     // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
+      const samplingParams =
+        getGpt5ReasoningCapabilities(
+          request.model || this.contentGeneratorConfig.model,
+        ) &&
+        configSamplingParams['reasoning'] === undefined &&
+        configSamplingParams['reasoning_effort'] === undefined
+          ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
+          : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
       const maxTokens =
         reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
@@ -1182,8 +1200,8 @@ export class ContentGenerationPipeline {
       // max_completion_tokens must not leak the provider key unclamped.
       return clampProviderOutputBudgetKeys(
         maxTokens !== undefined
-          ? { ...configSamplingParams, max_tokens: maxTokens }
-          : { ...configSamplingParams },
+          ? { ...samplingParams, max_tokens: maxTokens }
+          : { ...samplingParams },
         requestMaxTokens,
       );
     }

@@ -361,6 +361,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  getGpt5ReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getGpt5ReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -1101,6 +1104,7 @@ import type {
   McpServer,
   ResumeSessionResponse,
   SetSessionConfigOptionResponse,
+  NewSessionResponse,
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import {
@@ -9354,6 +9358,41 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    ['gpt-5.4', 'none', ['none', 'low', 'medium', 'high', 'xhigh']],
+    ['gpt-5.3-codex', 'medium', ['low', 'medium', 'high', 'xhigh']],
+  ] as const)(
+    'advertises the %s reasoning default in an active session',
+    async (model, currentValue, values) => {
+      const sessionId = 'gpt-reasoning-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => model);
+      innerConfig.getReasoningEffort = vi.fn(() => undefined);
+      const generation = innerConfig.getContentGeneratorConfig();
+      generation.model = model;
+      generation.reasoning = undefined;
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        const option = session.configOptions?.find(
+          (candidate) => candidate.id === 'reasoning_effort',
+        );
+        expect(option?.currentValue).toBe(currentValue);
+        expect(
+          option?.options.map((choice) =>
+            'value' in choice ? choice.value : undefined,
+          ),
+        ).toEqual(values);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
