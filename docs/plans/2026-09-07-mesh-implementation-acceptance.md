@@ -93,6 +93,8 @@ Evidence: the injection matrix as a table in the PR, one row per test, with the 
 
 ### Step 9 — REST and Web Shell
 
+Design direction is settled ahead of the build in [`2026-09-07-mesh-web-shell-design.md`](./2026-09-07-mesh-web-shell-design.md): the thread view is a ledger of outstanding obligations with the conversation as evidence, not a chat log with a status badge. It inherits Web Shell's existing tokens and adds no new colour or typeface. Step 9 renders `resolveThreadStatus`'s `status` and `reason` rather than inventing a second status vocabulary, shows one lane per agent that has worked the thread, and bounds every transcript view to the run's own slice.
+
 Lands: routes for agents, threads, posts, runs; roster, thread list, thread view with run slices, busy reason, gate/failure display, cancel; #11140's sidebar entry absorbed.
 Gate: Playwright visuals for roster, thread view with two agents' posts attributed by name snapshot, a `blocked` thread with its question, and a run slice rendered from `transcriptStartOffset..EndOffset` showing only that run; deleting an agent keeps old posts readable with the tombstoned name.
 Evidence: screenshots from the visuals config, in CI.
