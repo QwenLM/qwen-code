@@ -161,9 +161,11 @@ and copies the applicable Hook definition into an administrator-controlled
 `QWEN_HOME/settings.json`.
 
 This registration opts in every eligible input handled by that launcher,
-including headless and stream-json user turns. Administrators who want recall
-only in their interactive launcher must give automation a separate controlled
-`QWEN_HOME` without the Hook and omit its configuration and credential from the
+including headless and stream-json user turns. Automation can disable all Hooks
+with `--bare`, `--safe-mode`, or `disableAllHooks: true` in managed settings
+before startup. The two flags also change which customizations are loaded.
+When automation needs other Hooks, use a separate controlled `QWEN_HOME`
+without this Hook and omit its configuration and credential from the
 automation environment. A protocol-level TUI-only filter would require a
 separate Core/CLI provenance change and is outside this package-only design.
 

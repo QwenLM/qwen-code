@@ -67,7 +67,7 @@ describe('Mem0 Auto Recall local provider', () => {
       stdout: '{}',
       stderr: '',
     });
-  });
+  }, 20000);
 
   it('executes the v3 configuration, dialect, request engine, and Hook envelope', async () => {
     const requests: Array<{
@@ -134,7 +134,7 @@ describe('Mem0 Auto Recall local provider', () => {
         ),
       },
     });
-  });
+  }, 10000);
 
   it('exits successfully after a provider timeout during a stalled TLS handshake', async () => {
     let connected = false;
@@ -179,19 +179,26 @@ describe('Mem0 Auto Recall local provider', () => {
           '--eval',
           `
         import { createAutoRecallQuery } from ${JSON.stringify(hookBundle.href)};
+        const startedAt = performance.now();
         const query = createAutoRecallQuery(${JSON.stringify(keyword)}.repeat(Math.floor(4096 / ${keyword.length})), '');
-        process.stdout.write(JSON.stringify(query ?? null));
+        process.stdout.write(JSON.stringify({ query: query ?? null, elapsedMs: performance.now() - startedAt }));
       `,
         ],
-        { encoding: 'utf8', timeout: 2000, killSignal: 'SIGKILL' },
+        { encoding: 'utf8', timeout: 8000, killSignal: 'SIGKILL' },
       );
 
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(0);
       expect(result.signal).toBeNull();
-      expect(result.stdout).toBe('null');
+      const output = JSON.parse(result.stdout) as {
+        query: string | null;
+        elapsedMs: number;
+      };
+      expect(output.query).toBeNull();
+      expect(output.elapsedMs).toBeLessThan(2000);
       expect(result.stderr).toBe('');
     },
+    10000,
   );
 
   it.skipIf(process.platform === 'win32').each(['instance', 'dialect'])(

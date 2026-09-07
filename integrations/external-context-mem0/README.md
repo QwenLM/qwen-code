@@ -266,10 +266,14 @@ The Hook never falls back to the expanded `prompt`; events without
 `submitted_prompt` do not trigger retrieval.
 
 Register this profile only in launchers where automatic retrieval is intended
-for all eligible inputs. To exclude automation, give it a separate
-administrator-controlled `QWEN_HOME` without this Hook and omit the Auto Recall
-configuration and credential from that launcher's environment. The Hook itself
-does not distinguish TUI, SDK, or other transports supplying the field.
+for all eligible inputs. To disable every Hook for an automation run, use
+`qwen --bare -p '…'`, `qwen --safe-mode -p '…'`, or set `disableAllHooks: true`
+in its managed settings before starting Qwen. These options disable all Hooks;
+`--bare` and `--safe-mode` also change which customizations are loaded. If
+automation needs other Hooks, give it a separate administrator-controlled
+`QWEN_HOME` without this Hook and omit the Auto Recall configuration and
+credential from that launcher's environment. The Hook itself does not
+distinguish TUI, SDK, or other transports supplying the field.
 
 Instance and dialect paths must resolve to regular files. FIFOs and other
 special files are rejected before reading configuration.
