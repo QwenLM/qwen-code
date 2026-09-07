@@ -825,6 +825,31 @@ describe('NamedSessionManager', () => {
     });
   });
 
+  it('persists the selected worktree task route with restore metadata', async () => {
+    const routesPath = join(dir, 'routes.json');
+    router = new SessionRouter(bridge, '/workspace', 'user', routesPath, {
+      recoveryMode: 'lazy',
+    });
+    const named = manager();
+    const created = await named.create(alice, 'feature', 'worktree');
+
+    const routes = Object.values(
+      JSON.parse(readFileSync(routesPath, 'utf8')),
+    ) as Array<{
+      sessionId: string;
+      cwd: string;
+      isolation?: string;
+      workspaceCwd?: string;
+    }>;
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      sessionId: created.sessionId,
+      cwd: canonicalizeWorkspacePath(`/worktrees/${created.sessionId}`),
+      isolation: 'worktree',
+      workspaceCwd: '/workspace',
+    });
+  });
+
   it('resets a worktree task onto a fresh session that keeps the worktree', async () => {
     const named = manager();
     const created = await named.create(alice, 'feature', 'worktree');
