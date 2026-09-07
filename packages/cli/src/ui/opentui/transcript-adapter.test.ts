@@ -12,6 +12,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { transcriptToEvents } from './transcript-adapter.js';
+import { MID_TURN_USER_MESSAGE_PREFIX } from '../../utils/midTurnUserMessage.js';
 
 function userLine(subtype: string, text: string): string {
   return JSON.stringify({
@@ -32,6 +33,65 @@ describe('transcriptToEvents subtyped user records', () => {
     );
     expect(events).toEqual([
       { type: 'user', text: 'STEER_CANARY_ONE' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('replays the typed displayText, not the @-expanded parts (U-32)', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      message: {
+        role: 'user',
+        parts: [
+          { text: 'steer me' },
+          { text: '--- Content from a.ts ---\nFILE BODY' },
+        ],
+      },
+      systemPayload: { displayText: 'steer me @a.ts' },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: 'steer me @a.ts' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('renders an image-only steer as the attachment placeholder (R1-61)', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      message: {
+        role: 'user',
+        parts: [{ text: MID_TURN_USER_MESSAGE_PREFIX }],
+      },
+      systemPayload: {
+        displayText: '',
+        attachmentReferences: [{ type: 'image', mimeType: 'image/png' }],
+      },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: '[User message with attachments]' },
+      { type: 'done' },
+    ]);
+  });
+
+  it('falls back to the parts text when a record carries no displayText', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      message: { role: 'user', parts: [{ text: 'legacy steer' }] },
+    });
+    const events = transcriptToEvents(
+      [line, JSON.stringify({ type: 'done' })].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'user', text: 'legacy steer' },
       { type: 'done' },
     ]);
   });

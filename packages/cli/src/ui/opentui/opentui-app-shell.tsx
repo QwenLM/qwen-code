@@ -54,8 +54,8 @@ import type { WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
+import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useTerminalDimensions } from '@opentui/react';
-import { isSlashCommand } from '../utils/commandUtils.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -162,6 +162,8 @@ export interface OpenTuiAppProps {
   promptSuggestion?: string | null;
   /** U-7: clears the published suggestion (accept/typing/submit). */
   onPromptSuggestionDismiss?: () => void;
+  /** U-7/R2-2: aborts the suggestion without clearing it (typing path). */
+  onPromptSuggestionAbort?: () => void;
 }
 
 interface ShellModal {
@@ -206,6 +208,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onRenderError,
     promptSuggestion,
     onPromptSuggestionDismiss,
+    onPromptSuggestionAbort,
   } = props;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
@@ -220,9 +223,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   // U-33: `!` shell mode (ink shellModeActive parity). The state lives here
   // with the submit routing; the composer only renders the chrome and the
-  // toggle. A running command's controller is aborted on quit.
+  // toggle. Every running command's controller is kept so quit (and unmount)
+  // can kill all of them — a single slot would orphan an older command.
   const [shellModeActive, setShellModeActive] = useState(false);
-  const shellAbortRef = useRef<AbortController | null>(null);
+  const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
   const toggleShellMode = useCallback(
@@ -233,18 +237,39 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     (command: string) => {
       if (!props.onTranscriptEvent) return;
       const controller = new AbortController();
-      shellAbortRef.current = controller;
+      shellControllersRef.current.add(controller);
       return executeUserShell(
         config,
         command,
         props.onTranscriptEvent,
         controller.signal,
-        { width: terminalWidth, height: terminalHeight },
+        // The `!` row renders behind the 2-col input indicator, and the child
+        // runs over that inner width (ink parity: it also passes the raw
+        // terminal width to its `!` child — no SHELL_WIDTH_FRACTION here,
+        // which only reaches the model-driven tool).
+        {
+          width: Math.max(terminalWidth - STATUS_INDICATOR_WIDTH, 10),
+          height: terminalHeight,
+        },
       ).finally(() => {
-        if (shellAbortRef.current === controller) shellAbortRef.current = null;
+        shellControllersRef.current.delete(controller);
+        // The drain also waits for the shell lane, so a command finishing has
+        // to re-arm it for anything queued while the command held the gate.
+        setDeferredRevision((revision) => revision + 1);
       });
     },
     [config, props.onTranscriptEvent, terminalWidth, terminalHeight],
+  );
+
+  // A render teardown (error bailout, unmount) must not leave `!` children
+  // running with no transcript to report into.
+  useEffect(
+    () => () => {
+      for (const controller of shellControllersRef.current) {
+        controller.abort();
+      }
+    },
+    [],
   );
 
   // U-9: the shell owns the settings sub-dialog routing (ink DialogManager
@@ -453,8 +478,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // asked to leave.
           deferredCommandsRef.current = [];
           onPopQueue?.();
-          // A running `!` shell command dies with the session too.
-          shellAbortRef.current?.abort();
+          // A running `!` shell command dies with the session too — every
+          // one of them, not just the most recent.
+          for (const controller of shellControllersRef.current) {
+            controller.abort();
+          }
           // ink's quit action cancels the ongoing request before the exit
           // drains, so a mid-turn /quit stops the stream instead of racing the
           // cleanup chain (recording flush, config.shutdown) against a turn
@@ -482,9 +510,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       // only a command that opted into canRunDuringStreaming runs now — the
       // rest wait for idle instead of racing the stream. A shell-mode
       // submission (non-slash) defers the same way, tagged so the drain
-      // routes it back to the executor.
-      if (streaming) {
-        const shellEntry = shellModeActive && !isSlashCommand(submission);
+      // routes it back to the executor; the tag asks the dispatcher's own
+      // admission rule, not a re-derived classifier, or a `?`-form the
+      // dispatcher takes would run as a shell command. A running `!` command
+      // holds the same gate (ink keeps isResponding for the whole execution):
+      // a concurrent submission would race the command's LLM-history write
+      // into a live turn's chat.
+      if (streaming || shellControllersRef.current.size > 0) {
+        const shellEntry =
+          shellModeActive && !(await gateway.takesAsSlashCommand(submission));
         if (
           shellEntry ||
           (await gateway.mustDeferDuringStreaming(submission))
@@ -549,7 +583,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     // shared exit latch — at the edge and between dispatches, since the exit
     // can start while an earlier command is still awaiting its outcome.
     if (isExitInProgress()) return;
-    if (streaming || dialog || deferredCommandsRef.current.length === 0) {
+    // A running `!` command holds the same gate as a live turn: entries queued
+    // behind it must wait for it to end (its own finally re-arms this drain).
+    if (
+      streaming ||
+      dialog ||
+      shellControllersRef.current.size > 0 ||
+      deferredCommandsRef.current.length === 0
+    ) {
       return;
     }
     const pending = deferredCommandsRef.current;
@@ -669,6 +710,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             composerHandle={props.composerHandle}
             promptSuggestion={promptSuggestion}
             onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+            onPromptSuggestionAbort={onPromptSuggestionAbort}
             shellModeActive={shellModeActive}
             onToggleShellMode={toggleShellMode}
           />

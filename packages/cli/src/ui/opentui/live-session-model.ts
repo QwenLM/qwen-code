@@ -366,8 +366,10 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
+        // Every resolution clears 'pending' (transcript-view gates the
+        // awaiting marker on it); the outcome only picks the recorded state.
         if (t.confirm === 'pending') {
-          items[i] = { ...t, confirm: 'approved' };
+          items[i] = { ...t, confirm: ev.outcome };
         }
       }
       return items;

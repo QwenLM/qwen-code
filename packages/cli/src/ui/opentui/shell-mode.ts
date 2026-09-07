@@ -61,10 +61,18 @@ export function executeUserShell(
     if (!command.endsWith(';') && !command.endsWith('&')) {
       command += ';';
     }
-    commandToExecute = `{ ${command} }; __code=$?; pwd > "${pwdFilePath}"; exit $__code`;
+    // The brace group closes on its own line: a one-line `{ ... #comment; };`
+    // lets a trailing comment swallow the wrapper tail and the shell dies on
+    // a syntax error before the user's command runs at all.
+    commandToExecute = `{ ${command}\n}; __code=$?; pwd > "${pwdFilePath}"; exit $__code`;
   }
 
   const usePty = config.getShouldUseNodePtyShell();
+  // A command can outlive the chat it started in: /clear swaps the chat
+  // while the client object survives, so a late history write would inject
+  // the previous session's output into the fresh chat. Identify the chat at
+  // start and skip the write when it is no longer current.
+  const chatAtStart = config.getGeminiClient().getChat();
   let cumulative = '';
   let emittedText = '';
   let isBinaryStream = false;
@@ -122,18 +130,26 @@ export function executeUserShell(
     .then(({ result }) =>
       result.then((res) => {
         let success = true;
+        let summary: 'ok' | 'error' | 'cancelled' = 'ok';
         let prefixText = '';
         if (res.error) {
           success = false;
+          summary = 'error';
           prefixText = `${res.error.message}\n`;
         } else if (res.aborted) {
           success = false;
+          // Ink's processor sets Canceled for a user-cancelled `!` command;
+          // 'error' would paint the red ERROR glyph for an Esc the user
+          // chose (and disagree with /resume replay's 'cancelled').
+          summary = 'cancelled';
           prefixText = 'Command was cancelled.\n';
         } else if (isSignalTermination(res.signal)) {
           success = false;
+          summary = 'error';
           prefixText = `Command terminated by signal: ${res.signal}.\n`;
         } else if (res.exitCode !== 0) {
           success = false;
+          summary = 'error';
           prefixText = `Command exited with code ${res.exitCode}.\n`;
         }
 
@@ -157,20 +173,29 @@ export function executeUserShell(
           emittedTrimmed && mainContent.startsWith(emittedTrimmed)
             ? mainContent.slice(emittedTrimmed.length)
             : mainContent;
-        const finalOutput = `${prefixText}${tail}`;
+        // When the output was already streamed as deltas, the card's last
+        // line is on screen and `tail` is empty — the status prefix must
+        // start its own row instead of gluing onto it.
+        const finalOutput = tail
+          ? `${prefixText}${tail}`
+          : prefixText
+            ? `\n${prefixText}`
+            : '';
 
         emit({ type: 'tool-result', id: callId, display: finalOutput });
         emit({
           type: 'tool-end',
           id: callId,
           success,
-          summary: success ? 'ok' : 'error',
+          summary,
         });
-        addShellCommandToLlmHistory(
-          config.getGeminiClient(),
-          rawQuery,
-          `${prefixText}${mainContent}`,
-        );
+        if (config.getGeminiClient().getChat() === chatAtStart) {
+          addShellCommandToLlmHistory(
+            config.getGeminiClient(),
+            rawQuery,
+            `${prefixText}${mainContent}`,
+          );
+        }
       }),
     )
     .catch((err: unknown) => {

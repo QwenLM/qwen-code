@@ -39,21 +39,26 @@ export function useFollowupSuggestionGeneration({
   waitingCalls,
 }: FollowupGenerationParams): {
   promptSuggestion: string | null;
+  abortPromptSuggestion: () => void;
   dismissPromptSuggestion: () => void;
 } {
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const streamingRef = useRef(streaming);
 
+  // LoadedSettings.setValue mutates `merged` in place, so the settings
+  // object identity is not a reliable change signal — depend on the
+  // flattened feature values instead.
+  const followupEnabled =
+    settings.merged.ui?.enableFollowupSuggestions !== false;
+  const cacheSharingEnabled = settings.merged.ui?.enableCacheSharing !== false;
+
   useEffect(() => {
     const wasStreaming = streamingRef.current;
 
     // ink clears on a disabled feature and on every turn boundary: a new
     // turn invalidates the previous suggestion.
-    if (
-      settings.merged.ui?.enableFollowupSuggestions === false ||
-      wasStreaming !== streaming
-    ) {
+    if (!followupEnabled || wasStreaming !== streaming) {
       abortRef.current?.abort();
       setPromptSuggestion(null);
     }
@@ -62,7 +67,7 @@ export function useFollowupSuggestionGeneration({
     // opened mid-turn are invisible here (shell state); while one is open
     // the composer is unmounted, and the next turn boundary clears anyway.
     if (
-      settings.merged.ui?.enableFollowupSuggestions !== false &&
+      followupEnabled &&
       config.isInteractive() &&
       !config.getSdkMode() &&
       wasStreaming &&
@@ -79,7 +84,7 @@ export function useFollowupSuggestionGeneration({
         .getLlmClient()
         .getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
+        enableCacheSharing: cacheSharingEnabled,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -101,7 +106,14 @@ export function useFollowupSuggestionGeneration({
     }
 
     streamingRef.current = streaming;
-  }, [config, settings, streaming, items, waitingCalls]);
+  }, [
+    config,
+    followupEnabled,
+    cacheSharingEnabled,
+    streaming,
+    items,
+    waitingCalls,
+  ]);
 
   useEffect(
     () => () => {
@@ -112,6 +124,17 @@ export function useFollowupSuggestionGeneration({
 
   return {
     promptSuggestion,
-    dismissPromptSuggestion: () => setPromptSuggestion(null),
+    // Abort-only (ink AppContainer names this "abort", not "dismiss"):
+    // typing over the ghost kills the in-flight publish but leaves the
+    // suggestion set, so type-then-delete restores it.
+    abortPromptSuggestion: () => {
+      abortRef.current?.abort();
+    },
+    // Accept/submit path: the persisted suggestion is cleared too, or it
+    // would survive as the ghost after the buffer moved on.
+    dismissPromptSuggestion: () => {
+      abortRef.current?.abort();
+      setPromptSuggestion(null);
+    },
   };
 }

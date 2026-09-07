@@ -23,7 +23,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -641,6 +641,63 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(onPopQueue).not.toHaveBeenCalled();
   });
 
+  it('Esc in shell mode while streaming exits the mode and interrupts (R1-57)', async () => {
+    // Ink does both on one keypress: InputPrompt exits the mode with no
+    // streaming gate and AppContainer's broadcast handler cancels the turn.
+    const onToggleShellMode = vi.fn();
+    const onInterrupt = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        streaming
+        shellModeActive
+        onToggleShellMode={onToggleShellMode}
+        onInterrupt={onInterrupt}
+      />,
+    );
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onToggleShellMode).toHaveBeenCalledTimes(1);
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('`!` does not toggle shell mode while a stale dropdown is open (R1-54)', async () => {
+    let releaseSearch!: () => void;
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.fileSearchDelay = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    const onToggleShellMode = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={onToggleShellMode}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('@x');
+    await act(async () => {});
+    // Clear the buffer by Ctrl+C: the stale search result repopulates the
+    // dropdown over the empty buffer, exactly ink's !showCompletionSuggestions
+    // hazard.
+    await act(async () => {
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'c', sequence: '\x03', ctrl: true }),
+      );
+    });
+    expect(editor.plainText).toBe('');
+    releaseSearch();
+    await act(async () => {});
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: '!', sequence: '!' }));
+    });
+    expect(onToggleShellMode).not.toHaveBeenCalled();
+    expect(editor.plainText).toBe('!');
+  });
+
   it('Up at the top edge pops queued prompts into the composer', async () => {
     let queued: string | null = 'from queue';
     render(
@@ -660,6 +717,28 @@ describe('OpenTuiInputPrompt submit guard', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
     });
     expect(editor.plainText).toBe('from queue');
+  });
+
+  it('Up and ctrl+p touch neither the queue nor the history in shell mode', async () => {
+    const onPopQueue = vi.fn(() => 'queued text');
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={['npm test']}
+        shellModeActive
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'p', ctrl: true, sequence: '\x10' }),
+      );
+    });
+    expect(onPopQueue).not.toHaveBeenCalled();
+    expect(editor.plainText).toBe('');
   });
 });
 
@@ -1184,6 +1263,17 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
       }
     },
   );
+
+  it('replaces the status text with Shell mode while shell mode is active (R1-16)', () => {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        shellModeActive
+      />,
+    );
+    expect(screen.getByText(t('Shell mode'))).toBeTruthy();
+  });
 });
 
 describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
@@ -1204,9 +1294,11 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
     overrides: {
       onSubmit?: (text: string) => void;
       onPromptSuggestionDismiss?: () => void;
+      onPromptSuggestionAbort?: () => void;
     } = {},
   ) {
     const dismiss = vi.fn();
+    const abort = vi.fn();
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
@@ -1219,9 +1311,10 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
         onPromptSuggestionDismiss={
           overrides.onPromptSuggestionDismiss ?? dismiss
         }
+        onPromptSuggestionAbort={overrides.onPromptSuggestionAbort ?? abort}
       />,
     );
-    return { dismiss, submitted };
+    return { dismiss, abort, submitted };
   }
 
   it('shows the suggestion as the ghost placeholder', () => {
@@ -1261,20 +1354,88 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
     expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
-  it('typing over the ghost dismisses it but still inserts the character', async () => {
-    const { dismiss } = renderWithSuggestion();
+  it('typing over the ghost aborts it but still inserts the character', async () => {
+    const { abort } = renderWithSuggestion();
     const editor = currentEditor();
     await typeText('x');
     expect(editor.plainText).toBe('x');
+    // Abort (not dismiss): the persisted suggestion must survive so
+    // type-then-delete restores the ghost (ink AppContainer parity).
+    expect(abort).toHaveBeenCalledTimes(1);
+  });
+
+  it('backspace restores the ghost after typing over it (R2-2)', async () => {
+    // A parent-shaped harness: the entry layer owns the suggestion state and
+    // only clears it on dismiss, so a hard clear on the typing path loses the
+    // ghost for good while abort keeps it restorable.
+    const dismiss = vi.fn();
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={() => {}}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    const editor = currentEditor();
+    await typeText('x');
+    expect(editor.plainText).toBe('x');
+    await pressRaw('\x7f');
+    expect(editor.plainText).toBe('');
+    expect(mocks.state.textareaProps?.['placeholder']).toBe(SUGGESTION);
+  });
+
+  it('paste dismisses the ghost before inserting (R1-53)', async () => {
+    // Ink dismisses on key.paste too: a paste into an empty buffer must not
+    // leave the suggestion acceptable behind the inserted content.
+    const dismiss = vi.fn();
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={() => {}}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    const handler = mocks.state.pasteHandlers.at(-1);
+    if (!handler) throw new Error('no paste handler registered');
+    await act(async () => {
+      handler({
+        bytes: new TextEncoder().encode('y'.repeat(1500)),
+        preventDefault: vi.fn(),
+      });
+    });
     expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(currentEditor().plainText).toBe('[Pasted Content 1500 chars]');
+    await pressRaw('\x7f');
+    expect(currentEditor().plainText).toBe('');
+    expect(mocks.state.textareaProps?.['placeholder']).not.toBe(SUGGESTION);
   });
 
   it('submit clears the persisted suggestion', async () => {
     const { dismiss } = renderWithSuggestion();
     await typeText('hi');
+    // The typing path now aborts (not dismisses), so exactly one dismiss —
+    // the submit path's — reaches the mock; deleting it must red this.
     await act(async () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
-    expect(dismiss).toHaveBeenCalled();
+    expect(dismiss).toHaveBeenCalledTimes(1);
   });
 });

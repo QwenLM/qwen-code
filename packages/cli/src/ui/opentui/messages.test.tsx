@@ -43,6 +43,7 @@ import {
   userMessageMeta,
   STATUS_INDICATOR_WIDTH,
 } from './messages.js';
+import { toCodePoints } from '../utils/textUtils.js';
 import { TOOL_STATUS } from '../constants.js';
 import { C } from './theme.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
@@ -218,6 +219,20 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(win.hiddenRows).toBe(11);
   });
 
+  it('engages the cap for a wide-character row measured in display columns', () => {
+    // 1200 Han characters span 2400 columns: 24 physical rows at 100 cols,
+    // not the 12 rows a UTF-16 length estimate would model.
+    const win = headWindowPhysical(['汉'.repeat(1200)], 102, 20);
+    expect(toCodePoints(win.visible[0])).toHaveLength(950);
+    expect(win.hiddenRows).toBe(5);
+  });
+
+  it('cuts a wide-character row on a code-point boundary, never mid-pair', () => {
+    const win = headWindowPhysical(['𝕏'.repeat(201)], 103, 1);
+    expect(win.visible[0]).toMatch(/𝕏$/);
+    expect(toCodePoints(win.visible[0])).toHaveLength(101);
+  });
+
   it('renders the ink bottom-overflow hidden-tail indicator', () => {
     expect(hiddenTailLinesLabel(1)).toBe('... last 1 line hidden ...');
     expect(hiddenTailLinesLabel(4779)).toBe('... last 4779 lines hidden ...');
@@ -248,6 +263,12 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(win.visible[0]).toBe('5'.repeat(150));
     expect(win.visible[9]).toBe('4'.repeat(150));
     expect(win.hiddenRows).toBe(10);
+  });
+
+  it('keeps wide-character tails within the display-column budget', () => {
+    const win = tailWindowPhysical(['汉'.repeat(1200)], 102, 20);
+    expect(toCodePoints(win.visible[0])).toHaveLength(1000);
+    expect(win.hiddenRows).toBe(4);
   });
 
   it('truncates over-long results to the trailing characters', () => {
@@ -288,6 +309,19 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
     expect(cap.description).toBe('x'.repeat(4 * cols - 'mcp__mem0'.length - 1));
     expect(cap.hiddenRows).toBe(rows - 4);
     expect(cap.hiddenRows).toBeGreaterThan(0);
+  });
+
+  it('measures wide-character descriptions in display columns', () => {
+    // 1000 Han characters span 2000 columns: 19 rows at 108 cols, not the
+    // 10 rows a UTF-16 length estimate would model.
+    const cap = capToolCardDescription(
+      '汉'.repeat(1000),
+      'mcp__mem0',
+      110,
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    expect(toCodePoints(cap.description)).toHaveLength(211);
+    expect(cap.hiddenRows).toBe(15);
   });
 });
 

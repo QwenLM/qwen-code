@@ -868,7 +868,16 @@ export async function* livePromptEvents(
             waitingSeen.delete(id);
             // Release the transcript card's pending marker — without this it
             // would keep claiming "awaiting approval" while the call runs.
-            live.push({ type: 'confirm-resolved', id });
+            // The card must also record HOW it left: the scheduler cancels
+            // the call on No/Esc, so a blanket 'approved' would mislabel a
+            // declined tool as user-approved in the transcript.
+            const departed = calls.find((c) => c.request.callId === id);
+            live.push({
+              type: 'confirm-resolved',
+              id,
+              outcome:
+                departed?.status === 'cancelled' ? 'rejected' : 'approved',
+            });
           }
         }
         for (const c of calls) {
@@ -958,6 +967,14 @@ export async function* livePromptEvents(
         );
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
+        } else if (abort.aborted) {
+          // ink use-llm-stream :3386-3392 re-checks the signal after accept():
+          // an abort that lands once the hop has resolved must send the texts
+          // back to the queue — the continuation below never runs on the dead
+          // signal, so recording here would commit a mid-turn user message the
+          // model never saw (and /resume would replay it as the user's words).
+          options?.restoreSteering?.(texts);
+          return;
         }
         // U-32 (ink accept() :3352-3358): record each surviving message so a
         // steer survives /resume as a mid-turn user message.

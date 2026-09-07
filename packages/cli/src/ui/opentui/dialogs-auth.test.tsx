@@ -204,7 +204,10 @@ function createMockSettings(): LoadedSettings {
   } as unknown as LoadedSettings;
 }
 
-function renderDialog(overrides?: { authType?: AuthType }) {
+function renderDialog(overrides?: {
+  authType?: AuthType;
+  initialError?: string;
+}) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
@@ -215,6 +218,7 @@ function renderDialog(overrides?: { authType?: AuthType }) {
       settings={settings}
       onClose={onClose}
       notify={notify}
+      initialError={overrides?.initialError}
     />,
   );
   return { onClose, notify, config };
@@ -269,6 +273,17 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it('closes via Esc on the main view when authenticated', async () => {
     const { onClose } = renderDialog({ authType: AuthType.USE_OPENAI });
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes via Esc when the error was seeded from boot (R2-1)', async () => {
+    // A startup login failure seeds the message before mount; the swallow is
+    // for errors the dialog arms itself, so Esc must still close.
+    const { onClose } = renderDialog({
+      authType: AuthType.QWEN_OAUTH,
+      initialError: 'Failed to login',
+    });
     await pressEsc();
     expect(onClose).toHaveBeenCalledTimes(1);
   });

@@ -251,12 +251,15 @@ mid-turn update notice would sit queued forever. The entry now holds
 `{ cleanup, flush }` in a ref and flushes when `live.streaming` flips false.
 
 Coverage: the deferral/flush mechanism itself is pinned by
-`handleAutoUpdate.test.ts` (deferred-then-flushed, ordering, empty queue).
-Both the entry-side registration and the flush-on-idle effect cannot execute
-in the entry harness (`root.render` is mocked, so React never runs and no
-effect fires — the same boundary as Decision 8); they are review-pinned
-against AppContainer's idle effect. Entry suite, typecheck, and eslint
-clean.
+`handleAutoUpdate.test.ts` (deferred-then-flushed, ordering, empty queue),
+and the extracted `useUpdateNoticeFlush` hook
+(`packages/cli/src/ui/opentui/use-update-notice-flush.ts`, called from the
+entry) carries its own suite (`use-update-notice-flush.test.ts`) that pins
+registration, immediate delivery while idle, the deferred queue across
+streaming rerenders, and the flush-on-idle drain. Only the entry-harness
+wiring remains review-pinned (`root.render` is mocked there, so React never
+runs and no effect fires — the same boundary as Decision 8). Entry suite,
+typecheck, and eslint clean.
 
 ## Decision 10 — U-9: the shell owns settings sub-dialog routing and composer fill
 
@@ -426,8 +429,11 @@ so the honest scope is the full minimal shell mode, mirroring ink's five
 touchpoints. Entry/exit: `!` on an empty composer buffer toggles shell mode
 in both directions (ink does not gate the toggle on the mode either; a
 non-empty buffer still inserts, so `echo hi!` is unaffected), Esc exits the
-mode before any other escape behavior (ink InputPrompt's priority), and the
-chrome prefix becomes `!`, overriding the approval-mode prefix and status
+mode first and — when a turn is streaming — also interrupts it on the same
+keypress: ink does both in one keypress (InputPrompt exits the mode with no
+streaming gate while AppContainer's broadcast handler cancels the request),
+so OpenTUI mirrors the pair rather than picking one. The chrome prefix
+becomes `!`, overriding the approval-mode prefix and status
 text. Routing: slash dispatch is checked before
 shell mode exactly as in ink's use-llm-stream, so `/help` in shell mode still
 dispatches; a shell-mode submission runs without a model turn — typing the

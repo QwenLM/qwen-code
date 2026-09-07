@@ -96,6 +96,31 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           await this.opts.onToolCallsUpdate?.(
             waiting('Hook requested confirmation to run'),
           );
+        } else if (
+          calls.some(
+            (c) =>
+              (c.args as { __cancelApproval?: boolean } | undefined)
+                ?.__cancelApproval,
+          )
+        ) {
+          // No/Esc outcome shape: the scheduler cancels the call, so it
+          // leaves awaiting_approval with status 'cancelled'.
+          const cancelled = calls.map((c) => ({
+            status: 'cancelled',
+            request: c,
+          }));
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((c) => ({
+              status: 'awaiting_approval',
+              request: c,
+              confirmationDetails: {
+                type: 'info',
+                title: 'original',
+                onConfirm: async () => {},
+              },
+            })),
+          );
+          await this.opts.onToolCallsUpdate?.(cancelled);
         } else {
           // Emit one awaiting_approval update per call (twice, to prove the
           // live-session dedupe). A call with `__invocationDesc` args also
@@ -133,29 +158,37 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           }
         }
         await this.opts.onAllToolCallsComplete(
-          calls.map((c) => ({
-            request: {
-              callId: c.callId,
-              name: c.name ?? 'test_tool',
-              args: c.args ?? {},
-            },
-            status:
-              ((c.args ?? {}) as { __cancelled?: boolean }).__cancelled === true
-                ? 'cancelled'
-                : 'success',
-            response: {
-              responseParts: [
-                {
-                  functionResponse: {
-                    name: c.name ?? 'test_tool',
-                    id: c.callId,
-                    response: { ok: true },
+          calls.map((c) => {
+            const a = (c.args ?? {}) as {
+              __cancelled?: boolean;
+              __cancelApproval?: boolean;
+            };
+            return {
+              request: {
+                callId: c.callId,
+                name: c.name ?? 'test_tool',
+                args: c.args ?? {},
+              },
+              // A No/Esc cancellation leaves the scheduler with a cancelled
+              // call — the send loop must see it as terminal to stop.
+              status:
+                a.__cancelled === true || a.__cancelApproval === true
+                  ? 'cancelled'
+                  : 'success',
+              response: {
+                responseParts: [
+                  {
+                    functionResponse: {
+                      name: c.name ?? 'test_tool',
+                      id: c.callId,
+                      response: { ok: true },
+                    },
                   },
-                },
-              ],
-              resultDisplay: 'done',
-            },
-          })),
+                ],
+                resultDisplay: 'done',
+              },
+            };
+          }),
         );
       }
     },
@@ -177,6 +210,13 @@ const atMocks = vi.hoisted(() => ({
    * runs first, so a test can abort the turn from inside the read.
    */
   hang: null as (() => void) | null,
+  /**
+   * Set to abort the turn inside the read but still resolve it. Queued two
+   * microtasks deep so the abort lands after the race has delivered the read's
+   * result but before the steering hop returns — the "hop resolved cleanly,
+   * abort right behind it" window.
+   */
+  abortAfter: null as (() => void) | null,
 }));
 
 vi.mock('../hooks/atCommandProcessor.js', () => ({
@@ -185,6 +225,9 @@ vi.mock('../hooks/atCommandProcessor.js', () => ({
     if (atMocks.hang) {
       atMocks.hang();
       return new Promise<HandleAtCommandResult>(() => {});
+    }
+    if (atMocks.abortAfter) {
+      queueMicrotask(() => queueMicrotask(atMocks.abortAfter!));
     }
     return atMocks.result;
   },
@@ -275,6 +318,7 @@ describe('livePromptEvents', () => {
     atMocks.calls.length = 0;
     atMocks.result = { processedQuery: null, shouldProceed: true };
     atMocks.hang = null;
+    atMocks.abortAfter = null;
     visionMocks.run.mockReset();
   });
 
@@ -1015,6 +1059,42 @@ describe('livePromptEvents', () => {
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
   });
 
+  it('restores the steer when the abort lands after the hop resolves (U-32)', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const controller = new AbortController();
+    const restoreSteering = vi.fn();
+    atMocks.abortAfter = () => controller.abort();
+    atMocks.result = {
+      processedQuery: [{ text: 'resolved @a.ts' }],
+      shouldProceed: true,
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', controller.signal, {
+        drainSteering: () => ['read @a.ts'],
+        restoreSteering,
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // The hop resolved cleanly, but the continuation send will never run on
+    // the aborted signal — ink re-checks the signal after accept() and so must
+    // the recording: writing it here would commit a mid-turn user message the
+    // model never saw, and /resume would replay it as the user's words.
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts']);
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+    // The resolved hop does not ride the dead signal: no continuation send.
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {
     const sendMessageStream = oneToolBatchStream({
       callId: 't1',
@@ -1685,7 +1765,7 @@ describe('livePromptEvents', () => {
         tool: 'run_shell_command',
         title: 'original',
       },
-      { type: 'confirm-resolved', id: 'b2' },
+      { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
       {
         type: 'confirm',
         id: 'b2',
@@ -1693,6 +1773,46 @@ describe('livePromptEvents', () => {
         title: 'Hook requested confirmation to run',
       },
     ]);
+  });
+
+  it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // coreToolScheduler sets status 'cancelled' when the user picks
+    // No/Esc — the resolved event must carry 'rejected', not blanket
+    // 'approved', or the transcript mislabels a declined tool.
+    const resolved = events.find((e) => e.type === 'confirm-resolved');
+    expect(resolved).toEqual({
+      type: 'confirm-resolved',
+      id: 'c9',
+      outcome: 'rejected',
+    });
   });
 
   it('pushes the real invocation description once per callId (R1-104)', async () => {

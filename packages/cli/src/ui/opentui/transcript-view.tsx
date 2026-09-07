@@ -243,15 +243,13 @@ function ToolCard({
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
-  // While the call awaits approval the dialog below carries the payload —
-  // ink renders the confirmation as one surface there, and a duplicated
-  // description would flood the column and keep its hidden-lines label on
-  // screen after the body expands. Otherwise the description is capped to
-  // TOOL_CARD_DESCRIPTION_ROWS wrapped rows (ink MaxSizedBox parity).
+  // The description stays visible while a call awaits approval: the
+  // confirmation dialog does not carry the payload for every type (an MCP
+  // dialog shows only the server and tool names, so hiding here would leave
+  // the arguments nowhere on screen), and TOOL_CARD_DESCRIPTION_ROWS bounds
+  // any large payload (ink MaxSizedBox parity).
   const description =
-    item.confirm === 'pending' && !item.done
-      ? ''
-      : (item.description ?? toolCardDescription(item.tool, item.args));
+    item.description ?? toolCardDescription(item.tool, item.args);
   const cap = capToolCardDescription(
     description,
     name,
@@ -747,8 +745,10 @@ function ArenaSessionRow({ item }: { item: LiveArenaSessionItem }) {
           </text>
           {arenaFileGroups(agents).map((group, index, groups) => (
             <text key={group.label} fg={C.dim}>
-              {`  ${branch(index, groups.length)} ${group.label}: `}
-              <span fg={C.text}>{arenaFileList(group.files)}</span>
+              {`  ${branch(index, groups.length)} ${sanitizeTerminalText(group.label)}: `}
+              <span fg={C.text}>
+                {sanitizeTerminalText(arenaFileList(group.files))}
+              </span>
             </text>
           ))}
           <text fg={C.text} attributes={1}>

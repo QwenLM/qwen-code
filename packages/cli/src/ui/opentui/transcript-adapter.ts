@@ -66,6 +66,8 @@ export function transcribeSession(
         phase?: string;
         rawCommand?: string;
         hiddenInvocation?: boolean;
+        displayText?: string;
+        attachmentReferences?: unknown[];
       };
       toolCallResult?: {
         callId?: string;
@@ -84,10 +86,22 @@ export function transcribeSession(
       // mid_turn_user_message — U-32 steering, a real user message ink
       // replays on resume.
       if (o.subtype && o.subtype !== 'mid_turn_user_message') continue;
-      const text = parts
+      const partsText = parts
         .filter((p) => p.text && !p.thought)
         .map((p) => p.text as string)
         .join('\n');
+      // Ink's resume resolution (resumeHistoryUtils): the parts are the
+      // model-facing content (@-expanded, ACP-prefixed) — the row shows the
+      // typed text, with a placeholder for image-only steers, and only falls
+      // back to the parts when the record predates displayText.
+      const hasAttachmentReferences =
+        Array.isArray(o.systemPayload?.attachmentReferences) &&
+        o.systemPayload.attachmentReferences.length > 0;
+      const text =
+        o.systemPayload?.displayText ||
+        (hasAttachmentReferences
+          ? '[User message with attachments]'
+          : partsText);
       if (text) {
         events.push({ type: 'user', text });
         prompts.push(text);

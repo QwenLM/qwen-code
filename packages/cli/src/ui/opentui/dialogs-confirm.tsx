@@ -169,20 +169,34 @@ function TextBody({ text }: { text: string }) {
   useKeyboard((key) => {
     // A body that fits must ignore ctrl-s: the expanded tail window can be
     // shorter than the fitting body and would silently drop its head rows.
-    if (key.ctrl && toOriginalKey(key).name === 's' && window.hiddenRows > 0) {
+    // The same guard covers short terminals, where the expanded tail window
+    // is strictly smaller than the collapsed head it would replace — the
+    // key's on-screen promise is "show more lines".
+    if (
+      key.ctrl &&
+      toOriginalKey(key).name === 's' &&
+      window.hiddenRows > 0 &&
+      expandedWindow.hiddenRows < window.hiddenRows
+    ) {
       setExpanded(true);
     }
   });
 
   if (expanded) {
-    // No hidden-lines indicator once expanded: ink's expanded screen shows
-    // the tail with no label (its head lives in terminal scrollback), and
-    // the alt-screen viewport has no scrollback to point at.
+    // ink's expanded screen shows the tail with no label (its head lives in
+    // terminal scrollback); the alt-screen viewport has no scrollback to
+    // point at, so when the tail window itself still drops rows the label is
+    // the only trace of what is missing.
     return (
       <box flexDirection="column">
         {expandedWindow.visible.map((row, i) => (
           <text key={`${i}`}>{row}</text>
         ))}
+        {expandedWindow.hiddenRows > 0 ? (
+          <text fg={C.dim}>
+            {hiddenTailLinesLabel(expandedWindow.hiddenRows)}
+          </text>
+        ) : null}
       </box>
     );
   }

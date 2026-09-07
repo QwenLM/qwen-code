@@ -97,6 +97,16 @@ export class OpenTuiSlashGateway {
     return this.dispatcher?.mustDeferDuringStreaming(text) ?? false;
   }
 
+  /**
+   * Whether the dispatcher claims this input instead of the shell lane — the
+   * single admission rule the shell must reuse when tagging a mid-turn
+   * shell-mode submission, so routing cannot diverge between the two gates.
+   */
+  async takesAsSlashCommand(text: string): Promise<boolean> {
+    await this.ready;
+    return this.dispatcher?.takesAsSlashCommand(text.trim()) ?? false;
+  }
+
   /** True while a dispatched command is still running. */
   isBusy(): boolean {
     return this.busy;

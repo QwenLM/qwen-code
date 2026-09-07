@@ -22,6 +22,15 @@ import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 const executeMock = vi.hoisted(() => vi.fn());
 const addHistoryMock = vi.hoisted(() => vi.fn());
+// Pinned so the POSIX-wrap assertions do not depend on the host platform
+// (the wrap is skipped on win32 and the Windows lane collects this suite).
+const osPlatformMock = vi.hoisted(() => vi.fn(() => 'linux'));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const mocked = { ...actual, platform: osPlatformMock };
+  return { ...mocked, default: mocked };
+});
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -44,13 +53,21 @@ vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
   };
 });
 
-const llmClient = {};
+let currentChat: object = {};
+const llmClient = { getChat: () => currentChat };
 
 function makeConfig(usePty: boolean): Config {
   return {
     getTargetDir: () => '/tmp/project',
     getShouldUseNodePtyShell: () => usePty,
-    getShellExecutionConfig: () => ({}),
+    // Populated so the getShellExecutionConfig spread in executeUserShell is
+    // observable: deleting it must fail the terminalWidth assertion below
+    // instead of silently reverting !-commands to core defaults (R1-67).
+    getShellExecutionConfig: () => ({
+      showColor: false,
+      pager: 'cat',
+      maxBufferedOutputBytes: 12345,
+    }),
     getGeminiClient: () => llmClient,
   } as unknown as Config;
 }
@@ -75,6 +92,8 @@ describe('executeUserShell', () => {
     vi.useFakeTimers();
     executeMock.mockReset();
     addHistoryMock.mockReset();
+    currentChat = {};
+    osPlatformMock.mockReturnValue('linux');
   });
 
   afterEach(() => {
@@ -96,11 +115,12 @@ describe('executeUserShell', () => {
         }),
       });
     });
+    const controller = new AbortController();
     const done = executeUserShell(
       makeConfig(usePty),
       'echo hello',
       (event) => events.push(event),
-      new AbortController().signal,
+      controller.signal,
       { width: 80, height: 24 },
     );
     return {
@@ -109,6 +129,7 @@ describe('executeUserShell', () => {
       emitOutput: (chunk: string) => onOutputEvent({ type: 'data', chunk }),
       resolveResult,
       executeArgs,
+      signal: controller.signal,
     };
   }
 
@@ -215,6 +236,46 @@ describe('executeUserShell', () => {
     );
   });
 
+  it('starts the status prefix on its own row when the card was streamed', async () => {
+    const { events, done, emitOutput, resolveResult } = setup();
+    emitOutput('boom ');
+    vi.advanceTimersByTime(1001);
+    emitOutput('one\n');
+    resolveResult(
+      makeResult({
+        exitCode: 1,
+        output: 'boom one\n',
+        rawOutput: Buffer.from('boom one\n'),
+      }),
+    );
+    await done;
+    expect(events.filter((event) => event.type === 'tool-output')).toEqual([
+      { type: 'tool-output', id: expect.any(String), delta: 'boom one\n' },
+    ]);
+    // The streamed head is already on the card; the empty tail must not glue
+    // the exit-code prefix onto its last line.
+    expect(events[events.length - 2]).toEqual({
+      type: 'tool-result',
+      id: expect.any(String),
+      display: '\nCommand exited with code 1.\n',
+    });
+    expect(addHistoryMock).toHaveBeenCalledWith(
+      llmClient,
+      'echo hello',
+      'Command exited with code 1.\nboom one',
+    );
+  });
+
+  it('skips the history write when the chat was swapped mid-run', async () => {
+    const { done, resolveResult } = setup();
+    currentChat = { swapped: true };
+    resolveResult(
+      makeResult({ output: 'late\n', rawOutput: Buffer.from('late\n') }),
+    );
+    await done;
+    expect(addHistoryMock).not.toHaveBeenCalled();
+  });
+
   it('marks a cancelled command as failed', async () => {
     const { events, done, resolveResult } = setup();
     resolveResult(makeResult({ aborted: true }));
@@ -224,9 +285,14 @@ describe('executeUserShell', () => {
       id: expect.any(String),
       display: 'Command was cancelled.\n(Command produced no output)',
     });
-    expect(events[events.length - 1]).toMatchObject({
+    // 'cancelled' (not 'error'): ink paints Canceled for a user-cancelled
+    // `!` command, and /resume replay maps the same event to 'cancelled' —
+    // reverting to 'error' must red this (R1-22).
+    expect(events[events.length - 1]).toEqual({
       type: 'tool-end',
+      id: expect.any(String),
       success: false,
+      summary: 'cancelled',
     });
   });
 
@@ -274,11 +340,18 @@ describe('executeUserShell', () => {
     const { events, done, resolveResult, executeArgs } = setup();
     const wrapped = executeArgs[0] as string;
     expect(wrapped).toMatch(
-      /^\{ echo hello; \}; __code=\$\?; pwd > "[^"]+"; exit \$__code$/,
+      /^\{ echo hello;\n\}; __code=\$\?; pwd > "[^"]+"; exit \$__code$/,
     );
     const pwdFilePath = /pwd > "([^"]+)"/.exec(wrapped)![1];
+    expect(executeArgs[1]).toBe('/tmp/project');
     expect(executeArgs[4]).toBe(false);
-    expect(executeArgs[5]).toEqual({ terminalWidth: 80, terminalHeight: 24 });
+    expect(executeArgs[5]).toEqual({
+      showColor: false,
+      pager: 'cat',
+      maxBufferedOutputBytes: 12345,
+      terminalWidth: 80,
+      terminalHeight: 24,
+    });
     fs.writeFileSync(pwdFilePath, '/tmp/elsewhere\n');
     resolveResult(
       makeResult({ output: 'moved\n', rawOutput: Buffer.from('moved\n') }),
@@ -291,6 +364,22 @@ describe('executeUserShell', () => {
         "WARNING: shell mode is stateless; the directory change to '/tmp/elsewhere' will not persist.\n\nmoved",
     });
     expect(fs.existsSync(pwdFilePath)).toBe(false);
+  });
+
+  it('runs the command bare on win32 without the pwd wrap', async () => {
+    osPlatformMock.mockReturnValue('win32');
+    const { events, done, resolveResult, executeArgs } = setup();
+    expect(executeArgs[0]).toBe('echo hello');
+    resolveResult(
+      makeResult({ output: 'hi\n', rawOutput: Buffer.from('hi\n') }),
+    );
+    await done;
+    expect(events[events.length - 2]).toEqual({
+      type: 'tool-result',
+      id: expect.any(String),
+      display: 'hi',
+    });
+    expect(addHistoryMock).toHaveBeenCalledWith(llmClient, 'echo hello', 'hi');
   });
 
   it('does not stream pty output as deltas', async () => {
@@ -310,6 +399,77 @@ describe('executeUserShell', () => {
       type: 'tool-result',
       id: expect.any(String),
       display: 'final',
+    });
+  });
+
+  it('hands the caller cwd and abort signal to ShellExecutionService (R1-67)', async () => {
+    const { done, resolveResult, executeArgs, signal } = setup();
+    expect(executeArgs[1]).toBe('/tmp/project');
+    expect(executeArgs[3]).toBe(signal);
+    resolveResult(makeResult());
+    await done;
+  });
+
+  it('closes the pwd brace group on its own line so a trailing comment cannot swallow it (R1-68)', async () => {
+    const events: OpenTuiStreamEvent[] = [];
+    let executeArgs: unknown[] = [];
+    executeMock.mockImplementation((...args: unknown[]) => {
+      executeArgs = args;
+      return Promise.resolve({
+        pid: 1,
+        result: Promise.resolve(makeResult()),
+      });
+    });
+    const done = executeUserShell(
+      makeConfig(false),
+      'echo hi # note',
+      (event) => events.push(event),
+      new AbortController().signal,
+      { width: 80, height: 24 },
+    );
+    await done;
+    expect(executeArgs[0]).toMatch(
+      /^\{ echo hi # note;\n\}; __code=\$\?; pwd > "[^"]+"; exit \$__code$/,
+    );
+  });
+
+  it('marks a signal termination as failed on both leg shapes (R1-67)', async () => {
+    for (const overrides of [
+      { signal: 9, exitCode: null },
+      { signal: 9, exitCode: 0 },
+    ] as Array<Partial<ShellExecutionResult>>) {
+      const { events, done, resolveResult } = setup();
+      resolveResult(makeResult(overrides));
+      await done;
+      expect(events[events.length - 2]).toEqual({
+        type: 'tool-result',
+        id: expect.any(String),
+        display:
+          'Command terminated by signal: 9.\n(Command produced no output)',
+      });
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'tool-end',
+        success: false,
+        summary: 'error',
+      });
+    }
+  });
+
+  it('prefixes a spawn error and marks the card failed (R1-67)', async () => {
+    const { events, done, resolveResult } = setup();
+    resolveResult(
+      makeResult({ error: new Error('spawn ENOENT'), exitCode: null }),
+    );
+    await done;
+    expect(events[events.length - 2]).toEqual({
+      type: 'tool-result',
+      id: expect.any(String),
+      display: 'spawn ENOENT\n(Command produced no output)',
+    });
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'tool-end',
+      success: false,
+      summary: 'error',
     });
   });
 

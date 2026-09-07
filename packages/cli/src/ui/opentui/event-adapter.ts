@@ -74,8 +74,14 @@ export type OpenTuiStreamEvent =
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
   /** The call left awaiting_approval (approved, declined, or bounced):
-   * releases the transcript card's pending marker. */
-  | { type: 'confirm-resolved'; id: string }
+   * releases the transcript card's pending marker and records how it left
+   * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
+   * 'approved' (running means someone approved it). */
+  | {
+      type: 'confirm-resolved';
+      id: string;
+      outcome: 'approved' | 'rejected';
+    }
   /** Structured compression item (/compress command): rendered as the ink
    * CompressionMessage row (spinner/diamond + token counts) instead of the
    * flattened text projection. */

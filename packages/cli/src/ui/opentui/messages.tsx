@@ -122,12 +122,39 @@ export function hiddenLinesLabel(hiddenCount: number): string {
   return `... first ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
 }
 
+/** Physical rows a logical row occupies when soft-wrapped to `cols` columns. */
+function physicalRowCount(row: string, cols: number): number {
+  return Math.max(1, Math.ceil(getCachedStringWidth(row) / cols));
+}
+
+/** Cuts a row to `maxCols` display columns without splitting a surrogate pair. */
+function sliceRowToWidth(
+  row: string,
+  maxCols: number,
+  side: 'head' | 'tail',
+): string {
+  const points = toCodePoints(row);
+  const ordered = side === 'head' ? points : [...points].reverse();
+  let used = 0;
+  let taken = 0;
+  for (const cp of ordered) {
+    const cpWidth = getCachedStringWidth(cp);
+    if (used + cpWidth > maxCols) break;
+    used += cpWidth;
+    taken += 1;
+  }
+  const kept = ordered.slice(0, taken);
+  return (side === 'tail' ? kept.reverse() : kept).join('');
+}
+
 /**
  * Physical-height head window (ink MaxSizedBox overflowDirection 'bottom'
- * parity): the cap counts WRAPPED rows at width - 2 columns, because a
+ * parity): the cap counts WRAPPED rows at width - 2 display columns (not
+ * UTF-16 code units — wide-character bodies would otherwise be undercounted
+ * ~2x and silently never engage the cap), because a
  * single logical row — e.g. a JSON.stringify'd confirmation payload — can
  * wrap to dozens of physical rows that a logical-row window never bounds.
- * An over-budget tail logical row is sliced to its head characters; the
+ * An over-budget tail logical row is sliced to its head display columns; the
  * hidden tail is summarized by hiddenTailLinesLabel.
  */
 export function headWindowPhysical(
@@ -136,7 +163,7 @@ export function headWindowPhysical(
   maxRows: number,
 ): { visible: string[]; hiddenRows: number } {
   const cols = Math.max(width - 2, 10);
-  const height = (row: string) => Math.max(1, Math.ceil(row.length / cols));
+  const height = (row: string) => physicalRowCount(row, cols);
   const total = rows.reduce((sum, row) => sum + height(row), 0);
   if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
   const budget = Math.max(maxRows - 1, 1);
@@ -151,7 +178,7 @@ export function headWindowPhysical(
     }
     const remaining = budget - used;
     if (remaining > 0) {
-      visible.push(row.slice(0, remaining * cols));
+      visible.push(sliceRowToWidth(row, remaining * cols, 'head'));
       used = budget;
     }
     break;
@@ -178,7 +205,7 @@ export function tailWindowPhysical(
   maxRows: number,
 ): { visible: string[]; hiddenRows: number } {
   const cols = Math.max(width - 2, 10);
-  const height = (row: string) => Math.max(1, Math.ceil(row.length / cols));
+  const height = (row: string) => physicalRowCount(row, cols);
   const total = rows.reduce((sum, row) => sum + height(row), 0);
   if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
   const budget = Math.max(maxRows, 1);
@@ -194,7 +221,7 @@ export function tailWindowPhysical(
     }
     const remaining = budget - used;
     if (remaining > 0) {
-      visible.unshift(row.slice(row.length - remaining * cols));
+      visible.unshift(sliceRowToWidth(row, remaining * cols, 'tail'));
       used = budget;
     }
     break;
@@ -213,9 +240,10 @@ export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
  * Keeps the head of a description that would wrap past `maxRows` at the
- * given width; the hidden tail is summarized by hiddenTailLinesLabel. The
- * estimate is character-based (name + description wrap inside
- * width - STATUS_INDICATOR_WIDTH columns), which is intentionally coarse.
+ * given width; the hidden tail is summarized by hiddenTailLinesLabel. Rows
+ * are measured in terminal display columns (not UTF-16 code units) so
+ * wide-character payloads engage the cap (name + description wrap inside
+ * width - STATUS_INDICATOR_WIDTH columns).
  */
 export function capToolCardDescription(
   description: string,
@@ -224,12 +252,13 @@ export function capToolCardDescription(
   maxRows: number,
 ): { description: string; hiddenRows: number } {
   const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
-  const rows = Math.ceil((name.length + 1 + description.length) / cols);
+  const nameCols = getCachedStringWidth(name) + 1;
+  const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
   if (rows <= maxRows) return { description, hiddenRows: 0 };
   const descRows = Math.max(maxRows - 1, 1);
-  const visibleChars = Math.max(descRows * cols - name.length - 1, 0);
+  const visibleCols = Math.max(descRows * cols - nameCols, 0);
   return {
-    description: description.slice(0, visibleChars),
+    description: sliceRowToWidth(description, visibleCols, 'head'),
     hiddenRows: Math.max(rows - descRows, 1),
   };
 }

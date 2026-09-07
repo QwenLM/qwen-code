@@ -998,7 +998,10 @@ function AuthDialogFlow({
         goBack();
         return true;
       }
-      if (errorMessage) return true;
+      // The swallow is for an error the dialog armed itself; a boot-seeded
+      // initialError must fall through, or the auto-opened dialog could never
+      // be dismissed with Esc.
+      if (errorMessage && errorMessage !== initialError) return true;
       if (config.getAuthType() === undefined) {
         setErrorMessage(
           t(
@@ -1012,7 +1015,15 @@ function AuthDialogFlow({
     };
     renderer.addInputHandler(onRaw);
     return () => renderer.removeInputHandler(onRaw);
-  }, [renderer, viewLevel, goBack, errorMessage, config, onClose]);
+  }, [
+    renderer,
+    viewLevel,
+    goBack,
+    errorMessage,
+    initialError,
+    config,
+    onClose,
+  ]);
 
   // -- View title -------------------------------------------------------------
 

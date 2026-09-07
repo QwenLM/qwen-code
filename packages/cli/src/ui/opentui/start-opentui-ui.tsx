@@ -125,7 +125,7 @@ function OpenTuiEntryApp({
 
   // U-7: generate follow-up suggestions on the streaming→idle edge — the
   // entry owns that edge, the shell stays stream-state-free.
-  const { promptSuggestion, dismissPromptSuggestion } =
+  const { promptSuggestion, abortPromptSuggestion, dismissPromptSuggestion } =
     useFollowupSuggestionGeneration({
       config,
       settings,
@@ -298,6 +298,7 @@ function OpenTuiEntryApp({
       composerHandle={composerHandle}
       promptSuggestion={promptSuggestion}
       onPromptSuggestionDismiss={dismissPromptSuggestion}
+      onPromptSuggestionAbort={abortPromptSuggestion}
     />
   );
 }

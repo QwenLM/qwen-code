@@ -115,7 +115,10 @@ export const useShellCommandProcessor = (
         if (!command.endsWith(';') && !command.endsWith('&')) {
           command += ';';
         }
-        commandToExecute = `{ ${command} }; __code=$?; pwd > "${pwdFilePath}"; exit $__code`;
+        // The brace group closes on its own line: a one-line `{ ... #comment; };`
+        // lets a trailing comment swallow the wrapper tail and the shell dies
+        // on a syntax error before the user's command runs at all.
+        commandToExecute = `{ ${command}\n}; __code=$?; pwd > "${pwdFilePath}"; exit $__code`;
       }
 
       const executeCommand = async (

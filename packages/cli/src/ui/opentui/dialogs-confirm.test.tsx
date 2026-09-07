@@ -246,16 +246,19 @@ describe('OpenTuiToolConfirmation', () => {
             title: 'Confirm MCP Tool Execution',
             serverName: 'external-context',
             toolName: 'context_remember',
-            toolDisplayName: 'context_remember',
+            toolDisplayName: 'Context Remember',
             onConfirm: onConfirmNoop,
           },
         }}
         onSettled={() => {}}
       />,
     );
+    // The question line carries the raw toolName; the accent line below it
+    // carries the human display name — kept distinct so this test pins both.
     expect(container.textContent).toContain(
       'Allow execution of MCP tool "context_remember" from server "external-context"?',
     );
+    expect(container.textContent).toContain('Context Remember');
   });
 
   it('keeps the head of a long info body and expands it on ctrl-s', () => {
@@ -291,7 +294,9 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     const expanded = container.textContent ?? '';
     expect(expanded).toContain('BODY_TAIL');
-    expect(expanded).not.toContain('lines hidden');
+    // The expanded tail window (20 rows at height 40) still drops 6 of the
+    // 26 rows, and the label is the only trace of them on the alt screen.
+    expect(expanded).toContain('... last 6 lines hidden ...');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
   });
 
@@ -355,10 +360,42 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     const expanded = container.textContent ?? '';
     // The expanded tail window surfaces the end of the payload (the alt-screen
-    // viewport has no scrollback, so the tail must be on screen) with no
-    // hidden-lines label left behind.
+    // viewport has no scrollback, so the tail must be on screen); the rows it
+    // still drops are labeled, not silently discarded.
     expect(expanded).toContain('CONFIRM_TAIL');
-    expect(expanded).not.toContain('lines hidden');
+    expect(expanded).toMatch(/last \d+ lines hidden/);
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
+  });
+
+  it('keeps the collapsed view when expansion would show fewer rows', () => {
+    // At height 24 the expanded tail window caps at 4 rows while the collapsed
+    // head keeps 19 — expansion would strictly shrink the view, so ctrl-s
+    // must not engage even though the body overflows.
+    mocks.state.dimensions = { width: 110, height: 24 };
+    const lines = Array.from(
+      { length: 30 },
+      (_, index) => `OVERFLOW_LINE_${index.toString().padStart(2, '0')}`,
+    );
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Approve this call?',
+            prompt: lines.join('\n'),
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        onSettled={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('OVERFLOW_LINE_00');
+    expect(container.textContent).toContain('Press ctrl-s to show more lines');
+
+    press({ name: 's', ctrl: true });
+    expect(container.textContent).toContain('OVERFLOW_LINE_00');
+    expect(container.textContent).toContain('lines hidden');
   });
 });

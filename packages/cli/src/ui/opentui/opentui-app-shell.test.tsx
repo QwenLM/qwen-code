@@ -39,9 +39,11 @@
  *    subtree is caught by the boundary.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -70,6 +72,8 @@ const mocks = vi.hoisted(() => {
     exitInProgress: false,
     /** Runs while a dispatched command is still awaiting its outcome. */
     onHandle: null as null | ((text: string) => void),
+    /** Resolved immediately, so the drain never blocks on a shell lane. */
+    executeUserShell: vi.fn(() => Promise.resolve()),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -141,6 +145,16 @@ vi.mock('./commands-dispatch.js', () => ({
       const gate = mocks.state.deferGate;
       return gate ? gate(text) : mocks.state.deferDuringStreaming;
     }
+    // The shell's entry tag asks this predicate; mirror the real rule.
+    takesAsSlashCommand(text: string) {
+      const trimmed = text.trim();
+      if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
+        return false;
+      }
+      return !(
+        trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)
+      );
+    }
     cancel() {}
     dispose() {}
     async handle(text: string) {
@@ -153,6 +167,9 @@ vi.mock('./commands-dispatch.js', () => ({
 }));
 
 // Child widgets: string markers that also record their props for assertions.
+vi.mock('./shell-mode.js', () => ({
+  executeUserShell: mocks.state.executeUserShell,
+}));
 vi.mock('./opentui-dialog-mount.js', () => ({
   OpenTuiDialogMount: (props: Record<string, unknown>) => {
     mocks.state.dialogProps = props;
@@ -238,6 +255,11 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.exitInProgress = false;
     mocks.state.onHandle = null;
+    mocks.state.executeUserShell.mockClear();
+  });
+
+  afterEach(() => {
+    mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
   });
 
   it('renders the composer inside the error boundary by default', async () => {
@@ -688,6 +710,118 @@ describe('OpenTuiApp shell wiring', () => {
     await settle();
     await submit('/help');
     expect(mocks.state.handledTexts).toEqual(['/help']);
+  });
+
+  it('claims a mid-turn shell-mode ?btw for the dispatcher, not the shell', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('?btw why');
+    expect(mocks.state.handledTexts).toEqual(['?btw why']);
+    expect(screen.queryByText(/Queued/)).toBeNull();
+
+    // The idle edge must not resurrect it on the shell lane either.
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['?btw why']);
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+  });
+
+  it('keeps a slash-prefixed path on the shell lane when queued mid-turn', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onTranscriptEvent: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('/usr/bin/ls --color');
+    expect(screen.getByText(/Queued \/usr\/bin\/ls/)).toBeTruthy();
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(mocks.state.executeUserShell).toHaveBeenCalledWith(
+      CONFIG,
+      '/usr/bin/ls --color',
+      props.onTranscriptEvent,
+      expect.any(AbortSignal),
+      // The `!` row renders behind the 2-col input indicator, so the child
+      // runs over that inner width (R1-42).
+      expect.objectContaining({
+        width: 120 - STATUS_INDICATOR_WIDTH,
+        height: 40,
+      }),
+    );
+  });
+
+  it('holds a second shell submission and quit aborts every command', async () => {
+    const signals: AbortSignal[] = [];
+    mocks.state.executeUserShell.mockImplementation(((
+      _config: unknown,
+      _command: string,
+      _emit: unknown,
+      signal: AbortSignal,
+    ) => {
+      signals.push(signal);
+      return new Promise<void>(() => {});
+    }) as unknown as () => Promise<void>);
+    mocks.state.handleResults.push(false as unknown as OpenTuiDispatchOutcome, {
+      kind: 'quit',
+      messages: [],
+    } satisfies OpenTuiDispatchOutcome);
+    const onQuit = vi.fn();
+    const onInterrupt = vi.fn();
+    const onSubmitPrompt = vi.fn();
+    renderApp({
+      onQuit,
+      onInterrupt,
+      onSubmitPrompt,
+      onTranscriptEvent: vi.fn(),
+    });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('sleep 10');
+    // While the command runs, a second submission must queue behind it
+    // instead of starting a concurrent model turn or a racing shell.
+    await submit('hello');
+    expect(screen.getByText(/Queued hello/)).toBeTruthy();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(signals).toHaveLength(1);
+
+    await submit('/quit');
+    expect(onQuit).toHaveBeenCalledWith([]);
+    // Nothing survives the exit: the queued command is discarded and the
+    // running one's controller is aborted (a single-slot ref keeps only the
+    // newest and orphans the first).
+    expect(mocks.state.handledTexts).toEqual(['sleep 10', '/quit']);
+    expect(signals[0]?.aborted).toBe(true);
   });
 
   it('stops the turn and exits on a mid-turn quit instead of queueing it', async () => {

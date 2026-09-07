@@ -148,7 +148,7 @@ describe('useShellCommandProcessor', () => {
       isUserInitiated: true,
     });
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
-    const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    const wrappedCommand = `{ ls -l;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
     expect(mockShellExecutionService).toHaveBeenCalledWith(
       wrappedCommand,
       '/test/dir',
@@ -324,7 +324,7 @@ describe('useShellCommandProcessor', () => {
       });
 
       // Verify it's using the non-pty shell
-      const wrappedCommand = `{ stream; }; __code=$?; pwd > "${path.join(
+      const wrappedCommand = `{ stream;\n}; __code=$?; pwd > "${path.join(
         os.tmpdir(),
         'shell_pwd_abcdef.tmp',
       )}"; exit $__code`;

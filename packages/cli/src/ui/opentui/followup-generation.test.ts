@@ -19,6 +19,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 const mocks = vi.hoisted(() => ({
   generate: vi.fn(),
   log: vi.fn(),
+  getHistoryTail: vi.fn((): unknown[] => []),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -44,7 +45,7 @@ function buildConfig(overrides: Record<string, unknown> = {}): Config {
     isInteractive: () => true,
     getSdkMode: () => false,
     getApprovalMode: () => ApprovalMode.DEFAULT,
-    getLlmClient: () => ({ getHistoryTail: () => [] }),
+    getLlmClient: () => ({ getHistoryTail: mocks.getHistoryTail }),
     ...overrides,
   } as unknown as Config;
 }
@@ -89,6 +90,7 @@ describe('useFollowupSuggestionGeneration', () => {
   beforeEach(() => {
     mocks.generate.mockReset();
     mocks.log.mockReset();
+    mocks.getHistoryTail.mockClear();
   });
 
   it('generates on the streaming→idle edge and publishes the suggestion', async () => {
@@ -103,6 +105,7 @@ describe('useFollowupSuggestionGeneration', () => {
     expect(mocks.generate.mock.calls[0][3]).toEqual({
       enableCacheSharing: true,
     });
+    expect(mocks.getHistoryTail).toHaveBeenCalledWith(40, true);
     expect(result.current.promptSuggestion).toBe('Run the tests');
   });
 
@@ -161,6 +164,38 @@ describe('useFollowupSuggestionGeneration', () => {
     expect(result.current.promptSuggestion).toBeNull();
   });
 
+  it('clears the suggestion when the setting is flipped off in place (R1-15)', async () => {
+    mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
+    const config = buildConfig();
+    // LoadedSettings.setValue mutates `merged` in place — the same object
+    // identity, so the effect must be keyed on the flattened value, not the
+    // settings object. Keep every other dep identity-stable across the
+    // rerender or the test passes for the wrong reason.
+    const settings = { merged: {} } as unknown as LoadedSettings;
+    const items: readonly LiveHistoryItem[] = [];
+    const waitingCalls: readonly WaitingCallInfo[] = [];
+    const { result, rerender } = renderGeneration(
+      props({ config, settings, items, waitingCalls }),
+    );
+    await act(async () => {
+      rerender(
+        props({ config, settings, streaming: false, items, waitingCalls }),
+      );
+    });
+    expect(result.current.promptSuggestion).toBe('Run the tests');
+
+    (settings as { merged: { ui?: object } }).merged.ui = {
+      enableFollowupSuggestions: false,
+    };
+    await act(async () => {
+      rerender(
+        props({ config, settings, streaming: false, items, waitingCalls }),
+      );
+    });
+    expect(result.current.promptSuggestion).toBeNull();
+    expect(mocks.generate).toHaveBeenCalledTimes(1);
+  });
+
   it('clears the suggestion when a new turn starts', async () => {
     mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
     const config = buildConfig();
@@ -208,6 +243,66 @@ describe('useFollowupSuggestionGeneration', () => {
       view.rerender(props({ config, streaming: false }));
     });
     view.unmount();
+    expect(captured?.aborted).toBe(true);
+  });
+
+  // R2-2: typing over the ghost must abort (ink AppContainer parity), not
+  // clear — abort leaves the suggestion restorable after type-then-delete.
+  it('abortPromptSuggestion leaves the published suggestion set', async () => {
+    mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
+    const config = buildConfig();
+    const { result, rerender } = renderGeneration(props({ config }));
+    await act(async () => {
+      rerender(props({ config, streaming: false }));
+    });
+    expect(result.current.promptSuggestion).toBe('Run the tests');
+    act(() => result.current.abortPromptSuggestion());
+    expect(result.current.promptSuggestion).toBe('Run the tests');
+  });
+
+  it('abortPromptSuggestion aborts the in-flight generation', async () => {
+    let captured: AbortSignal | undefined;
+    mocks.generate.mockImplementation(
+      (_config: unknown, _history: unknown, signal: AbortSignal) => {
+        captured = signal;
+        return new Promise(() => {});
+      },
+    );
+    const config = buildConfig();
+    const { result, rerender } = renderGeneration(props({ config }));
+    await act(async () => {
+      rerender(props({ config, streaming: false }));
+    });
+    act(() => result.current.abortPromptSuggestion());
+    expect(captured?.aborted).toBe(true);
+  });
+
+  it('dismissPromptSuggestion clears the published suggestion', async () => {
+    mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
+    const config = buildConfig();
+    const { result, rerender } = renderGeneration(props({ config }));
+    await act(async () => {
+      rerender(props({ config, streaming: false }));
+    });
+    expect(result.current.promptSuggestion).toBe('Run the tests');
+    act(() => result.current.dismissPromptSuggestion());
+    expect(result.current.promptSuggestion).toBeNull();
+  });
+
+  it('dismissPromptSuggestion aborts the in-flight generation', async () => {
+    let captured: AbortSignal | undefined;
+    mocks.generate.mockImplementation(
+      (_config: unknown, _history: unknown, signal: AbortSignal) => {
+        captured = signal;
+        return new Promise(() => {});
+      },
+    );
+    const config = buildConfig();
+    const { result, rerender } = renderGeneration(props({ config }));
+    await act(async () => {
+      rerender(props({ config, streaming: false }));
+    });
+    act(() => result.current.dismissPromptSuggestion());
     expect(captured?.aborted).toBe(true);
   });
 });

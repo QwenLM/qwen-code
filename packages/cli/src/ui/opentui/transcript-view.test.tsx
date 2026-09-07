@@ -6,13 +6,16 @@
 // @vitest-environment jsdom
 
 /**
- * Mount coverage for the transcript view's review-round behaviors: the
- * awaiting-approval card must not duplicate its description (the confirmation
- * dialog owns that payload), and the `!` shell row carries ink's `$ ` prefix.
+ * Mount coverage for the transcript view's review-round behaviors: an
+ * awaiting-approval card keeps its (capped) description — the confirmation
+ * dialog does not carry the payload for every type, so an MCP call stays
+ * approvable with its arguments on screen — and the `!` shell row carries
+ * ink's `$ ` prefix.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/react';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -68,18 +71,21 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
-  it('hides the tool-card description while the call awaits approval', () => {
+  it('keeps a pending MCP-shaped card description visible (R1-10)', () => {
+    // An MCP confirmation dialog shows only the server and tool names — no
+    // args — so the card is the only surface that carries the arguments.
     const { container } = render(
       <OpenTuiTranscriptView
         items={[
           toolItem({
-            description: 'echo SECRET_PAYLOAD',
+            tool: 'mcp__fs__write_file',
+            description: '{"path":"/x","content":"SECRET_PAYLOAD"}',
             confirm: 'pending',
           }),
         ]}
       />,
     );
-    expect(container.textContent).not.toContain('SECRET_PAYLOAD');
+    expect(container.textContent).toContain('SECRET_PAYLOAD');
     expect(container.textContent).toContain('awaiting approval');
   });
 
@@ -107,5 +113,39 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(container.textContent).toContain('$ git status');
+  });
+
+  it('strips bidi overrides from arena file lists and group labels (R1-26)', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={[
+          {
+            kind: 'arena-session',
+            id: 'a1',
+            sessionStatus: 'completed',
+            task: 'do it',
+            totalDurationMs: 2000,
+            agents: [
+              {
+                label: 'a\u202eX',
+                status: AgentStatus.COMPLETED,
+                durationMs: 1200,
+                totalTokens: 10,
+                inputTokens: 4,
+                outputTokens: 6,
+                toolCalls: 2,
+                successfulToolCalls: 2,
+                failedToolCalls: 0,
+                rounds: 1,
+                modifiedFiles: ['a\u202eb.ts'],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).not.toContain('\u202e');
+    expect(text).toContain('b.ts');
   });
 });

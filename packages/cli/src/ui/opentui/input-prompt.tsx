@@ -25,7 +25,8 @@
  *    original accept rules (Tab/Enter, trailing space, directory drill-in);
  *  - Esc: double-Esc clears the buffer (footer-style "Press Esc again to
  *    clear." hint surfaced via onEscapeArmedChange); while streaming Esc
- *    interrupts instead;
+ *    interrupts instead (in shell mode it exits the mode first, and also
+ *    interrupts a live turn);
  *  - Enter submits to the parent (real client wiring), `\`+Enter continues
  *    the line, Shift+Enter inserts a newline.
  */
@@ -204,6 +205,11 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** U-7: clears the published suggestion (accept/typing/submit). */
   onPromptSuggestionDismiss?: () => void;
+  /**
+   * U-7/R2-2: aborts the suggestion without clearing it — typing over the
+   * ghost keeps it restorable after type-then-delete (ink parity).
+   */
+  onPromptSuggestionAbort?: () => void;
   /** U-33: `!` shell mode is active (ink shellModeActive chrome parity). */
   shellModeActive?: boolean;
   /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
@@ -226,6 +232,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     recentSlashCommands,
     promptSuggestion,
     onPromptSuggestionDismiss,
+    onPromptSuggestionAbort,
     shellModeActive = false,
     onToggleShellMode,
   } = props;
@@ -324,8 +331,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       : null;
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
-  // wins over the approval-mode prefix and status text).
-  const chrome = shellModeActive ? { prefix: '!' } : promptChrome(approvalMode);
+  // wins over the approval-mode prefix and replaces its status text with
+  // "Shell mode" — the only signal that Enter now executes shell commands).
+  const chrome = shellModeActive
+    ? { prefix: '!', color: C.accent, statusText: t('Shell mode') }
+    : promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
 
   // ── real command registry feeding /-completion ──────────────────────────
@@ -689,6 +699,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const el = editorRef.current;
       if (!el) return;
       const pasted = normalizePastedText(decodePasteBytes(event.bytes));
+      // Ink dismisses the follow-up ghost on paste too (key.paste, no
+      // keystroke record): a paste into an empty buffer must not leave the
+      // suggestion acceptable behind the inserted content.
+      if (el.plainText.length === 0 && availableSuggestion) {
+        dismissFollowup();
+        onPromptSuggestionDismiss?.();
+      }
       if (!isLargePaste(pasted)) return; // small pastes insert verbatim
       event.preventDefault();
       const charCount = [...pasted].length;
@@ -704,7 +721,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     return () => {
       renderer.keyInput.off('paste', onPaste);
     };
-  }, [renderer, focus]);
+  }, [
+    renderer,
+    focus,
+    // availableSuggestion/dismissFollowup/onPromptSuggestionDismiss are read
+    // in the handler: resubscribe when they change or the closure goes stale.
+    availableSuggestion,
+    dismissFollowup,
+    onPromptSuggestionDismiss,
+  ]);
 
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
@@ -839,10 +864,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
     // U-33: an empty-buffer `!` toggles shell mode instead of inserting
     // (ink InputPrompt parity — the character still inserts in a non-empty
-    // buffer, so `echo hi!` is unaffected).
+    // buffer, so `echo hi!` is unaffected). The `suggestions.length === 0`
+    // clause is ink's `!showCompletionSuggestions`: `!` must not flip the
+    // mode while a stale completion dropdown is open and would consume the
+    // next Enter/Tab.
     if (
       key.sequence === '!' &&
       el.plainText.length === 0 &&
+      suggestions.length === 0 &&
       onToggleShellMode
     ) {
       onToggleShellMode();
@@ -850,12 +879,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
     if (isPrintableKeyInput(key)) {
-      // Typing over a ghost suggestion dismisses it but still inserts the
-      // character (ink parity: no preventDefault on the dismiss itself).
+      // Typing over a ghost suggestion aborts it (kills the in-flight publish,
+      // keeps the suggestion restorable) but still inserts the character —
+      // ink deliberately does NOT clear the persisted suggestion here.
       if (el.plainText.length === 0 && availableSuggestion) {
         recordFollowupKeystroke();
         dismissFollowup();
-        onPromptSuggestionDismiss?.();
+        onPromptSuggestionAbort?.();
       }
       el.insertText(key.sequence);
       setTextVersion((v) => v + 1);
@@ -876,14 +906,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (key.name === 'escape') {
       key.preventDefault();
-      if (streaming) {
-        onInterrupt?.();
-        return;
-      }
-      // Ink InputPrompt parity: Esc in shell mode exits the mode before any
-      // other escape behavior (queue restore, double-Esc clear).
+      // Ink parity (InputPrompt exits the mode with no streaming gate;
+      // AppContainer's broadcast handler cancels the request on the same
+      // keypress): Esc in shell mode leaves the mode first, and when a turn
+      // is streaming it interrupts too — one keypress does both.
       if (shellModeActive) {
         onToggleShellMode?.();
+        if (streaming) onInterrupt?.();
+        return;
+      }
+      if (streaming) {
+        onInterrupt?.();
         return;
       }
       if (completionModeRef.current !== CompletionMode.IDLE) {
@@ -928,6 +961,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     const navigationDown =
       (key.name === 'down' && !key.shift && !key.ctrl) ||
       (key.name === 'n' && !!key.ctrl);
+
+    // Ink parity: shell mode owns Up/Down for shell-history recall, so the
+    // prompt queue and chat history must stay untouched there — popping or
+    // recalling would drop prompt context into a shell command line.
+    const historyNavActive = !shellModeActive;
 
     const showing = suggestions.length > 0;
 
@@ -984,7 +1022,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     // branch above (accept-unless-perfect-match); there is no separate path.
 
     // Up at the top edge pops queued prompts into the composer (original).
-    if (navigationUp && queueLength > 0) {
+    if (historyNavActive && navigationUp && queueLength > 0) {
       const topCursor = el.logicalCursor;
       if (topCursor.row === 0 && topCursor.col === 0) {
         const popped = onPopQueue?.();
@@ -998,7 +1036,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
     }
 
-    if (navigationUp) {
+    if (historyNavActive && navigationUp) {
       const cursor = el.logicalCursor;
       const decision = historyUpDecision(
         historyRef.current!,
@@ -1023,7 +1061,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (navigationDown) {
+    if (historyNavActive && navigationDown) {
       const cursor = el.logicalCursor;
       const lastLine = el.plainText.split('\n').pop() ?? '';
       const decision = historyDownDecision(
