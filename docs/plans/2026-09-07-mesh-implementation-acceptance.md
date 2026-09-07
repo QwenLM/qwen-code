@@ -94,9 +94,29 @@ Writing the production port corrected the design's four-branch idle path to thre
 
 ### Step 7 — Live vertical slice (first integration gate)
 
-Lands: nothing new; this is a run.
+Lands: normally nothing; the first run may carry only defects that directly
+block the slice. This run corrected the resident-continuation sidecar lookup to
+use the same storage root as the background-agent launcher.
 Gate: the §8 demo steps 1-5 complete against two real agents on a build-capable machine, plus: a forced `queueExternalInput` miss (kill the agent between its last tool round and finish) is rebooked and delivered on the next run; a synthetic ping-pong between two _running_ agents on one thread stops at 12 with `turn_budget_exhausted` in the thread and one channel-less notification record.
 Evidence: the thread JSON files after the run, the two agents' transcript slices, the observed wall-clock between the child's `thread_review` and the parent's wake, and the host reaper timeout plus daemon-observed reload latency. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
+
+**Happy-path observation (2026-09-07).** On a normal non-bare host, Alice was
+the only target of the root post, created and assigned Bob's child, and closed
+`waiting`. Bob posted three concrete checks and closed `review`. The parent
+report applied after 13 ms; the same resident Alice body continued, summarized
+the child, and closed the root `review`. Final status was `in_review` on both
+threads; Alice's two runs were `completed/waiting` and `completed/review`, and
+Bob's was `completed/review`. All six thread tools were in the real model tool
+surface. No §6 prompt change was needed. The first continuation attempt failed
+because `dispatch-port.ts` derived the sidecar path from the checkout rather
+than `Config.storage.getProjectDir()`; the correction above made the next live
+run pass. A first demo input also mentioned Bob directly and therefore woke him
+according to the real routing rule; addressing only Alice fixed the driver, not
+the product.
+
+This proves the demo steps 1-5 only. The forced delivery miss, 12-turn
+ping-pong, daemon reaper/reload observation, and bare-mode exposure remain
+unrun, so the full step-7 gate is not yet claimed.
 
 ### Step 8 — Dispatcher reliability
 
