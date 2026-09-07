@@ -55,11 +55,14 @@ export function SessionDetailsTooltip({
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const collisionBoundary = open
-    ? resolveSessionDetailsCollisionBoundary(
-        anchorRef.current?.closest<HTMLElement>('aside') ??
-          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
-          null,
-      )
+    ? side === 'bottom'
+      ? [
+          anchorRef.current?.closest<HTMLElement>('[data-pane-session-id]'),
+          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]'),
+        ].filter((element): element is HTMLElement => Boolean(element))
+      : resolveSessionDetailsCollisionBoundary(
+          anchorRef.current?.closest<HTMLElement>('aside') ?? null,
+        )
     : null;
   const folderPath = session.workspaceCwd;
   const folderName = workspaceLabel ?? workspaceBasename(folderPath);

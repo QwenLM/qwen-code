@@ -104,6 +104,7 @@ vi.mock('./ChatPane', () => ({
       <div
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
+        data-session-details={props.sessionSummary?.sessionId}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
@@ -234,6 +235,30 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
+  it('keeps a newly added controlled pane active without relying on composer autofocus', () => {
+    function ControlledSplit() {
+      const [ids, setIds] = React.useState(['s1', 's2']);
+      return (
+        <SplitView sessionIds={ids} onPanesChange={setIds} onExit={() => {}} />
+      );
+    }
+    render();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ControlledSplit />
+        </I18nProvider>,
+      ),
+    );
+    openPicker();
+    const third = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('[role="option"] button'),
+    ).find((button) => button.textContent === 'Three')!;
+    act(() => third.click());
+    expect(titles()).toEqual(['One', 'Two', 'Three']);
+    expect(panes()[2].hasAttribute('data-pane-active')).toBe(true);
+  });
+
   it('tracks pointer and keyboard activity without activating a hovered pane', () => {
     render({ sessionIds: ['s1', 's2'] });
     expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
@@ -250,7 +275,7 @@ describe('SplitView', () => {
     expect(panes()[1].hasAttribute('data-pane-active')).toBe(false);
   });
 
-  it('cycles hidden pending panes, focuses approval and preserves drafts without confirming', () => {
+  it('cycles hidden pending panes, focuses outside approvals and preserves drafts without confirming', () => {
     waitingSessions = new Set(['s2', 's3']);
     render({ sessionIds: ['s1', 's2', 's3'] });
     const draft = panes()[0].querySelector('input')!;
@@ -264,15 +289,21 @@ describe('SplitView', () => {
       '[title="Go to the next session awaiting input"]',
     )!;
     expect(pendingButton.textContent).toBe('2 awaiting input');
+    expect(pendingButton.getAttribute('aria-label')).toBe(
+      'Go to the next session awaiting input',
+    );
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe(
+      '2 awaiting input',
+    );
     act(() => pendingButton.click());
     expect(panes()[1].getAttribute('data-maximized')).toBe('true');
     expect(document.activeElement).toBe(
-      panes()[1].querySelector('[data-testid="pane-approval"] button'),
+      panes()[1].closest('[data-pane-session-id]'),
     );
     act(() => pendingButton.click());
     expect(panes()[2].getAttribute('data-maximized')).toBe('true');
     expect(document.activeElement).toBe(
-      panes()[2].querySelector('[data-testid="pane-approval"] button'),
+      panes()[2].closest('[data-pane-session-id]'),
     );
     expect(confirmApproval).not.toHaveBeenCalled();
     expect(scrollPaneIntoView).toHaveBeenCalledTimes(2);
@@ -280,20 +311,32 @@ describe('SplitView', () => {
     expect(draft.value).toBe('keep this draft');
   });
 
-  it('drops pending and active state when a controlled pane is removed', () => {
-    waitingSessions = new Set(['s2']);
-    render({ sessionIds: ['s1', 's2'] });
-    act(() => panes()[1].querySelector('input')!.focus());
+  it('keeps selection and focus on a neighbour when a controlled pane is removed', () => {
+    waitingSessions = new Set(['s3']);
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    act(() => panes()[2].querySelector('input')!.focus());
     act(() =>
       root!.render(
         <I18nProvider language="en">
-          <SplitView sessionIds={['s1']} onExit={() => {}} />
+          <SplitView sessionIds={['s1', 's2']} onExit={() => {}} />
         </I18nProvider>,
       ),
     );
-    expect(panes()).toHaveLength(1);
-    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
-    expect(container!.textContent).not.toContain('awaiting input');
+    expect(panes()).toHaveLength(2);
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(false);
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(true);
+    expect(document.activeElement).toBe(
+      panes()[1].closest('[data-pane-session-id]'),
+    );
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe('');
+  });
+
+  it('omits title details when the host disables them', () => {
+    render({ sessionIds: ['s1', 's2'], showSessionDetails: false });
+    expect(titles()).toEqual(['One', 'Two']);
+    expect(
+      panes().some((pane) => pane.hasAttribute('data-session-details')),
+    ).toBe(false);
   });
 
   it('renders one pane per initial session, each under its own provider', () => {

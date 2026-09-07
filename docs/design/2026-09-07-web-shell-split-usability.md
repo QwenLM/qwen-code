@@ -11,15 +11,22 @@ toolbar row or reducing transcript height:
 
 - Reuse the sidebar's session-details popover on the pane title. Keep its delayed
   pointer hover, copy control, workspace, branch, PR/issue links, and status. Open
-  below the title and constrain it to the Web Shell root. Header action buttons
+  below the title and constrain it to its pane, inside the Web Shell root. Honor
+  the host's session-details action allowlist. Header action buttons
   remain outside the hover target. Hovering must not focus or activate a pane.
 - Mark the last clicked or keyboard-focused pane with an inset line in its
   existing header. Adding, closing, and maximizing panes keep this selection
-  valid; selection does not change keyboard routing or focus by itself.
+  valid, choosing a neighbour when the selected pane closes. Expose the same
+  current location to assistive technology.
 - Show a pending-session count in the existing toolbar only while a pane awaits
   tool approval or a user answer. Clicking cycles through waiting panes in row
   order, reveals a hidden maximized sibling when needed, scrolls the row to the
-  target, and focuses its approval controls. It never submits a response.
+  target, and focuses the labelled pane wrapper outside all approval keyboard
+  handlers. Enter, Escape, and digits immediately after navigation cannot submit
+  a response; Escape can restore the row. Tab or a deliberate click enters the
+  pane's controls. Announce pending counts without moving focus, and return focus
+  to Back if the focused pending button disappears. The outer session's notice
+  appears only when that session is not already represented by a pane.
 
 `ChatPane` already derives its pending tool/question request from its own
 transcript. Report that boolean to `SplitView` with a stable callback, including
@@ -42,8 +49,10 @@ breakpoint changes are required. There are no open design questions.
 Validation covers delayed hover without focus theft, action-button exclusion,
 active-pane pointer/keyboard selection, pending tool and question transitions,
 hidden-pane navigation, draft retention, and existing add/close/maximize/reload
-behavior. The CLI baseline and browser-test environment limitations are recorded
-in `.qwen/e2e-tests/web-shell-split-usability.md`.
+behavior. The browser regressions are committed in
+`packages/web-shell/client/e2e/web-shell.split-persist.spec.ts` and tagged
+`@smoke` for PR CI. The baseline and verification evidence are published in
+[PR #11250](https://github.com/QwenLM/qwen-code/pull/11250).
 
 The PR's browser CI job runs on GitHub hosted Ubuntu. The unchanged feature
 passed the document gate and all 50 smoke cases there, while three ECS runs

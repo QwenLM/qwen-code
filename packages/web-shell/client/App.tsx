@@ -17372,7 +17372,8 @@ export function App({
                       split (it would own ghost keyboard shortcuts). If that
                       session isn't one of the panes, the approval would be
                       invisible — surface a notice with a way back to it. */}
-                  {approvalOverlayActive && (
+                  {approvalOverlayActive &&
+                    !splitSessionIds.includes(connection.sessionId ?? '') && (
                     <div
                       className={styles.splitApprovalNotice}
                       role="status"
@@ -17391,6 +17392,11 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
                         sessionIds={splitSessionIds}
+                        showSessionDetails={
+                          sidebarOptions.sessionActions?.items?.includes(
+                            'details',
+                          ) ?? true
+                        }
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Keep this
                         // callback stable to avoid looping SplitView's reporting

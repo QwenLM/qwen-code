@@ -168,8 +168,11 @@ interface UnknownPromptAdmission {
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
+  /** Session-list metadata for the shared title details. */
   sessionSummary?: DaemonSessionSummary;
+  /** Last interacted pane, independent of whether its session is running. */
   isActive?: boolean;
+  /** Must be referentially stable; reports pending state and unmount cleanup. */
   onApprovalChange?: (sessionId: string, pending: boolean) => void;
   /**
    * The workspace this pane's session lives in. Passed explicitly by the split
@@ -1255,6 +1258,7 @@ export function ChatPane({
       className={`${styles.pane} ${embedded ? styles.paneEmbedded : ''}`.trim()}
       data-testid="chat-pane"
       data-pane-active={isActive ? '' : undefined}
+      aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
       {goalEditOpen && connection.goalState?.goal && (

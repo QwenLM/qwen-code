@@ -137,7 +137,7 @@ test('leaving the split clears storage so a refresh does not restore it', async 
   await expect(page.locator('[data-testid="split-view"]')).toHaveCount(0);
 });
 
-test('shows session details without moving focus and preserves drafts across pane controls', async ({
+test('shows session details without moving focus and preserves drafts across pane controls @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
@@ -156,6 +156,10 @@ test('shows session details without moving focus and preserves drafts across pan
     'data-pane-active',
   );
   await expect(paneA.locator('header')).not.toHaveCSS('box-shadow', 'none');
+  await expect(paneB.locator('header')).toHaveCSS('box-shadow', 'none');
+  const headerHeight = await paneB
+    .locator('header')
+    .evaluate((header) => header.getBoundingClientRect().height);
 
   await titleB.hover();
   await expect(details).toBeVisible();
@@ -176,14 +180,11 @@ test('shows session details without moving focus and preserves drafts across pan
   expect(detailsBounds!.x + detailsBounds!.width).toBeLessThanOrEqual(
     rootBounds!.x + rootBounds!.width,
   );
-  const toolbarHeight = await split
-    .locator(':scope > header')
-    .evaluate((header) => header.getBoundingClientRect().height);
-  const paneHeaderHeight = await paneB
-    .locator('header')
-    .evaluate((header) => header.getBoundingClientRect().height);
-  expect(toolbarHeight).toBe(51);
-  expect(paneHeaderHeight).toBe(43);
+  expect(
+    await paneB
+      .locator('header')
+      .evaluate((header) => header.getBoundingClientRect().height),
+  ).toBe(headerHeight);
   await page.screenshot({ path: testInfo.outputPath('split-details.png') });
 
   await page.keyboard.press('Escape');
@@ -237,17 +238,30 @@ test('shows session details without moving focus and preserves drafts across pan
   await expect(editorB).toHaveText('Draft kept in session B');
 });
 
-test('navigates hidden tool and question approvals without answering them', async ({
+test('navigates hidden tool and question approvals without answering them @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const scenario = createSplitScenario();
-  scenario.events = [
-    permissionRequestEvent('split-tool-permission', {
-      id: 1,
-      sessionId: SESSION_A,
-    }),
+  const toolEvent = permissionRequestEvent('split-tool-permission', {
+    id: 1,
+    sessionId: SESSION_A,
+  });
+  toolEvent.data.options = [
+    { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
+    {
+      optionId: 'proceed_always_user',
+      label: 'Always allow for user',
+      kind: 'allow_always',
+    },
+    {
+      optionId: 'proceed_always_project',
+      label: 'Always allow for project',
+      kind: 'allow_always',
+    },
+    { optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' },
   ];
+  scenario.events = [toolEvent];
   scenario.branch = {
     sessionId: SESSION_B,
     displayName: 'Session B',
@@ -276,8 +290,8 @@ test('navigates hidden tool and question approvals without answering them', asyn
             },
           },
           options: [
-            { optionId: 'allow_once', label: 'Allow once' },
-            { optionId: 'reject_once', label: 'Reject' },
+            { optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject_once', label: 'Reject', kind: 'reject_once' },
           ],
         },
       },
@@ -289,14 +303,17 @@ test('navigates hidden tool and question approvals without answering them', asyn
   const paneA = page.locator(`[data-pane-session-id="${SESSION_A}"]`);
   const paneB = page.locator(`[data-pane-session-id="${SESSION_B}"]`);
   const pending = split.getByRole('button', {
-    name: '2 awaiting input',
+    name: 'Go to the next session awaiting input',
     exact: true,
   });
   await expect(
     paneA.locator('[data-web-shell-permission-panel]'),
   ).toBeVisible();
   await expect(paneB.locator('[data-web-shell-ask-panel]')).toBeVisible();
-  await expect(pending).toBeVisible();
+  await expect(pending).toHaveText('2 awaiting input');
+  const toolbarHeight = await split
+    .locator(':scope > header')
+    .evaluate((header) => header.getBoundingClientRect().height);
   await paneA
     .getByRole('button', { name: 'Maximize pane', exact: true })
     .click();
@@ -305,9 +322,31 @@ test('navigates hidden tool and question approvals without answering them', asyn
   await pending.click();
   await expect(paneA).toBeHidden();
   await expect(paneB).toBeVisible();
-  await expect(
-    paneB.locator('[data-web-shell-ask-option][tabindex="0"]'),
-  ).toBeFocused();
+  await expect(paneB).toBeFocused();
+  for (const key of [
+    'Enter',
+    'Control+Enter',
+    'Meta+Enter',
+    '2',
+    '3',
+    'Escape',
+  ]) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(50);
+    expect(daemon.permissionRequests()).toHaveLength(0);
+  }
+  await expect(paneA).toBeVisible();
+  await paneB.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await pending.click();
+  await pending.click();
+  await expect(paneB).toBeFocused();
+  await expect(paneB.locator('[data-web-shell-ask-option]')).toHaveCount(0);
+  await page.keyboard.press('Control+Enter');
+  await page.waitForTimeout(50);
+  expect(daemon.permissionRequests()).toHaveLength(0);
+  await paneB
+    .getByRole('button', { name: 'Maximize pane', exact: true })
+    .click();
   await expect(paneB.getByTestId('chat-pane')).toHaveAttribute(
     'data-pane-active',
   );
@@ -315,11 +354,28 @@ test('navigates hidden tool and question approvals without answering them', asyn
   await pending.click();
   await expect(paneB).toBeHidden();
   await expect(paneA).toBeVisible();
-  await expect(
-    paneA.locator('[data-web-shell-permission-option][tabindex="0"]'),
-  ).toBeFocused();
+  await expect(paneA).toBeFocused();
+  for (const key of ['Enter', '2', '3', 'Escape']) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(50);
+    expect(daemon.permissionRequests()).toHaveLength(0);
+  }
+  await expect(paneB).toBeVisible();
+  await paneA
+    .getByRole('button', { name: 'Maximize pane', exact: true })
+    .click();
   expect(daemon.permissionRequests()).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath('split-pending.png') });
+
+  const reject = paneA.locator(
+    '[data-web-shell-permission-option][tabindex="0"]',
+  );
+  await reject.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(
+    paneA.locator('[data-web-shell-permission-option]').nth(1),
+  ).toBeFocused();
+  expect(daemon.permissionRequests()).toHaveLength(0);
 
   await daemon.sse.waitForConnection(SESSION_A);
   await daemon.sendEvent({
@@ -332,19 +388,74 @@ test('navigates hidden tool and question approvals without answering them', asyn
     },
   });
   const onePending = split.getByRole('button', {
-    name: '1 awaiting input',
+    name: 'Go to the next session awaiting input',
     exact: true,
   });
-  await expect(onePending).toBeVisible();
-  await onePending.click();
+  await expect(onePending).toHaveText('1 awaiting input');
+  await expect(paneB).toBeHidden();
+  await onePending.focus();
+  await daemon.sendEvent({
+    v: 1,
+    id: 3,
+    type: 'permission_resolved',
+    data: {
+      requestId: 'split-question-permission',
+      outcome: { outcome: 'selected', optionId: 'allow_once' },
+    },
+  });
+  await expect(onePending).toHaveCount(0);
+  await expect(
+    split.getByRole('button', { name: 'back', exact: true }),
+  ).toBeFocused();
+  await expect(split.locator(':scope > header [role="status"]')).toBeEmpty();
+  await page.keyboard.press('Escape');
   await expect(paneB).toBeVisible();
   await paneB.getByRole('button', { name: 'Close pane', exact: true }).click();
   await expect(
-    split.getByRole('button', { name: /awaiting input/ }),
+    split.getByRole('button', {
+      name: 'Go to the next session awaiting input',
+    }),
   ).toHaveCount(0);
   await expect(paneA).toBeVisible();
   await expect(paneA.getByTestId('chat-pane')).toHaveAttribute(
     'data-pane-active',
   );
   expect(daemon.permissionRequests()).toHaveLength(0);
+  expect(
+    await split
+      .locator(':scope > header')
+      .evaluate((header) => header.getBoundingClientRect().height),
+  ).toBe(toolbarHeight);
+});
+
+test('keeps title details inside narrow panes in an embedded shell @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await installScenario(page, createSplitScenario(), testInfo);
+  await page.goto(`/?split=${SESSION_A},${SESSION_B},${MAIN_SESSION}`);
+  const root = page.locator('[data-web-shell-root]');
+  await expect(page.getByTestId('split-view')).toBeVisible();
+  await root.evaluate((element) => {
+    element.style.width = '1100px';
+    element.style.marginLeft = '40px';
+  });
+  for (const [id, name] of [
+    [SESSION_B, 'Session B'],
+    [MAIN_SESSION, 'Main Session'],
+  ]) {
+    const pane = page.locator(`[data-pane-session-id="${id}"]`);
+    await pane.locator('[data-slot="popover-anchor"]').hover();
+    const details = page.getByRole('dialog', { name, exact: true });
+    await expect(details).toBeVisible();
+    const bounds = await details.boundingBox();
+    for (const host of [pane, root]) {
+      const hostBounds = (await host.boundingBox())!;
+      expect(bounds!.x).toBeGreaterThanOrEqual(hostBounds.x);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(
+        hostBounds.x + hostBounds.width,
+      );
+    }
+    await page.keyboard.press('Escape');
+  }
 });

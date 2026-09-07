@@ -13,6 +13,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { formatDateTime } from '../utils/formatDateTime';
 import {
   WebShellCustomizationProvider,
   type WebShellComposerToolbarRenderInfo,
@@ -527,6 +528,16 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('exposes the selected pane without confusing it with a running session', () => {
+    render({ isActive: true });
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
+    sessionHasActivePromptValue = true;
+    rerender();
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(false);
+    expect(testid('chat-pane')?.hasAttribute('aria-current')).toBe(false);
+  });
+
   it('reports tool and question waiting state while hidden and clears it on unmount', () => {
     const onApprovalChange = vi.fn();
     const props = { hidden: true, onApprovalChange };
@@ -573,10 +584,14 @@ describe('ChatPane', () => {
         sessionSummary: {
           sessionId: 'session-details',
           workspaceCwd: '/work/split-project',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-02T00:00:00Z',
+          hasActivePrompt: false,
           branch: { name: 'codex/split', baseBranch: 'main' },
         },
         onToggleMaximize: vi.fn(),
       };
+      sessionHasActivePromptValue = true;
       render(props);
       const title = container!.querySelector('[data-slot="popover-anchor"]')!;
       expect(title.textContent).toBe('Pane details');
@@ -593,6 +608,12 @@ describe('ChatPane', () => {
       );
       expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
         'codex/split',
+      );
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'Running',
+      );
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        formatDateTime(props.sessionSummary.updatedAt),
       );
       expect(document.activeElement).toBe(composerFocus);
       rerender({ ...props, hidden: true });

@@ -615,6 +615,7 @@ const {
         settings: DaemonSettingDescriptor[];
       } | null,
       latestSplitViewProps: null as {
+        showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
         sessionWorkflowEnabled?: boolean;
@@ -9587,6 +9588,12 @@ describe('App session workflow', () => {
         .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
         ?.click();
       await Promise.resolve();
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
     });
 
     testState.settings = [sessionWorkflowSetting()];
@@ -27749,6 +27756,44 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it.each<undefined | Array<'details'>>([undefined, [], ['details']])(
+    'applies the session-details allowlist to split panes: %j',
+    async (items) => {
+      const { container } = renderApp({
+        sidebar: { sessionActions: { items } },
+      });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+      });
+      expect(testState.latestSplitViewProps?.showSessionDetails).toBe(
+        items === undefined || items.includes('details'),
+      );
+    },
+  );
+
+  it('keeps the outer approval notice hidden when its session is already a split pane', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-approval-notice"]'),
+    ).toBeNull();
+  });
+
   it('surfaces the outer approval as a split notice and returns to chat when clicked', async () => {
     // The overlay is suppressed under the split, so the outer approval would be
     // invisible; a notice banner (with a way back) is the only signal.
@@ -27761,6 +27806,12 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+    });
+
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
       rerender();
