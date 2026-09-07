@@ -1809,6 +1809,12 @@ describe('ShellExecutionService', () => {
         ['/f', '/pid', String(mockPtyProcess.pid)],
         HIDDEN_WINDOW,
       );
+      // The ConPTY host release (#11303) sits in the same spot for the same
+      // reason: above firePostSettle's `!postPromote?.onSettle` early return.
+      // This assertion is what goes red if it is ever slid below it — with
+      // onData but no onSettle, every backgrounded command would leak its host.
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
     it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
@@ -1940,6 +1946,36 @@ describe('ShellExecutionService', () => {
       expect(result.error).toBeNull();
       // A throwing host close must not skip the worker teardown.
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('still drops the pid from activePtys when the conout worker dispose throws', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The second guard in releaseConPtyHost — the one around
+      // _conoutSocketWorker.dispose(). The release runs in finalize()'s
+      // finally, immediately before activePtys.delete(pid) and after the result
+      // has already settled, so an escaping throw would leave a finished pid
+      // registered for the process-exit `taskkill /f /t` — against a pid
+      // Windows may have recycled by then.
+      mockConoutWorkerDispose.mockImplementation(() => {
+        throw new Error('dispose boom');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(mockPtyProcess.pid);
+
+      // The pid was already dropped, so the exit cleanup has nothing to
+      // tree-kill. This is the assertion that goes red without the guard.
+      expect(mockSpawnSync).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('degrades to the pre-fix leak, not to kill(), if node-pty internals change', async () => {
