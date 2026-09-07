@@ -91,8 +91,8 @@ can deadlock (AB-BA).
 ## Safety contract
 
 Cleanup fires only when the whole ownership chain verifies; any doubt
-preserves the checkout and logs a named warning
-(`logSessionArchiveWarning`).
+preserves the checkout and logs a named warning (a `qwen serve:` stderr
+line via `writeStderrLine`).
 
 Classification (before record deletion, under the worktree lock):
 
@@ -126,11 +126,18 @@ Execution (after confirmed deletion, still under the worktree lock):
    create route's `if (removed)` gate.
 8. Re-verify the marker (unchanged, still naming the deleted session) —
    closes the out-of-band window classification can't see.
-9. `git status --porcelain --untracked-files=no` inside the checkout
-   must be empty (reusing `hasTrackedChanges` from
-   `packages/core/src/services/worktreeCleanup.ts`, which fails closed
-   to dirty on read errors). The bridge session was closed before the
-   record deletion, so no in-daemon writer can dirty it afterwards.
+9. Full `git status --porcelain` inside the checkout must be empty —
+   **untracked files included**, so an agent-written file that was
+   never committed counts as work and preserves the checkout. This is
+   the deliberate choice behind the safety contract's "any doubt
+   preserves": tracked and committed work was already protected, and
+   extending the gate to untracked files costs one `git status` walk
+   per delete while closing the "silently destroyed draft" hole the
+   tracked-only variant left open. The daemon's own marker file
+   (`.qwen-session`, git-excluded in production) is the one exemption.
+   Read errors fail closed to "has work". The bridge session was
+   closed before the record deletion, so no in-daemon writer can dirty
+   the checkout afterwards.
 10. `removeUserWorktree(slug, { deleteBranch: true })` — never
     `forceDeleteBranch`. Log the `branchPreserved` outcome so "checkout
     removed, branch kept for unmerged commits" is distinguishable from

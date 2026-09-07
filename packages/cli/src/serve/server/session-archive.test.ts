@@ -2333,7 +2333,47 @@ describe('deleteDaemonSessions worktree cleanup', () => {
 
     expect(result.removed).toEqual([sessionId]);
     expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(warnings()).toContain('tracked changes');
+    expect(warnings()).toContain('uncommitted work');
+  });
+
+  it('keeps a checkout with never-committed agent files', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544009e';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    fs.writeFileSync(path.join(worktreePath, 'draft.ts'), 'export {}\n');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(fs.existsSync(path.join(worktreePath, 'draft.ts'))).toBe(true);
+    expect(warnings()).toContain('uncommitted work');
+  });
+
+  it('keeps the checkout and warns on an invalid marker', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544009f';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    // A symlink marker fails the strict read (unsafe file type).
+    fs.rmSync(path.join(worktreePath, '.qwen-session'));
+    fs.symlinkSync(
+      path.join(workspaceDir, 'file.txt'),
+      path.join(worktreePath, '.qwen-session'),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('marker invalid');
   });
 
   it('removes the checkout but keeps a branch with unmerged commits', async () => {

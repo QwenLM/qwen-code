@@ -354,7 +354,6 @@ export {
 export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export { hasTrackedChanges } from './services/worktreeCleanup.js';
 export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,

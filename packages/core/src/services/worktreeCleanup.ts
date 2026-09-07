@@ -153,16 +153,7 @@ export async function cleanupStaleAgentWorktrees(
   return removed;
 }
 
-/**
- * True when the checkout has any tracked change (staged, unstaged, or
- * conflicted). Fails closed to dirty on read errors so a permission
- * error or unmounted filesystem is never indistinguishable from "has
- * real changes". Shared by the stale-ephemeral sweep and the daemon
- * delete-path orphan cleanup.
- */
-export async function hasTrackedChanges(
-  worktreePath: string,
-): Promise<boolean> {
+async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
   try {
     const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);

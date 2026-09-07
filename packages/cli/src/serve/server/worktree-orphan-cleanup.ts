@@ -7,11 +7,13 @@
 import fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   GitWorktreeService,
-  hasTrackedChanges,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
+  WORKTREE_SESSION_FILE,
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
@@ -42,6 +44,29 @@ function canonicalPath(candidate: string): string {
     return fs.realpathSync(candidate);
   } catch {
     return candidate;
+  }
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Full `git status --porcelain` — untracked files included — so an
+ * agent-written file that was never committed counts as work and
+ * preserves the checkout. The daemon's own marker file is the one
+ * exemption (it is git-excluded in production but may not be in
+ * hand-built fixtures). Fails closed to "has work" on any read error.
+ */
+async function checkoutHasWork(worktreePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
+      cwd: worktreePath,
+    });
+    return stdout
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .some((line) => line.slice(3) !== WORKTREE_SESSION_FILE);
+  } catch {
+    return true;
   }
 }
 
@@ -232,9 +257,10 @@ export async function verifyWorktreeCleanupOwnership(
  * Execute a verified cleanup after the record deletion was confirmed
  * (`kind === 'removed'`), still under the cleanup lock. The marker is
  * re-verified (nothing may have flipped it since classification) and the
- * checkout must be clean; the branch is deleted safely (never forced)
- * and a preserved branch is logged so "checkout removed, branch kept"
- * stays distinguishable from "checkout kept, ownership doubtful".
+ * checkout must hold no uncommitted work; the branch is deleted safely
+ * (never forced) and a preserved branch is logged so "checkout removed,
+ * branch kept" stays distinguishable from "checkout kept, ownership
+ * doubtful".
  */
 export async function executeWorktreeCleanup(
   plan: WorktreeCleanupPlan,
@@ -245,8 +271,8 @@ export async function executeWorktreeCleanup(
     logWorktreeCleanupPreserve(sessionId, 'marker changed after delete');
     return;
   }
-  if (await hasTrackedChanges(plan.lockKey)) {
-    logWorktreeCleanupPreserve(sessionId, 'checkout has tracked changes');
+  if (await checkoutHasWork(plan.lockKey)) {
+    logWorktreeCleanupPreserve(sessionId, 'checkout has uncommitted work');
     return;
   }
   // originalCwd is the root the creating worktree service used; the
