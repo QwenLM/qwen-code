@@ -140,6 +140,11 @@ persisted as `cancelling`, the dispatcher verifies the ambient runtime binding,
 then stops the body and records terminal `cancelled`; queued cancellation also
 wakes the dispatcher so the next FIFO item is not stranded. A racing runtime
 completion observes `cancelling` and also settles as `cancelled`.
+Prompt replay now detects internal retention holes by counting missing message
+sequences, rather than trusting the first retained message, because referenced
+old posts can survive trimming. The frame no longer tells an agent to recover
+physically deleted posts through `thread_read`; it marks the gap unrecoverable
+and tells the agent to ask a person when the missing context is required.
 Undelivered triggers are rebooked only from a running, finishing, or completed
 attempt where delivery can genuinely have raced completion. Failed and
 cancelled runs remain terminal, so a later dispatcher pass cannot undo an

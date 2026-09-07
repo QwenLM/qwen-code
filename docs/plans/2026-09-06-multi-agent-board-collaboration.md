@@ -1044,9 +1044,11 @@ remain genuinely open:
    `MAX_THREAD_RUNS` retain active references but trim old terminal history. The
    v1 conservative default also retains messages carrying an `originEventId`
    and runs carrying usage, because trimming either would break replay
-   idempotency or reset the token gate. The dispatcher must record the first
-   retained sequence and emit a gap; whether full history and these durable
-   ledgers move to a separate append-only archive is undecided.
+   idempotency or reset the token gate. Because referenced old messages can
+   survive while unreferenced messages around them are removed, prompt assembly
+   counts missing sequence numbers across the undisplayed range and emits an
+   explicit, non-recoverable gap; whether full history and these durable ledgers
+   move to a separate append-only archive is undecided.
 3. **Cancellation UX.** Done now has defined cancellation semantics, but the
    user-facing choice between graceful stop and immediate abort, and what partial
    output should be posted, remains to be designed.
