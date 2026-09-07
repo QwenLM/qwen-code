@@ -269,10 +269,15 @@ describe('BundledSkillLoader', () => {
         'Bash(git *)',
         {
           trustGated: false,
+          // Scoped to the session that ran the command: the permission
+          // manager outlives a session swap, so an unscoped grant would keep
+          // auto-approving in a session that never loaded the skill.
+          sessionId: 'session-1',
         },
       );
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
         trustGated: false,
+        sessionId: 'session-1',
       });
     });
 

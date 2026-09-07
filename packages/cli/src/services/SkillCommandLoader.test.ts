@@ -320,10 +320,11 @@ describe('SkillCommandLoader', () => {
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
         1,
         'Bash(curl *)',
-        { trustGated: true },
+        { trustGated: true, sessionId: 'session-1' },
       );
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Write', {
         trustGated: true,
+        sessionId: 'session-1',
       });
     });
   });
@@ -551,10 +552,12 @@ describe('SkillCommandLoader', () => {
         'Bash(git *)',
         {
           trustGated: false,
+          sessionId: 'session-1',
         },
       );
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
         trustGated: false,
+        sessionId: 'session-1',
       });
     });
 

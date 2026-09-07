@@ -81,6 +81,15 @@ export interface PermissionRule {
    * restores it, without any per-skill bookkeeping.
    */
   trustGated?: boolean;
+  /**
+   * The session this allow rule was granted for. Set for grants that belong
+   * to a single session — a skill's `allowedTools` — so they stop applying
+   * when the process swaps sessions (`/clear`, `/resume`) without the rule
+   * having to be found and removed. Unset means the grant is not
+   * session-scoped: a user's "Always allow for this session" choice keeps
+   * its existing lifetime.
+   */
+  sessionId?: string;
 }
 
 /** A complete set of permission rules organized by type. */

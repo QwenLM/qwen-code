@@ -184,8 +184,12 @@ describe('applySkillSideEffects', () => {
   it('applies both allowedTools and hooks', () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig();
     applySkillSideEffects(config, gatedSkill);
+    // Scoped to the session that loaded the skill, the same scope the hooks
+    // half gets: `PermissionManager` outlives a session swap, so an unscoped
+    // grant would keep auto-approving in the next session.
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
+      sessionId: 'session-1',
     });
     expect(addSessionHook).toHaveBeenCalledTimes(1);
   });
@@ -203,6 +207,7 @@ describe('applySkillSideEffects', () => {
     // The allowedTools half still applies — only the hooks are skipped.
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
+      sessionId: 'session-1',
     });
     // Pinned at `warn`: a promised gate is being dropped, and at `debug` the
     // only trace of that would sit below the level anyone reads.
@@ -231,6 +236,7 @@ describe('applySkillSideEffects', () => {
     // The allowedTools half is unaffected by the hooks early return.
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
+      sessionId: 'session-1',
     });
   });
 
@@ -248,6 +254,7 @@ describe('applySkillSideEffects', () => {
     expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
+      sessionId: 'session-1',
     });
   });
 
@@ -259,9 +266,13 @@ describe('applySkillSideEffects', () => {
     expect(addSessionHook).not.toHaveBeenCalled();
     // Same asymmetry as the no-hook-system case: only the hooks half is
     // skipped. Without this, hoisting the session-id guard above
-    // `applySkillAllowedTools` would ship untested.
+    // `applySkillAllowedTools` would ship untested. With no session id there
+    // is nothing to scope the grant to, so it is added unscoped — the same
+    // degradation `activeSessionAllowRules` makes when the config exposes no
+    // session id.
     expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
       trustGated: false,
+      sessionId: undefined,
     });
   });
 

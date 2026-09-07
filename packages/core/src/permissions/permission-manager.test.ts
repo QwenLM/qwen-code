@@ -1704,10 +1704,13 @@ function makeConfig(
     eagerTools: string[];
     /** Live folder trust; absent reads as trusted. */
     isTrustedFolder: () => boolean;
+    /** Live session id; absent means no session scoping is applied. */
+    getSessionId: () => string;
   }> = {},
 ): PermissionManagerConfig {
   return {
     ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    ...(opts.getSessionId ? { getSessionId: opts.getSessionId } : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -3146,6 +3149,65 @@ describe('PermissionManager', () => {
           command: 'git commit',
         }),
       ).toBe('allow');
+    });
+
+    it("a skill's grant stops applying once the process swaps sessions", async () => {
+      // `PermissionManager` is built once per process and outlives a session
+      // swap: `/clear` and an in-process `/resume` change the session id but
+      // never touch `sessionRules`. A skill's `allowedTools` are granted for
+      // the session that loaded the skill — the same scope its hooks get — so
+      // without this the next session would keep auto-approving them with no
+      // skill loaded, no body in context and no trace of where the approval
+      // came from. The user's own "always allow" grant is not scoped and is
+      // unaffected.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git push' };
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
+      expect(await pm.evaluate(call)).toBe('allow');
+
+      sessionId = 'session-B';
+      expect(await pm.evaluate(call)).toBe('ask');
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm test',
+        }),
+      ).toBe('allow');
+      // The effective-rules listing agrees with the decision.
+      expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
+        false,
+      );
+
+      // Loading the same skill again in session B re-points the deduped
+      // entry at the session granting it now, rather than leaving it stuck
+      // on the id it first received.
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-B' });
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(2);
+    });
+
+    it("an unscoped grant of the same raw rule outranks a skill's session-scoped one", async () => {
+      // Same widening rule the trust gating follows: the kept entry must
+      // never be narrower than the grant that just arrived, so a user's own
+      // "always allow" survives the session swap that drops the skill grant.
+      let sessionId = 'session-A';
+      pm = new PermissionManager(makeConfig({ getSessionId: () => sessionId }));
+      pm.initialize();
+      const call = { toolName: 'run_shell_command', command: 'git push' };
+      pm.addSessionAllowRule('Bash(git *)', { sessionId: 'session-A' });
+      pm.addSessionAllowRule('Bash(git *)'); // the user's own grant
+      sessionId = 'session-B';
+      expect(await pm.evaluate(call)).toBe('allow');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {

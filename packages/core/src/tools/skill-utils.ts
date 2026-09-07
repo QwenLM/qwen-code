@@ -17,12 +17,19 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('SKILL');
 
 /**
+ * The first bytes of every injected skill body. Exported so a recorded tool
+ * response can be told apart from the other strings the Skill tool records —
+ * its dedup message and its refusals — without inventing a second contract.
+ */
+export const SKILL_LLM_CONTENT_PREFIX = 'Base directory for this skill: ';
+
+/**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
  */
 export function buildSkillLlmContent(baseDir: string, body: string): string {
-  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+  return `${SKILL_LLM_CONTENT_PREFIX}${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
 }
 
 /**
@@ -307,11 +314,17 @@ export function canApplySkillSideEffects(
  * permission decision. Whether that re-check can change mid-session depends
  * on where trust comes from — see `applySkillHooks`, which is gated the same
  * way. Pass `skill.level === 'project'`.
+ *
+ * `sessionId` scopes the grants to the session that loaded the skill, the
+ * same scope the skill's hooks already get. `PermissionManager` is built once
+ * per process and outlives a session swap, so without it a grant made in one
+ * session would keep auto-approving in the next one — which has no skill
+ * loaded, no body in context and no trace of where the approval came from.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
-  options?: { trustGated?: boolean },
+  options?: { trustGated?: boolean; sessionId?: string },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
@@ -319,6 +332,7 @@ export function applySkillAllowedTools(
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule, {
       trustGated: options?.trustGated === true,
+      sessionId: options?.sessionId,
     });
   }
 }
@@ -424,6 +438,7 @@ export function applySkillSideEffects(
   }
   applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
     trustGated: skill.level === 'project',
+    sessionId: config.getSessionId(),
   });
   applySkillHooks(config, skill);
 }

@@ -607,9 +607,11 @@ describe('SkillTool', () => {
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Bash(curl *)', {
         trustGated: true,
+        sessionId: 'test-session-id',
       });
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Write', {
         trustGated: true,
+        sessionId: 'test-session-id',
       });
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
@@ -652,6 +654,7 @@ describe('SkillTool', () => {
       // Not repository-controlled: never gated on folder trust.
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Bash(curl *)', {
         trustGated: false,
+        sessionId: 'test-session-id',
       });
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
@@ -852,10 +855,11 @@ describe('SkillTool', () => {
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
         1,
         'Bash(git *)',
-        { trustGated: false },
+        { trustGated: false, sessionId: 'test-session-id' },
       );
       expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
         trustGated: false,
+        sessionId: 'test-session-id',
       });
     });
 
@@ -1326,6 +1330,10 @@ describe('SkillTool', () => {
         expect(registerSkillHooks).toHaveBeenCalledTimes(1);
         expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Edit', {
           trustGated: false,
+          // Scoped to the session that restored it: `PermissionManager`
+          // outlives a `/clear` or `/resume`, so an unscoped grant would keep
+          // auto-approving in a session that never loaded the skill.
+          sessionId: 'test-session-id',
         });
       });
 
@@ -1402,6 +1410,87 @@ describe('SkillTool', () => {
         expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
         expect(registerSkillHooks).not.toHaveBeenCalled();
         expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        // Diagnosability is the requirement here, not just the refusal: this
+        // branch used to be a bare `continue`, and a gate that vanishes in
+        // silence is what #11180 reported. Assert the reason, not the shared
+        // prefix, so it cannot be satisfied by a differently-caused message.
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('its body no longer matches SKILL.md'),
+        );
+      });
+
+      it('does not re-arm a Skill that is now hidden from model invocation', async () => {
+        // Frontmatter is not part of the recorded body, so adding
+        // `disable-model-invocation: true` between sessions leaves the
+        // recorded output byte-identical and the mismatch check passes.
+        // `execute` refuses such a skill outright, so re-arming it would
+        // grant a session what no tool call can ask for.
+        const hiddenSkill: SkillConfig = {
+          ...gatedSkill,
+          disableModelInvocation: true,
+        };
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+          hiddenSkill,
+        ]);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(hiddenSkill),
+        );
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('it is hidden from model invocation'),
+        );
+      });
+
+      it('does not blame SKILL.md for a same-session re-invocation replayed in the history', async () => {
+        // A skill invoked twice records the body once and the dedup message
+        // ("already loaded in context") the second time. That second pair is
+        // not a body, so attributing it to an edited SKILL.md would tell an
+        // operator their gate is gone while the same loop has just armed it.
+        const [call, response] = resumedHistory(gatedSkill);
+        const reinvocation: Content[] = [
+          call,
+          response,
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'skill-call-2',
+                  name: ToolNames.SKILL,
+                  args: { skill: gatedSkill.name },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'skill-call-2',
+                  name: ToolNames.SKILL,
+                  response: {
+                    output: `Skill "${gatedSkill.name}" is already loaded in context.`,
+                  },
+                },
+              },
+            ],
+          },
+        ];
+
+        await skillTool.restoreLoadedSkillsFromHistory(reinvocation);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.warn).not.toHaveBeenCalled();
       });
 
       it('awaits discovery when the skill cache has not committed yet', async () => {
@@ -1410,9 +1499,19 @@ describe('SkillTool', () => {
         // waits for one refresh instead of declining every Skill in the
         // history — which for a gate Skill would be exactly #11180 again, with
         // a debug line as the only trace.
-        vi.mocked(mockSkillManager.getCachedSkills)
-          .mockReturnValueOnce(null)
-          .mockReturnValue([gatedSkill]);
+        // Order-sensitive on purpose: the cache commits only when the
+        // discovery promise settles, so an oracle that hands the skill back
+        // regardless of timing would stay green with the `await` replaced by
+        // a bare call — the mutation this test exists to catch.
+        let committed = false;
+        vi.mocked(mockSkillManager.listSkills).mockImplementation(async () => {
+          await Promise.resolve();
+          committed = true;
+          return [gatedSkill];
+        });
+        vi.mocked(mockSkillManager.getCachedSkills).mockImplementation(() =>
+          committed ? [gatedSkill] : null,
+        );
 
         await skillTool.restoreLoadedSkillsFromHistory(
           resumedHistory(gatedSkill),

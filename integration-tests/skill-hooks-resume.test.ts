@@ -235,8 +235,22 @@ describe('skill hooks survive session resume', () => {
         let sent = false;
         for (let attempt = 0; attempt < 3 && !sent; attempt++) {
           ptyProcess.write('\r');
+          // Scoped to the request that carries this prompt, not to "any new
+          // request": the previous turn's tool-result follow-up lands inside
+          // this window and would satisfy a bare count comparison, so the
+          // retry above would never run and a swallowed Enter would surface
+          // 30 s later as a mislabelled timeout. Matching on `stream === true`
+          // alone is not enough either — the fake server also answers
+          // non-stream side calls.
           sent = await rig.poll(
-            () => fakeServer.requests.length > before,
+            () =>
+              fakeServer.requests
+                .slice(before)
+                .some(
+                  (r) =>
+                    r.body['stream'] === true &&
+                    JSON.stringify(r.body['messages'] ?? '').includes(prompt),
+                ),
             10000,
             100,
           );

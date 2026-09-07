@@ -95,6 +95,13 @@ export interface PermissionManagerConfig {
    */
   isTrustedFolder?(): boolean;
   /**
+   * The id of the session in force right now. Read on every permission
+   * decision for session allow rules that were granted for one session (a
+   * skill's `allowedTools`): those stop applying once the process swaps
+   * sessions. Absent means no session scoping is applied.
+   */
+  getSessionId?(): string;
+  /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
    */
@@ -1207,12 +1214,26 @@ export class PermissionManager {
    * project skill's grants at the next decision, and a later grant of trust
    * restores them, the second side of the gate `applySideEffects` enforces
    * on the way in.
+   *
+   * Session id is re-read the same way, for the same reason. A grant tagged
+   * with the session it was made for (`sessionId`) stops applying as soon as
+   * the process swaps sessions: `PermissionManager` outlives a `/clear` or
+   * `/resume` — `Config` builds it once and `startNewSession` never touches
+   * `sessionRules` — so without this a skill's `allowedTools` would keep
+   * auto-approving in a session that never loaded the skill and shows no
+   * trace of it. Skills are the only such grant today; a rule with no
+   * `sessionId` is unaffected.
    */
   private activeSessionAllowRules(): PermissionRule[] {
     const trusted = this.config.isTrustedFolder?.() ?? true;
-    return trusted
-      ? this.sessionRules.allow
-      : this.sessionRules.allow.filter((rule) => !rule.trustGated);
+    const currentSessionId = this.config.getSessionId?.();
+    return this.sessionRules.allow.filter(
+      (rule) =>
+        (trusted || !rule.trustGated) &&
+        (rule.sessionId === undefined ||
+          currentSessionId === undefined ||
+          rule.sessionId === currentSessionId),
+    );
   }
 
   /**
@@ -1226,11 +1247,17 @@ export class PermissionManager {
    * @param options - `trustGated`: the grant came from repository-controlled
    *   configuration (a project skill's `allowedTools`) and applies only
    *   while the folder is trusted — see `PermissionRule.trustGated`.
+   *   `sessionId`: the grant belongs to that one session and stops applying
+   *   once the process swaps sessions — see `PermissionRule.sessionId`.
    */
-  addSessionAllowRule(raw: string, options?: { trustGated?: boolean }): void {
+  addSessionAllowRule(
+    raw: string,
+    options?: { trustGated?: boolean; sessionId?: string },
+  ): void {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
+      if (options?.sessionId) rule.sessionId = options.sessionId;
       if (rule.invalid) {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
@@ -1272,6 +1299,17 @@ export class PermissionManager {
       const existing = this.sessionRules.allow.find((r) => r.raw === rule.raw);
       if (existing) {
         if (!options?.trustGated) existing.trustGated = false;
+        // Session scoping widens the same way trust gating does, so that a
+        // kept entry is never narrower than the grant that just arrived. An
+        // unscoped arrival (a user's own "Always allow") clears the scope;
+        // a scoped one re-points the entry at the session granting it now,
+        // which is what makes a skill re-invoked (or restored) in a later
+        // session active again instead of stuck on the id it first got.
+        if (!options?.sessionId) {
+          delete existing.sessionId;
+        } else if (existing.sessionId !== undefined) {
+          existing.sessionId = options.sessionId;
+        }
         return;
       }
       this.sessionRules.allow.push(rule);

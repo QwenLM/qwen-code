@@ -38,6 +38,7 @@ import {
   applySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  SKILL_LLM_CONTENT_PREFIX,
 } from './skill-utils.js';
 
 /**
@@ -352,17 +353,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   async restoreLoadedSkillsFromHistory(history: Content[]): Promise<void> {
     this.clearLoadedSkills();
 
-    // Restore is keyed off the committed skill cache, and nothing sequences it
-    // against the discovery the SkillTool constructor kicks off — that is a
-    // fire-and-forget `refreshSkills()`, so a resume that reaches this point
-    // first would find `null` and decline every skill in the history, gate
-    // included. `getCachedSkills()` returning `null` means specifically "no
-    // refresh has committed yet", so await one rather than treating a cold
-    // cache as an empty one. A warm cache makes this a no-op; only the
-    // genuinely-cold case pays for a scan.
-    if (this.skillManager.getCachedSkills() === null) {
+    // Restore is keyed off the committed skill cache. `getCachedSkills()`
+    // returning `null` means specifically "no refresh has committed yet", not
+    // "scanned and empty", so it must not be read as an empty cache: that
+    // would decline every skill in the history, gate included — #11180 again,
+    // quieter. Today `Config.initializeOnce` awaits the skill cache before it
+    // constructs the tool registry and initializes the client, so no resume
+    // reaches this line cold; the guard is what keeps that an ordering detail
+    // of startup rather than a precondition this method silently depends on.
+    // A warm cache makes it a no-op; only a genuinely cold one pays a scan.
+    let cachedSkills = this.skillManager.getCachedSkills();
+    if (cachedSkills === null) {
       try {
         await this.skillManager.listSkills();
+        cachedSkills = this.skillManager.getCachedSkills();
       } catch (error) {
         debugLogger.warn(
           'Failed to load skills while restoring a resumed session; ' +
@@ -376,7 +380,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       string,
       { name: string; output: string; config: SkillConfig }
     >();
-    for (const skill of this.skillManager.getCachedSkills() ?? []) {
+    for (const skill of cachedSkills ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
@@ -424,19 +428,32 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           );
           continue;
         }
+        if (this.loadedSkillNames.has(skill.name)) {
+          // An earlier pair in this same history already restored this skill.
+          // What follows is a same-session re-invocation, whose recorded
+          // output is the dedup message rather than a body — matching it
+          // against the file would blame `SKILL.md` for a skill that is
+          // already armed. Nothing left to do for it either way.
+          continue;
+        }
         if (
           output !== skill.output &&
           !output.startsWith(`${skill.output}\n`)
         ) {
-          // The recorded body is not the one on disk now — SKILL.md was
-          // edited between sessions. We cannot attribute the resident body
-          // to the current file, so neither the dedup bookkeeping nor the
-          // side effects are restored. This branch used to be a bare
-          // `continue`; the silence is part of what made #11180 present as
-          // a working setup.
+          // The recorded output is not the body on disk now, so it cannot be
+          // attributed to the current file: neither the dedup bookkeeping nor
+          // the side effects are restored. This branch used to be a bare
+          // `continue`; the silence is part of what made #11180 present as a
+          // working setup. Name the cause the recorded output actually
+          // supports — the tool also records refusals (`Skill "X" is
+          // disabled.`, `... not found.`), and telling an operator their
+          // SKILL.md changed when it did not sends them to diff a file that
+          // never moved.
           this.logSkillNotRestored(
             skill.config,
-            'its body no longer matches SKILL.md on disk',
+            output.startsWith(SKILL_LLM_CONTENT_PREFIX)
+              ? 'its body no longer matches SKILL.md on disk'
+              : "the recorded tool response is not this skill's body",
           );
           continue;
         }
@@ -469,8 +486,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * `applySkillSideEffects`, so this is idempotent and a project skill in an
    * untrusted folder still gets nothing.
    *
-   * A skill a fresh invocation would refuse is skipped, mirroring both live
-   * paths, so resume never re-arms something the user cannot invoke today.
+   * A skill the model could not invoke today is skipped, so resume never
+   * re-arms something a fresh tool call would refuse. The three conditions
+   * are the model-facing ones (`skill-utils.ts`'s availability filter):
+   * enabled, active, and not hidden from the model. That is deliberately the
+   * stricter of the two live paths — the `/<skill-name>` loader checks only
+   * enabledness and would arm an inactive or model-hidden skill — because
+   * this history records model tool calls, and a user who wants the looser
+   * grant back can still type the slash command.
    */
   private restoreSkillSideEffects(skill: SkillConfig): void {
     // Enabledness can change between sessions: a skill invoked, then
@@ -495,10 +518,22 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // `updatedPermissions`), so restoring one for a skill this session has not
     // activated can widen permissions as easily as narrow them — and it would
     // leave the hook armed for the whole session while the `paths:` scope that
-    // was supposed to bound it never fired. Refusing both keeps restore's rule
-    // to exactly what the live paths grant.
+    // was supposed to bound it never fired. Refusing both keeps restore no
+    // wider than the model path, which is the path this history records.
     if (!this.skillManager.isSkillActive(skill)) {
       this.logSkillNotRestored(skill, 'its `paths:` activation has not fired');
+      return;
+    }
+    // Visibility can change between sessions the same way enabledness can,
+    // and it changes invisibly here: frontmatter is not part of the recorded
+    // body, so adding `disable-model-invocation: true` leaves the recorded
+    // output byte-identical and the mismatch check passes. `execute` refuses
+    // such a skill outright (`Skill "X" not found.`), so re-arming it would
+    // grant a session what no tool call can ask for. Read the flag off the
+    // cached config rather than `hiddenSkillNames`, which is committed by the
+    // unsequenced `refreshSkills()`.
+    if (skill.disableModelInvocation) {
+      this.logSkillNotRestored(skill, 'it is hidden from model invocation');
       return;
     }
     applySkillSideEffects(this.config, skill);
