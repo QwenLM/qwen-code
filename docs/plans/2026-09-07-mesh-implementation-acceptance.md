@@ -25,12 +25,11 @@ Evidence: the test names covering each clause. Currently 38 tests; keep the coun
 
 ### Step 2 — Read-only capability boundary
 
-Lands: a built-in allowlist for `run_shell_command`, intersected with the agent definition's tool list; an explicit deny list containing `save_memory`, `write_file`, `edit`, and every tool that persists outside the process; `thread_*` tools are added on top of the definition, never taken from it.
-Gate: a table-driven test enumerates every registered tool name in core and asserts it is either allowed, denied, or `thread_*`; adding a new tool to core without classifying it fails the test. The shell predicate refuses every command the AST classifier does not return `read-only` for, with tests for allowed and refused commands.
-Deferred to step 4/5: proving the refusal happens in the tool layer. `executionAllowedTools` is name-level, so a per-command predicate needs an invocation-time hook that arrives with the launcher (see the steps 2-3 brief §2).
+Lands: a built-in workspace file-reading allowlist intersected with the agent definition's tool list; shell, MCP, `save_memory`, `write_file`, `edit`, and every persistent or host-wide tool are denied; `thread_*` tools are added on top of the definition, never taken from it.
+Gate: a table-driven test enumerates every registered tool name in core and asserts it is either allowed, denied, or `thread_*`; adding a new tool to core without classifying it fails the test. The tool configuration and invocation guard both deny shell by name.
 Evidence: the classification table, committed as data, not prose.
 
-Supporting local observation: `capability.test.ts`, 10 tests passed. The step
+Supporting local observation before the shell boundary correction: `capability.test.ts`, 10 tests passed. The step
 is not complete until #11206 CI passes after the child PR merges.
 
 ### Step 3 — Versioned storage protocol

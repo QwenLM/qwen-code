@@ -10,7 +10,6 @@ import {
   type ToolInvocationGuard,
 } from '../../core/tool-invocation-guard.js';
 import { ToolNames } from '../../tools/tool-names.js';
-import { classifyShellCommandSafetyInDirectory } from '../../utils/shellAstParser.js';
 
 export type MeshToolClassification = 'allow' | 'deny' | 'thread';
 
@@ -33,7 +32,7 @@ export const MESH_TOOL_CLASSIFICATION = {
   [ToolNames.ZOOM_IMAGE]: 'allow',
   [ToolNames.GREP]: 'allow',
   [ToolNames.GLOB]: 'allow',
-  [ToolNames.SHELL]: 'allow',
+  [ToolNames.SHELL]: 'deny',
   [ToolNames.TODO_WRITE]: 'deny',
   [ToolNames.MEMORY]: 'deny',
   [ToolNames.AGENT]: 'deny',
@@ -133,19 +132,6 @@ export function buildMeshToolConfig(definition?: ToolConfig): ToolConfig {
   };
 }
 
-export async function checkMeshShellCommand(
-  command: string,
-  cwd: string,
-): Promise<{ allowed: true } | { allowed: false; reason: string }> {
-  const safety = await classifyShellCommandSafetyInDirectory(command, cwd);
-  return safety === 'read-only'
-    ? { allowed: true }
-    : {
-        allowed: false,
-        reason: `You may only run read-only shell commands; this one is classified as ${safety}.`,
-      };
-}
-
 export function createMeshToolInvocationGuard(
   upstream?: ToolInvocationGuard,
 ): ToolInvocationGuard {
@@ -165,23 +151,6 @@ export function createMeshToolInvocationGuard(
         reason: `Tool "${context.toolName}" is outside the mesh read-only capability boundary.`,
       };
     }
-    if (context.toolName !== ToolNames.SHELL) return { allowed: true };
-    if (context.args['is_background'] === true) {
-      return {
-        allowed: false,
-        reason: 'You may not start background shell processes.',
-      };
-    }
-    const command = context.args['command'];
-    if (typeof command !== 'string') {
-      return { allowed: false, reason: 'Mesh shell command is missing.' };
-    }
-    const directory = context.args['directory'];
-    return checkMeshShellCommand(
-      command,
-      typeof directory === 'string'
-        ? directory
-        : (context.cwd ?? process.cwd()),
-    );
+    return { allowed: true };
   };
 }
