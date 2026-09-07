@@ -9127,21 +9127,21 @@ export class Config {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 

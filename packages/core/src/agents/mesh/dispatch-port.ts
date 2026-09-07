@@ -158,7 +158,11 @@ async function continueCompleted(
       failureStage: 'continue',
     };
   }
-  const revived = await config.reviveCompletedBackgroundAgent(agentId, prompt);
+  const revived = await config.reviveCompletedBackgroundAgent(agentId, {
+    kind: 'message',
+    text: prompt,
+    deliveryId,
+  });
   if (!revived) {
     return {
       status: 'launch_failed',
@@ -169,7 +173,7 @@ async function continueCompleted(
   return {
     status: 'started',
     sessionId: config.getSessionId(),
-    consumedOnStart: true,
+    consumedOnStart: false,
   };
 }
 
@@ -305,7 +309,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
           case 'resume': {
             const resumed = await config.resumeBackgroundAgent(
               meshBackgroundAgentId(agent),
-              prompt,
+              { kind: 'message', text: prompt, deliveryId: runId },
             );
             if (!resumed) {
               return {
@@ -317,7 +321,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
             return {
               status: 'started',
               sessionId: config.getSessionId(),
-              consumedOnStart: true,
+              consumedOnStart: false,
               transcriptStartOffset,
             };
           }

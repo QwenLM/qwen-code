@@ -156,7 +156,7 @@ interface CurrentForkRuntime {
 }
 
 interface ResumeOperation {
-  continuationMessages: string[];
+  continuationInputs: AgentExternalInput[];
   promise: Promise<AgentTask | undefined>;
 }
 
@@ -620,22 +620,23 @@ export class BackgroundAgentResumeService {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
-    const trimmedMessage = initialMessage?.trim();
+    const normalizedInput =
+      typeof initialInput === 'string' ? initialInput.trim() : initialInput;
     const existingOperation = this.resumeOperations.get(agentId);
     if (existingOperation) {
-      if (trimmedMessage) {
+      if (normalizedInput) {
         const registry = this.config.getBackgroundTaskRegistry();
-        if (!registry.queueMessage(agentId, trimmedMessage)) {
-          existingOperation.continuationMessages.push(trimmedMessage);
+        if (!registry.queueExternalInput(agentId, normalizedInput)) {
+          existingOperation.continuationInputs.push(normalizedInput);
         }
       }
       return existingOperation.promise;
     }
 
     const operation: ResumeOperation = {
-      continuationMessages: trimmedMessage ? [trimmedMessage] : [],
+      continuationInputs: normalizedInput ? [normalizedInput] : [],
       promise: Promise.resolve(undefined),
     };
     operation.promise = this.resumeBackgroundAgentInternal(
@@ -662,13 +663,13 @@ export class BackgroundAgentResumeService {
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
     // A resume/revive already in flight for this id owns the lifecycle — fold
     // into it. (The status flip below is await-free, so this guards a genuinely
     // concurrent in-flight operation, not a same-tick re-entry.)
     if (this.resumeOperations.has(agentId)) {
-      return this.resumeBackgroundAgent(agentId, initialMessage);
+      return this.resumeBackgroundAgent(agentId, initialInput);
     }
     const registry = this.config.getBackgroundTaskRegistry();
     const entry = registry.get(agentId);
@@ -755,7 +756,7 @@ export class BackgroundAgentResumeService {
       pendingApprovals: [...(entry.pendingApprovals ?? [])],
     };
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
-    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    const revived = await this.resumeBackgroundAgent(agentId, initialInput);
     if (!revived) {
       const failedEntry = registry.get(agentId);
       // `??` only falls back on null/undefined, so a failed revive that left
@@ -975,10 +976,19 @@ export class BackgroundAgentResumeService {
             )[0],
             ...recovery.history,
           ];
-      const promptMessages = [...operation.continuationMessages];
+      const promptInputs = [...operation.continuationInputs];
       const continuationPrompt =
-        promptMessages.join('\n\n').trim() ||
+        promptInputs
+          .map((input) => (typeof input === 'string' ? input : input.text))
+          .join('\n\n')
+          .trim() ||
         DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE;
+      const initialExternalInputs = promptInputs.some(
+        (input) => typeof input !== 'string',
+      )
+        ? promptInputs
+        : undefined;
+      let pendingInitialExternalInputs = initialExternalInputs;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -1120,11 +1130,11 @@ export class BackgroundAgentResumeService {
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,
       });
-      const lateContinuationMessages = operation.continuationMessages.slice(
-        promptMessages.length,
+      const lateContinuationInputs = operation.continuationInputs.slice(
+        promptInputs.length,
       );
-      for (const message of lateContinuationMessages) {
-        registry.queueMessage(meta.agentId, message);
+      for (const input of lateContinuationInputs) {
+        registry.queueExternalInput(meta.agentId, input);
       }
 
       subagent.setExternalMessageProvider(() =>
@@ -1256,7 +1266,8 @@ export class BackgroundAgentResumeService {
         fireStartHook: boolean,
       ) => {
         let keepResident = false;
-        let finishingInputs: AgentExternalInput[] | undefined;
+        let finishingInputs = pendingInitialExternalInputs;
+        pendingInitialExternalInputs = undefined;
         let shouldFireStartHook = fireStartHook;
         turnRunning = true;
         try {
