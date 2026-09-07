@@ -304,6 +304,7 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
+import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -10450,6 +10451,27 @@ export function App({
         : [],
     [floatingTodosState, messages, tasksDialogMessage],
   );
+  // One projection per render for every session-workflow surface. The
+  // cockpit, the artifact-panel inspector and the graph embedded in the
+  // cockpit each used to derive their own copy of the same projection; they
+  // now share this one, which also carries the single task-execution index
+  // they all read from.
+  const sessionWorkflowProjection = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? buildSessionWorkflowProjection(
+            sessionWorkflowTodos,
+            planAgentTools,
+            environmentAgentTasks,
+          )
+        : undefined,
+    [
+      environmentAgentTasks,
+      planAgentTools,
+      sessionWorkflowEnabled,
+      sessionWorkflowTodos,
+    ],
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -15935,6 +15957,7 @@ export function App({
           todos: sessionWorkflowTodos,
           tools: planAgentTools,
           tasks: environmentAgentTasks,
+          projection: sessionWorkflowProjection,
           artifacts,
           selectedTodoId: selectedWorkflowTodoId,
           onSelectedTodoIdChange: setSelectedWorkflowTodoId,
@@ -17281,6 +17304,7 @@ export function App({
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
+                    projection={sessionWorkflowProjection}
                     selectedTodoId={selectedWorkflowTodoId}
                     onSelectedTodoIdChange={setSelectedWorkflowTodoId}
                     onBackToChat={closeCockpit}
