@@ -104,9 +104,15 @@ function lastActivity(thread: Thread): number {
 
 async function deleteMeshAgentTranscripts(
   workspaceCwd: string,
+  runtimeBaseDir: string | undefined,
   agentId: string,
 ): Promise<void> {
-  const root = getSubagentsRootDir(new Storage(workspaceCwd).getProjectDir());
+  const root = getSubagentsRootDir(
+    new Storage(
+      workspaceCwd,
+      runtimeBaseDir ?? Storage.getRuntimeBaseDir(),
+    ).getProjectDir(),
+  );
   const sessions = await readdir(root, { withFileTypes: true }).catch(
     (error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
@@ -824,7 +830,11 @@ export function registerMeshRoutes(
           return;
         }
         const dispatchError = await startBookedRuns(runtime);
-        await deleteMeshAgentTranscripts(runtime.workspaceCwd, agentId);
+        await deleteMeshAgentTranscripts(
+          runtime.workspaceCwd,
+          runtime.sessionRuntimeBaseDir,
+          agentId,
+        );
         res.json({
           id: agentId,
           deleted: true,
