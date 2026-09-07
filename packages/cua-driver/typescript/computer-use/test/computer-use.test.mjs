@@ -302,6 +302,40 @@ test("disableDiff maps to the one-shot native full request", async () => {
   assert.equal(driver.calls.length, 1);
 });
 
+test("macOS element completeness does not discard actionable elements", async () => {
+  const driver = fakeDriver({
+    results: {
+      getWindowState: toolResult({
+        structured: {
+          tree_markdown: "FULL element_token=rv1:l_mac:1",
+          elements_complete: false,
+          elements: [
+            {
+              element_index: 0,
+              element_token: "rv1:l_mac:1",
+              role: "AXButton",
+              label: "Run",
+            },
+          ],
+          observation_revision: {
+            mode: "full",
+            lineage_id: "l_mac",
+            revision_id: "l_mac:r1",
+            stable_element_ids: true,
+            capture_complete: true,
+          },
+        },
+      }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+
+  const observation = await computer.observeWindow({ pid: 42, windowId: 7 });
+
+  assert.equal(observation.elements[0].element_token, "rv1:l_mac:1");
+  assert.doesNotMatch(observation.text, /capture is incomplete/i);
+});
+
 test("an incomplete capture retries once without disabling diffs", async () => {
   const incomplete = () =>
     toolResult({

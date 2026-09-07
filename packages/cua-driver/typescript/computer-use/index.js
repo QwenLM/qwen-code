@@ -923,8 +923,7 @@ export class ComputerUse {
     }
     const { text, structured, images } = observed;
     const envelope = structured?.observation_revision;
-    const captureComplete =
-      structured?.capture_complete ?? structured?.elements_complete;
+    const captureComplete = structured?.capture_complete;
     const treeText = structured?.tree_markdown ?? text;
     const publicText =
       captureComplete === false
