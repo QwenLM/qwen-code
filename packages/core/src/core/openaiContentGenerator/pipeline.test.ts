@@ -809,6 +809,17 @@ describe('ContentGenerationPipeline', () => {
         expectedThinking: undefined,
         expectedToolChoice: 'required',
       },
+      ...['gpt-5-pro', 'gpt-6-astra'].map((model) => ({
+        name: `preserve required tool selection for name-derived mandatory ${model}`,
+        baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+        model,
+        extraBody: undefined,
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      })),
       {
         name: 'preserve required tool selection when thinking is not enabled',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -1137,9 +1148,7 @@ describe('ContentGenerationPipeline', () => {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://llm.example.com/v1',
         model: 'gpt-5.4',
-        // The shared mock sets samplingParams, and the pipeline ships those
-        // keys verbatim instead of injecting `reasoning` at all. Clear it so
-        // this exercises the injected-tier path the clamp is meant to cap.
+        // Exercise the configured-tier path without sampling overrides.
         samplingParams: undefined,
         reasoning: { effort: 'max' },
       } as ContentGeneratorConfig;
@@ -1192,6 +1201,48 @@ describe('ContentGenerationPipeline', () => {
         reasoning: { effort: 'high' },
         samplingParams: { max_completion_tokens: 1024 },
         expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'over-ceiling effort with a token budget',
+        model: 'gpt-5.1',
+        reasoning: { effort: 'max' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'configured effort with a null flat placeholder',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: null },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'configured effort after an extra-body null replaces a flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+        extraBody: { reasoning_effort: null },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'a configured reasoning budget with an extra-body flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high', budget_tokens: 8192 },
+        samplingParams: { max_completion_tokens: 1024 },
+        extraBody: { reasoning_effort: 'low' },
+        expected: {
+          reasoning_effort: 'low',
+          reasoning: { budget_tokens: 8192 },
+          max_completion_tokens: 1024,
+        },
+      },
+      {
+        name: 'a non-mandatory GPT model on OpenRouter',
+        model: 'openai/gpt-5.4',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: false,
+        samplingParams: {},
+        expected: { reasoning: { enabled: false } },
       },
       {
         name: 'configured model fallback with a token budget',
@@ -1289,6 +1340,7 @@ describe('ContentGenerationPipeline', () => {
         model: testCase.configuredModel ?? testCase.model,
         reasoning: testCase.reasoning,
         samplingParams: testCase.samplingParams,
+        extra_body: 'extraBody' in testCase ? testCase.extraBody : undefined,
       } as ContentGeneratorConfig;
       const provider = new DefaultOpenAICompatibleProvider(
         mockContentGeneratorConfig,

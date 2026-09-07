@@ -12,7 +12,7 @@ import * as os from 'node:os';
 // Mock @qwen-code/qwen-code-core to avoid the undici dependency chain.
 // This is required so @qwen-code/acp-bridge/status can load (it imports
 // SkillError from core).
-vi.mock('@qwen-code/qwen-code-core', () => {
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   class SkillError extends Error {
     code: string;
     constructor(message: string, code: string) {
@@ -65,6 +65,9 @@ vi.mock('@qwen-code/qwen-code-core', () => {
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
     getGptReasoningCapabilities: vi.fn(() => undefined),
+    clampReasoningEffort: (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).clampReasoningEffort,
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
     DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,

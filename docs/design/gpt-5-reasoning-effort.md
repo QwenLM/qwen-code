@@ -10,7 +10,8 @@ same gaps when it falls through to the generic provider behavior.
 
 Share GPT model capabilities in core's existing reasoning-effort module.
 Recognize GPT-5 and GPT-5.x identifiers, dated variants, Codex and Pro variants,
-and OpenRouter's `openai/` prefix. Exclude ChatGPT chat variants, which do not
+and OpenRouter's `openai/` prefix and variant suffixes. Numeric patch versions
+inherit their minor version's capabilities. Exclude ChatGPT chat variants, which do not
 expose the same reasoning controls. Use the supported subset of the existing
 `low`, `medium`, `high`, `xhigh`, `max` ladder; do not add CLI tiers.
 
@@ -28,17 +29,23 @@ The pipeline's mandatory-thinking check must consume the same capabilities
 for the wire model, including flat disable values and automatic OpenRouter
 off requests.
 
-The default Chat Completions provider maps configured effort to the flat wire
-field and clamps to the model's supported subset. Explicit `samplingParams`
+Chat Completions providers, including DashScope-compatible gateways serving
+GPT models, map configured effort to the flat wire
+field and clamp to the model's supported subset. Explicit `samplingParams`
 and `extra_body` reasoning overrides keep their existing priority. OpenRouter
-keeps its nested reasoning protocol. Sampling options unrelated to reasoning
+keeps its nested reasoning protocol. Only the translated effort is removed
+from the nested object; sibling values such as the reasoning budget remain.
+Nullish flat placeholders do not suppress configured effort.
+Sampling options unrelated to reasoning
 must not suppress GPT's configured effort. The pipeline emits `none` when
 thinking is disabled on models that support it.
 
 GPT overrides are excluded from the existing Qwen-specific ACP override
-cleanup. As with the existing generic effort command, the displayed tier is
-the requested preference; raw request overrides may determine a different
-effective tier. Generalizing override reporting is outside this change.
+cleanup. Controls display the same clamped tier as the provider, while the
+global preference survives a GPT model switch for use on other models.
+Raw request overrides may determine a different effective tier; their enabled
+state must not be reported as thinking off when the request enables it.
+Generalizing override reporting is outside this change.
 
 ACP uses the shared capabilities to advertise supported efforts, mandatory
 thinking, and default enabled state. Existing Web Shell consumers use these

@@ -48,7 +48,7 @@ export function getGptReasoningCapabilities(model: string | undefined):
       thinkingMandatory: boolean;
     }
   | undefined {
-  const normalized = model?.toLowerCase() ?? '';
+  const normalized = (model?.toLowerCase() ?? '').replace(/:[\w.+-]+$/, '');
   if (/^(?:openai\/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
     return {
       efforts: REASONING_EFFORT_TIERS,
@@ -57,7 +57,9 @@ export function getGptReasoningCapabilities(model: string | undefined):
       thinkingMandatory: true,
     };
   }
-  const match = /^(?:openai\/)?gpt-5(?:\.(\d+))?(?:-|$)/.exec(normalized);
+  const match = /^(?:openai\/)?gpt-5(?:\.(\d+))?(?:\.\d+)*(?:-|$)/.exec(
+    normalized,
+  );
   if (!match || /-chat(?:-|$)/.test(normalized)) return undefined;
 
   const minor = Number(match[1] ?? 0);

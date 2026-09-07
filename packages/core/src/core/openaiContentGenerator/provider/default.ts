@@ -154,8 +154,8 @@ export class DefaultOpenAICompatibleProvider
    * session too.
    *
    * Only the pipeline-injected tier is capped. A `reasoning` object the user
-   * put in `samplingParams` ships verbatim (the pipeline hands those keys
-   * straight to the wire and skips the injection entirely), and `extra_body`
+   * put in `samplingParams` ships verbatim. Unrelated GPT sampling options
+   * still receive the configured effort and need clamping. `extra_body`
    * merges after this, so both explicit overrides survive unchanged.
    */
   protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
@@ -216,22 +216,29 @@ export class DefaultOpenAICompatibleProvider
       messages,
       ...(extraBody ? extraBody : {}),
     };
-    if (
-      getGptReasoningCapabilities(request.model) &&
-      !isOpenRouterHostname(this.contentGeneratorConfig) &&
-      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
-      extraBody?.['reasoning'] === undefined
-    ) {
-      const body = result as unknown as Record<string, unknown>;
-      const reasoning = body['reasoning'] as { effort?: unknown } | undefined;
-      if (reasoning?.effort !== undefined) {
-        if (!('reasoning_effort' in body)) {
-          body['reasoning_effort'] = reasoning.effort;
-        }
-        delete body['reasoning'];
-      }
-    }
+    this.flattenGptReasoningEffort(result);
     return result;
+  }
+
+  protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
+    if (
+      !getGptReasoningCapabilities(body['model'] as string | undefined) ||
+      isOpenRouterHostname(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
+      this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined
+    )
+      return;
+    const reasoning = body['reasoning'] as { effort?: unknown } | undefined;
+    if (reasoning?.effort === undefined) return;
+    if (
+      typeof body['reasoning_effort'] !== 'string' ||
+      !body['reasoning_effort']
+    ) {
+      body['reasoning_effort'] = reasoning.effort;
+    }
+    const { effort: _drop, ...rest } = reasoning;
+    if (Object.keys(rest).length > 0) body['reasoning'] = rest;
+    else delete body['reasoning'];
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {

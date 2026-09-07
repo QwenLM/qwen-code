@@ -361,6 +361,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  clampReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).clampReasoningEffort,
   getGptReasoningCapabilities: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getGptReasoningCapabilities,
@@ -9387,6 +9390,120 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             'value' in choice ? choice.value : undefined,
           ),
         ).toEqual(values);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    [
+      { model: 'gpt-5.5', samplingParams: { reasoning_effort: 'none' } },
+      'none',
+    ],
+    [
+      { model: 'gpt-5.5', extra_body: { reasoning: { enabled: false } } },
+      'none',
+    ],
+    [{ samplingParams: { reasoning_effort: null } }, 'none'],
+    [{ samplingParams: { reasoning: {} } }, 'none'],
+    [
+      { reasoning: { effort: 'high' }, samplingParams: { reasoning: {} } },
+      'none',
+    ],
+    [
+      { reasoning: { effort: 'high' }, extra_body: { reasoning: null } },
+      'none',
+    ],
+    [{ extra_body: { reasoning: { exclude: true } } }, 'none'],
+    [{ extra_body: { reasoning: { enabled: true } } }, 'medium'],
+    [{ extra_body: { reasoning: { max_tokens: 1024 } } }, 'medium'],
+    [
+      {
+        samplingParams: { reasoning_effort: 'none' },
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      'none',
+    ],
+    [{ samplingParams: { reasoning_effort: 'high' } }, 'medium'],
+    [{ extra_body: { reasoning_effort: 'high' } }, 'medium'],
+    [{ samplingParams: { reasoning: { effort: 'high' } } }, 'medium'],
+    [{ extra_body: { reasoning: { effort: 'high' } } }, 'medium'],
+    [{ samplingParams: { reasoning_effort: 'none' } }, 'none'],
+    [{ extra_body: { reasoning: { enabled: false } } }, 'none'],
+    [
+      {
+        samplingParams: { reasoning_effort: 'none' },
+        extra_body: { reasoning_effort: 'high' },
+      },
+      'medium',
+    ],
+    [{ reasoning: false, extra_body: { reasoning_effort: 'high' } }, 'none'],
+  ] as const)(
+    'reports the GPT raw override enabled state for %j',
+    async (overrides, expected) => {
+      const innerConfig = await setupSessionMocks('gpt-raw-reasoning-session');
+      innerConfig.getModel = vi.fn(() =>
+        'model' in overrides ? overrides.model : 'gpt-5.4',
+      );
+      innerConfig.getReasoningEffort = vi.fn(() => undefined);
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(
+        generation,
+        {
+          model: 'gpt-5.4',
+          reasoning: undefined,
+          samplingParams: undefined,
+          extra_body: undefined,
+        },
+        overrides,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          session.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe(expected);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([{ reasoning_effort: 'none' }, { reasoning: { enabled: false } }])(
+    'rejects and rolls back a GPT selection blocked by %j',
+    async (extra_body) => {
+      const sessionId = 'gpt-disabled-override-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-5.5',
+        reasoning: undefined,
+        extra_body,
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'high',
+          }),
+        ).rejects.toThrow('Reasoning selection was not applied: high');
+        expect(generation.reasoning).toBeUndefined();
+        expect(generation.extra_body).toEqual(extra_body);
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

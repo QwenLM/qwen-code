@@ -61,6 +61,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
+  getGptReasoningCapabilities,
   ApprovalMode,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -352,6 +353,7 @@ import {
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NONE,
   type ReasoningSelection,
 } from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -10767,10 +10769,13 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
-    let supported =
-      selection !== undefined &&
-      selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+    const gptModel = getGptReasoningCapabilities(modelId) !== undefined;
+    const supportsPreference = (value: ReasoningSelection | undefined) =>
+      value !== undefined &&
+      value !== REASONING_EFFORT_DEFAULT &&
+      ((gptModel && value !== REASONING_EFFORT_NONE) ||
+        isReasoningSelectionSupported(modelId, value, thinkingMandatory));
+    let supported = supportsPreference(selection);
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10778,15 +10783,13 @@ export class Session implements SessionContext {
       this.sessionReasoningSelection = undefined;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
-      supported =
-        selection !== undefined &&
-        selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+      supported = supportsPreference(selection);
     }
     if (
       !hasSessionSelection &&
       rawSelection !== undefined &&
       !supported &&
+      !(gptModel && selection === REASONING_EFFORT_NONE) &&
       options.persist
     ) {
       try {

@@ -7,6 +7,7 @@
 import {
   REASONING_EFFORT_TIERS,
   getGptReasoningCapabilities,
+  clampReasoningEffort,
   type Config,
   type ContentGeneratorConfig,
   type ReasoningEffort,
@@ -86,9 +87,17 @@ export function resolvePersistedReasoningConfigState(
   value: unknown,
   thinkingMandatory = false,
 ): ModelReasoningConfigState {
-  thinkingMandatory ||=
-    getGptReasoningCapabilities(modelId)?.thinkingMandatory === true;
-  const selection = parseReasoningSelection(value);
+  const gptReasoning = getGptReasoningCapabilities(modelId);
+  thinkingMandatory ||= gptReasoning?.thinkingMandatory === true;
+  let selection = parseReasoningSelection(value);
+  if (
+    gptReasoning &&
+    selection &&
+    selection !== REASONING_EFFORT_NONE &&
+    selection !== REASONING_EFFORT_DEFAULT
+  ) {
+    selection = clampReasoningEffort(selection, gptReasoning.efforts);
+  }
   if (
     !selection ||
     selection === REASONING_EFFORT_DEFAULT ||
@@ -106,6 +115,8 @@ export function getModelConfiguration(modelId: string | undefined):
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
+  // GPT controls share the provider's core capabilities; the manifest
+  // remains the source for curated Qwen models.
   const gptReasoning = getGptReasoningCapabilities(modelId);
   return gptReasoning
     ? { reasoning: { thinking: true, ...gptReasoning } }
@@ -224,8 +235,9 @@ export function buildModelReasoningConfigOption(
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT
-        : (reasoning.efforts.find((effort) => effort === state.effort) ??
-          reasoning.defaultEffort);
+        : state.effort === undefined
+          ? reasoning.defaultEffort
+          : clampReasoningEffort(state.effort, reasoning.efforts);
 
   return {
     id: 'reasoning_effort',

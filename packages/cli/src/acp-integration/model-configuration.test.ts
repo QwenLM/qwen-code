@@ -39,6 +39,24 @@ describe('model configuration manifest', () => {
     },
   );
 
+  it.each([
+    ['gpt-5.4', 'max', 'xhigh'],
+    ['gpt-5.1', 'max', 'high'],
+    ['gpt-5-pro', 'low', 'high'],
+  ] as const)(
+    'displays the same clamped %s tier as the provider',
+    (model, effort, expected) => {
+      expect(buildModelReasoningConfigOption(model, { effort })).toMatchObject({
+        currentValue: expected,
+      });
+      expect(resolvePersistedReasoningConfigState(model, effort)).toEqual({
+        enabled: true,
+        effort: expected,
+        thinkingMandatory: model === 'gpt-5-pro',
+      });
+    },
+  );
+
   it('shows a selected effort when a GPT model defaults to thinking off', () => {
     expect(
       buildModelReasoningConfigOption('gpt-5.4', { effort: 'high' }),

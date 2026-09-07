@@ -6941,6 +6941,38 @@ describe('Session', () => {
       expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
+    it.each(['max', 'none'] as const)(
+      'preserves global GPT %s across model switches and reloads',
+      async (selection) => {
+        const state = installReasoningPreference(selection, { trusted: true });
+        const modelId = selection === 'max' ? 'gpt-5.4' : 'gpt-6-astra';
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+        session.reloadReasoningSelection();
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.workspace.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter((call) => call[1] === 'model.reasoningEffort'),
+        ).toEqual([]);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : false,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+      },
+    );
+
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
       const state = installReasoningPreference('max', { trusted: true });
 

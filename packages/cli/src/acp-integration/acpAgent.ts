@@ -98,6 +98,7 @@ import {
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
   REASONING_EFFORT_TIERS,
+  getGptReasoningCapabilities,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
@@ -14703,11 +14704,41 @@ class QwenAgent implements Agent {
               ) ?? modelReasoning.defaultEffort)
             : currentModelEffort
         : currentModelEffort;
+    const gptReasoning = getGptReasoningCapabilities(generation.model);
+    const rawGptReasoning = gptReasoning
+      ? { ...generation.samplingParams, ...generation.extra_body }
+      : undefined;
+    const rawGptEffort = rawGptReasoning?.['reasoning_effort'];
+    const rawGptNested = rawGptReasoning?.['reasoning'] as
+      | { enabled?: boolean; effort?: unknown; max_tokens?: number }
+      | false
+      | null
+      | undefined;
+    const rawGptEnabled =
+      typeof rawGptEffort === 'string' && rawGptEffort
+        ? rawGptEffort !== REASONING_EFFORT_NONE
+        : rawGptNested === undefined
+          ? undefined
+          : rawGptNested === null
+            ? gptReasoning?.defaultEnabled
+            : rawGptNested === false ||
+                rawGptNested.enabled === false ||
+                rawGptNested.effort === REASONING_EFFORT_NONE
+              ? false
+              : rawGptNested.enabled === true ||
+                  (typeof rawGptNested.effort === 'string' &&
+                    rawGptNested.effort.length > 0) ||
+                  (rawGptNested.max_tokens ?? 0) > 0
+                ? true
+                : gptReasoning?.defaultEnabled;
     const reasoningEnabled =
-      generation.reasoning === undefined && !reasoningOverride
+      generation.reasoning === undefined &&
+      !reasoningOverride &&
+      rawGptEnabled === undefined
         ? undefined
         : generation.reasoning !== false &&
-          (!reasoningOverride || !overrideDisablesReasoning);
+          (!reasoningOverride || !overrideDisablesReasoning) &&
+          rawGptEnabled !== false;
     const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {

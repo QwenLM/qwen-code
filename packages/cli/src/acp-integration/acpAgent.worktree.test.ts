@@ -137,6 +137,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  clampReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).clampReasoningEffort,
   getGptReasoningCapabilities: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getGptReasoningCapabilities,

@@ -581,6 +581,28 @@ describe('DefaultOpenAICompatibleProvider', () => {
       },
     );
 
+    it.each([undefined, null])(
+      'preserves a sibling budget with a %s flat override',
+      (override) => {
+        mockContentGeneratorConfig.extra_body = { reasoning_effort: override };
+        const request = {
+          model: 'gpt-5.4',
+          messages: [],
+          reasoning: { effort: 'high', budget_tokens: 42000 },
+        };
+        const result = provider.buildRequest(
+          request,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe('high');
+        expect(result['reasoning']).toEqual({ budget_tokens: 42000 });
+        expect(request.reasoning).toEqual({
+          effort: 'high',
+          budget_tokens: 42000,
+        });
+      },
+    );
+
     it('keeps the OpenRouter nested reasoning protocol', () => {
       mockContentGeneratorConfig.baseUrl = 'https://openrouter.ai/api/v1';
       const result = provider.buildRequest(
@@ -623,8 +645,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('leaves a samplingParams reasoning object verbatim', () => {
-      // The pipeline hands samplingParams keys straight to the wire and skips
-      // the reasoning injection, so this object is the user's own value.
+      // Explicit nested reasoning bypasses injection and clamping, unlike
+      // unrelated GPT sampling options that retain the configured effort.
       const providerWithSampling = new DefaultOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,

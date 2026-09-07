@@ -912,7 +912,10 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory = this.requiresThinking(model);
+    const explicitThinkingMandatory = this.requiresThinking(model);
+    const thinkingMandatory =
+      explicitThinkingMandatory ||
+      getGptReasoningCapabilities(model)?.thinkingMandatory === true;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -1066,12 +1069,12 @@ export class ContentGenerationPipeline {
     // they are opaque parameters that do not put the request in thinking
     // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
     // dropping `required` there only degrades their forced-tool side
-    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory ||
+      (explicitThinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||
@@ -1080,7 +1083,7 @@ export class ContentGenerationPipeline {
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, explicitThinkingMandatory },
       );
       delete typed['tool_choice'];
     }
@@ -1120,8 +1123,6 @@ export class ContentGenerationPipeline {
   private requiresThinking(model: string): boolean {
     const normalizedModel = model.toLowerCase();
     return (
-      getGptReasoningCapabilities(normalizedModel)?.thinkingMandatory ===
-        true ||
       this.requiredThinkingModels.has(normalizedModel) ||
       (this.contentGeneratorConfig.thinkingMandatory === true &&
         normalizedModel ===
@@ -1181,12 +1182,16 @@ export class ContentGenerationPipeline {
     // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
+      const rawEffort = {
+        ...configSamplingParams,
+        ...this.contentGeneratorConfig.extra_body,
+      }['reasoning_effort'];
       const samplingParams =
         getGptReasoningCapabilities(
           request.model || this.contentGeneratorConfig.model,
         ) &&
         configSamplingParams['reasoning'] === undefined &&
-        configSamplingParams['reasoning_effort'] === undefined
+        (configSamplingParams['reasoning_effort'] == null || rawEffort == null)
           ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
           : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
