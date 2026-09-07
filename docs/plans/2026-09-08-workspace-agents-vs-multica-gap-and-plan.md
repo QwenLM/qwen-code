@@ -205,6 +205,53 @@ In dependency order. Each item is small; the sequence is what matters.
 The dispatcher's rules, the twelve admission outcomes, the store, the tools,
 the prompt envelope and the REST surface are not touched by any of this.
 
+## 8. What landed, 2026-09-08
+
+All four stages are on `codex/multi-agent-mesh-foundation`. Nothing here was
+built, typechecked or tested on the author's machine; ESLint is clean across
+the changed surface and CI is the verification.
+
+| Commit       | What                                                                 |
+| ------------ | -------------------------------------------------------------------- |
+| `2a8e23cb30` | Renamed the subsystem from mesh to workspace agents                  |
+| `77578abab7` | Repaired the import paths the rename broke; persona applied at spawn |
+| `cbc8958379` | Dispatch against one session process per agent                       |
+| `f663f779a1` | Token accounting from the session's own counter                      |
+| `39da00b8f6` | Removed the subagent execution path                                  |
+| `b4055c3690` | Agent sessions named after their agent; runs link to them            |
+| `6616312c67` | Threads gained acceptance criteria and priority                      |
+| `8d6e199cc4` | Deleting an agent retires it instead of erasing it                   |
+| `59d326e422` | Agents are configurable; the capability ceiling is shown             |
+
+Stage A is complete: `launcher.ts`, `dispatch-port.ts` and `runtime-bridge.ts`
+are gone, along with `launchWorkspaceAgent`, `dispatchAgentRuns` and the two
+ACP control methods behind them. Dispatch runs in the daemon, where the
+sessions are.
+
+Stage B turned out to be smaller than written. Agent sessions were already in
+the ordinary session list — only the hidden host type is filtered anywhere —
+so the work was making them legible: a session is titled with its agent's
+name, written once and never over a person's `/rename`. A run row links to the
+agent's session. The thread-scoped transcript slice was kept rather than
+replaced: a session serving several threads cannot answer "what did this agent
+do _here_", which is the narrower question the slice exists for.
+
+Stage C landed items 1 and 2 of the four. Labels, project and due date are
+still display-only work and are not done.
+
+Stage D landed instructions, model, definition and concurrency as per-identity
+overrides, plus the capability ceiling as something a person can read. MCP
+servers were deliberately not added: `classifyAgentTool` denies every name not
+in its table and no MCP tool is in it, so the setting would do nothing.
+Reaching MCP means moving the read-only ceiling, which is a separate decision.
+
+### Still open
+
+- Labels, project and due date on a thread (Stage C, items 3 and 4).
+- §9.9 envelope role transport, §9.10 parent-to-child replies, §9.11 human
+  blocker acknowledgement scope — all owner decisions, unchanged.
+- Squads, inbox and projects, which remain out of scope until asked for.
+
 <details>
 <summary>中文说明</summary>
 
