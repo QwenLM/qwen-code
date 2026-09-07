@@ -44,3 +44,11 @@ active-pane pointer/keyboard selection, pending tool and question transitions,
 hidden-pane navigation, draft retention, and existing add/close/maximize/reload
 behavior. The CLI baseline and browser-test environment limitations are recorded
 in `.qwen/e2e-tests/web-shell-split-usability.md`.
+
+The PR's browser CI job runs on GitHub hosted Ubuntu. The unchanged feature
+passed the document gate and all 50 smoke cases there, while three ECS runs
+failed during browser resource loading or at the document performance budget.
+Keep the existing 60-second document budget, smoke assertions, triggers, and
+hosted 20-minute job limit. Other CI jobs retain their current runner routing.
+This uses hosted capacity for the browser job and may incur hosted queue time;
+it does not diagnose the underlying ECS network or performance bottleneck.

@@ -360,11 +360,7 @@ describe('review worktree cleanup steps', () => {
 
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
     expect(ciCleanSteps.map(({ id }) => id)).toEqual(
-      expect.arrayContaining([
-        'test',
-        'web_shell_e2e_smoke',
-        'integration_cli',
-      ]),
+      expect.arrayContaining(['test', 'integration_cli']),
     );
     for (const { id, steps, run } of ciCleanSteps) {
       expect(
