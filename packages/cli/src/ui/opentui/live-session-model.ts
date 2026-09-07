@@ -19,6 +19,7 @@ import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
+import { formatTokenCount } from '../statusLinePresets.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
@@ -613,6 +614,15 @@ export function describeGoalCard(
   const activeTimeMs = goal.activeTimeMs ?? 0;
   if (activeTimeMs > 0)
     stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
+  const tokensUsed = goal.tokensUsed ?? 0;
+  if (tokensUsed > 0) {
+    const used = formatTokenCount(tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
+  }
   const reason =
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
