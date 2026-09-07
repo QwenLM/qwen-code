@@ -228,6 +228,9 @@ action error a second later. These paths were source-inspected only.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.
+An unassigned `open` child no longer satisfies `thread_wait`: only a live run,
+pending parent report, or non-open descendant state is a future wake path, so a
+parent cannot silently sleep behind an inert child.
 
 ### Step 10 — Channel notifications
 

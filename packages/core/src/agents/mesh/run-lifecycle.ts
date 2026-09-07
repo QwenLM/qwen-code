@@ -113,8 +113,22 @@ export function hasLiveDescendant(
     for (const child of byParent.get(current) ?? []) {
       if (seen.has(child.id)) continue;
       seen.add(child.id);
-      if (child.status !== 'done') return true;
       queue.push(child.id);
+      if (child.status === 'done') continue;
+      const canWakeParent =
+        child.status !== 'open' ||
+        child.runs.some(
+          (run) =>
+            run.status === 'queued' ||
+            run.status === 'running' ||
+            run.status === 'finishing' ||
+            run.status === 'cancelling',
+        ) ||
+        child.outbox.some(
+          (event) =>
+            event.kind === 'parent_report' && event.status === 'pending',
+        );
+      if (canWakeParent) return true;
     }
   }
   return false;
