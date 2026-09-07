@@ -81,16 +81,15 @@ import type {
 
 export interface RegisterWorkspaceAgentRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
-  mutate: (opts?: {
-    strict?: boolean /**
-     * Sends one channel message. Absent when no channel worker is running, in
-     * which case notifications stay pending rather than being dropped.
-     */;
-    deliverChannelMessage?: (
-      workspaceCwd: string,
-      request: ChannelDeliveryRequest,
-    ) => Promise<unknown>;
-  }) => RequestHandler;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  /**
+   * Sends one channel message. Absent when no channel worker is running, in
+   * which case notifications stay pending rather than being dropped.
+   */
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<unknown>;
 }
 
 const LIVE_RUN_STATUSES = new Set([
