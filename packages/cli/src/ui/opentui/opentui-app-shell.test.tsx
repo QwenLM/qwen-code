@@ -74,6 +74,9 @@ const mocks = vi.hoisted(() => {
     onHandle: null as null | ((text: string) => void),
     /** Resolved immediately, so the drain never blocks on a shell lane. */
     executeUserShell: vi.fn(() => Promise.resolve()),
+    /** Holds the dispatcher's busy slot on this text until released. */
+    holdHandleOn: null as string | null,
+    releaseHandle: null as null | (() => void),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -158,6 +161,14 @@ vi.mock('./commands-dispatch.js', () => ({
     cancel() {}
     dispose() {}
     async handle(text: string) {
+      if (
+        mocks.state.holdHandleOn === text &&
+        mocks.state.releaseHandle === null
+      ) {
+        await new Promise<void>((resolve) => {
+          mocks.state.releaseHandle = resolve;
+        });
+      }
       mocks.state.handledTexts.push(text);
       mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
@@ -255,6 +266,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.exitInProgress = false;
     mocks.state.onHandle = null;
+    mocks.state.holdHandleOn = null;
+    mocks.state.releaseHandle = null;
     mocks.state.executeUserShell.mockClear();
   });
 
@@ -843,6 +856,171 @@ describe('OpenTuiApp shell wiring', () => {
     // newest and orphans the first).
     expect(mocks.state.handledTexts).toEqual(['sleep 10', '/quit']);
     expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it('routes a prompt held behind a running shell command to the turn seam (R5-5)', async () => {
+    let releaseShell: () => void = () => {};
+    const shellDone = new Promise<void>((resolve) => {
+      releaseShell = resolve;
+    });
+    mocks.state.executeUserShell.mockImplementation(() => shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onTranscriptEvent = vi.fn();
+    const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt, onTranscriptEvent });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('sleep 10');
+    // Shell mode was toggled off while the command still runs (the Esc path):
+    // the plain prompt must not start a turn behind the `!` command, whose
+    // completion injects LLM history between sends — a concurrent turn turns
+    // that write into a mid-turn addHistory (R5-5).
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    await submit('hello');
+    expect(screen.getByText(/Queued hello/)).toBeTruthy();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseShell();
+      await shellDone;
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'hello',
+      undefined,
+      expect.objectContaining({ submittedPrompt: 'hello' }),
+    );
+  });
+
+  it('runs a command queued during a drain after the drain, not beside it (R5-6)', async () => {
+    // A third submission queued while the drain runs must wait for the busy
+    // slot instead of a second drain instance racing the first (R5-6): the
+    // loser would be dropped with the gateway's busy rejection.
+    let releaseShell: () => void = () => {};
+    const shellDone = new Promise<void>((resolve) => {
+      releaseShell = resolve;
+    });
+    mocks.state.holdHandleOn = '/review';
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.executeUserShell.mockImplementation(() => shellDone);
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onTranscriptEvent: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('make');
+    await submit('/review');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    // The drain started: `make` runs on the shell lane while /review waits
+    // behind it in the same drain.
+    expect(mocks.state.executeUserShell).toHaveBeenCalledTimes(1);
+
+    await submit('/status');
+
+    await act(async () => {
+      releaseShell();
+      await shellDone;
+      // The revision bump from the release re-arms the drain while the busy
+      // slot is still held for /review.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // /review's dispatch holds the busy slot (the mock took the hold), so
+    // nothing has run to completion yet.
+    expect(mocks.state.releaseHandle).not.toBeNull();
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    await act(async () => {
+      mocks.state.releaseHandle?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.handledTexts).toEqual(['/review', '/status']);
+    expect(screen.queryByText(/already running/)).toBeNull();
+  });
+
+  it('reports an executeUserShell rejection and releases the shell gate (R5-7)', async () => {
+    const onTranscriptEvent = vi.fn();
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    renderApp({ onTranscriptEvent });
+    await settle();
+    mocks.state.executeUserShell.mockImplementation(() =>
+      Promise.reject(new Error('spawn failed')),
+    );
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('boom');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const errorEvent = onTranscriptEvent.mock.calls
+      .map((call) => call[0] as { type: string; text: string })
+      .find((event) => event.type === 'error');
+    expect(errorEvent?.text).toContain('spawn failed');
+
+    // The controller left the gate set: a later command still runs instead of
+    // queueing behind a lane wedged for the rest of the session.
+    const second = vi.fn(() => Promise.resolve());
+    mocks.state.executeUserShell.mockImplementation(second);
+    await submit('echo ok');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Queued echo ok/)).toBeNull();
+  });
+
+  it('sends shell-mode slash input to the init error when the stack failed (R5-8)', async () => {
+    mocks.state.loadRejects = true;
+    const onQuit = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: undefined as unknown as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onQuit,
+      onTranscriptEvent: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('/quit');
+    // No dispatcher exists to tag the submission, so the shell lane must not
+    // claim it: the recorded init-error rejection is the truthful answer
+    // (R5-8), not a bash execution of `/quit`.
+    expect(screen.getByText(/failed to initialize/)).toBeTruthy();
+    expect(screen.queryByText(/Queued/)).toBeNull();
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+    expect(onQuit).not.toHaveBeenCalled();
   });
 
   it('stops the turn and exits on a mid-turn quit instead of queueing it', async () => {

@@ -53,8 +53,18 @@ vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
   };
 });
 
-let currentChat: object = {};
-const llmClient = { getChat: () => currentChat };
+let currentChat: object | undefined = {};
+const llmClient = {
+  getChat: () => {
+    if (currentChat === undefined) {
+      // core's real shape (R5-7): getChat() throws while the client is
+      // uninitialized, instead of returning undefined.
+      throw new Error('Chat not initialized');
+    }
+    return currentChat;
+  },
+  isInitialized: () => currentChat !== undefined,
+};
 
 function makeConfig(usePty: boolean): Config {
   return {
@@ -273,6 +283,44 @@ describe('executeUserShell', () => {
       makeResult({ output: 'late\n', rawOutput: Buffer.from('late\n') }),
     );
     await done;
+    expect(addHistoryMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the command when the client is uninitialized at start (R5-7)', async () => {
+    // Boot timing (U-31): getChat() throws while uninitialized. The command
+    // itself never needs a chat, so the identity read must be guarded — an
+    // unguarded read rejects the whole execution before the command starts.
+    currentChat = undefined;
+    const { events, done, resolveResult } = setup();
+    resolveResult(
+      makeResult({ output: 'hi\n', rawOutput: Buffer.from('hi\n') }),
+    );
+    await done;
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'tool-end',
+      success: true,
+      summary: 'ok',
+    });
+    // Uninitialized never matches a live chat, so no history write either.
+    expect(addHistoryMock).not.toHaveBeenCalled();
+  });
+
+  it('lands a successful card when the chat is gone at completion (R5-7)', async () => {
+    const { events, done, resolveResult } = setup();
+    // /clear swapped (or dropped) the chat while the command ran: the
+    // completion check must consult isInitialized first, or getChat() throws
+    // inside the result chain and turns a finished command into an error.
+    currentChat = undefined;
+    resolveResult(
+      makeResult({ output: 'late\n', rawOutput: Buffer.from('late\n') }),
+    );
+    await done;
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'tool-end',
+      success: true,
+      summary: 'ok',
+    });
+    expect(events.some((event) => event.type === 'error')).toBe(false);
     expect(addHistoryMock).not.toHaveBeenCalled();
   });
 

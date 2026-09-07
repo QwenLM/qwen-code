@@ -31,7 +31,7 @@ import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 
-export function executeUserShell(
+export async function executeUserShell(
   config: Config,
   rawQuery: string,
   emit: (event: OpenTuiStreamEvent) => void,
@@ -71,8 +71,13 @@ export function executeUserShell(
   // A command can outlive the chat it started in: /clear swaps the chat
   // while the client object survives, so a late history write would inject
   // the previous session's output into the fresh chat. Identify the chat at
-  // start and skip the write when it is no longer current.
-  const chatAtStart = config.getGeminiClient().getChat();
+  // start and skip the write when it is no longer current. `getChat()`
+  // throws while the client is uninitialized (boot timing, U-31), so both
+  // identity reads are guarded — the command itself never needs a chat.
+  // Undefined never matches a live chat (R1-43), so an uninitialized start
+  // skips the write even if the chat arrives mid-run.
+  const client = config.getGeminiClient();
+  const chatAtStart = client.isInitialized() ? client.getChat() : undefined;
   let cumulative = '';
   let emittedText = '';
   let isBinaryStream = false;
@@ -189,7 +194,7 @@ export function executeUserShell(
           success,
           summary,
         });
-        if (config.getGeminiClient().getChat() === chatAtStart) {
+        if (client.isInitialized() && client.getChat() === chatAtStart) {
           addShellCommandToLlmHistory(
             config.getGeminiClient(),
             rawQuery,

@@ -603,6 +603,39 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('');
   });
 
+  it('one physical ! toggles shell mode exactly once on press+release (R5-3)', async () => {
+    // The parent's toggle is a relative flip, so a duplicated dispatch
+    // (kitty-protocol terminals report the release of a printable key too)
+    // is a net no-op and the mode ends up off. The release half must be
+    // ignored, exactly like every other printable-sequence consumer here.
+    let shellActive = false;
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onToggleShellMode={() => {
+          shellActive = !shellActive;
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: '1', sequence: '!', shift: true }),
+      );
+      lastKeyboardHandler()(
+        baseKeyEvent({
+          name: '1',
+          sequence: '!',
+          shift: true,
+          eventType: 'release',
+        }),
+      );
+    });
+    expect(shellActive).toBe(true);
+    expect(editor.plainText).toBe('');
+  });
+
   it('a non-empty buffer inserts ! instead of toggling (U-33)', async () => {
     render(
       <OpenTuiInputPrompt

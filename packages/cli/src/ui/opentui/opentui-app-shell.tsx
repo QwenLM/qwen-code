@@ -235,13 +235,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
   const runShellCommand = useCallback(
     (command: string) => {
-      if (!props.onTranscriptEvent) return;
+      const emit = props.onTranscriptEvent;
+      if (!emit) return;
       const controller = new AbortController();
       shellControllersRef.current.add(controller);
       return executeUserShell(
         config,
         command,
-        props.onTranscriptEvent,
+        emit,
         controller.signal,
         // The `!` row renders behind the 2-col input indicator, and the child
         // runs over that inner width (ink parity: it also passes the raw
@@ -251,12 +252,24 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           width: Math.max(terminalWidth - STATUS_INDICATOR_WIDTH, 10),
           height: terminalHeight,
         },
-      ).finally(() => {
-        shellControllersRef.current.delete(controller);
-        // The drain also waits for the shell lane, so a command finishing has
-        // to re-arm it for anything queued while the command held the gate.
-        setDeferredRevision((revision) => revision + 1);
-      });
+      )
+        .catch((error: unknown) => {
+          // executeUserShell reports its own failures; this guards the seam
+          // itself so a rejection can neither strand the controller in the
+          // gate set nor escape the fire-and-forget call sites (R5-7).
+          emit({
+            type: 'error',
+            text: `An unexpected error occurred: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        })
+        .finally(() => {
+          shellControllersRef.current.delete(controller);
+          // The drain also waits for the shell lane, so a command finishing has
+          // to re-arm it for anything queued while the command held the gate.
+          setDeferredRevision((revision) => revision + 1);
+        });
     },
     [config, props.onTranscriptEvent, terminalWidth, terminalHeight],
   );
@@ -403,15 +416,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // Slash and shell submissions held back while a model turn streams (ink's
   // message queue; a queued shell entry carries its routing so the drain
   // cannot be fooled by a mid-turn toggle).
-  const deferredCommandsRef = useRef<Array<{ text: string; shell?: boolean }>>(
-    [],
-  );
+  const deferredCommandsRef = useRef<
+    Array<{ text: string; shell?: boolean; prompt?: boolean }>
+  >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
   // ref so re-queueing behind a turn or a dialog does not re-trigger the
   // effect, but a push has to: the mid-turn gate awaits the registry, and a
   // verdict that lands after the idle edge would otherwise strand the command
   // until some future streaming transition.
   const [deferredRevision, setDeferredRevision] = useState(0);
+  // Guards one drain instance at a time (R5-6).
+  const drainingRef = useRef(false);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -517,16 +532,27 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       // a concurrent submission would race the command's LLM-history write
       // into a live turn's chat.
       if (streaming || shellControllersRef.current.size > 0) {
-        const shellEntry =
-          shellModeActive && !(await gateway.takesAsSlashCommand(submission));
+        const takesAsSlash = await gateway.takesAsSlashCommand(submission);
+        const shellEntry = shellModeActive && !takesAsSlash;
+        // A plain prompt submitted while a `!` command runs must not start a
+        // turn even when shell mode was toggled off meanwhile (Esc): the
+        // command's completion injects LLM history between sends, and a
+        // concurrent turn turns that write into a mid-turn addHistory
+        // (R5-5). Ink holds the same gate via isResponding covering the
+        // whole execution. Slash-form input is exempt — the dispatcher's own
+        // admission rule (quit, canRunDuringStreaming, ?btw fork) decides.
+        const blockedByRunningShell =
+          !takesAsSlash && shellControllersRef.current.size > 0;
         if (
           shellEntry ||
+          blockedByRunningShell ||
           (await gateway.mustDeferDuringStreaming(submission))
         ) {
           const command = submission.trim();
           deferredCommandsRef.current.push({
             text: command,
             shell: shellEntry,
+            ...(blockedByRunningShell && !shellEntry ? { prompt: true } : {}),
           });
           setDeferredRevision((revision) => revision + 1);
           notify(
@@ -593,34 +619,74 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     ) {
       return;
     }
+    // One drain at a time: a re-arm that lands mid-drain (a shell entry's own
+    // finally bumps the revision) must be a no-op, not a second instance
+    // racing the first on the gateway's single busy slot — the loser's
+    // command would be dropped with a busy rejection (R5-6). The queue is a
+    // ref, so the release below bumps the revision or entries queued behind
+    // a live drain strand.
+    if (drainingRef.current) return;
+    drainingRef.current = true;
     const pending = deferredCommandsRef.current;
     deferredCommandsRef.current = [];
     void (async () => {
-      for (const [i, entry] of pending.entries()) {
-        if (isExitInProgress()) return;
-        if (entry.shell) {
-          await runShellCommand(entry.text);
-          continue;
+      // A holdsUi pause re-queues the remainder for the turn/dialog it waits
+      // for; re-arming here would drain it before that owner even starts.
+      let paused = false;
+      try {
+        for (const [i, entry] of pending.entries()) {
+          if (isExitInProgress()) return;
+          if (entry.shell) {
+            await runShellCommand(entry.text);
+            continue;
+          }
+          if (entry.prompt) {
+            // A plain prompt the running-`!` gate held back (R5-5). Routed
+            // straight to the seam: dispatch would answer outcome=false and
+            // the drain drops that silently.
+            if (!onSubmitPrompt) {
+              notify('The live prompt turn is not wired in this shell.');
+              continue;
+            }
+            onSubmitPrompt(entry.text, undefined, {
+              submittedPrompt: entry.text || undefined,
+            });
+            // The turn it starts owns the drain until it ends, exactly like a
+            // dispatched submit_prompt outcome below.
+            if (i + 1 < pending.length) {
+              deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+              paused = true;
+            }
+            return;
+          }
+          const settlement = await gateway.dispatch(entry.text);
+          if (settlement.kind === 'rejected') {
+            notify(settlement.reason);
+            continue;
+          }
+          if (settlement.outcome === false) continue;
+          const outcome = settlement.outcome;
+          applyOutcome(outcome);
+          // A submit_prompt outcome starts a turn and an open_dialog outcome
+          // takes the UI over, so the commands behind either wait for that turn
+          // to end or that dialog to close rather than racing the stream or
+          // overwriting the dialog with a second setDialog().
+          const holdsUi =
+            outcome.kind === 'open_dialog' ||
+            (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
+          if (holdsUi && i + 1 < pending.length) {
+            deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+            paused = true;
+            return;
+          }
         }
-        const settlement = await gateway.dispatch(entry.text);
-        if (settlement.kind === 'rejected') {
-          notify(settlement.reason);
-          continue;
-        }
-        if (settlement.outcome === false) continue;
-        const outcome = settlement.outcome;
-        applyOutcome(outcome);
-        // A submit_prompt outcome starts a turn and an open_dialog outcome
-        // takes the UI over, so the commands behind either wait for that turn
-        // to end or that dialog to close rather than racing the stream or
-        // overwriting the dialog with a second setDialog().
-        const holdsUi =
-          outcome.kind === 'open_dialog' ||
-          (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
-        if (holdsUi && i + 1 < pending.length) {
-          deferredCommandsRef.current.unshift(...pending.slice(i + 1));
-          return;
-        }
+      } finally {
+        drainingRef.current = false;
+        // Entries that arrived mid-drain strand unless the completion re-arms
+        // the drain (the queue is a ref; a push alone triggers nothing) — but
+        // a holdsUi pause must not re-arm, or the remainder runs before the
+        // turn/dialog it waits for even starts (R5-6).
+        if (!paused) setDeferredRevision((revision) => revision + 1);
       }
     })();
   }, [

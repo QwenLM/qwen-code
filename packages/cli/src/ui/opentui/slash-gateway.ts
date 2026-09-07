@@ -21,6 +21,7 @@
  *    gate ({@link normalizeQuitSubmission}).
  */
 
+import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
@@ -104,7 +105,19 @@ export class OpenTuiSlashGateway {
    */
   async takesAsSlashCommand(text: string): Promise<boolean> {
     await this.ready;
-    return this.dispatcher?.takesAsSlashCommand(text.trim()) ?? false;
+    if (!this.dispatcher) {
+      // No registry to ask (failed init): mirror the real admission rule's
+      // shape so a slash-form submission still reaches dispatch and its
+      // recorded init-error rejection, instead of `?? false` tagging it for
+      // bash. A `/`-prefixed path keeps the shell lane via the same
+      // separator carve-out the dispatcher applies.
+      const trimmed = text.trim();
+      return (
+        trimmed.startsWith('?') ||
+        (trimmed.startsWith('/') && !hasSlashCommandPathSeparator(trimmed))
+      );
+    }
+    return this.dispatcher.takesAsSlashCommand(text.trim());
   }
 
   /** True while a dispatched command is still running. */

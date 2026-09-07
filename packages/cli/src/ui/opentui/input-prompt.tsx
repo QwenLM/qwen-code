@@ -870,6 +870,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     // next Enter/Tab.
     if (
       key.sequence === '!' &&
+      key.eventType !== 'release' &&
       el.plainText.length === 0 &&
       suggestions.length === 0 &&
       onToggleShellMode
