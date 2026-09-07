@@ -2430,7 +2430,9 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
   const subagentName =
     typeof rawOutput?.['subagentName'] === 'string'
       ? rawOutput['subagentName']
-      : undefined;
+      : typeof tool.args?.name === 'string'
+        ? tool.args.name
+        : undefined;
   const subagentType =
     typeof tool.args?.subagent_type === 'string'
       ? tool.args.subagent_type
@@ -2514,7 +2516,9 @@ export function getEnvironmentAgentTasks(
         const subagentName =
           typeof rawOutput?.['subagentName'] === 'string'
             ? rawOutput['subagentName']
-            : undefined;
+            : typeof tool.args?.name === 'string'
+              ? tool.args.name
+              : undefined;
         const taskId = taskIdsByToolUseId.get(tool.callId);
         const derivedTaskId = derivedTaskIdForTool(tool);
         // Completed background agents can lose their toolUseId / derived-id
@@ -2539,6 +2543,9 @@ export function getEnvironmentAgentTasks(
             task.toolUseId === tool.callId ||
             task.id === taskId ||
             task.id === derivedTaskId ||
+            (task.teamName != null &&
+              subagentName != null &&
+              task.label === subagentName) ||
             (!seenTaskIds.has(task.id) &&
               !isPreciselyClaimed(task) &&
               matchesLiveTaskContent(task)),
@@ -2562,10 +2569,12 @@ export function getEnvironmentAgentTasks(
             ? {
                 ...liveTask,
                 toolUseId: tool.callId,
-                label,
-                description: taskDescription || liveTask.description,
+                label: liveTask.teamName ? liveTask.label : label,
+                description: liveTask.teamName
+                  ? liveTask.description
+                  : taskDescription || liveTask.description,
                 ...(subagentType ? { subagentType } : {}),
-                ...(color ? { color } : {}),
+                ...(color && !liveTask.teamName ? { color } : {}),
               }
             : {
                 kind: 'agent',
@@ -6705,7 +6714,10 @@ export function App({
         consecutiveFailures = 0;
         if (
           agents.some(
-            (task) => task.status === 'running' || task.status === 'paused',
+            (task) =>
+              task.status === 'running' ||
+              task.status === 'idle' ||
+              task.status === 'paused',
           )
         ) {
           timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
@@ -16339,6 +16351,11 @@ export function App({
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     openPanel('settings');
+                  }}
+                  onOpenAgents={() => {
+                    closeMobileDrawer();
+                    setAgentsCreateScope(null);
+                    openPanel('agents');
                   }}
                   onOpenPlugins={() => {
                     closeMobileDrawer();

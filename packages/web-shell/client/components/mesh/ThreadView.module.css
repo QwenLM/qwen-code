@@ -65,6 +65,10 @@
   background: currentcolor;
 }
 
+.doneButton {
+  margin-inline-start: auto;
+}
+
 .body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
@@ -118,6 +122,36 @@
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.childRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.childRow span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.childRow:hover:not(:disabled) {
+  background: var(--secondary);
 }
 
 .posts {
@@ -251,6 +285,52 @@
 
 .runLink:hover {
   color: var(--foreground);
+}
+
+.runCancel {
+  margin-inline-start: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--status-attention-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.runError {
+  grid-column: 1 / span 2;
+  color: var(--status-attention-fg);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.transcriptPanel {
+  min-width: 0;
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 16px;
+}
+
+.transcriptHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-block-end: 8px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.transcriptContent {
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .pastToggle {

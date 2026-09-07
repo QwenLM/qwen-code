@@ -21,6 +21,7 @@ export * from './background-tasks.js';
 export * from './background-agent-resume.js';
 export {
   MAX_AGENT_TRACE_NODES,
+  getAgentJsonlPath,
   getSubagentSessionDir,
   getSubagentsRootDir,
   readAgentMeta,
@@ -45,7 +46,10 @@ export { parseMentions } from './mesh/mentions.js';
 export { postMessage } from './mesh/thread-actions.js';
 export { resolveThreadStatus } from './mesh/thread-status.js';
 export { hasLiveDescendant } from './mesh/run-lifecycle.js';
-export { createMeshDispatchPort } from './mesh/dispatch-port.js';
+export {
+  createMeshDispatchPort,
+  meshBackgroundAgentId,
+} from './mesh/dispatch-port.js';
 export { dispatchOnce } from './mesh/dispatcher.js';
 export { launchMeshAgent } from './mesh/launcher.js';
 export type { MeshAgentLaunchResult } from './mesh/launcher.js';

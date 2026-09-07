@@ -152,11 +152,18 @@ the extra bookings. A separate draft containing the literal word `@mentions`
 was correctly rejected as an unknown agent name; creation-time routing preview
 is not implemented yet.
 
-This proves the roster/create/list/detail/reply-preview and live-dispatch demo
-path only. Cancellation, transcript-slice reading, tombstoned-agent visuals,
-the blocked-question visual, and CI screenshots remain open, so the full
-step-9 gate is not claimed. No local unit tests, lint, typecheck, or build were
-run for this demo-first slice.
+The same live daemon then covered the remaining visible step-9 paths. A fresh
+run recorded transcript offsets `16990..22071`; opening its history row showed
+only that byte range beside the still-visible thread. A second agent called
+`thread_block` and the page rendered both `Which target file should I inspect?`
+and the resolver reason that the run was waiting for a person. Cancelling a
+running agent changed the row from `working` to `stopping`, reached terminal
+`cancelled`, and the thread could then be marked done. Deleting `alice-demo`
+removed it from the roster while its existing post remained attributed as
+`alice-demo (removed)`. The first-class Agents sidebar entry from #11140 and
+inline child-thread navigation were also exercised in the same browser. No
+local unit tests, lint, typecheck, or build were run; the remaining gate item is
+the branch CI visual evidence.
 
 ### Step 10 — Channel notifications
 

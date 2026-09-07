@@ -20,8 +20,12 @@
  * avoid cold-reviving a body that was still live.
  */
 
+import { stat } from 'node:fs/promises';
+
 import type { Config } from '../../config/config.js';
+import { isNodeError } from '../../utils/errors.js';
 import {
+  getAgentJsonlPath,
   getAgentMetaPath,
   patchAgentMeta,
   readAgentMeta,
@@ -36,8 +40,34 @@ import type {
 import type { MeshAgent } from './types.js';
 
 /** Deterministic per identity, so one agent has exactly one body. */
-export function meshBackgroundAgentId(agent: MeshAgent): string {
+export function meshBackgroundAgentId(agent: Pick<MeshAgent, 'id'>): string {
   return `mesh-${agent.id}`;
+}
+
+async function transcriptSize(config: Config, agent: MeshAgent): Promise<number> {
+  try {
+    return (
+      await stat(
+        getAgentJsonlPath(
+          config.storage.getProjectDir(),
+          config.getSessionId(),
+          meshBackgroundAgentId(agent),
+        ),
+      )
+    ).size;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return 0;
+    throw error;
+  }
+}
+
+function withTranscriptStart(
+  result: MeshStartResult,
+  transcriptStartOffset: number,
+): MeshStartResult {
+  return result.status === 'started'
+    ? { ...result, transcriptStartOffset }
+    : result;
 }
 
 /**
@@ -172,6 +202,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
       contextThroughSequence,
     }) {
       try {
+        const transcriptStartOffset = await transcriptSize(config, agent);
         const binding: MeshRunContext = {
           workspaceId,
           agentId: agent.id,
@@ -195,6 +226,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
                 status: 'started',
                 sessionId: result.sessionId,
                 consumedOnStart: true,
+                transcriptStartOffset,
               };
             }
             if (result.status === 'capacity_wait') {
@@ -225,10 +257,14 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
               status: 'started',
               sessionId: config.getSessionId(),
               consumedOnStart: true,
+              transcriptStartOffset,
             };
           }
           case 'continue_completed':
-            return await continueCompleted(config, agent, prompt, runId);
+            return withTranscriptStart(
+              await continueCompleted(config, agent, prompt, runId),
+              transcriptStartOffset,
+            );
           default: {
             const exhaustive: never = action;
             return failure(

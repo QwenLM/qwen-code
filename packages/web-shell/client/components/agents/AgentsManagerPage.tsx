@@ -629,6 +629,9 @@ export function AgentsManagerPage({
               {t('agents.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+              {t('agents.description')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground tabular-nums">
               {t('agent.count', { count: agents.length })}
             </p>
           </div>

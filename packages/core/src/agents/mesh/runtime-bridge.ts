@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stat } from 'node:fs/promises';
+
 import { readAgentMeta } from '../agent-transcript.js';
 import {
   AgentEventType,
@@ -20,12 +22,23 @@ import {
   runWithMeshRunContext,
   type MeshRunContext,
 } from './run-context.js';
+import { isNodeError } from '../../utils/errors.js';
+
+async function transcriptSize(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return 0;
+    throw error;
+  }
+}
 
 export async function runMeshTurn<T>(input: {
   projectRoot: string;
   context: MeshRunContext;
   emitter: AgentEventEmitter;
   metaPath: string;
+  transcriptPath: string;
   body: () => Promise<T>;
 }): Promise<T> {
   let writes: Promise<unknown> = Promise.resolve();
@@ -89,6 +102,15 @@ export async function runMeshTurn<T>(input: {
           meta?.lastError ??
           'Background agent turn ended without a terminal status.',
         failureStage: 'runtime',
+      };
+    }
+    try {
+      outcome.transcriptEndOffset = await transcriptSize(input.transcriptPath);
+    } catch (error) {
+      outcome = {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+        failureStage: 'transcript',
       };
     }
     await finishRun(

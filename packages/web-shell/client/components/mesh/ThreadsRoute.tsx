@@ -16,7 +16,11 @@ import {
   type NewMeshAgent,
   type NewMeshThread,
 } from './ThreadsPage';
-import { ThreadView, type ThreadDetailView } from './ThreadView';
+import {
+  ThreadView,
+  type ThreadDetailView,
+  type TranscriptSliceView,
+} from './ThreadView';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -31,12 +35,19 @@ export interface ThreadsApi {
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewMeshAgent): Promise<unknown>;
+  deleteAgent(id: string): Promise<unknown>;
   createThread(input: NewMeshThread): Promise<CreateThreadResult>;
   previewReply(
     id: string,
     text: string,
   ): Promise<{ targets: RoutingPreviewTarget[] }>;
   postReply(id: string, text: string): Promise<unknown>;
+  markDone(id: string): Promise<unknown>;
+  cancelRun(threadId: string, runId: string): Promise<unknown>;
+  getRunTranscript(
+    threadId: string,
+    runId: string,
+  ): Promise<TranscriptSliceView>;
 }
 
 function createThreadsHttpApi(
@@ -67,11 +78,23 @@ function createThreadsHttpApi(
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
+    deleteAgent: (id) =>
+      request(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     createThread: (input) => post('/threads', input),
     previewReply: (id, text) =>
       post(`/threads/${encodeURIComponent(id)}/preview`, { text }),
     postReply: (id, text) =>
       post(`/threads/${encodeURIComponent(id)}/posts`, { text }),
+    markDone: (id) => post(`/threads/${encodeURIComponent(id)}/done`, {}),
+    cancelRun: (threadId, runId) =>
+      post(
+        `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        {},
+      ),
+    getRunTranscript: (threadId, runId) =>
+      request(
+        `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/transcript`,
+      ),
   };
 }
 
@@ -103,6 +126,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
   const [draft, setDraft] = useState('');
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
+  const [transcript, setTranscript] = useState<
+    TranscriptSliceView | undefined
+  >();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const draftRef = useRef(draft);
@@ -169,23 +195,58 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
 
   if (openId && detail) {
     return (
-      <ThreadView
-        thread={detail}
-        draft={draft}
-        onDraftChange={setDraft}
-        onReply={() =>
-          void mutate(async () => {
-            if (!draft.trim()) return;
-            await client.postReply(openId, draft);
-            setDraft('');
-            setPreview(undefined);
-          })
-        }
-        onBack={() => setOpenId(undefined)}
-        onOpenTranscript={onOpenTranscript ?? (() => {})}
-        replyPending={pending}
-        {...(preview ? { preview } : {})}
-      />
+      <>
+        {error ? (
+          <p role="alert" className="mb-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+        <ThreadView
+          thread={detail}
+          draft={draft}
+          onDraftChange={setDraft}
+          onReply={() =>
+            void mutate(async () => {
+              if (!draft.trim()) return;
+              await client.postReply(openId, draft);
+              setDraft('');
+              setPreview(undefined);
+            })
+          }
+          onBack={() => {
+            setTranscript(undefined);
+            setOpenId(undefined);
+          }}
+          onOpenThread={(threadId) => {
+            setTranscript(undefined);
+            setOpenId(threadId);
+          }}
+          onOpenTranscript={(runId) => {
+            onOpenTranscript?.(runId);
+            void client
+              .getRunTranscript(openId, runId)
+              .then(setTranscript)
+              .catch((cause) =>
+                setError(
+                  cause instanceof Error ? cause.message : String(cause),
+                ),
+              );
+          }}
+          onCloseTranscript={() => setTranscript(undefined)}
+          onCancelRun={(runId) =>
+            void mutate(() => client.cancelRun(openId, runId))
+          }
+          onMarkDone={() =>
+            void mutate(async () => {
+              await client.markDone(openId);
+              setTranscript(undefined);
+            })
+          }
+          replyPending={pending}
+          {...(preview ? { preview } : {})}
+          {...(transcript ? { transcript } : {})}
+        />
+      </>
     );
   }
 
@@ -202,6 +263,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
         pending={pending}
         onOpenThread={setOpenId}
         onCreateAgent={(input) => void mutate(() => client.createAgent(input))}
+        onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
         onCreateThread={(input) =>
           void mutate(async () => {
             const created = await client.createThread(input);

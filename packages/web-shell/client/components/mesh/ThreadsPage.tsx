@@ -21,6 +21,7 @@ export interface ThreadsPageProps {
   threads: readonly ThreadSummaryView[];
   onOpenThread: (threadId: string) => void;
   onCreateAgent: (input: NewMeshAgent) => void;
+  onDeleteAgent: (agentId: string) => void;
   onCreateThread: (input: NewMeshThread) => void;
   pending?: boolean;
   loading?: boolean;
@@ -120,6 +121,7 @@ export function ThreadsPage({
   threads,
   onOpenThread,
   onCreateAgent,
+  onDeleteAgent,
   onCreateThread,
   pending,
   loading,
@@ -220,9 +222,33 @@ export function ThreadsPage({
                   aria-hidden="true"
                 />
                 <strong>{agent.name}</strong>
-                <span className={styles.agentDescription}>{agent.description || 'general agent'}</span>
-                <span className={styles.agentActivity}>{agent.workingOn ? `working · ${agent.workingOn.title}` : 'idle'}</span>
-                <span className={styles.agentWaiting}>{agent.waiting ? `${agent.waiting} waiting` : '—'}</span>
+                <span className={styles.agentDescription}>
+                  {agent.description || 'general agent'}
+                </span>
+                <span className={styles.agentActivity}>
+                  {agent.workingOn
+                    ? `working · ${agent.workingOn.title}`
+                    : 'idle'}
+                </span>
+                <span className={styles.agentWaiting}>
+                  {agent.waiting ? `${agent.waiting} waiting` : '—'}
+                </span>
+                <button
+                  type="button"
+                  className={styles.agentRemove}
+                  disabled={Boolean(agent.workingOn || agent.waiting)}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Remove agent "${agent.name}"? Existing thread posts keep its name.`,
+                      )
+                    ) {
+                      onDeleteAgent(agent.id);
+                    }
+                  }}
+                >
+                  Remove
+                </button>
               </div>
             ))
           )}

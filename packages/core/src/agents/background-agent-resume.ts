@@ -1433,6 +1433,7 @@ export class BackgroundAgentResumeService {
                     context: meshRun,
                     emitter: bgEmitter,
                     metaPath,
+                    transcriptPath: outputFile,
                     body,
                   })
               : body,

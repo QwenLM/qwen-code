@@ -24,6 +24,7 @@ export interface ThreadPostView {
   sequence: number;
   authorKind: 'human' | 'agent' | 'system';
   authorName: string;
+  authorDeleted?: boolean;
   text: string;
   at: number;
 }
@@ -37,12 +38,28 @@ export interface ThreadDetailView {
   reason: string;
   posts: readonly ThreadPostView[];
   runs: readonly RunView[];
+  children?: readonly ThreadChildView[];
   budget: {
     turnsUsed: number;
     turnLimit: number;
     tokensUsed: number;
     tokenLimit: number;
   };
+}
+
+export interface ThreadChildView {
+  id: string;
+  title: string;
+  status: ThreadDetailView['status'];
+  reason: string;
+}
+
+export interface TranscriptSliceView {
+  runId: string;
+  agentName: string;
+  startOffset: number;
+  endOffset: number;
+  content: string;
 }
 
 export interface ThreadViewProps {
@@ -53,7 +70,12 @@ export interface ThreadViewProps {
   onDraftChange: (draft: string) => void;
   onReply: () => void;
   onBack: () => void;
+  onOpenThread?: (threadId: string) => void;
   onOpenTranscript: (runId: string) => void;
+  onCloseTranscript?: () => void;
+  onCancelRun?: (runId: string) => void;
+  onMarkDone?: () => void;
+  transcript?: TranscriptSliceView;
   replyPending?: boolean;
 }
 
@@ -67,9 +89,11 @@ function formatTime(at: number): string {
 function RunRowView({
   row,
   onOpenTranscript,
+  onCancelRun,
 }: {
   row: RunRow;
   onOpenTranscript: (runId: string) => void;
+  onCancelRun?: (runId: string) => void;
 }) {
   const stateClass = row.outstanding
     ? `${styles.runState} ${styles.runStateOutstanding}`
@@ -86,7 +110,18 @@ function RunRowView({
       }
     >
       <span className={styles.runAgent}>{row.run.agentName}</span>
-      <span className={stateClass}>{row.state}</span>
+      <span className={stateClass}>
+        {row.state}
+        {row.live && row.run.status !== 'cancelling' && onCancelRun ? (
+          <button
+            type="button"
+            className={styles.runCancel}
+            onClick={() => onCancelRun(row.run.id)}
+          >
+            Cancel
+          </button>
+        ) : null}
+      </span>
       <span className={styles.runTrigger}>
         {row.run.trigger}
         {row.run.hasTranscriptSlice ? (
@@ -102,7 +137,32 @@ function RunRowView({
           </>
         ) : null}
       </span>
+      {row.run.error ? (
+        <span className={styles.runError}>{row.run.error}</span>
+      ) : null}
     </div>
+  );
+}
+
+function TranscriptPanel({
+  transcript,
+  onClose,
+}: {
+  transcript: TranscriptSliceView;
+  onClose: () => void;
+}) {
+  return (
+    <aside className={styles.transcriptPanel}>
+      <div className={styles.transcriptHeader}>
+        <strong>
+          run {transcript.runId} · {transcript.agentName} · this thread only
+        </strong>
+        <button type="button" className={styles.runLink} onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <pre className={styles.transcriptContent}>{transcript.content}</pre>
+    </aside>
   );
 }
 
@@ -170,7 +230,12 @@ export function ThreadView({
   onDraftChange,
   onReply,
   onBack,
+  onOpenThread,
   onOpenTranscript,
+  onCloseTranscript,
+  onCancelRun,
+  onMarkDone,
+  transcript,
   replyPending,
 }: ThreadViewProps) {
   const { live, past } = useMemo(
@@ -203,6 +268,16 @@ export function ThreadView({
             {working.run.agentName} working
           </span>
         ) : null}
+        {thread.status !== 'done' && onMarkDone ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className={styles.doneButton}
+            onClick={onMarkDone}
+          >
+            Mark done
+          </Button>
+        ) : null}
       </header>
 
       <div className={styles.body}>
@@ -222,6 +297,24 @@ export function ThreadView({
             <p className={styles.threadBody}>{thread.body}</p>
           ) : null}
 
+          {thread.children && thread.children.length > 0 ? (
+            <section className={styles.children}>
+              <h2 className={styles.sectionTitle}>Sub-threads</h2>
+              {thread.children.map((child) => (
+                <button
+                  key={child.id}
+                  type="button"
+                  className={styles.childRow}
+                  onClick={() => onOpenThread?.(child.id)}
+                  disabled={!onOpenThread}
+                >
+                  <strong>{child.title}</strong>
+                  <span>{child.reason}</span>
+                </button>
+              ))}
+            </section>
+          ) : null}
+
           <div className={styles.posts}>
             {thread.posts.map((post) => (
               <article
@@ -233,13 +326,12 @@ export function ThreadView({
                 }
               >
                 <span className={styles.sequence}>{post.sequence}</span>
-                <span className={styles.author}>{post.authorName}</span>
+                <span className={styles.author}>
+                  {post.authorName}
+                  {post.authorDeleted ? ' (removed)' : ''}
+                </span>
                 <span className={styles.time}>{formatTime(post.at)}</span>
-                {/* A system trigger is a ledger entry: its author line already
-                    says what happened, so it has no body to render. */}
-                {post.authorKind === 'system' ? null : (
-                  <p className={styles.postText}>{post.text}</p>
-                )}
+                <p className={styles.postText}>{post.text}</p>
               </article>
             ))}
           </div>
@@ -267,53 +359,62 @@ export function ThreadView({
           </div>
         </div>
 
-        <aside className={styles.sidebar}>
-          <section>
-            <h2 className={styles.sectionTitle}>Runs</h2>
-            {live.length === 0 && past.length === 0 ? (
-              <p className={styles.budgetLine}>
-                Nothing has run on this thread yet.
-              </p>
-            ) : null}
-            {live.map((row) => (
-              <RunRowView
-                key={row.run.id}
-                row={row}
-                onOpenTranscript={onOpenTranscript}
-              />
-            ))}
-            {past.length > 0 ? (
-              <>
-                {showPast
-                  ? past.map((row) => (
-                      <RunRowView
-                        key={row.run.id}
-                        row={row}
-                        onOpenTranscript={onOpenTranscript}
-                      />
-                    ))
-                  : null}
-                <button
-                  type="button"
-                  className={styles.pastToggle}
-                  onClick={() => setShowPast((open) => !open)}
-                  aria-expanded={showPast}
-                >
+        {transcript ? (
+          <TranscriptPanel
+            transcript={transcript}
+            onClose={onCloseTranscript ?? (() => {})}
+          />
+        ) : (
+          <aside className={styles.sidebar}>
+            <section>
+              <h2 className={styles.sectionTitle}>Runs</h2>
+              {live.length === 0 && past.length === 0 ? (
+                <p className={styles.budgetLine}>
+                  Nothing has run on this thread yet.
+                </p>
+              ) : null}
+              {live.map((row) => (
+                <RunRowView
+                  key={row.run.id}
+                  row={row}
+                  onOpenTranscript={onOpenTranscript}
+                  {...(onCancelRun ? { onCancelRun } : {})}
+                />
+              ))}
+              {past.length > 0 ? (
+                <>
                   {showPast
-                    ? 'Hide past runs'
-                    : `Show past runs (${past.length})`}
-                </button>
-              </>
-            ) : null}
-          </section>
+                    ? past.map((row) => (
+                        <RunRowView
+                          key={row.run.id}
+                          row={row}
+                          onOpenTranscript={onOpenTranscript}
+                          {...(onCancelRun ? { onCancelRun } : {})}
+                        />
+                      ))
+                    : null}
+                  <button
+                    type="button"
+                    className={styles.pastToggle}
+                    onClick={() => setShowPast((open) => !open)}
+                    aria-expanded={showPast}
+                  >
+                    {showPast
+                      ? 'Hide past runs'
+                      : `Show past runs (${past.length})`}
+                  </button>
+                </>
+              ) : null}
+            </section>
 
-          <section>
-            <h2 className={styles.sectionTitle}>Budget</h2>
-            <p className={styles.budgetLine}>{budget.turns}</p>
-            <p className={styles.budgetLine}>{budget.tokens}</p>
-            <p className={styles.budgetLine}>{budget.scope}</p>
-          </section>
-        </aside>
+            <section>
+              <h2 className={styles.sectionTitle}>Budget</h2>
+              <p className={styles.budgetLine}>{budget.turns}</p>
+              <p className={styles.budgetLine}>{budget.tokens}</p>
+              <p className={styles.budgetLine}>{budget.scope}</p>
+            </section>
+          </aside>
+        )}
       </div>
     </div>
   );

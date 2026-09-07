@@ -384,6 +384,7 @@ export async function finishRunInTransaction(
       status: 'completed' | 'failed' | 'cancelled';
       error?: string;
       failureStage?: string;
+      transcriptEndOffset?: number;
     };
     now?: number;
   },
@@ -412,6 +413,9 @@ export async function finishRunInTransaction(
             ...(input.outcome.error ? { error: input.outcome.error } : {}),
             ...(input.outcome.failureStage
               ? { failureStage: input.outcome.failureStage }
+              : {}),
+            ...(input.outcome.transcriptEndOffset !== undefined
+              ? { transcriptEndOffset: input.outcome.transcriptEndOffset }
               : {}),
           }
         : run,

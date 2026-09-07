@@ -24,6 +24,8 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
+import { open } from 'node:fs/promises';
+
 import type {
   Application,
   Request,
@@ -47,6 +49,9 @@ import {
   HUMAN_AUTHOR_ID,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
+  Storage,
+  getAgentJsonlPath,
+  meshBackgroundAgentId,
   type MeshAgent,
   type Thread,
   type ThreadRun,
@@ -120,8 +125,31 @@ function runView(thread: Thread, run: ThreadRun, agents: readonly MeshAgent[]) {
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
     hasTranscriptSlice:
-      run.transcriptStartOffset !== undefined && run.sessionId !== undefined,
+      run.transcriptStartOffset !== undefined &&
+      run.transcriptEndOffset !== undefined &&
+      run.sessionId !== undefined,
   };
+}
+
+async function readTranscriptSlice(
+  path: string,
+  startOffset: number,
+  endOffset: number,
+): Promise<string> {
+  const length = endOffset - startOffset;
+  const buffer = Buffer.alloc(length);
+  const handle = await open(path, 'r');
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, length, startOffset);
+    if (bytesRead !== length) {
+      throw new Error(
+        `Transcript ended at ${startOffset + bytesRead}; expected ${endOffset}.`,
+      );
+    }
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -311,10 +339,24 @@ export function registerMeshRoutes(
           sequence: message.sequence,
           authorKind: message.authorKind,
           authorName: message.authorNameSnapshot,
+          authorDeleted:
+            message.authorKind === 'agent' &&
+            !agents.some((agent) => agent.id === message.from),
           text: message.text,
           at: message.at,
         })),
         runs: thread.runs.map((run) => runView(thread, run, agents)),
+        children: threads
+          .filter((candidate) => candidate.parentThreadId === thread.id)
+          .map((candidate) => {
+            const childResolution = resolve(candidate, threads);
+            return {
+              id: candidate.id,
+              title: candidate.title,
+              status: childResolution.status,
+              reason: childResolution.reason,
+            };
+          }),
         budget: {
           turnsUsed: thread.autoTurnsUsed,
           turnLimit: DEFAULT_THREAD_AUTO_TURN_BUDGET,
@@ -326,6 +368,62 @@ export function registerMeshRoutes(
       fail(res, error);
     }
   });
+
+  app.get(
+    `${prefix}/threads/:id/runs/:runId/transcript`,
+    async (req: Request, res: Response) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        const thread = await readThread(
+          runtime.workspaceCwd,
+          String(req.params['id']),
+        );
+        const run = thread?.runs.find(
+          (candidate) => candidate.id === String(req.params['runId']),
+        );
+        if (!thread || !run) {
+          res.status(404).json({ error: 'run_not_found' });
+          return;
+        }
+        const { sessionId, transcriptStartOffset, transcriptEndOffset } = run;
+        if (
+          !sessionId ||
+          transcriptStartOffset === undefined ||
+          transcriptEndOffset === undefined ||
+          transcriptEndOffset < transcriptStartOffset
+        ) {
+          res.status(409).json({ error: 'transcript_slice_unavailable' });
+          return;
+        }
+        const projectDir = new Storage(
+          runtime.workspaceCwd,
+          runtime.sessionRuntimeBaseDir,
+        ).getProjectDir();
+        const path = getAgentJsonlPath(
+          projectDir,
+          sessionId,
+          meshBackgroundAgentId({ id: run.agentId }),
+        );
+        res.json({
+          runId: run.id,
+          agentName: agentName(
+            await readMeshAgents(runtime.workspaceCwd),
+            run.agentId,
+          ),
+          startOffset: transcriptStartOffset,
+          endOffset: transcriptEndOffset,
+          content: await readTranscriptSlice(
+            path,
+            transcriptStartOffset,
+            transcriptEndOffset,
+          ),
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
 
   /**
    * What a draft reply would do, without doing it.
@@ -532,6 +630,114 @@ export function registerMeshRoutes(
     }
   });
 
+  app.delete(
+    `${prefix}/agents/:id`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const agentId = String(req.params['id']);
+      try {
+        const [{ threads }, agents] = await Promise.all([
+          listThreads(runtime.workspaceCwd),
+          readMeshAgents(runtime.workspaceCwd),
+        ]);
+        const agent = agents.find((candidate) => candidate.id === agentId);
+        if (!agent) {
+          res.status(404).json({ error: 'agent_not_found' });
+          return;
+        }
+        if (
+          threads.some((thread) =>
+            thread.runs.some(
+              (run) =>
+                run.agentId === agentId && LIVE_RUN_STATUSES.has(run.status),
+            ),
+          )
+        ) {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
+        await updateMeshAgents(runtime.workspaceCwd, (current) =>
+          current.filter((candidate) => candidate.id !== agentId),
+        );
+        res.json({ id: agentId, deleted: true });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.post(
+    `${prefix}/threads/:id/runs/:runId/cancel`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const threadId = String(req.params['id']);
+      const runId = String(req.params['runId']);
+      try {
+        const thread = await readThread(runtime.workspaceCwd, threadId);
+        const run = thread?.runs.find((candidate) => candidate.id === runId);
+        if (!thread || !run) {
+          res.status(404).json({ error: 'run_not_found' });
+          return;
+        }
+        if (run.status === 'queued') {
+          await updateThread(runtime.workspaceCwd, threadId, (current) => ({
+            ...current,
+            runs: current.runs.map((candidate) =>
+              candidate.id === runId && candidate.status === 'queued'
+                ? {
+                    ...candidate,
+                    status: 'cancelled' as const,
+                    endedAt: Date.now(),
+                  }
+                : candidate,
+            ),
+          }));
+          res.json({ runId, cancelled: true, status: 'cancelled' });
+          return;
+        }
+        if (run.status === 'cancelling') {
+          res.json({ runId, cancelled: true, status: 'cancelling' });
+          return;
+        }
+        if (
+          !run.sessionId ||
+          (run.status !== 'running' && run.status !== 'finishing')
+        ) {
+          res.status(409).json({ error: 'run_not_cancellable' });
+          return;
+        }
+        const result = await runtime.bridge.cancelSessionTask(
+          run.sessionId,
+          meshBackgroundAgentId({ id: run.agentId }),
+          'agent',
+        );
+        if (result.cancelled) {
+          await updateThread(runtime.workspaceCwd, threadId, (current) => ({
+            ...current,
+            runs: current.runs.map((candidate) =>
+              candidate.id === runId &&
+              (candidate.status === 'running' ||
+                candidate.status === 'finishing')
+                ? { ...candidate, status: 'cancelling' as const }
+                : candidate,
+            ),
+          }));
+        }
+        res.json({
+          runId,
+          cancelled: result.cancelled,
+          status: result.cancelled ? 'cancelling' : run.status,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
   /**
    * Marks a thread done, refusing while a descendant is still open.
    *
@@ -539,48 +745,71 @@ export function registerMeshRoutes(
    * looked at. The refusal names the descendants so the reader can go finish
    * them rather than guessing which one is holding this open.
    */
-  app.post(`${prefix}/threads/:id/done`, deps.mutate({ strict: true }), async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const threadId = String(req.params['id']);
-      const { threads } = await listThreads(root);
-      const target = threads.find((thread) => thread.id === threadId);
-      if (!target) {
-        res.status(404).json({ error: 'thread_not_found' });
-        return;
+  app.post(
+    `${prefix}/threads/:id/done`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const root = runtime.workspaceCwd;
+      try {
+        const threadId = String(req.params['id']);
+        const { threads } = await listThreads(root);
+        const target = threads.find((thread) => thread.id === threadId);
+        if (!target) {
+          res.status(404).json({ error: 'thread_not_found' });
+          return;
+        }
+        if (
+          target.runs.some(
+            (run) =>
+              run.status === 'running' ||
+              run.status === 'finishing' ||
+              run.status === 'cancelling',
+          )
+        ) {
+          res.status(409).json({ error: 'thread_has_live_work' });
+          return;
+        }
+        const byId = new Map(threads.map((thread) => [thread.id, thread]));
+        const isDescendant = (candidate: Thread) => {
+          const seen = new Set<string>();
+          let parentId = candidate.parentThreadId;
+          while (parentId && !seen.has(parentId)) {
+            if (parentId === threadId) return true;
+            seen.add(parentId);
+            parentId = byId.get(parentId)?.parentThreadId;
+          }
+          return false;
+        };
+        const openDescendants = threads.filter(
+          (thread) => thread.status !== 'done' && isDescendant(thread),
+        );
+        if (openDescendants.length > 0) {
+          res.status(409).json({
+            error: 'descendants_not_done',
+            descendants: openDescendants.map((thread) => ({
+              id: thread.id,
+              title: thread.title,
+            })),
+          });
+          return;
+        }
+        const updated = await updateThread(root, threadId, (thread) => ({
+          ...thread,
+          status: 'done',
+          runs: thread.runs.map((run) =>
+            run.status === 'queued'
+              ? { ...run, status: 'cancelled' as const, endedAt: Date.now() }
+              : run,
+          ),
+        }));
+        res.json({ id: updated.id, status: updated.status });
+      } catch (error) {
+        fail(res, error);
       }
-      const openDescendants = threads.filter(
-        (thread) =>
-          thread.id !== threadId &&
-          thread.parentThreadId === threadId &&
-          thread.status !== 'done',
-      );
-      if (openDescendants.length > 0) {
-        res.status(409).json({
-          error: 'descendants_not_done',
-          descendants: openDescendants.map((thread) => ({
-            id: thread.id,
-            title: thread.title,
-          })),
-        });
-        return;
-      }
-      const updated = await updateThread(root, threadId, (thread) => ({
-        ...thread,
-        status: 'done',
-        runs: thread.runs.map((run) =>
-          run.status === 'queued'
-            ? { ...run, status: 'cancelled' as const, endedAt: Date.now() }
-            : run,
-        ),
-      }));
-      res.json({ id: updated.id, status: updated.status });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
+    },
+  );
 
   app.post(`${prefix}/threads/:id/posts`, deps.mutate({ strict: true }), async (req, res) => {
     const runtime = runtimeFor(req, res);

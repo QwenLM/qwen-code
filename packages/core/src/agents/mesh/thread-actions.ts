@@ -624,6 +624,7 @@ export async function finishRun(
     status: 'completed' | 'failed' | 'cancelled';
     error?: string;
     failureStage?: string;
+    transcriptEndOffset?: number;
   },
   now = Date.now(),
 ): Promise<Thread> {

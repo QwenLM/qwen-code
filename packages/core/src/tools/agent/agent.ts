@@ -3842,6 +3842,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                           context: meshRun,
                           emitter: bgEventEmitter,
                           metaPath,
+                          transcriptPath: jsonlPath,
                           body,
                         })
                     : body,

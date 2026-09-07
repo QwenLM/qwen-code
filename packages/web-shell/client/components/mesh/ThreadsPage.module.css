@@ -73,7 +73,7 @@
 
 .agentRow {
   display: grid;
-  grid-template-columns: 10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  grid-template-columns: 10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   min-height: 34px;
@@ -110,6 +110,25 @@
   font-variant-numeric: tabular-nums;
 }
 
+.agentRemove {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.agentRemove:hover:not(:disabled) {
+  color: var(--status-attention-fg);
+}
+
+.agentRemove:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .emptyRoster {
   padding: 8px;
   font-size: 13px;
@@ -117,7 +136,7 @@
 
 @media (max-width: 720px) {
   .agentRow {
-    grid-template-columns: 10px minmax(80px, 1fr) auto;
+    grid-template-columns: 10px minmax(80px, 1fr) auto auto;
   }
 
   .agentDescription,
