@@ -522,13 +522,14 @@ action on the child caused it.
 Pre-existing on this branch (five production files plus two tests; nothing
 starts an agent yet):
 
-| File                                      | Responsibility                                 |
-| ----------------------------------------- | ---------------------------------------------- |
-| `core/src/agents/mesh/types.ts`           | Entities and limits                            |
-| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD               |
-| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                            |
-| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                        |
-| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock |
+| File                                      | Responsibility                                     |
+| ----------------------------------------- | -------------------------------------------------- |
+| `core/src/agents/mesh/types.ts`           | Entities and limits                                |
+| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD                   |
+| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                                |
+| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                            |
+| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock     |
+| `core/src/agents/mesh/thread-status.ts`   | Aggregate status over every run's close obligation |
 
 ### 5.1 Local review correction — committed and verified
 
