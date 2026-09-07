@@ -374,8 +374,8 @@ test('polls an expanded workspace once per 30 s tick and not faster @smoke', asy
   // loader, any connection-settle re-fetch) from eating into the interval
   // the assertions measure: every startup timer is pinned to one fake
   // instant, and nothing fires until runFor below.
-  await page.clock.install();
-  await page.clock.pauseAt(Date.now());
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
+  await page.clock.pauseAt(new Date('2026-01-01T01:00:00.000Z'));
   await gotoSession(page, scenario, daemon);
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
