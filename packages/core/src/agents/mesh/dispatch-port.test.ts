@@ -43,6 +43,9 @@ function makeConfig(
   };
   const config = {
     getProjectRoot: () => '/workspace',
+    // #11255 moved the sidecar lookup under the runtime project dir; the mock
+    // has to offer it or every start reads as a launch failure.
+    storage: { getProjectDir: () => '/workspace-runtime' },
     getBackgroundTaskRegistry: () => registry,
     getSessionId: () => 'se_host',
     reviveCompletedBackgroundAgent: vi.fn(async () => overrides.revive),

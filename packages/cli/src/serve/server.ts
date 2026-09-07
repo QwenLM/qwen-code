@@ -15,6 +15,7 @@ import {
   Storage,
   WebTerminalRegistry,
   type DurableCronTask,
+  readMeshAgents,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
@@ -147,6 +148,7 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { startMeshHostSessionOwner } from './mesh/mesh-host-session.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -3245,6 +3247,58 @@ export function createServeApp(
     for (const runtime of workspaceRegistry.list()) {
       startKeepaliveForWorkspace(runtime);
     }
+
+    // Agents-and-threads host. A workspace whose roster is non-empty gets one
+    // hidden host session kept resident; the dispatch loop runs inside that
+    // session, so all the daemon owes it is existence. Checked on the keepalive
+    // cadence: an empty roster costs one file read per interval and no session.
+    const meshHostStops = new Map<string, () => void>();
+    const startMeshHostForWorkspace = (runtime: WorkspaceRuntime) => {
+      const trusted = runtime.primary
+        ? isPrimaryWorkspaceTrusted()
+        : runtime.trusted;
+      if (!trusted) return;
+      if (meshHostStops.has(runtime.workspaceCwd)) return;
+      const owner = startMeshHostSessionOwner({
+        bridge: runtime.bridge,
+        workspaceCwd: runtime.workspaceCwd,
+        intervalMs: keepaliveIntervalMs,
+      });
+      let ensuring = false;
+      const ensureIfRostered = async () => {
+        if (ensuring) return;
+        ensuring = true;
+        try {
+          const agents = await readMeshAgents(runtime.workspaceCwd);
+          if (agents.length > 0) await owner.ensureResident();
+        } catch (error) {
+          daemonLog?.warn(
+            `mesh host for ${runtime.workspaceCwd} not ensured: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        } finally {
+          ensuring = false;
+        }
+      };
+      void ensureIfRostered();
+      const rosterTimer = setInterval(
+        () => void ensureIfRostered(),
+        keepaliveIntervalMs,
+      );
+      rosterTimer.unref?.();
+      meshHostStops.set(runtime.workspaceCwd, () => {
+        clearInterval(rosterTimer);
+        owner.stop();
+      });
+    };
+    for (const runtime of workspaceRegistry.list()) {
+      startMeshHostForWorkspace(runtime);
+    }
+    (app.locals as { stopMeshHosts?: () => void }).stopMeshHosts = () => {
+      for (const stop of meshHostStops.values()) stop();
+      meshHostStops.clear();
+    };
 
     // Park a combined stop fn on `app.locals` (same pattern as `fsFactory` /
     // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in

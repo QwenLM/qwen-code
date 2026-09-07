@@ -29,9 +29,16 @@ describe('mesh capability boundary', () => {
     expect(new Set(Object.keys(MESH_TOOL_CLASSIFICATION))).toEqual(
       new Set([...Object.values(ToolNames), ...MESH_THREAD_TOOL_NAMES]),
     );
-    expect(Object.values(ToolNames).map(classifyMeshTool)).not.toContain(
-      'thread',
-    );
+    // The thread tools are registered under ToolNames too, so the "core"
+    // side of this check excludes them by name rather than by class.
+    expect(
+      Object.values(ToolNames)
+        .filter(
+          (name) =>
+            !(MESH_THREAD_TOOL_NAMES as readonly string[]).includes(name),
+        )
+        .map(classifyMeshTool),
+    ).not.toContain('thread');
     expect(MESH_THREAD_TOOL_NAMES.map(classifyMeshTool)).toEqual(
       MESH_THREAD_TOOL_NAMES.map(() => 'thread'),
     );

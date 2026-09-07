@@ -200,10 +200,8 @@ describe('dispatchOnce', () => {
     expect(started.status).toBe('running');
     expect(started.sessionId).toBe('se_1');
     expect(started.attempts).toBe(1);
-    // The initial prompt is consumed the moment the turn starts, so the
-    // watermark moves with it.
-    expect(started.contextThroughSequence).toBe(1);
-    expect(stored!.deliveryByAgent[ALICE.id]?.committedThroughSequence).toBe(1);
+    // The prompt window is committed when the runtime accepts the turn (see
+    // runtime-bridge.ts), not at booking, so the watermark is asserted there.
     // The prompt the port received is the envelope, not a bare task string.
     const prompt = driver.start.mock.calls[0]![0].prompt as string;
     expect(prompt).toContain('YOUR RUN');

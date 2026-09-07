@@ -561,7 +561,7 @@ kept in the next isolated child PR:
 | `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only            |
 | `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports    |
 | `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime        |
-| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload            |
+| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
 | `acp-bridge` + `cli/src/acp-integration/` | Private daemon-to-host launch control                  |
 
 ### 5.1 Local review correction — committed and verified
@@ -631,6 +631,20 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    consume the parent-report outbox. Handle `capacity_wait` by releasing the
    claim without spending the attempt. This is intentionally the smallest
    dispatcher that can make the next step executable.
+   **Where the loop runs (decided 2026-09-07).** Inside the hidden host
+   session, not in the daemon. The launcher and the background-agent registry
+   live in that session's process, and the first live slice was driven by hand
+   from exactly there; ticking where the state is makes `inspect` a local
+   registry read and a start a local call. The daemon's whole job is to keep
+   the host resident: `server.ts` starts one `startMeshHostSessionOwner` per
+   trusted workspace and ensures residency whenever the roster is non-empty,
+   and the ACP child starts `startMeshSupervisor` for any session whose source
+   type is the mesh host. The supervisor dispatches only while its session
+   still holds the workspace's host claim, so a stale duplicate cannot give an
+   agent two bodies, and it polls rather than waits for notifications because
+   posts written by the daemon's REST route land in the store, not in this
+   process. Option (b), a daemon-side loop with an `inspect` round trip per
+   candidate, was rejected as a process boundary on every tick for no gain.
 7. **Minimal live vertical slice** — assigned parent → launch → assigned child →
    parent wait → child review → parent dependency wake → parent review. Run it
    against two live agents before building the full daemon; this is the first

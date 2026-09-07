@@ -150,6 +150,9 @@ import {
   launchMeshAgent,
   readMeshAgents,
   readMeshWorkspace,
+  createMeshDispatchPort,
+  startMeshSupervisor,
+  type MeshSupervisor,
   type MeshAgent,
   type MeshAgentLaunchResult,
 } from '@qwen-code/qwen-code-core';
@@ -4496,6 +4499,9 @@ class QwenAgent implements Agent {
     return { closed: true, holds: [] };
   }
 
+  /** One dispatch loop per mesh host session this process holds. */
+  private readonly meshSupervisors = new Map<string, MeshSupervisor>();
+
   private async discardStoredSessionIfCurrent(
     sessionId: string,
     session: Session,
@@ -4509,6 +4515,8 @@ class QwenAgent implements Agent {
     if (this.sessions.get(sessionId) !== session) {
       return;
     }
+    this.meshSupervisors.get(sessionId)?.stop();
+    this.meshSupervisors.delete(sessionId);
     await this.closeStoredSession(sessionId, opts);
   }
 
@@ -14553,6 +14561,23 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
+      // A mesh host session dispatches its own workspace's booked work. The
+      // loop lives here rather than in the daemon because the launcher and the
+      // background-agent registry live in this process; the daemon's part is
+      // only to keep this session resident. The supervisor refuses to start
+      // anything unless this session still holds the workspace's host claim,
+      // so a stale duplicate cannot give one agent two bodies.
+      if (config.getSessionSourceType() === MESH_HOST_SESSION_SOURCE_TYPE) {
+        this.meshSupervisors.get(sessionId)?.stop();
+        this.meshSupervisors.set(
+          sessionId,
+          startMeshSupervisor({
+            projectRoot: config.getProjectRoot(),
+            sessionId: config.getSessionId(),
+            port: createMeshDispatchPort(config),
+          }),
+        );
+      }
       // The session boots converged on the mode its settings derived; later
       // reloads track convergence from here. Restricted sessions derive
       // DEFAULT, mirroring the fold the reload loop applies to them.
