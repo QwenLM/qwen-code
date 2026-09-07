@@ -1298,12 +1298,6 @@ interface TestEfficacyArgs {
   now?: () => number;
 }
 
-// Sanitized env on every git spawn below: an exported GIT_DIR redirects
-// repository discovery for ALL of them at once — the head sha read, the probe
-// resets, the revert's checkout — so the mutations would land in whichever
-// repository the environment names while every check against the tree passes
-// silently. The trees this file touches are chosen by the paths it is given.
-
 // The two config-driven command surfaces a checkout fires from the very tree it
 // is cleaning: `core.hooksPath` (a `post-checkout` hook planted in the shared
 // common dir) and `core.fsmonitor` (a command git runs on checkout/status).
@@ -1321,6 +1315,24 @@ const CHECKOUT_INERT = [
   'core.fsmonitor=',
 ] as const;
 
+/**
+ * The refusal every screened site reports, differing only in the rewrite it
+ * names. One helper because four sites render the same screen answer, and a
+ * message a reader acts on should not depend on which of them produced it.
+ */
+function filterScreenRefusal(hits: string[], rewrite: string): string {
+  return (
+    "the repository's local config defines content filter(s), or includes " +
+    'config this screen could not read to the bottom: ' +
+    `${describeFilterScreen(hits.map(inertPath))} — ${rewrite}`
+  );
+}
+
+// Sanitized env on every git spawn below: an exported GIT_DIR redirects
+// repository discovery for ALL of them at once — the head sha read, the probe
+// resets, the revert's checkout — so the mutations would land in whichever
+// repository the environment names while every check against the tree passes
+// silently. The trees this file touches are chosen by the paths it is given.
 function git(cwd: string, ...args: string[]): void {
   const r = spawnSync('git', args, {
     cwd,
@@ -1676,11 +1688,9 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // the checkout below would execute something this screen did not clear.
   const filters = localFilterCommands(probeTree);
   if (filters.length > 0) {
-    return (
-      "the repository's local config defines content filter(s), or includes " +
-      'config this screen could not read to the bottom: ' +
-      `${describeFilterScreen(filters.map(inertPath))} — this tree's restore ` +
-      'would EXECUTE them'
+    return filterScreenRefusal(
+      filters,
+      "this tree's restore would EXECUTE them",
     );
   }
   for (const args of [
@@ -2168,20 +2178,20 @@ export function runOneHunkProbe(
   // Screened, and not by the restore's screen: `git apply --reverse` rewrites
   // the working tree and executes BOTH sides of a content filter — the clean
   // and the smudge, where a pathspec checkout fires only the smudge. The
-  // restore screened this tree several attacker-sized spawns ago, and
-  // everything between ran the PR's own suite, so a filter planted since is
-  // live here and would run once per hunk candidate on the reviewer's host.
-  // Repo-local scope, for the git-lfs reason the restore's screen states.
+  // restore screened this tree three git spawns and several filesystem reads
+  // ago, which is a window a detached planter can land in — the capability the
+  // revert phase's own comment credits — and a plant that lands there is live
+  // here, once per hunk candidate, on the reviewer's host. Repo-local scope,
+  // for the git-lfs reason the restore's screen states.
   const applyFilters = localFilterCommands(probeTree);
   if (applyFilters.length > 0) {
     return {
       ...meta,
-      verdict: 'inconclusive' as const,
-      detail:
-        "the repository's local config defines content filter(s), or includes " +
-        'config this screen could not read to the bottom: ' +
-        `${describeFilterScreen(applyFilters.map(inertPath))} — this ` +
-        'reverse-apply would EXECUTE them',
+      verdict: 'inconclusive',
+      detail: filterScreenRefusal(
+        applyFilters,
+        'this reverse-apply would EXECUTE them',
+      ),
     };
   }
   const applied = spawnSync('git', ['apply', '--reverse', '-'], {
@@ -2721,10 +2731,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       const creationFilters = localFilterCommands(worktree);
       if (creationFilters.length > 0) {
         throw new Error(
-          "the repository's local config defines content filter(s), or " +
-            'includes config this screen could not read to the bottom: ' +
-            `${describeFilterScreen(creationFilters.map(inertPath))} — ` +
+          filterScreenRefusal(
+            creationFilters,
             'creating the probe tree would EXECUTE them',
+          ),
         );
       }
       git(
@@ -3082,10 +3092,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           const revertFilters = localFilterCommands(probeTree);
           if (revertFilters.length > 0) {
             throw new Error(
-              "the repository's local config defines content filter(s), or " +
-                'includes config this screen could not read to the bottom: ' +
-                `${describeFilterScreen(revertFilters.map(inertPath))} — this ` +
-                "revert's checkout would EXECUTE them",
+              filterScreenRefusal(
+                revertFilters,
+                "this revert's checkout would EXECUTE them",
+              ),
             );
           }
           // Same neutralisation the restore's checkout runs: this revert
