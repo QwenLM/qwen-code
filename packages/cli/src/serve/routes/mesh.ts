@@ -33,6 +33,7 @@ import type {
   Response,
 } from 'express';
 import {
+  assignThread,
   createAssignedThread,
   createThread,
   decideDispatch,
@@ -376,6 +377,9 @@ export function registerMeshRoutes(
         id: thread.id,
         title: thread.title,
         body: thread.body,
+        ...(thread.assigneeAgentId
+          ? { assigneeName: agentName(agents, thread.assigneeAgentId) }
+          : {}),
         status: resolution.status,
         reason: resolution.reason,
         posts: thread.messages.map((message) => ({
@@ -633,6 +637,62 @@ export function registerMeshRoutes(
           booked > 0 ? await startBookedRuns(runtime) : undefined;
         res.json({
           id: thread.id,
+          booked,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.patch(
+    `${prefix}/threads/:id`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const rawAssignee = (req.body as { assignee?: unknown } | undefined)
+        ?.assignee;
+      if (rawAssignee !== null && typeof rawAssignee !== 'string') {
+        res.status(400).json({ error: 'assignee_invalid' });
+        return;
+      }
+      const assigneeName =
+        typeof rawAssignee === 'string'
+          ? rawAssignee.replace(/^@/, '').trim()
+          : undefined;
+      try {
+        const result = await assignThread(
+          runtime.workspaceCwd,
+          String(req.params['id']),
+          assigneeName,
+        );
+        if (result.kind === 'thread_not_found') {
+          res.status(404).json({ error: 'thread_not_found' });
+          return;
+        }
+        if (result.kind === 'thread_done') {
+          res.status(409).json({ error: 'thread_done' });
+          return;
+        }
+        if (result.kind === 'agent_unknown') {
+          res.status(400).json({ error: 'assignee_unknown' });
+          return;
+        }
+        if (result.kind === 'agent_disabled') {
+          res.status(409).json({ error: 'assignee_disabled' });
+          return;
+        }
+        const booked =
+          result.assignment?.outcomes.filter(
+            (outcome) => outcome.decision.kind !== 'skip',
+          ).length ?? 0;
+        const dispatchError =
+          booked > 0 ? await startBookedRuns(runtime) : undefined;
+        res.json({
+          id: result.thread.id,
+          assignee: assigneeName ?? null,
           booked,
           ...(dispatchError ? { dispatchError } : {}),
         });

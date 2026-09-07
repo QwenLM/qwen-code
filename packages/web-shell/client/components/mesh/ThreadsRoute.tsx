@@ -38,6 +38,7 @@ export interface ThreadsApi {
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   createThread(input: NewMeshThread): Promise<CreateThreadResult>;
+  assignThread(id: string, assignee?: string): Promise<unknown>;
   previewReply(
     id: string,
     text: string,
@@ -87,6 +88,11 @@ function createThreadsHttpApi(
         body: JSON.stringify({ enabled }),
       }),
     createThread: (input) => post('/threads', input),
+    assignThread: (id, assignee) =>
+      request(`/threads/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ assignee: assignee ?? null }),
+      }),
     previewReply: (id, text) =>
       post(`/threads/${encodeURIComponent(id)}/preview`, { text }),
     postReply: (id, text) =>
@@ -209,6 +215,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
         ) : null}
         <ThreadView
           thread={detail}
+          agents={agents}
           draft={draft}
           onDraftChange={setDraft}
           onReply={() =>
@@ -247,6 +254,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
               await client.markDone(openId);
               setTranscript(undefined);
             })
+          }
+          onAssign={(assignee) =>
+            void mutate(() => client.assignThread(openId, assignee))
           }
           replyPending={pending}
           {...(preview ? { preview } : {})}

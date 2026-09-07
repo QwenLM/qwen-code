@@ -48,6 +48,7 @@ export {
 export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
 export { parseMentions } from './mesh/mentions.js';
 export {
+  assignThread,
   createAssignedThread,
   finishRun,
   postMessage,

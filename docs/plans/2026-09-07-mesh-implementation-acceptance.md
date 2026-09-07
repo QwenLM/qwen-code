@@ -191,6 +191,10 @@ definitions remain typed dispatcher launch failures because the pure admission
 rule has no runtime definition loader. The roster now exposes the designed
 enable/disable state; disabling or deleting is one workspace-locked mutation
 that refuses live or queued work, so a booking cannot race the roster change.
+The thread header also supports atomic human reassignment: changing the default
+assignee writes a structured assignment through admission without cancelling
+work already booked for another agent; choosing no assignee only clears the
+future fallback.
 
 ### Step 10 — Channel notifications
 

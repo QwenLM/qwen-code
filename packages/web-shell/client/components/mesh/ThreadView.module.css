@@ -44,6 +44,17 @@
   font-size: 12px;
 }
 
+.assigneeSelect {
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
 /* The live signal lives in the header, never in a body card that competes
    with the content and scrolls away. */
 .workingChip {

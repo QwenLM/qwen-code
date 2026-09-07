@@ -73,8 +73,8 @@ export interface PostMessageOptions {
   agents?: readonly MeshAgent[];
   limits?: BudgetLimits;
   now?: number;
-  /** New thread not yet written, so its first assignment lands atomically. */
-  initialThread?: Thread;
+  /** Thread state to admit against and persist in the final replacement. */
+  threadOverride?: Thread;
 }
 
 export function countQueuedElsewhere(
@@ -141,10 +141,10 @@ export async function postMessageInTransaction(
   options: PostMessageOptions = {},
 ): Promise<PostMessageResult> {
   const current =
-    options.initialThread ?? (await transaction.readThread(threadId));
+    options.threadOverride ?? (await transaction.readThread(threadId));
   if (!current) throw new Error(`No thread with id "${threadId}".`);
   if (current.id !== threadId) {
-    throw new Error(`Initial thread id does not match "${threadId}".`);
+    throw new Error(`Thread override id does not match "${threadId}".`);
   }
 
   if (input.originEventId) {
@@ -403,9 +403,74 @@ export async function createAssignedThread(
         triggerKind: 'assignment',
         text: `Assigned to ${mentionToken(input.assignee)}.`,
       },
-      { initialThread: thread },
+      { threadOverride: thread },
     );
     return { thread: assignment.thread, assignment };
+  });
+}
+
+export type AssignThreadResult =
+  | {
+      kind: 'updated';
+      thread: Thread;
+      assignment?: PostMessageResult;
+    }
+  | {
+      kind:
+        | 'thread_not_found'
+        | 'thread_done'
+        | 'agent_unknown'
+        | 'agent_disabled';
+    };
+
+export async function assignThread(
+  projectRoot: string,
+  threadId: string,
+  assigneeName?: string,
+): Promise<AssignThreadResult> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) return { kind: 'thread_not_found' };
+    if (thread.status === 'done') return { kind: 'thread_done' };
+
+    if (!assigneeName) {
+      if (!thread.assigneeAgentId) return { kind: 'updated', thread };
+      const { assigneeAgentId: _, ...unassigned } = thread;
+      return {
+        kind: 'updated',
+        thread: await transaction.writeThread(unassigned),
+      };
+    }
+
+    const agents = await transaction.readAgents();
+    const assignee = agents.find(
+      (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
+    );
+    if (!assignee) return { kind: 'agent_unknown' };
+    if (assignee.enabled === false) return { kind: 'agent_disabled' };
+    if (thread.assigneeAgentId === assignee.id) {
+      return { kind: 'updated', thread };
+    }
+
+    const assignment = await postMessageInTransaction(
+      transaction,
+      threadId,
+      {
+        from: HUMAN_AUTHOR_ID,
+        authorKind: 'human',
+        triggerKind: 'assignment',
+        text: `Assigned to ${mentionToken(assignee)}.`,
+      },
+      {
+        agents,
+        threadOverride: { ...thread, assigneeAgentId: assignee.id },
+      },
+    );
+    return {
+      kind: 'updated',
+      thread: assignment.thread,
+      assignment,
+    };
   });
 }
 

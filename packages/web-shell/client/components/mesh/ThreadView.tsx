@@ -33,6 +33,7 @@ export interface ThreadDetailView {
   id: string;
   title: string;
   body: string;
+  assigneeName?: string;
   status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done';
   /** The resolver's sentence. Rendered verbatim. */
   reason: string;
@@ -64,6 +65,7 @@ export interface TranscriptSliceView {
 
 export interface ThreadViewProps {
   thread: ThreadDetailView;
+  agents: readonly { name: string; enabled: boolean }[];
   /** Server-computed routing for the current draft. */
   preview?: readonly RoutingPreviewTarget[];
   draft: string;
@@ -75,6 +77,7 @@ export interface ThreadViewProps {
   onCloseTranscript?: () => void;
   onCancelRun?: (runId: string) => void;
   onMarkDone?: () => void;
+  onAssign?: (assignee?: string) => void;
   transcript?: TranscriptSliceView;
   replyPending?: boolean;
 }
@@ -225,6 +228,7 @@ function RoutingPreview({
  */
 export function ThreadView({
   thread,
+  agents,
   preview,
   draft,
   onDraftChange,
@@ -235,6 +239,7 @@ export function ThreadView({
   onCloseTranscript,
   onCancelRun,
   onMarkDone,
+  onAssign,
   transcript,
   replyPending,
 }: ThreadViewProps) {
@@ -247,6 +252,9 @@ export function ThreadView({
   const attention =
     thread.status === 'blocked' || thread.status === 'in_review';
   const active = live.find((row) => row.run.status !== 'queued') ?? live[0];
+  const currentAssignee = agents.find(
+    (agent) => agent.name === thread.assigneeName,
+  );
 
   return (
     <div className={styles.page}>
@@ -262,6 +270,30 @@ export function ThreadView({
         </Button>
         <h1 className={styles.title}>{thread.title}</h1>
         <span className={styles.threadId}>{thread.id}</span>
+        {onAssign ? (
+          <select
+            className={styles.assigneeSelect}
+            value={thread.assigneeName ?? ''}
+            onChange={(event) => onAssign(event.target.value || undefined)}
+            disabled={thread.status === 'done' || replyPending}
+            aria-label="Thread assignee"
+          >
+            <option value="">No assignee</option>
+            {thread.assigneeName && !currentAssignee?.enabled ? (
+              <option value={thread.assigneeName}>
+                {thread.assigneeName}{' '}
+                {currentAssignee ? '(disabled)' : '(removed)'}
+              </option>
+            ) : null}
+            {agents
+              .filter((agent) => agent.enabled)
+              .map((agent) => (
+                <option key={agent.name} value={agent.name}>
+                  {agent.name}
+                </option>
+              ))}
+          </select>
+        ) : null}
         {active ? (
           <span className={styles.workingChip}>
             <span className={styles.workingDot} aria-hidden="true" />

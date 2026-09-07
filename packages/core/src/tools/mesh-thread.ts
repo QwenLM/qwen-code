@@ -423,7 +423,7 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               triggerKind: 'assignment',
               text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
             },
-            { initialThread: child },
+            { threadOverride: child },
           );
           return {
             child: posted.thread,
