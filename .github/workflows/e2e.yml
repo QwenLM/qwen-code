@@ -351,6 +351,9 @@ jobs:
             run_shard() {
               QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'
             }
+            # timeout(1) execs a file, not a shell function; the export is
+            # what lets the bounded child below resolve it.
+            export -f run_shard
             # One bounded retry: pool runners' sandbox:none shards die under
             # shared-host pressure with every test green and no vitest FAIL
             # line — runs 33293739505, 33302550436 and 33317457036 failed
@@ -364,7 +367,19 @@ jobs:
             # be cancelled mid-flight by timeout-minutes. The docker leg
             # keeps no retry: two ~30min attempts would outrun the job's
             # timeout-minutes.
-            run_shard || {
+            # The first attempt is wall-clock bounded: the same pressure can
+            # degrade a shard slowly instead of killing it — run 34083672277's
+            # shard 1/3 burned 40 of the 60 job minutes beside 14-18 minute
+            # siblings and died with every test green and the retry budget
+            # already spent, which forfeits the retry this block exists to
+            # enable. 1500s clears the worst measured healthy shard (~21min
+            # under pressure, per the gate arithmetic below) and still lands
+            # a timeout-killed attempt inside the 2100s gate. Without
+            # --foreground, timeout signals the attempt's whole process
+            # group, and --kill-after promotes a wedged one to KILL. The
+            # retry stays unbounded: the gate below has already reserved its
+            # shard-time.
+            timeout --kill-after=30 1500 bash -c run_shard || {
               elapsed=$(( $(date +%s) - ${E2E_JOB_START_EPOCH:-0} ))
               # Budget gate: a retry needs a full shard-time inside the job's
               # timeout-minutes. 3600s minus a 25-minute reserve — the worst

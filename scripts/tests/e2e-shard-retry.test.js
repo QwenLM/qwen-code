@@ -34,7 +34,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
     .replaceAll('${{ matrix.sandbox }}', 'sandbox:none')
     .replaceAll('${{ matrix.shard }}', '1/3');
 
-  function runStepScript({ failCalls, elapsedSeconds }) {
+  function runStepScript({ failCalls, elapsedSeconds, timeoutExit }) {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-e2e-retry-'));
     try {
       const callCountFile = join(dir, 'npm-call-count');
@@ -63,6 +63,27 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
         ['#!/usr/bin/env bash', `printf '%s' '${now}'`].join('\n'),
       );
       chmodSync(dateStub, 0o755);
+      // GNU timeout stand-in for the first-attempt bound: macOS runners
+      // carry no `timeout`, and a real one would race the pinned clock
+      // anyway. It records each duration it is asked to enforce, honors
+      // TIMEOUT_STUB_EXIT as the killed-attempt path (timeout's own 124),
+      // and otherwise execs the wrapped command so the retry wiring stays
+      // observable.
+      const timeoutDurationsFile = join(dir, 'timeout-durations');
+      writeFileSync(timeoutDurationsFile, '');
+      const timeoutStub = join(dir, 'timeout');
+      writeFileSync(
+        timeoutStub,
+        [
+          '#!/usr/bin/env bash',
+          'while [[ "$1" == -* ]]; do shift; done',
+          'printf "%s\\n" "$1" >> "$TIMEOUT_DURATIONS_FILE"',
+          'shift',
+          'if [[ -n "${TIMEOUT_STUB_EXIT:-}" ]]; then exit "$TIMEOUT_STUB_EXIT"; fi',
+          '"$@"',
+        ].join('\n'),
+      );
+      chmodSync(timeoutStub, 0o755);
       const scriptFile = join(dir, 'run-e2e-tests.sh');
       writeFileSync(scriptFile, script);
       let exitCode = 0;
@@ -74,6 +95,10 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
             PATH: `${dir}:${process.env.PATH}`,
             NPM_CALL_COUNT_FILE: callCountFile,
             NPM_FAIL_CALLS: failCalls,
+            TIMEOUT_DURATIONS_FILE: timeoutDurationsFile,
+            ...(timeoutExit === undefined
+              ? {}
+              : { TIMEOUT_STUB_EXIT: String(timeoutExit) }),
             E2E_JOB_START_EPOCH: String(now - elapsedSeconds),
           },
           encoding: 'utf8',
@@ -86,6 +111,9 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
         exitCode,
         output,
         npmCalls: Number(readFileSync(callCountFile, 'utf8')),
+        timeoutDurations: readFileSync(timeoutDurationsFile, 'utf8')
+          .split('\n')
+          .filter(Boolean),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -96,11 +124,13 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
     // The green first-attempt path needs its own witness: without one, an
     // unconditional pre-gate side effect (a spurious ::warning:: before
     // `run_shard || {`) ships with every other witness green.
-    const { exitCode, npmCalls, output } = runStepScript({
+    const { exitCode, npmCalls, output, timeoutDurations } = runStepScript({
       failCalls: '',
       elapsedSeconds: 1200,
     });
     expect(npmCalls).toBe(1);
+    // The bound wraps the (only) attempt even when nothing fails.
+    expect(timeoutDurations).toEqual(['1500']);
     expect(output).not.toContain('::warning::');
     expect(output).not.toContain('::error::');
     expect(exitCode).toBe(0);
@@ -109,11 +139,14 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
   it('retries a shard that dies once and passes on the second attempt', () => {
     // The transient class the retry exists for: first attempt dead, re-run
     // green (runs 33293739505, 33302550436, 33317457036).
-    const { exitCode, npmCalls, output } = runStepScript({
+    const { exitCode, npmCalls, output, timeoutDurations } = runStepScript({
       failCalls: '1',
       elapsedSeconds: 1200,
     });
     expect(npmCalls).toBe(2);
+    // One bounded attempt, not two: the retry stays unbounded because the
+    // budget gate has already reserved its shard-time.
+    expect(timeoutDurations).toEqual(['1500']);
     expect(output).toContain('::warning::');
     expect(exitCode).toBe(0);
   });
@@ -132,11 +165,29 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
   it('retries at exactly the 2100s budget-gate threshold', () => {
     // The gate admits a retry at elapsed <= 2100. Threshold mutations in
     // either direction must not ship silently between the 1200/3000 probes.
-    const { exitCode, npmCalls, output } = runStepScript({
+    const { exitCode, npmCalls, output, timeoutDurations } = runStepScript({
       failCalls: '1',
       elapsedSeconds: 2100,
     });
     expect(npmCalls).toBe(2);
+    expect(timeoutDurations).toEqual(['1500']);
+    expect(output).toContain('::warning::');
+    expect(exitCode).toBe(0);
+  });
+
+  it('retries a first attempt killed by its own wall-clock bound', () => {
+    // The run 34083672277 shape under the bound: timeout(1) kills the
+    // degraded first attempt (exit 124, the shard never reporting) and that
+    // exit must flow through the same budget gate as any other
+    // first-attempt death.
+    const { exitCode, npmCalls, output, timeoutDurations } = runStepScript({
+      failCalls: '',
+      elapsedSeconds: 1200,
+      timeoutExit: 124,
+    });
+    expect(timeoutDurations).toEqual(['1500']);
+    // Only the retried attempt ever reached the shard command.
+    expect(npmCalls).toBe(1);
     expect(output).toContain('::warning::');
     expect(exitCode).toBe(0);
   });
