@@ -1757,6 +1757,60 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'keeps update download sources user-owned when loading %s',
+    (source) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-update-source-')),
+      );
+      const keys = [
+        'QWEN_UPDATE_BASE_URL',
+        'qwen_update_base_url',
+        'Qwen_Update_Base_Url',
+      ];
+      for (const key of keys) vi.stubEnv(key, undefined);
+      const values = Object.fromEntries(
+        keys.map((key) => [key, 'https://project.example.com']),
+      );
+      const settings: ServeFastPathSettings = {
+        advanced: { excludedEnvVars: [] },
+      };
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        const envPath = join(tempWorkspace, source);
+        mkdirSync(dirname(envPath), { recursive: true });
+        writeFileSync(
+          envPath,
+          Object.entries(values)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n'),
+        );
+      }
+      try {
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        for (const key of keys) expect(process.env[key]).toBeUndefined();
+
+        const trustedUrl = 'https://downloads.example.com/releases';
+        writeFileSync(
+          join(qwenHome, '.env'),
+          `QWEN_UPDATE_BASE_URL=${trustedUrl}\n`,
+        );
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+
+        process.env['QWEN_UPDATE_BASE_URL'] = 'https://shell.example.com';
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(
+          'https://shell.example.com',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   // Regression for #8653: the fast path runs before runQwenServeImpl freezes
   // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base
   // env distributed to every workspace's session subprocesses — the exact

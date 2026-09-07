@@ -265,6 +265,7 @@ interface ChatEditorProps {
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -1535,6 +1536,7 @@ export const ChatEditor = memo(
       atWorkspaceCwd,
       composerScopeKey,
       workspaceFeaturesEnabled = true,
+      attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -1690,7 +1692,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: workspaceFeaturesEnabled && fileUploadEnabled !== false,
+      fileDragEnabled: attachmentsEnabled && fileUploadEnabled !== false,
       placeholderText,
       commands,
       skills,
@@ -1713,7 +1715,7 @@ export const ChatEditor = memo(
       atWorkspaceCwd,
       composerScopeKey,
       disableLegacyHistoryFallback: composerScopeKey === 'standalone',
-      attachmentsEnabled: workspaceFeaturesEnabled,
+      attachmentsEnabled,
       workspaceFeaturesEnabled,
       composerTagIcons,
       parseUserMessageContent,
@@ -2447,6 +2449,7 @@ export const ChatEditor = memo(
     const workspaceSelectVisible = Boolean(
       workspaces &&
         onSelectWorkspace &&
+        showToolbarAction('workspace') &&
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
@@ -3124,7 +3127,7 @@ export const ChatEditor = memo(
                         Boolean(skills?.length),
                       ])}
                       addFileAvailable={
-                        workspaceFeaturesEnabled && fileUploadEnabled !== false
+                        attachmentsEnabled && fileUploadEnabled !== false
                       }
                       uploadAvailable={uploadEnabled}
                       onAddFiles={handleAddMenuFiles}
