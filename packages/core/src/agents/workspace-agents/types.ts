@@ -239,6 +239,14 @@ export interface ThreadRun {
   closeAcknowledgedAtSequence?: number;
   finalMessageId?: string;
   usageByRound: RunUsageRound[];
+  /**
+   * The agent body's cumulative token total when this run started.
+   *
+   * A body is long-lived and works many threads, so its total is not this
+   * run's. Without the baseline the first settlement would charge one thread
+   * tree for everything the agent has ever spent.
+   */
+  usageBaselineTokens?: number;
   failureStage?: string;
   /** Workspace-wide FIFO key. */
   queueSequence: number;

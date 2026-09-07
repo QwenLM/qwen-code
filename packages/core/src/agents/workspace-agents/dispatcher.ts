@@ -41,6 +41,7 @@ import {
   requeueRun,
   releaseRunClaim,
   SYSTEM_AUTHOR_ID,
+  upsertRunUsage,
 } from './thread-actions.js';
 import type {
   WorkspaceAgent,
@@ -115,6 +116,17 @@ export interface AgentDispatchPort {
     attempt: number;
     contextThroughSequence: number;
   }): Promise<AgentStartResult>;
+  /**
+   * Total tokens this agent's body has spent since it started, or undefined
+   * when the runtime cannot say.
+   *
+   * A cumulative reading rather than a per-round event: a session reports what
+   * it has spent, not what each round cost, so the dispatcher charges the
+   * difference across a run. That is why `usageByRound` records a
+   * monotonically increasing total under one synthetic round rather than
+   * pretending to per-round detail the source does not have.
+   */
+  totalTokens?(agent: WorkspaceAgent): Promise<number | undefined>;
   /** Definition content hash, when the port can supply one (§9.4). */
   definitionVersion?(agent: WorkspaceAgent): Promise<string | undefined>;
 }
@@ -428,6 +440,10 @@ async function reconcileInterruptedRuns(
         run.status === 'finishing' ||
         (state.kind === 'completed' && !hasUndrainedInput)
       ) {
+        // Charge before the run goes terminal: once it is completed the
+        // baseline it was started with has nowhere left to live, and an
+        // uncharged run would let a tree spend past its budget silently.
+        await chargeRunUsage(projectRoot, port, agent, thread.id, run);
         await withAgentStoreTransaction(projectRoot, (transaction) =>
           finishRunInTransaction(transaction, {
             threadId: thread.id,
@@ -568,6 +584,45 @@ async function deliverRunningInputs(
  * about this instant, and the next pass re-reads them rather than persisting a
  * decision that was already stale when it was written.
  */
+/**
+ * The synthetic round a session's cumulative reading is recorded under.
+ *
+ * A session reports what it has spent in total, not what each round cost, so
+ * there is no honest per-round breakdown to write. One entry that grows is the
+ * truthful shape; inventing rounds would make the record look more precise
+ * than the source.
+ */
+const SESSION_USAGE_ROUND = 1;
+
+/**
+ * Charges what this run cost, as the difference from its starting reading.
+ *
+ * An agent's body is long-lived and works many threads, so its total is not
+ * this run's total. The baseline is written when the run starts; the delta is
+ * what this thread tree owes. A runtime that cannot report usage charges
+ * nothing rather than guessing, which under-counts — the gate then trips late
+ * rather than blocking work that was never measured.
+ */
+async function chargeRunUsage(
+  projectRoot: string,
+  port: AgentDispatchPort,
+  agent: WorkspaceAgent,
+  threadId: string,
+  run: ThreadRun,
+): Promise<void> {
+  if (!port.totalTokens) return;
+  const total = await port.totalTokens(agent);
+  if (total === undefined) return;
+  const baseline = run.usageBaselineTokens ?? 0;
+  const spent = Math.max(0, total - baseline);
+  if (spent === 0) return;
+  await upsertRunUsage(projectRoot, threadId, run.id, {
+    attempt: run.attempts,
+    round: SESSION_USAGE_ROUND,
+    tokens: spent,
+  });
+}
+
 export async function dispatchOnce(
   projectRoot: string,
   port: AgentDispatchPort,
@@ -652,6 +707,11 @@ export async function dispatchOnce(
     });
 
     if (result.status === 'started') {
+      // Read after the body started, so the reading includes the turn's own
+      // opening prompt in neither direction: the baseline and the settlement
+      // are taken from the same counter, and only what happens between them is
+      // charged to this thread tree.
+      const usageBaselineTokens = await port.totalTokens?.(agent);
       await bindRunSession(projectRoot, {
         threadId: thread.id,
         runId: run.id,
@@ -663,6 +723,7 @@ export async function dispatchOnce(
         ...(result.transcriptStartOffset !== undefined
           ? { transcriptStartOffset: result.transcriptStartOffset }
           : {}),
+        ...(usageBaselineTokens !== undefined ? { usageBaselineTokens } : {}),
       });
       records.push({ ...base, kind: 'started' });
       continue;

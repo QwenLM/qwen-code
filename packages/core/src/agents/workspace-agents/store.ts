@@ -312,6 +312,8 @@ function isValidRun(value: unknown): value is ThreadRun {
     isOptionalNonNegativeInteger(value['closeAcknowledgedAtSequence']) &&
     (value['finalMessageId'] === undefined ||
       isValidId(value['finalMessageId'])) &&
+    (value['usageBaselineTokens'] === undefined ||
+      isNonNegativeInteger(value['usageBaselineTokens'])) &&
     Array.isArray(value['usageByRound']) &&
     value['usageByRound'].every(isValidUsageRound) &&
     (value['failureStage'] === undefined ||

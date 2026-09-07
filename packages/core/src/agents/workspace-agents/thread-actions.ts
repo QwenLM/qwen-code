@@ -566,6 +566,8 @@ export interface BindRunSessionInput {
   definitionVersion?: string;
   /** Byte offset into the agent's transcript where this run's slice begins. */
   transcriptStartOffset?: number;
+  /** The body's cumulative token total at start; the run is charged the delta. */
+  usageBaselineTokens?: number;
 }
 
 export async function bindRunSession(
@@ -638,6 +640,9 @@ export async function bindRunSession(
                 : {}),
               ...(input.transcriptStartOffset !== undefined
                 ? { transcriptStartOffset: input.transcriptStartOffset }
+                : {}),
+              ...(input.usageBaselineTokens !== undefined
+                ? { usageBaselineTokens: input.usageBaselineTokens }
                 : {}),
             }
           : run,

@@ -38,7 +38,11 @@ import {
 /** What the port needs from the bridge, so a test can supply four functions. */
 export type AgentSessionBridge = Pick<
   AcpSessionBridge,
-  'spawnOrAttach' | 'sendPrompt' | 'listWorkspaceSessions' | 'cancelSession'
+  | 'spawnOrAttach'
+  | 'sendPrompt'
+  | 'listWorkspaceSessions'
+  | 'cancelSession'
+  | 'getSessionStatsStatus'
 >;
 
 export interface CreateSessionDispatchPortInput {
@@ -150,6 +154,24 @@ export function createSessionDispatchPort(
         // write rebooks whatever it never read, so this costs latency and
         // never a message.
         return false;
+      }
+    },
+
+    async totalTokens(agent): Promise<number | undefined> {
+      const session = sessionFor(bridge, workspaceCwd, agent);
+      if (!session) return undefined;
+      try {
+        const stats = await bridge.getSessionStatsStatus(session.sessionId);
+        // Summed across models: an agent may switch model mid-life, and the
+        // budget is money rather than a per-model quota.
+        return Object.values(stats.models).reduce(
+          (total, model) => total + (model.tokens?.total ?? 0),
+          0,
+        );
+      } catch {
+        // A body that cannot be read has not spent anything this pass. The
+        // gate under-counts rather than blocking work on a failed probe.
+        return undefined;
       }
     },
 
