@@ -19,78 +19,30 @@
  * what tells the two apart.
  */
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
-import {
-  applyContainerSandboxNoProxy,
-  fakeServerHostOptions,
-  TestRig,
-} from './test-helper.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { fakeServerHostOptions, TestRig } from './test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from './fake-openai-server.js';
 import type {
   FakeOpenAIResponse,
   FakeOpenAIServer,
 } from './fake-openai-server.js';
-import { join } from 'node:path';
 import {
-  mkdirSync,
-  writeFileSync,
-  chmodSync,
-  existsSync,
-  readFileSync,
-} from 'node:fs';
+  EXECUTED_FLAG,
+  SKILL_BODY_SENTINEL,
+  SKILL_NAME,
+  exitInteractive,
+  fakeModelLaunchArgs,
+  gateHits,
+  installGatedSkill,
+  makeWaitFor,
+  stubFakeModelEnv,
+} from './helpers/gated-skill-fixture.js';
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 
-const GATE_MARKER = 'GATE_BLOCKED_DOWNSTREAM_SESSION_ID_MISSING';
-const EXECUTED_FLAG = 'executed.flag';
-/** Present in the Skill body, so a resumed request can be recognized. */
-const SKILL_BODY_SENTINEL = 'Never fabricate a fallback';
 /** Typed by the "user"; the fake model dispatches on these. */
 const START_SKILL = 'load the gated skill';
 const RUN_DOWNSTREAM = 'run the downstream command';
-
-function installGatedSkill(testDir: string) {
-  const skillDir = join(testDir, '.qwen', 'skills', 'gated-skill');
-  mkdirSync(join(skillDir, 'scripts'), { recursive: true });
-
-  writeFileSync(
-    join(skillDir, 'SKILL.md'),
-    `---
-name: gated-skill
-description: Calls the downstream CLI using a runtime-injected session ID
-hooks:
-  PreToolUse:
-    - matcher: Shell
-      hooks:
-        - type: command
-          command: "$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"
----
-
-Only use the exact runtime-injected ID (\`DOWNSTREAM_SESSION_ID\`).
-${SKILL_BODY_SENTINEL}; stop if it is missing.
-`,
-  );
-
-  const gate = join(skillDir, 'scripts', 'gate-session-id.sh');
-  writeFileSync(
-    gate,
-    `#!/usr/bin/env bash
-echo fired >> "$QWEN_SKILL_ROOT/gate-hits.log"
-if [ -z "\${DOWNSTREAM_SESSION_ID:-}" ]; then
-  echo "${GATE_MARKER}" >&2
-  exit 2
-fi
-exit 0
-`,
-  );
-  chmodSync(gate, 0o755);
-
-  return { skillDir, hitsLog: join(skillDir, 'gate-hits.log') };
-}
-
-/** How many times the gate has actually run. */
-function gateHits(hitsLog: string): number {
-  if (!existsSync(hitsLog)) return 0;
-  return readFileSync(hitsLog, 'utf8').split('\n').filter(Boolean).length;
-}
 
 describe('skill hooks survive session resume', () => {
   let rig: TestRig;
@@ -136,7 +88,7 @@ describe('skill hooks survive session resume', () => {
             // No fixed id: the CLI suppresses a tool call whose id already
             // appears earlier in the conversation, and the resumed session
             // replays the first session's calls.
-            fakeToolCall('skill', { skill: 'gated-skill' }),
+            fakeToolCall('skill', { skill: SKILL_NAME }),
           ],
         };
       }
@@ -152,17 +104,9 @@ describe('skill hooks survive session resume', () => {
       return { content: 'done' };
     }, fakeServerHostOptions());
 
-    vi.stubEnv('OPENAI_API_KEY', 'fake-key');
-    vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
-    vi.stubEnv('OPENAI_MODEL', 'fake-model');
-    vi.stubEnv('QWEN_MODEL', 'fake-model');
     // Both launches share one home so `--continue` can find the recorded
     // session, and neither can reach the developer's real one.
-    vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
-    vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
-    restoreNoProxy = applyContainerSandboxNoProxy();
-    // The gate's required value is deliberately absent, in both sessions.
-    vi.stubEnv('DOWNSTREAM_SESSION_ID', '');
+    restoreNoProxy = stubFakeModelEnv(rig, fakeServer);
 
     const flagPath = join(rig.testDir!, EXECUTED_FLAG);
 
@@ -180,14 +124,7 @@ describe('skill hooks survive session resume', () => {
       const { ptyProcess, promise: exited } = rig.runInteractiveWith(
         { chatRecording: true },
         ...options.extraArgs,
-        '--auth-type',
-        'openai',
-        '--model',
-        'fake-model',
-        '--openai-base-url',
-        fakeServer.baseUrl,
-        '--openai-api-key',
-        'fake-key',
+        ...fakeModelLaunchArgs(fakeServer),
       );
 
       let output = '';
@@ -195,12 +132,7 @@ describe('skill hooks survive session resume', () => {
         output += d;
       });
 
-      const waitFor = async (label: string, done: () => boolean) => {
-        const ok = await rig.poll(done, 30000, 100);
-        expect(ok, `timed out waiting for ${label}. Output:\n${output}`).toBe(
-          true,
-        );
-      };
+      const waitFor = makeWaitFor(rig, () => output);
 
       const ready = await rig.waitForText('Type your message', 30000);
       expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
@@ -270,13 +202,7 @@ describe('skill hooks survive session resume', () => {
         () => existsSync(flagPath) || gateHits(hitsLog) > hitsAtLaunch,
       );
 
-      // Ctrl+C twice to exit; the second only registers once the first has
-      // been acknowledged.
-      ptyProcess.write('\x03');
-      await waitFor('the exit confirmation', () =>
-        output.includes('Ctrl+C again to exit'),
-      );
-      ptyProcess.write('\x03');
+      await exitInteractive(ptyProcess, waitFor, () => output);
       // Wait for the process to actually exit before the next launch: the
       // conversation `--continue` reads is written on the way out, so racing
       // it produces a resumed session with an empty history — which looks

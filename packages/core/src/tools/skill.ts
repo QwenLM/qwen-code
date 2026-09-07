@@ -38,6 +38,7 @@ import {
   applySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  skillModelInvocationBlock,
   SKILL_LLM_CONTENT_PREFIX,
 } from './skill-utils.js';
 
@@ -76,6 +77,27 @@ Important:
   - \`python scripts/helper.py\` -> \`python /path/to/skill/scripts/helper.py\`
   - \`reference.md\` -> \`/path/to/skill/reference.md\`
 </skills_instructions>`;
+
+/**
+ * What resume tells the operator when it declines to re-arm a skill, keyed by
+ * the condition `skillModelInvocationBlock` reports. The phrasing is the
+ * whole point of the branch — a gate that vanishes in silence is #11180 — so
+ * each reason names what changed since the skill was invoked, not merely that
+ * something did.
+ */
+const SKILL_RESTORE_DECLINED_REASONS = {
+  // `skills.disabled`, or its extension deactivated. Both live paths refuse a
+  // disabled skill before applying anything, so restoring its allow rules and
+  // hooks would switch an auto-approval back on after the user turned it off.
+  disabled: 'it is disabled',
+  // `paths:` activation is in-memory, so a conditional skill starts a resumed
+  // session deactivated and `validateToolParams` refuses it in that state.
+  inactive: 'its `paths:` activation has not fired',
+  // `disable-model-invocation: true`, which `execute` refuses outright
+  // (`Skill "X" not found.`): re-arming it would grant a session what no tool
+  // call can ask for.
+  hidden: 'it is hidden from model invocation',
+} as const;
 
 /**
  * Skill tool that enables the model to access skill definitions. The tool keeps
@@ -487,53 +509,39 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * untrusted folder still gets nothing.
    *
    * A skill the model could not invoke today is skipped, so resume never
-   * re-arms something a fresh tool call would refuse. The three conditions
-   * are the model-facing ones (`skill-utils.ts`'s availability filter):
-   * enabled, active, and not hidden from the model. That is deliberately the
-   * stricter of the two live paths — the `/<skill-name>` loader checks only
-   * enabledness and would arm an inactive or model-hidden skill — because
-   * this history records model tool calls, and a user who wants the looser
-   * grant back can still type the slash command.
+   * re-arms something a fresh tool call would refuse. The conditions are not
+   * restated here: `skillModelInvocationBlock` is the same predicate the
+   * availability filter uses to decide what the model may call, so the two
+   * cannot drift into disagreeing about what a resumed session may hold.
+   * That is deliberately the stricter of the two live paths — the
+   * `/<skill-name>` loader checks only enabledness and would arm an inactive
+   * or model-hidden skill — because this history records model tool calls,
+   * and a user who wants the looser grant back can still type the slash
+   * command.
    */
   private restoreSkillSideEffects(skill: SkillConfig): void {
-    // Enabledness can change between sessions: a skill invoked, then
-    // disabled via `skills.disabled` or by deactivating its extension, is
-    // still in this history. Both live paths refuse a disabled skill before
-    // applying anything (`executeDisabledSkill`; the loader's disabled
-    // branch), so restoring its allow rules and hooks would switch an
-    // auto-approval back on after the user turned it off.
-    if (!this.config.isSkillEnabled(skill)) {
-      this.logSkillNotRestored(skill, 'it is disabled');
-      return;
-    }
-    // `paths:` activation is in-memory too, so a conditional skill starts a
-    // resumed session deactivated. `validateToolParams` refuses it in that
-    // state ("gated by path-based activation"), and this is the same check
-    // that backs `pendingConditionalSkillNames` — read from the manager
-    // directly so restore does not race the async `refreshSkills`.
-    // Hooks are refused here alongside the `allowedTools` grant, rather than
-    // split off as "a gate is a restriction, so re-arming it is always safe".
-    // A `PreToolUse` hook is not purely a restriction: it runs an arbitrary
+    // One predicate, shared with the availability filter that decides what the
+    // model may call (`skillModelInvocationBlock`), rather than a second copy
+    // of its three conditions here. All three can change between sessions, and
+    // one of them changes invisibly: frontmatter is not part of the recorded
+    // body, so adding `disable-model-invocation: true` leaves the recorded
+    // output byte-identical and the mismatch check still passes.
+    //
+    // Hooks are refused alongside the `allowedTools` grant, rather than split
+    // off as "a gate is a restriction, so re-arming it is always safe". A
+    // `PreToolUse` hook is not purely a restriction: it runs an arbitrary
     // command and its output can carry `permissionDecision: 'allow'` (and
     // `updatedPermissions`), so restoring one for a skill this session has not
     // activated can widen permissions as easily as narrow them — and it would
     // leave the hook armed for the whole session while the `paths:` scope that
-    // was supposed to bound it never fired. Refusing both keeps restore no
-    // wider than the model path, which is the path this history records.
-    if (!this.skillManager.isSkillActive(skill)) {
-      this.logSkillNotRestored(skill, 'its `paths:` activation has not fired');
-      return;
-    }
-    // Visibility can change between sessions the same way enabledness can,
-    // and it changes invisibly here: frontmatter is not part of the recorded
-    // body, so adding `disable-model-invocation: true` leaves the recorded
-    // output byte-identical and the mismatch check passes. `execute` refuses
-    // such a skill outright (`Skill "X" not found.`), so re-arming it would
-    // grant a session what no tool call can ask for. Read the flag off the
-    // cached config rather than `hiddenSkillNames`, which is committed by the
-    // unsequenced `refreshSkills()`.
-    if (skill.disableModelInvocation) {
-      this.logSkillNotRestored(skill, 'it is hidden from model invocation');
+    // was supposed to bound it never fired.
+    const blocked = skillModelInvocationBlock(
+      this.config,
+      this.skillManager,
+      skill,
+    );
+    if (blocked) {
+      this.logSkillNotRestored(skill, SKILL_RESTORE_DECLINED_REASONS[blocked]);
       return;
     }
     applySkillSideEffects(this.config, skill);

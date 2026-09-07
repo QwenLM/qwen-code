@@ -24,6 +24,7 @@ import {
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   clearLoadedSkillTracking,
+  skillModelInvocationBlock,
 } from './skill-utils.js';
 import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
@@ -316,6 +317,93 @@ describe('applySkillSideEffects', () => {
   it('is a no-op without a config', () => {
     expect(() => applySkillSideEffects(null, gatedSkill)).not.toThrow();
     expect(() => applySkillSideEffects(undefined, gatedSkill)).not.toThrow();
+  });
+});
+
+describe('skillModelInvocationBlock', () => {
+  // The rule two callers share: the availability filter that decides what the
+  // model may call, and the resume path that decides whose `allowedTools` and
+  // `hooks:` may be re-armed. They used to hand-roll it separately, and the
+  // resume copy was missing the visibility condition — so a resumed session
+  // could hold grants for a skill no tool call can ask for.
+  const skill = {
+    name: 'gated-skill',
+    description: 'Gated',
+    level: 'user',
+    filePath: '/skills/gated-skill/SKILL.md',
+    body: 'Body.',
+  } as unknown as SkillConfig;
+
+  function make(
+    opts: {
+      enabled?: boolean;
+      active?: boolean;
+      hidden?: boolean;
+    } = {},
+  ) {
+    const config = {
+      isSkillEnabled: () => opts.enabled ?? true,
+    } as unknown as Config;
+    const skillManager = {
+      isSkillActive: () => opts.active ?? true,
+    } as unknown as SkillManager;
+    return {
+      config,
+      skillManager,
+      skill: opts.hidden ? { ...skill, disableModelInvocation: true } : skill,
+    };
+  }
+
+  it('reports nothing when the model could invoke the skill right now', () => {
+    const { config, skillManager, skill: s } = make();
+    expect(skillModelInvocationBlock(config, skillManager, s)).toBeUndefined();
+  });
+
+  it('names each condition that blocks invocation', () => {
+    const disabled = make({ enabled: false });
+    expect(
+      skillModelInvocationBlock(
+        disabled.config,
+        disabled.skillManager,
+        disabled.skill,
+      ),
+    ).toBe('disabled');
+
+    const inactive = make({ active: false });
+    expect(
+      skillModelInvocationBlock(
+        inactive.config,
+        inactive.skillManager,
+        inactive.skill,
+      ),
+    ).toBe('inactive');
+
+    // Invisible to the resume path's body match — frontmatter is not part of
+    // the recorded body — which is why it has to be checked here.
+    const hidden = make({ hidden: true });
+    expect(
+      skillModelInvocationBlock(
+        hidden.config,
+        hidden.skillManager,
+        hidden.skill,
+      ),
+    ).toBe('hidden');
+  });
+
+  it('reports the first failing condition when several fail at once', () => {
+    // Only the message an operator reads depends on this, but it has to be
+    // stable: the resume path turns the reason into the line that says why a
+    // gate is missing.
+    const {
+      config,
+      skillManager,
+      skill: s,
+    } = make({
+      enabled: false,
+      active: false,
+      hidden: true,
+    });
+    expect(skillModelInvocationBlock(config, skillManager, s)).toBe('disabled');
   });
 });
 

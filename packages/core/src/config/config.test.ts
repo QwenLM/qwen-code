@@ -75,6 +75,7 @@ import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
@@ -3009,6 +3010,50 @@ describe('Server Config (config.ts)', () => {
       config.startNewSession('replacement-session');
 
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
+    it("drops a skill's session allow rule at the session boundary, keeping the user's own", async () => {
+      // The other half of what `clearLoadedSkills` above does: a skill's
+      // `allowedTools` are granted as session allow rules, and
+      // `PermissionManager` is built once per process — `startNewSession`
+      // never touches `sessionRules`. Without the session scoping the grant
+      // would keep auto-approving in a session that never loaded the skill,
+      // has no body in context and shows no trace of where the approval came
+      // from. Driven through `applySkillSideEffects` with a real `Config` and
+      // a real `PermissionManager`, so the whole chain is pinned — the id the
+      // grant is tagged with is the one `startNewSession` replaces.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipLlmInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const permissionManager = config.getPermissionManager()!;
+      const gitPush = {
+        toolName: ToolNames.SHELL,
+        command: 'git push origin main',
+      };
+      const userGranted = { toolName: ToolNames.SHELL, command: 'ls -la' };
+
+      applySkillSideEffects(config, {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/skills/gated-skill/SKILL.md',
+        body: 'Body.',
+        allowedTools: ['Bash(git *)'],
+      } as unknown as SkillConfig);
+      // The user's own "always allow" is not session-scoped and must survive.
+      permissionManager.addSessionAllowRule('Bash(ls *)');
+      expect(await permissionManager.evaluate(gitPush)).toBe('allow');
+      expect(await permissionManager.evaluate(userGranted)).toBe('allow');
+
+      config.startNewSession('replacement-session');
+
+      expect(await permissionManager.evaluate(gitPush)).toBe('ask');
+      expect(await permissionManager.evaluate(userGranted)).toBe('allow');
     });
 
     it('records no lifecycle transition when resuming the current session id', async () => {
