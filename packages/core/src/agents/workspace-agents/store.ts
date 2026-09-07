@@ -1211,18 +1211,38 @@ export async function setWorkspaceAgentEnabled(
   });
 }
 
-export async function removeWorkspaceAgent(
+/**
+ * Retires an identity: it takes no new work and keeps everything it did.
+ *
+ * Deleting the roster entry was the obvious implementation and the wrong one.
+ * Every post an agent wrote names it, and a thread is read long after the
+ * agent stops working: removing the entry turns its side of a conversation
+ * into an author nobody can look up, and a mention of it into a typo. So the
+ * entry stays, `retiredAt` is stamped, and `isAgentAddressable` refuses new
+ * work from then on.
+ *
+ * The consequences are deliberate. The name stays taken, because a second
+ * agent under a retired one's name would make the old posts read as that new
+ * agent's. Retiring twice is idempotent rather than an error. Live work still
+ * refuses: an agent cannot be retired out from under a run that is mid-turn,
+ * which is the same answer deletion gave.
+ */
+export async function retireWorkspaceAgent(
   projectRoot: string,
   agentId: string,
 ): Promise<WorkspaceAgentRosterChange> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const agents = await transaction.readAgents();
-    if (!agents.some((candidate) => candidate.id === agentId)) {
-      return 'not_found';
-    }
+    const existing = agents.find((candidate) => candidate.id === agentId);
+    if (!existing) return 'not_found';
+    if (existing.retiredAt !== undefined) return 'updated';
     if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
     await transaction.writeAgents(
-      agents.filter((candidate) => candidate.id !== agentId),
+      agents.map((candidate) =>
+        candidate.id === agentId
+          ? { ...candidate, retiredAt: Date.now() }
+          : candidate,
+      ),
     );
     return 'updated';
   });

@@ -68,7 +68,12 @@ export interface TranscriptSliceView {
 
 export interface ThreadViewProps {
   thread: ThreadDetailView;
-  agents: readonly { name: string; enabled: boolean }[];
+  agents: readonly {
+    name: string;
+    enabled: boolean;
+    /** Retired identities stay in the list and are never offered new work. */
+    retiredAt?: number;
+  }[];
   /** Server-computed routing for the current draft. */
   preview?: readonly RoutingPreviewTarget[];
   draft: string;
@@ -303,14 +308,21 @@ export function ThreadView({
             aria-label="Thread assignee"
           >
             <option value="">No assignee</option>
-            {thread.assigneeName && !currentAssignee?.enabled ? (
+            {thread.assigneeName &&
+            (!currentAssignee?.enabled || currentAssignee?.retiredAt) ? (
+              // The thread keeps naming whoever it was assigned to, and says
+              // in what way they are unavailable rather than dropping them.
               <option value={thread.assigneeName}>
                 {thread.assigneeName}{' '}
-                {currentAssignee ? '(disabled)' : '(removed)'}
+                {currentAssignee?.retiredAt
+                  ? '(retired)'
+                  : currentAssignee
+                    ? '(disabled)'
+                    : '(removed)'}
               </option>
             ) : null}
             {agents
-              .filter((agent) => agent.enabled)
+              .filter((agent) => agent.enabled && !agent.retiredAt)
               .map((agent) => (
                 <option key={agent.name} value={agent.name}>
                   {agent.name}

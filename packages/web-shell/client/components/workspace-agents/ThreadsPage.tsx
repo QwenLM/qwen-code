@@ -38,6 +38,8 @@ export interface WorkspaceAgentSummaryView {
   description?: string;
   color?: string;
   enabled: boolean;
+  /** Set once the identity is retired: it keeps its posts and takes no work. */
+  retiredAt?: number;
   workingOn?: {
     id: string;
     title: string;
@@ -283,7 +285,7 @@ export function ThreadsPage({
             >
               <option value="">No assignee</option>
               {agents
-                .filter((agent) => agent.enabled)
+                .filter((agent) => agent.enabled && !agent.retiredAt)
                 .map((agent) => (
                   <option key={agent.id} value={agent.name}>
                     {agent.name}
@@ -354,14 +356,16 @@ export function ThreadsPage({
               <div
                 key={agent.id}
                 className={
-                  agent.enabled
+                  agent.enabled && !agent.retiredAt
                     ? styles.agentRow
                     : `${styles.agentRow} ${styles.agentRowDisabled}`
                 }
               >
                 <span
                   className={
-                    agent.enabled ? styles.agentDot : styles.agentDotDisabled
+                    agent.enabled && !agent.retiredAt
+                      ? styles.agentDot
+                      : styles.agentDotDisabled
                   }
                   style={agent.color ? { color: agent.color } : undefined}
                   aria-hidden="true"
@@ -371,37 +375,45 @@ export function ThreadsPage({
                   {agent.description || 'general agent'}
                 </span>
                 <span className={styles.agentActivity}>
-                  {agent.workingOn
-                    ? `${agent.workingOn.state} · ${agent.workingOn.title}`
-                    : 'idle'}
+                  {agent.retiredAt
+                    ? 'retired'
+                    : agent.workingOn
+                      ? `${agent.workingOn.state} · ${agent.workingOn.title}`
+                      : 'idle'}
                 </span>
                 <span className={styles.agentWaiting}>
                   {agent.waiting ? `${agent.waiting} waiting` : '—'}
                 </span>
-                <button
-                  type="button"
-                  className={styles.agentAction}
-                  disabled={pending}
-                  onClick={() => onSetAgentEnabled(agent.id, !agent.enabled)}
-                >
-                  {agent.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.agentAction} ${styles.agentRemove}`}
-                  disabled={Boolean(agent.workingOn || agent.waiting)}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        `Remove agent "${agent.name}"? Existing thread posts keep its name.`,
-                      )
-                    ) {
-                      onDeleteAgent(agent.id);
-                    }
-                  }}
-                >
-                  Remove
-                </button>
+                {agent.retiredAt ? null : (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.agentAction}
+                      disabled={pending}
+                      onClick={() =>
+                        onSetAgentEnabled(agent.id, !agent.enabled)
+                      }
+                    >
+                      {agent.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.agentAction} ${styles.agentRemove}`}
+                      disabled={Boolean(agent.workingOn || agent.waiting)}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Retire agent "${agent.name}"? It stops taking work. Its posts stay on every thread, and its name stays taken so nothing else can post as it.`,
+                          )
+                        ) {
+                          onDeleteAgent(agent.id);
+                        }
+                      }}
+                    >
+                      Retire
+                    </button>
+                  </>
+                )}
               </div>
             ))
           )}

@@ -24,8 +24,7 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
-import { open, readdir, rm } from 'node:fs/promises';
-import path from 'node:path';
+import { open } from 'node:fs/promises';
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
@@ -47,7 +46,8 @@ import {
   readAgentWorkspace,
   readThread,
   releaseAgentHostSession,
-  removeWorkspaceAgent,
+  retireWorkspaceAgent,
+  isAgentAddressable,
   resolveThreadStatus,
   setWorkspaceAgentEnabled,
   updateWorkspaceAgents,
@@ -59,8 +59,6 @@ import {
   DEFAULT_THREAD_TOKEN_BUDGET,
   Storage,
   getAgentJsonlPath,
-  getSubagentsRootDir,
-  sanitizeFilenameComponent,
   agentBodyId,
   type WorkspaceAgent,
   type Thread,
@@ -111,36 +109,6 @@ function lastActivity(thread: Thread): number {
     0,
   );
   return Math.max(lastPost, lastRun);
-}
-
-async function deleteWorkspaceAgentTranscripts(
-  workspaceCwd: string,
-  runtimeBaseDir: string | undefined,
-  agentId: string,
-): Promise<void> {
-  const root = getSubagentsRootDir(
-    new Storage(
-      workspaceCwd,
-      runtimeBaseDir ?? Storage.getRuntimeBaseDir(),
-    ).getProjectDir(),
-  );
-  const sessions = await readdir(root, { withFileTypes: true }).catch(
-    (error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    },
-  );
-  const stem = `agent-${sanitizeFilenameComponent(
-    agentBodyId({ id: agentId }),
-  )}`;
-  await Promise.all(
-    sessions
-      .filter((entry) => entry.isDirectory())
-      .flatMap((entry) => [
-        rm(path.join(root, entry.name, `${stem}.jsonl`), { force: true }),
-        rm(path.join(root, entry.name, `${stem}.meta.json`), { force: true }),
-      ]),
-  );
 }
 
 /** Why a run exists, in the words a reader asks the question in. */
@@ -372,6 +340,13 @@ export function registerWorkspaceAgentRoutes(
             ...(agent.description ? { description: agent.description } : {}),
             ...(agent.color ? { color: agent.color } : {}),
             enabled: agent.enabled !== false,
+            // A retired agent is listed, not hidden. Its posts are still on
+            // the threads, and a reader who meets its name needs somewhere to
+            // look it up. `enabled` stays a separate answer: a retired agent
+            // is not merely paused, and the two are not interchangeable.
+            ...(agent.retiredAt !== undefined
+              ? { retiredAt: agent.retiredAt }
+              : {}),
             ...(active && activeRun
               ? {
                   workingOn: {
@@ -933,13 +908,17 @@ export function registerWorkspaceAgentRoutes(
         }
         let created: WorkspaceAgent | undefined;
         let duplicate = false;
+        // A retired agent still holds its name. Saying so is the difference
+        // between a person renaming and a person hunting for an agent that is
+        // not in the list.
+        let duplicateRetired = false;
         await updateWorkspaceAgents(root, (agents) => {
-          if (
-            agents.some(
-              (agent) => agent.name.toLowerCase() === name.toLowerCase(),
-            )
-          ) {
+          const clash = agents.find(
+            (agent) => agent.name.toLowerCase() === name.toLowerCase(),
+          );
+          if (clash) {
             duplicate = true;
+            duplicateRetired = clash.retiredAt !== undefined;
             return agents;
           }
           created = {
@@ -960,7 +939,9 @@ export function registerWorkspaceAgentRoutes(
         });
         if (duplicate) {
           res.status(409).json({
-            error: `An agent named "${name}" already exists.`,
+            error: duplicateRetired
+              ? `A retired agent is named "${name}". Retired names stay taken so its old posts still read as its own.`
+              : `An agent named "${name}" already exists.`,
           });
           return;
         }
@@ -983,7 +964,7 @@ export function registerWorkspaceAgentRoutes(
       if (!runtime) return;
       const agentId = String(req.params['id']);
       try {
-        const result = await removeWorkspaceAgent(
+        const result = await retireWorkspaceAgent(
           runtime.workspaceCwd,
           agentId,
         );
@@ -995,16 +976,15 @@ export function registerWorkspaceAgentRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        const remainingAgents = await readWorkspaceAgents(runtime.workspaceCwd);
+        // Retiring keeps the roster entry, so "is anyone left" is a question
+        // about who can still take work, not about how many rows exist.
+        const remainingAgents = (
+          await readWorkspaceAgents(runtime.workspaceCwd)
+        ).filter(isAgentAddressable);
         const dispatchError =
           remainingAgents.length > 0
             ? await startBookedRuns(runtime)
             : undefined;
-        await deleteWorkspaceAgentTranscripts(
-          runtime.workspaceCwd,
-          runtime.sessionRuntimeBaseDir,
-          agentId,
-        );
         if (remainingAgents.length === 0) {
           owners.get(runtime.workspaceCwd)?.owner.stop();
           owners.delete(runtime.workspaceCwd);
@@ -1021,7 +1001,11 @@ export function registerWorkspaceAgentRoutes(
         }
         res.json({
           id: agentId,
+          // The identity is gone from the roster's point of view and its posts
+          // are still readable. `deleted` stays for callers that read it, and
+          // says what actually happened alongside it.
           deleted: true,
+          retired: true,
           ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {
