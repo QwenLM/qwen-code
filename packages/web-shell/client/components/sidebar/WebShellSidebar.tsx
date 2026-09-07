@@ -252,7 +252,12 @@ export interface WebShellSidebarLockedWorkspace {
 }
 
 export type WebShellSidebarPrimaryNavItem =
-  'newTask' | 'plugins' | 'channels' | 'scheduledTasks' | 'workflows' | 'goals';
+  | 'newTask'
+  | 'plugins'
+  | 'channels'
+  | 'scheduledTasks'
+  | 'workflows'
+  | 'goals';
 
 export interface WebShellSidebarPrimaryNavOptions {
   /** Built-in primary nav entries to show. Defaults to all. */
@@ -296,11 +301,20 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
 ];
 
 export type WebShellSidebarSessionActionItem =
-  'details' | 'rename' | 'group' | 'export' | 'delete' | 'pin' | 'archive';
+  | 'details'
+  | 'rename'
+  | 'group'
+  | 'export'
+  | 'delete'
+  | 'pin'
+  | 'archive';
 
 /** Subset of action items that have working inline (hover-button) handlers. */
 export type WebShellSidebarSessionInlineActionItem =
-  'pin' | 'rename' | 'export' | 'delete';
+  | 'pin'
+  | 'rename'
+  | 'export'
+  | 'delete';
 
 export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
@@ -949,9 +963,9 @@ export function WebShellSidebar({
         footer === false
           ? []
           : (footer?.items ??
-              (isDesktopShell()
-                ? DESKTOP_DEFAULT_FOOTER_ITEMS
-                : DEFAULT_FOOTER_ITEMS)),
+            (isDesktopShell()
+              ? DESKTOP_DEFAULT_FOOTER_ITEMS
+              : DEFAULT_FOOTER_ITEMS)),
       ),
     [footer],
   );
@@ -1124,13 +1138,13 @@ export function WebShellSidebar({
     workspaceSessionLiveStateSupported && liveStateWorkspaceCwds.length > 0;
   const primaryWorkspaceSessionLiveStateEnabled = Boolean(
     workspaceSessionLiveStateEnabled &&
-    primaryWorkspaceCwd &&
-    liveStateWorkspaceCwdSet.has(primaryWorkspaceCwd),
+      primaryWorkspaceCwd &&
+      liveStateWorkspaceCwdSet.has(primaryWorkspaceCwd),
   );
   const primaryWorkspaceLiveStateGroupsEnabled = Boolean(
     primaryWorkspaceSessionLiveStateEnabled &&
-    primaryWorkspaceCwd &&
-    liveStateGroupWorkspaceCwds.includes(primaryWorkspaceCwd),
+      primaryWorkspaceCwd &&
+      liveStateGroupWorkspaceCwds.includes(primaryWorkspaceCwd),
   );
   const secondaryWorkspaceCwds = useMemo(
     () =>
@@ -4973,9 +4987,9 @@ export function WebShellSidebar({
     workspace.capabilities?.features?.includes(
       STANDALONE_SESSIONS_CAPABILITY,
     ) === true &&
-    !lockedWorkspaceCwd &&
-    onLoadStandaloneSession &&
-    onStandaloneNotice,
+      !lockedWorkspaceCwd &&
+      onLoadStandaloneSession &&
+      onStandaloneNotice,
   );
   const handleStandaloneMutation = useCallback(() => {
     setStandaloneRefreshKey((value) => value + 1);
