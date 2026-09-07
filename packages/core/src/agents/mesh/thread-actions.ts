@@ -389,10 +389,15 @@ export async function createAssignedThread(
   },
 ): Promise<{ thread: Thread; assignment: PostMessageResult }> {
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const assignee = agents.find((agent) => agent.id === input.assignee.id);
+    if (!assignee || assignee.enabled === false) {
+      throw new Error(`Agent "${input.assignee.name}" is no longer available.`);
+    }
     const thread = await prepareThreadInTransaction(transaction, {
       title: input.title,
       ...(input.body !== undefined ? { body: input.body } : {}),
-      assigneeAgentId: input.assignee.id,
+      assigneeAgentId: assignee.id,
     });
     const assignment = await postMessageInTransaction(
       transaction,
@@ -401,9 +406,9 @@ export async function createAssignedThread(
         from: HUMAN_AUTHOR_ID,
         authorKind: 'human',
         triggerKind: 'assignment',
-        text: `Assigned to ${mentionToken(input.assignee)}.`,
+        text: `Assigned to ${mentionToken(assignee)}.`,
       },
-      { threadOverride: thread },
+      { agents, threadOverride: thread },
     );
     return { thread: assignment.thread, assignment };
   });

@@ -680,8 +680,9 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    reviewed the root. The live surface now also covers cancellation,
    transcript-slice reading, blocked questions, tombstoned agent names, inline
    children, mark-done, and the Agents sidebar entry. Assigned creation now
-   persists its first booking atomically, human posts wake both new and
-   coalesced work, and cancel/done persist intent before touching the runtime.
+   validates the live roster and persists its first booking atomically, human
+   posts wake both new and coalesced work, and cancel/done persist intent before
+   touching the runtime.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate
     tripped, and terminal failure. Last because it consumes state transitions
     proven by steps 7-9.

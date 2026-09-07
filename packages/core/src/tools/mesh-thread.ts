@@ -30,7 +30,6 @@ import {
 import {
   findAgentByName,
   prepareThreadInTransaction,
-  readMeshAgents,
   readThread,
   withMeshStoreTransaction,
 } from '../agents/mesh/mesh-store.js';
@@ -374,21 +373,6 @@ class ThreadCreateInvocation extends BaseToolInvocation<
     try {
       const context = requireMeshRunContext('thread_create');
       const projectRoot = this.config.getProjectRoot();
-      const agents = await readMeshAgents(projectRoot);
-      const assignee = this.params.assignee
-        ? findAgentByName(agents, this.params.assignee.replace(/^@/, ''))
-        : undefined;
-      if (this.params.assignee && !assignee) {
-        return failed(
-          `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
-        );
-      }
-      if (assignee && assignee.enabled === false) {
-        return failed(
-          `Agent "${assignee.name}" is disabled and cannot take work.`,
-        );
-      }
-
       // Creating and assigning are one transaction: two would leave a crash
       // window in which an assigned sub-thread exists with nothing scheduled
       // to work it.
@@ -400,6 +384,23 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             context,
             'thread_create',
           );
+          const agents = await transaction.readAgents();
+          const assignee = this.params.assignee
+            ? findAgentByName(
+                agents,
+                this.params.assignee.replace(/^@/, ''),
+              )
+            : undefined;
+          if (this.params.assignee && !assignee) {
+            throw new Error(
+              `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
+            );
+          }
+          if (assignee?.enabled === false) {
+            throw new Error(
+              `Agent "${assignee.name}" is disabled and cannot take work.`,
+            );
+          }
           const child = await prepareThreadInTransaction(transaction, {
             title: this.params.title,
             ...(this.params.body ? { body: this.params.body } : {}),
@@ -408,7 +409,11 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             ...(assignee ? { assigneeAgentId: assignee.id } : {}),
           });
           if (!assignee) {
-            return { child: await transaction.writeThread(child), booked: 0 };
+            return {
+              child: await transaction.writeThread(child),
+              booked: 0,
+              assignee: undefined,
+            };
           }
           // Assignment is a structured trigger through the same admission
           // path, so it cannot bypass budgets, the queue limit, or the
@@ -424,19 +429,20 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               triggerKind: 'assignment',
               text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
             },
-            { threadOverride: child },
+            { agents, threadOverride: child },
           );
           return {
             child: posted.thread,
             booked: posted.dispatched.length,
+            assignee,
           };
         },
       );
 
       const shares = ` It shares this thread tree's budget.`;
       return ok(
-        assignee
-          ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(assignee)}.${
+        created.assignee
+          ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(created.assignee)}.${
               created.booked > 0
                 ? ' Their work has been queued.'
                 : ' No run was booked — check the thread for the reason.'
