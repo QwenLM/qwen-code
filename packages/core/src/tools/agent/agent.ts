@@ -25,7 +25,6 @@ import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import type { AgentRunContext } from '../../agents/workspace-agents/run-context.js';
-import { runAgentTurn } from '../../agents/workspace-agents/runtime-bridge.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
@@ -3352,9 +3351,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(this.programmatic
             ? {
                 workspaceAgentId: this.programmatic.workspaceAgentId,
-                ...(this.programmatic.agentRun
-                  ? { agentRun: this.programmatic.agentRun }
-                  : {}),
               }
             : {}),
           agentType: hookOpts.agentType,
@@ -3826,7 +3822,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           turnAbortController: AbortController,
           fireStartHook: boolean,
         ) => {
-          const agentRun = readAgentMeta(metaPath)?.agentRun;
           const framedBgBody = () =>
             this.runWithSubagentSpan(
               this.buildSubagentSpanSpec(
@@ -3845,18 +3840,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   );
                 return runWithAgentContext(
                   hookOpts.agentId,
-                  agentRun
-                    ? () =>
-                        runAgentTurn({
-                          projectRoot: this.config.getProjectRoot(),
-                          context: agentRun,
-                          emitter: bgEventEmitter,
-                          abortController: turnAbortController,
-                          metaPath,
-                          transcriptPath: jsonlPath,
-                          body,
-                        })
-                    : body,
+                  body,
                   launchDepth,
                 );
               },

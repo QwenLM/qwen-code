@@ -258,7 +258,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   stripRuntimeSnapshotPrefix: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).stripRuntimeSnapshotPrefix,
-  launchWorkspaceAgent: mockLaunchWorkspaceAgent,
   readWorkspaceAgents: mockReadWorkspaceAgents,
   readAgentWorkspace: mockReadAgentWorkspace,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
@@ -7261,102 +7260,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'standalone',
       undefined,
     );
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('launches a configured agent only from a trusted agent host session', async () => {
-    const sessionId = '11111111-1111-4111-8111-111111111111';
-    const workspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getSessionSourceType = vi
-      .fn()
-      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
-    innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadAgentWorkspace.mockResolvedValue({ hostSessionId: sessionId });
-    mockReadWorkspaceAgents.mockResolvedValue([workspaceAgent]);
-    mockLaunchWorkspaceAgent.mockResolvedValue({
-      status: 'started',
-      runtimeId: 'local:agent-ag_alice',
-      backgroundAgentId: 'agent-ag_alice',
-      sessionId,
-    });
-    const { agent, agentPromise } = await bootInitializedAcpAgent(
-      makeSessionSettings(),
-      'trusted-capability',
-    );
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
-        sessionId,
-        agentId: workspaceAgent.id,
-        prompt: 'go',
-      }),
-    ).resolves.toMatchObject({ status: 'started', sessionId });
-    expect(mockReadAgentWorkspace).toHaveBeenCalledWith('/tmp');
-    expect(mockReadWorkspaceAgents).toHaveBeenCalledWith('/tmp');
-    expect(mockLaunchWorkspaceAgent).toHaveBeenCalledWith(
-      innerConfig,
-      workspaceAgent,
-      'go',
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('rejects a labelled session that is not the claimed agent host', async () => {
-    const sessionId = '11111111-1111-4111-8111-111111111111';
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getSessionSourceType = vi
-      .fn()
-      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
-    innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadAgentWorkspace.mockResolvedValue({ hostSessionId: 'other-host' });
-    const { agent, agentPromise } = await bootInitializedAcpAgent(
-      makeSessionSettings(),
-      'trusted-capability',
-    );
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
-        sessionId,
-        agentId: 'ag_alice',
-        prompt: 'go',
-      }),
-    ).rejects.toThrow(/claimed agent host/);
-    expect(mockReadWorkspaceAgents).not.toHaveBeenCalled();
-    expect(mockLaunchWorkspaceAgent).not.toHaveBeenCalled();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('returns launch_failed when the agent store cannot be read', async () => {
-    const sessionId = '11111111-1111-4111-8111-111111111111';
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getSessionSourceType = vi
-      .fn()
-      .mockReturnValue(AGENT_HOST_SESSION_SOURCE_TYPE);
-    innerConfig.getProjectRoot = vi.fn().mockReturnValue('/tmp');
-    mockReadAgentWorkspace.mockRejectedValue(new Error('agent store busy'));
-    const { agent, agentPromise } = await bootInitializedAcpAgent(
-      makeSessionSettings(),
-      'trusted-capability',
-    );
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch, {
-        sessionId,
-        agentId: 'ag_alice',
-        prompt: 'go',
-      }),
-    ).resolves.toEqual({ status: 'launch_failed', error: 'agent store busy' });
-    expect(mockLaunchWorkspaceAgent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

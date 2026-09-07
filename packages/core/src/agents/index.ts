@@ -64,20 +64,14 @@ export {
   finishRunInTransaction,
   hasLiveDescendant,
 } from './workspace-agents/run-lifecycle.js';
-export {
-  createAgentDispatchPort,
-  agentBodyId,
-} from './workspace-agents/dispatch-port.js';
 export { dispatchOnce } from './workspace-agents/dispatcher.js';
 export {
   deliverNotifications,
   notificationText,
 } from './workspace-agents/dispatcher.js';
 export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
-export { launchWorkspaceAgent } from './workspace-agents/launcher.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export type { AgentPersonaResolution } from './workspace-agents/persona.js';
-export type { WorkspaceAgentLaunchResult } from './workspace-agents/launcher.js';
 export type { DispatchRecord } from './workspace-agents/dispatcher.js';
 export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,

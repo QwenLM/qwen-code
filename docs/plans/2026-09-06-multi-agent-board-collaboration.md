@@ -650,24 +650,24 @@ action on the child caused it.
 Implemented through the step-6 stacked branch; the shared runtime turn seam is
 kept in the next isolated child PR:
 
-| File                                                   | Responsibility                                         |
-| ------------------------------------------------------ | ------------------------------------------------------ |
-| `core/src/agents/workspace-agents/types.ts`            | Entities and limits                                    |
-| `core/src/agents/workspace-agents/store.ts`            | Paths, validation, locking, CRUD, singleton host claim |
-| `core/src/agents/workspace-agents/mentions.ts`         | `@name` → agent ids                                    |
-| `core/src/agents/workspace-agents/dispatch-policy.ts`  | `decideDispatch` — pure                                |
-| `core/src/agents/workspace-agents/thread-actions.ts`   | `postMessage` — append and book under one lock         |
-| `core/src/agents/workspace-agents/thread-status.ts`    | Aggregate status over every run's close obligation     |
-| `core/src/agents/workspace-agents/run-lifecycle.ts`    | Run close, terminal state, status application, outbox  |
-| `core/src/agents/workspace-agents/run-context.ts`      | Per-turn ambient `(agent, run, thread)` binding        |
-| `core/src/agents/workspace-agents/prompt.ts`           | Turn envelope: thread frame, delta, gap, peers         |
-| `core/src/agents/workspace-agents/capability.ts`       | Read-only name and invocation boundary                 |
-| `core/src/agents/workspace-agents/launcher.ts`         | Persona conversion and typed local launch              |
-| `core/src/tools/thread-tools.ts`                       | The six thread tools; ambient identity only            |
-| `core/src/agents/workspace-agents/dispatcher.ts`       | FIFO selection, runtime entry point, parent reports    |
-| `core/src/agents/workspace-agents/dispatch-port.ts`    | The one binding to the background-agent runtime        |
-| `cli/src/serve/workspace-agents/agent-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
-| `acp-bridge` + `cli/src/acp-integration/`              | Private daemon-to-host launch control                  |
+| File                                                      | Responsibility                                         |
+| --------------------------------------------------------- | ------------------------------------------------------ |
+| `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                    |
+| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD, singleton host claim |
+| `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                    |
+| `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                                |
+| `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock         |
+| `core/src/agents/workspace-agents/thread-status.ts`       | Aggregate status over every run's close obligation     |
+| `core/src/agents/workspace-agents/run-lifecycle.ts`       | Run close, terminal state, status application, outbox  |
+| `core/src/agents/workspace-agents/run-context.ts`         | Per-turn ambient `(agent, run, thread)` binding        |
+| `core/src/agents/workspace-agents/prompt.ts`              | Turn envelope: thread frame, delta, gap, peers         |
+| `core/src/agents/workspace-agents/capability.ts`          | Read-only name and invocation boundary                 |
+| `core/src/agents/workspace-agents/persona.ts`             | Resolves an agent's persona for its own session        |
+| `core/src/tools/thread-tools.ts`                          | The six thread tools; ambient identity only            |
+| `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports    |
+| `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime     |
+| `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload           |
+| `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns       |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -801,8 +801,8 @@ cd packages/core
 npx vitest run src/agents/background-agent-resume.test.ts \
   src/agents/background-tasks.test.ts \
   src/agents/workspace-agents/capability.test.ts \
-  src/agents/workspace-agents/launcher.test.ts
-# 4 files, 218 tests passed
+  src/agents/workspace-agents/persona.test.ts
+# run in CI, not on the author's machine
 
 cd packages/acp-bridge
 npx vitest run src/bridge.test.ts

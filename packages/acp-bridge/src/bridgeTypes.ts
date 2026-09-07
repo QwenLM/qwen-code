@@ -1988,14 +1988,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{ cancelled: boolean }>;
 
   /** Launch one configured agent identity inside its hidden host session. */
-  launchWorkspaceAgent(
-    sessionId: string,
-    agentId: string,
-    prompt: string,
-  ): Promise<BridgeWorkspaceAgentLaunchResult>;
 
   /** Dispatch durable agent bookings inside their hidden host session. */
-  dispatchAgentRuns(sessionId: string): Promise<BridgeAgentDispatchRecord[]>;
 
   /** Control a run, delete history, or start a saved workflow definition. */
   controlSessionWorkflowTask(

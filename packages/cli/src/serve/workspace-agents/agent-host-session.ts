@@ -8,8 +8,6 @@ import {
   claimAgentHostSession,
   readAgentWorkspace,
   releaseAgentHostSession,
-  type WorkspaceAgent,
-  type WorkspaceAgentLaunchResult,
   dispatchOnce,
   type DispatchRecord,
 } from '@qwen-code/qwen-code-core';
@@ -30,7 +28,6 @@ interface AgentHostBridge {
     request: Parameters<AcpSessionBridge['spawnOrAttach']>[0],
   ): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
-  launchWorkspaceAgent: AcpSessionBridge['launchWorkspaceAgent'];
   // Dispatch reads and writes sessions, which live in this process's bridge,
   // so the loop runs here rather than being forwarded into a child. The ACP
   // round trip existed only because the bodies used to be background agents
@@ -42,10 +39,6 @@ interface AgentHostBridge {
 
 export interface AgentHostSessionOwner {
   ensureResident(): Promise<string>;
-  launch(
-    agent: WorkspaceAgent,
-    prompt: string,
-  ): Promise<WorkspaceAgentLaunchResult>;
   dispatch(): Promise<{ records: DispatchRecord[] }>;
   tick(): Promise<void>;
   stop(): void;
@@ -196,11 +189,6 @@ export function startAgentHostSessionOwner(options: {
 
   return {
     ensureResident,
-    async launch(agent, prompt) {
-      const sessionId = await ensureResident();
-      assertGenerationOpen();
-      return bridge.launchWorkspaceAgent(sessionId, agent.id, prompt);
-    },
     async dispatch() {
       await ensureResident();
       assertGenerationOpen();

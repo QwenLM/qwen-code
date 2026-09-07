@@ -230,8 +230,6 @@ import type {
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
-  BridgeAgentDispatchRecord,
-  BridgeWorkspaceAgentLaunchResult,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -12359,21 +12357,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
       );
-    },
-
-    async launchWorkspaceAgent(sessionId, agentId, prompt) {
-      return requestSessionStatus<BridgeWorkspaceAgentLaunchResult>(
-        sessionId,
-        SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch,
-        { agentId, prompt },
-      );
-    },
-
-    async dispatchAgentRuns(sessionId) {
-      const result = await requestSessionStatus<{
-        records: BridgeAgentDispatchRecord[];
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch);
-      return result.records;
     },
 
     async controlSessionWorkflowTask(sessionId, taskId, action, context) {

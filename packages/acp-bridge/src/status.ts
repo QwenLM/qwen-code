@@ -185,8 +185,6 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
-  sessionAgentLaunch: 'qwen/control/session/agent/launch',
-  sessionAgentDispatch: 'qwen/control/session/agent/dispatch',
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',

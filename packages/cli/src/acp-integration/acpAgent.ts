@@ -147,14 +147,6 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
-  createAgentDispatchPort,
-  dispatchOnce,
-  launchWorkspaceAgent,
-  readAgentMeta,
-  readWorkspaceAgents,
-  readAgentWorkspace,
-  type WorkspaceAgent,
-  type WorkspaceAgentLaunchResult,
   resolveAgentPersona,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -8500,9 +8492,7 @@ class QwenAgent implements Agent {
             }
           : params;
       if (
-        (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch) &&
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -12264,105 +12254,6 @@ class QwenAgent implements Agent {
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
         return result;
-      }
-      case SERVE_CONTROL_EXT_METHODS.sessionAgentDispatch: {
-        const sessionId = params['sessionId'];
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid agent dispatch request',
-          );
-        }
-        const config = this.sessionOrThrow(sessionId).getConfig();
-        if (config.getSessionSourceType() !== AGENT_HOST_SESSION_SOURCE_TYPE) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Dispatch requires an agent host session',
-          );
-        }
-        const workspace = await readAgentWorkspace(config.getProjectRoot());
-        if (workspace.hostSessionId !== config.getSessionId()) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Dispatch requires the claimed agent host session',
-          );
-        }
-        const agents = await readWorkspaceAgents(config.getProjectRoot());
-        const agentIds = new Set(agents.map((agent) => agent.id));
-        const registry = config.getBackgroundTaskRegistry();
-        for (const entry of registry.getAll()) {
-          const workspaceAgentId = entry.metaPath
-            ? readAgentMeta(entry.metaPath)?.workspaceAgentId
-            : undefined;
-          if (workspaceAgentId && !agentIds.has(workspaceAgentId)) {
-            registry.forget(entry.agentId);
-          }
-        }
-        return {
-          records: await dispatchOnce(
-            config.getProjectRoot(),
-            createAgentDispatchPort(config),
-          ),
-        };
-      }
-      case SERVE_CONTROL_EXT_METHODS.sessionAgentLaunch: {
-        const sessionId = params['sessionId'];
-        const agentId = params['agentId'];
-        const prompt = params['prompt'];
-        if (
-          typeof sessionId !== 'string' ||
-          sessionId.length === 0 ||
-          typeof agentId !== 'string' ||
-          agentId.length === 0 ||
-          typeof prompt !== 'string' ||
-          prompt.length === 0
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid workspace agent launch request',
-          );
-        }
-        const session = this.sessionOrThrow(sessionId);
-        const config = session.getConfig();
-        if (config.getSessionSourceType() !== AGENT_HOST_SESSION_SOURCE_TYPE) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Workspace agents require an agent host session',
-          );
-        }
-        const projectRoot = config.getProjectRoot();
-        let workspace: Awaited<ReturnType<typeof readAgentWorkspace>>;
-        try {
-          workspace = await readAgentWorkspace(projectRoot);
-        } catch (error) {
-          return {
-            status: 'launch_failed',
-            error: error instanceof Error ? error.message : String(error),
-          } satisfies WorkspaceAgentLaunchResult;
-        }
-        if (workspace.hostSessionId !== config.getSessionId()) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Workspace agents require the claimed agent host session',
-          );
-        }
-        let agents: WorkspaceAgent[];
-        try {
-          agents = await readWorkspaceAgents(projectRoot);
-        } catch (error) {
-          return {
-            status: 'launch_failed',
-            error: error instanceof Error ? error.message : String(error),
-          } satisfies WorkspaceAgentLaunchResult;
-        }
-        const agent = agents.find((candidate) => candidate.id === agentId);
-        if (!agent) {
-          return {
-            status: 'agent_unavailable',
-            error: `Agent "${agentId}" is unavailable.`,
-          } satisfies WorkspaceAgentLaunchResult;
-        }
-        return launchWorkspaceAgent(config, agent, prompt);
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const request = readRuntimeMcpAddRequest(params);

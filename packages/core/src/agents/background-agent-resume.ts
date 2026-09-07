@@ -90,7 +90,6 @@ import {
   buildAgentToolConfig,
   createAgentToolInvocationGuard,
 } from './workspace-agents/capability.js';
-import { runAgentTurn } from './workspace-agents/runtime-bridge.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -1430,24 +1429,12 @@ export class BackgroundAgentResumeService {
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
-        const agentRun = readAgentMeta(metaPath)?.agentRun;
         const body = () =>
           runBody(turnContextState, turnAbortController, fireStartHook);
         const framedRunBody = () =>
           runWithAgentContext(
             meta.agentId,
-            agentRun
-              ? () =>
-                  runAgentTurn({
-                    projectRoot: this.config.getProjectRoot(),
-                    context: agentRun,
-                    emitter: bgEmitter,
-                    abortController: turnAbortController,
-                    metaPath,
-                    transcriptPath: outputFile,
-                    body,
-                  })
-              : body,
+            body,
             normalizeResumedAgentDepth(meta.depth),
           );
         const invocationRunBody = () =>
