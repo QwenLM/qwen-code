@@ -9,13 +9,14 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const execFileMock = vi.hoisted(() => vi.fn());
 
 // AcpConnection imports AcpFileHandler which imports vscode.
 // Mock vscode so it can be resolved without the actual VS Code runtime.
 vi.mock('vscode', () => ({}));
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
-  return { ...actual, spawn: spawnMock };
+  return { ...actual, spawn: spawnMock, execFile: execFileMock };
 });
 
 import { AcpConnection } from './acpConnection.js';
@@ -262,6 +263,10 @@ describe('AcpConnection child exit cleanup', () => {
   });
 
   it('disconnect force-kills the CLI only after it fails to exit on its own', () => {
+    // Pinned so the assertion does not depend on which runner executes it.
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
     vi.useFakeTimers();
     try {
       const mockKill = vi.fn();
@@ -276,15 +281,43 @@ describe('AcpConnection child exit cleanup', () => {
       expect(mockKill).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(10_000);
-      // On win32 the escalation is a taskkill /t (the CLI is unresponsive, so
-      // nothing else will reap the shells under it); elsewhere it is SIGKILL.
-      if (process.platform === 'win32') {
-        expect(mockKill).not.toHaveBeenCalled();
-      } else {
-        expect(mockKill).toHaveBeenCalledWith('SIGKILL');
-      }
+      expect(mockKill).toHaveBeenCalledWith('SIGKILL');
     } finally {
       vi.useRealTimers();
+      platform.mockRestore();
+    }
+  });
+
+  it('escalates through taskkill /t on Windows, not a bare kill', () => {
+    // Windows CI is skipped on PRs, so the platform is faked here rather than
+    // left to whichever runner happens to execute the suite.
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    vi.useFakeTimers();
+    try {
+      const mockKill = vi.fn();
+      const conn = createConnection({
+        child: createMockChild({ kill: mockKill, pid: 4242 }),
+        sdkConnection: {},
+        sessionId: 'test-session',
+      });
+
+      (conn as unknown as AcpConnection).disconnect();
+      vi.advanceTimersByTime(10_000);
+
+      // A tree kill: the CLI is unresponsive by now, so nothing else will reap
+      // the shells and ConPTY hosts underneath it. See #11303.
+      expect(execFileMock).toHaveBeenCalledWith(
+        expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+        ['/f', '/t', '/pid', '4242'],
+        expect.objectContaining({ windowsHide: true }),
+        expect.any(Function),
+      );
+      expect(mockKill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      platform.mockRestore();
     }
   });
 
