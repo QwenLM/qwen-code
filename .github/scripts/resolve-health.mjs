@@ -354,15 +354,27 @@ export function assess(prs, options = {}) {
     // actually be donated: without that an aged-out request on a PR with no
     // results at all would hold the gate for the rest of the window, and the
     // refusal writes nothing, so the prune that would drop it never runs.
-    const liveRequestIds = new Set(
-      comments.filter(isRequestShaped).map((c) => c.id),
+    // Excluded by every request-SHAPED live id, answerable or not. Keying it
+    // on `isRequestShaped` — which also gates on the association — would let a
+    // still-live REFUSED request in through the vanished arm, since its id is
+    // absent from a set built that way.
+    const liveShapedIds = new Set(
+      comments
+        .filter((c) => c.user !== opts.bot && isRequest(c.body))
+        .map((c) => c.id),
     );
     const vanished = (opts.recorded ?? [])
       .filter(
         (e) =>
           e.length > 3 &&
           e[3] === pr.number &&
-          !liveRequestIds.has(e[0]) &&
+          // The lane would never have run this one, so it is owed no result:
+          // injecting it hands the gate a permanent veto that one comment from
+          // an account without write access can arm. The producer's authorize
+          // job refuses such a request in silence, which is the same fact
+          // ANSWERABLE_ASSOCIATIONS reads on the live side.
+          ANSWERABLE_ASSOCIATIONS.has(e[2]) &&
+          !liveShapedIds.has(e[0]) &&
           prResults.some((r) => r.at > e[1]),
       )
       .map((e) => ({ id: e[0], created_at: e[1] }));
@@ -379,23 +391,36 @@ export function assess(prs, options = {}) {
     // run's push→comment lag, whose trailing comment the roster's "any later
     // result" reading would otherwise spend twice: once as proof the lane
     // recovered, and again as proof this request was served.
-    let cursor = 0;
+    // Which request the deficit belongs to is not observable — a result that
+    // never arrived names nobody — so the walk decides it. Oldest-first blames
+    // whichever request the cursor runs out on, which is always the NEWEST: a
+    // single permanently lost result (a cancelled run, a deleted result
+    // comment) then reports the newest ask as unanswered and slides forward
+    // onto each new one, renewing a veto instead of letting it expire. Walk
+    // newest-first and the deficit lands on the OLDEST unmatched request —
+    // the earliest moment the lane demonstrably owed an answer — which leaves
+    // the window when that ask does.
+    let cursor = prResults.length - 1;
     let prUnserved = null;
-    for (const req of gateRequests) {
-      while (
-        cursor < prResults.length &&
-        prResults[cursor].at <= req.created_at
-      ) {
-        cursor += 1;
+    for (let i = gateRequests.length - 1; i >= 0; i -= 1) {
+      const req = gateRequests[i];
+      while (cursor >= 0 && prResults[cursor].at <= req.created_at) {
+        cursor -= 1;
       }
-      if (cursor < prResults.length) {
-        cursor += 1;
-      } else if (!prUnserved || req.created_at > prUnserved) {
+      if (cursor >= 0) {
+        cursor -= 1;
+      } else {
         prUnserved = req.created_at;
       }
     }
     if (prUnserved) {
       unservedByPr.set(pr.number, prUnserved);
+      // Only an OPEN PR feeds the global signal. A request on a closed one
+      // can never be served now, and holding every recovery for the rest of
+      // the window over it would refuse the ordinary end of an incident:
+      // requests go unanswered, the PRs carrying them are closed or merged,
+      // and the lane later demonstrably works. The one place a closed PR
+      // still has to count is the evidence's OWN PR, folded in after the loop.
       // Only an OPEN PR feeds the global signal. A request on a closed one
       // can never be served now, and holding every recovery for the rest of
       // the window over it would refuse the ordinary end of an incident:

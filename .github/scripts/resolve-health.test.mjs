@@ -1701,9 +1701,110 @@ describe('resolve-health: decisions', () => {
       ['edited out of shape', [editedAway]],
     ]) {
       const lane = withFirst(first);
-      assert.equal(lane.unserved, r2.created_at, label);
+      assert.equal(lane.unserved, '2026-09-07T10:00:00Z', label);
       assert.deepEqual(decide(lane, existing), [], label);
     }
+  });
+
+  it('does not re-inject a request the lane would have refused', () => {
+    // `isRequestShaped` gates on the association, so the exclusion set built
+    // from it holds only ANSWERABLE live ids — which let a recorded refusal in
+    // through the vanished arm whether or not its comment is still there. The
+    // producer's authorize job refuses such a request in silence, so it is
+    // owed no result, and injecting it hands the gate a veto that one comment
+    // from an account with no write access can arm for the rest of the window.
+    const genuine = comment(
+      'maintainer',
+      '2026-09-07T00:00:00Z',
+      '@qwen-code /resolve',
+      50,
+    );
+    const driveBy = comment(
+      'passer-by',
+      '2026-09-07T01:00:00Z',
+      '@qwen-code /resolve',
+      50,
+      '2026-09-07T01:00:00Z',
+      'NONE',
+    );
+    const push = result('2026-09-07T02:00:00Z', PUSHED, 50);
+    const recorded = [
+      [genuine.id, genuine.created_at, 'COLLABORATOR', 50],
+      [driveBy.id, driveBy.created_at, 'NONE', 50],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: genuine.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // Both while the refused comment is still there, and after it is deleted.
+    for (const [label, comments] of [
+      ['live', [genuine, driveBy, push]],
+      ['deleted', [genuine, push]],
+    ]) {
+      const lane = assess([{ number: 50, state: 'open', comments }], {
+        now: new Date('2026-09-07T12:00:00Z'),
+        recorded,
+      });
+      assert.equal(lane.unserved, null, label);
+      assert.deepEqual(
+        decide(lane, existing).map((a) => a.type),
+        ['comment', 'close'],
+        label,
+      );
+    }
+  });
+
+  it('blames a lost result on the oldest ask, not on whichever is newest', () => {
+    // Which request lost its result is not observable. Walking oldest-first
+    // blames whichever request the cursor runs out on, which is always the
+    // NEWEST — so a single permanent deficit slides onto each new ask and the
+    // reported barrier never stops advancing. Walking newest-first leaves it
+    // on the oldest unmatched ask, which leaves the window when that ask does.
+    const asks = [1, 2, 3].map((d) => request(`2026-09-0${d}T00:00:00Z`, 60));
+    const results = [
+      // r1's own run was cancelled: no result of its own.
+      result('2026-09-02T01:00:00Z', PUSHED, 60),
+      result('2026-09-05T00:00:00Z', PUSHED, 60),
+    ];
+    const recorded = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR', 60]);
+    const lane = (extra) =>
+      assess(
+        [
+          {
+            number: 60,
+            state: 'open',
+            comments: [
+              ...asks,
+              ...extra.requests,
+              ...results,
+              ...extra.results,
+            ],
+          },
+        ],
+        { now: new Date('2026-09-05T12:00:00Z'), recorded },
+      );
+    const deficit = lane({ requests: [], results: [] });
+    assert.equal(deficit.unserved, asks[0].created_at);
+    // A new ask that DID get its own result must not inherit the deficit.
+    const later = request('2026-09-05T02:00:00Z', 60);
+    const served = lane({
+      requests: [later],
+      results: [result('2026-09-05T03:00:00Z', PUSHED, 60)],
+    });
+    assert.equal(
+      served.unserved,
+      asks[0].created_at,
+      'the deficit stays on the ask that could have lost a result',
+    );
   });
 
   it('does not re-inject a recorded request no result could be donated to', () => {
@@ -1780,7 +1881,7 @@ describe('resolve-health: decisions', () => {
           recorded,
         },
       );
-      assert.equal(lane.unserved, r2.created_at, state);
+      assert.equal(lane.unserved, r1.created_at, state);
       assert.deepEqual(decide(lane, existing), [], state);
     }
   });
@@ -1857,7 +1958,7 @@ describe('resolve-health: decisions', () => {
       ],
       { now: new Date('2026-09-03T02:30:00Z'), recorded },
     );
-    assert.equal(aged.unserved, r2.created_at);
+    assert.equal(aged.unserved, r1.created_at);
     const written = decide(aged, existing);
     assert.deepEqual(
       written.map((a) => a.type),
@@ -1905,16 +2006,16 @@ describe('resolve-health: decisions', () => {
       });
     // Both live: the retry has no result of its own, so no close.
     const live = tick([r1, r2, report], '2026-08-27T12:00:00Z');
-    assert.equal(live.unserved, r2.created_at);
+    assert.equal(live.unserved, r1.created_at);
     assert.deepEqual(decide(live, existing), []);
     // The first request's author deletes it. The record still holds its claim.
     const deleted = tick([r2, report], '2026-08-27T12:00:00Z');
-    assert.equal(deleted.unserved, r2.created_at);
+    assert.equal(deleted.unserved, r1.created_at);
     assert.deepEqual(decide(deleted, existing), []);
     // Nothing deleted: the tick simply lands after the first request aged out
     // of the comment window and before the second does.
     const ageing = tick([r1, r2, report], '2026-09-03T02:00:00Z');
-    assert.equal(ageing.unserved, r2.created_at);
+    assert.equal(ageing.unserved, r1.created_at);
     assert.deepEqual(decide(ageing, existing), []);
     // ...and the claim has to SURVIVE that tick's write, or the next one
     // loses it: the prune cannot run on the same window that hid the comment
@@ -2077,7 +2178,7 @@ describe('resolve-health: decisions', () => {
       ],
       { now },
     );
-    assert.equal(samePr.unserved, '2026-08-27T05:00:00Z');
+    assert.equal(samePr.unserved, '2026-08-27T00:00:00Z');
     assert.deepEqual(
       decide(samePr, existing).map((a) => a.type),
       ['comment'],
@@ -2241,7 +2342,7 @@ describe('resolve-health: decisions', () => {
     const controlA = assess(shapeA(request('2026-08-27T05:00:00Z', 31)), {
       now,
     });
-    assert.equal(controlA.unserved, '2026-08-27T05:30:00Z');
+    assert.equal(controlA.unserved, '2026-08-27T05:00:00Z');
     assert.deepEqual(
       decide(controlA, existing).map((a) => a.type),
       ['comment'],
@@ -2259,7 +2360,7 @@ describe('resolve-health: decisions', () => {
     );
     assert.equal(
       editedA.unserved,
-      '2026-08-27T05:30:00Z',
+      '2026-08-27T05:00:00Z',
       'an edited request keeps its claim on a result of its own',
     );
     assert.deepEqual(
