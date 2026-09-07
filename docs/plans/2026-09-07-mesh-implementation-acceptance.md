@@ -212,8 +212,9 @@ actual active run state instead of calling a queued or cancelling run
 obligation. The dead `agent_unavailable` composer branch was removed: missing
 definitions remain typed dispatcher launch failures because the pure admission
 rule has no runtime definition loader. The roster now exposes the designed
-enable/disable state; disabling or deleting is one workspace-locked mutation
-that refuses live or queued work, so a booking cannot race the roster change.
+enable/disable state. Disabling is one workspace-locked mutation that rejects
+new admissions while already-booked work keeps draining; deletion still
+refuses live or queued work. A booking cannot race either roster change.
 Root and child creation revalidate the chosen assignee under that same lock, so
 a concurrent disable or delete cannot leave a new thread pointing at a stale
 identity.

@@ -249,10 +249,7 @@ export function ThreadsPage({
                 <button
                   type="button"
                   className={styles.agentAction}
-                  disabled={
-                    agent.enabled &&
-                    Boolean(agent.workingOn || agent.waiting)
-                  }
+                  disabled={pending}
                   onClick={() => onSetAgentEnabled(agent.id, !agent.enabled)}
                 >
                   {agent.enabled ? 'Disable' : 'Enable'}

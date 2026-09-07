@@ -1116,9 +1116,6 @@ export async function setMeshAgentEnabled(
     const agent = agents.find((candidate) => candidate.id === agentId);
     if (!agent) return 'not_found';
     if ((agent.enabled !== false) === enabled) return 'updated';
-    if (!enabled && (await agentHasLiveWork(transaction, agentId))) {
-      return 'has_live_work';
-    }
     await transaction.writeAgents(
       agents.map((candidate) =>
         candidate.id === agentId ? { ...candidate, enabled } : candidate,

@@ -316,7 +316,7 @@ export function selectCandidates(
     for (const run of thread.runs) {
       if (run.status !== 'queued' || busy.has(run.agentId)) continue;
       const agent = agents.find((candidate) => candidate.id === run.agentId);
-      if (!agent || agent.enabled === false) continue;
+      if (!agent) continue;
       const held = byAgent.get(run.agentId);
       if (!held || run.queueSequence < held.run.queueSequence) {
         byAgent.set(run.agentId, { agent, thread, run });

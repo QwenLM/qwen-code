@@ -872,9 +872,7 @@ export function registerMeshRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        const dispatchError = enabled
-          ? await startBookedRuns(runtime)
-          : undefined;
+        const dispatchError = await startBookedRuns(runtime);
         res.json({
           id: agentId,
           enabled,

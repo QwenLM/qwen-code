@@ -35,7 +35,7 @@ export async function launchMeshAgent(
   prompt: string,
   meshRun?: MeshRunContext,
 ): Promise<MeshAgentLaunchResult> {
-  if (agent.enabled === false) {
+  if (agent.enabled === false && !meshRun) {
     return {
       status: 'agent_unavailable',
       error: `Agent "${agent.name}" is disabled.`,
