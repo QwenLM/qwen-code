@@ -99,11 +99,6 @@ Lands: routes for agents, threads, posts, runs; roster, thread list, thread view
 Gate: Playwright visuals for roster, thread view with two agents' posts attributed by name snapshot, a `blocked` thread with its question, and a run slice rendered from `transcriptStartOffset..EndOffset` showing only that run; deleting an agent keeps old posts readable with the tombstoned name.
 Evidence: screenshots from the visuals config, in CI.
 
-**Step 9 landed (core half: REST plus the two pages).** `routes/mesh.ts` serves the roster, thread list, thread detail, a routing preview, posting, thread creation and marking done. Three properties live here because a browser cannot hold them: the thread's state is resolved server-side and travels with the sentence explaining it, so the client never derives a second status word; the composer's preview runs the real `parseMentions` and `decideDispatch` rather than a second implementation that could drift, and writes nothing; and a post's author comes from the authenticated surface, with no body field that can claim otherwise. Marking a parent done refuses while a descendant is open and names the descendants.
-`components/mesh/` adds `mesh-view-logic.ts` (pure: grouping, run rows, budget lines, the refusal copy table), `ThreadsPage` and `ThreadView`. The list groups by what each thread needs rather than by recency; `blocked` and `in_review` share one attention treatment and are told apart by their sentence; runs sit in a side panel with live pinned and past behind a count, each row carrying its close obligation and why the run exists; the budget is lines, not a bar; a system trigger renders as a ledger entry with no body.
-Observed locally: `mesh.test.ts` → 14 tests; `mesh-view-logic.test.ts` + `ThreadView.test.tsx` → 2 files, 34 tests. Targeted ESLint clean.
-Not done in step 9: the pages are not mounted in `App.tsx` and the routes are not registered in `server.ts`, because both entry points belong with #11140's absorbed sidebar entry; no transcript-slice panel; no Playwright visuals, which are this step's real evidence and need a browser.
-
 ### Step 10 — Channel notifications
 
 Lands: four events to the channel workers.
