@@ -5,7 +5,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -124,8 +126,11 @@ function setupAcpTest(
   // the `set_config_option` test (acp-integration.test.ts:516). A per-agent
   // QWEN_HOME redirects `getGlobalQwenDir()` so the authenticate -> session/new
   // round-trip reads back exactly what this agent wrote.
-  const qwenHome = join(rig.testDir!, '.qwen-home');
-  mkdirSync(qwenHome, { recursive: true });
+  // The agent keeps writing under QWEN_HOME for a few hundred ms after it
+  // exits (measured: memory/projects/usage_record files landing ~300 ms after
+  // cleanup() returns), so inside rig.testDir those late writes race the
+  // global teardown's recursive rm with ENOTEMPTY.
+  const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-acp-home-'));
 
   const agent = spawn(
     'node',
@@ -301,6 +306,18 @@ function setupAcpTest(
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
+    try {
+      // Retry around the post-exit writes noted at qwenHome above; a cleanup
+      // that cannot finish must not turn an all-green run red.
+      await rm(qwenHome, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 200,
+      });
+    } catch (e) {
+      console.error(`Warning: could not remove ${qwenHome}:`, e);
+    }
   };
 
   return {
@@ -995,13 +1012,6 @@ function setupAcpTest(
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
       },
-      permissionHandler: (request) => {
-        // Cancel exit_plan_mode to keep plan mode active
-        if (request.toolCall?.kind === 'switch_mode') {
-          return { outcome: 'cancelled' };
-        }
-        return { optionId: 'proceed_once' };
-      },
     });
 
     try {
@@ -1063,7 +1073,10 @@ function setupAcpTest(
       const blockedEvent = writeFileEvents.find(
         (e) => e.status === 'failed' && e.error?.includes('Plan mode'),
       );
-      expect(blockedEvent).toBeDefined();
+      expect(
+        blockedEvent,
+        `expected a failed write_file tool_call_update blocked by plan mode; events=${JSON.stringify(toolCallEvents)}`,
+      ).toBeDefined();
       expect(blockedEvent?.error).toContain('Plan mode is active');
 
       // Verify the file was NOT created

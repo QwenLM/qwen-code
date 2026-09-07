@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, describe, it, beforeEach, afterEach } from 'vitest';
+import { expect, describe, it, beforeEach, afterEach, vi } from 'vitest';
 import {
-  applyContainerSandboxNoProxy,
+  CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
   TestRig,
 } from '../test-helper.js';
 import {
@@ -18,15 +19,21 @@ import {
 describe('JSON output', () => {
   let rig: TestRig;
   let fakeServer: FakeOpenAIServer;
-  let restoreNoProxy: () => void;
 
   beforeEach(async () => {
     rig = new TestRig();
-    restoreNoProxy = applyContainerSandboxNoProxy();
+    // The spawned CLI routes through any inherited HTTP(S)_PROXY; without a
+    // loopback NO_PROXY entry the fake-server POST is tunnelled and these
+    // tests hang. Mirrors test-helper.ts:993-995.
+    const noProxy = IS_CONTAINER_SANDBOX
+      ? CONTAINER_SANDBOX_NO_PROXY
+      : '127.0.0.1,localhost';
+    vi.stubEnv('NO_PROXY', noProxy);
+    vi.stubEnv('no_proxy', noProxy);
     fakeServer = await startFakeOpenAIServer(
       ({ body }) =>
         body['stream'] === true
-          ? { content: 'Paris' }
+          ? { contentChunks: ['Par', 'is'] }
           : { content: '{"selected_memories":[]}' },
       fakeServerHostOptions(),
     );
@@ -35,7 +42,7 @@ describe('JSON output', () => {
 
   afterEach(async () => {
     await fakeServer?.close();
-    restoreNoProxy();
+    vi.unstubAllEnvs();
     await rig.cleanup();
   });
 
@@ -267,8 +274,6 @@ describe('JSON output', () => {
   });
 
   it('should return a JSON error for enforced auth mismatch before running', async () => {
-    const originalOpenaiApiKey = process.env['OPENAI_API_KEY'];
-    process.env['OPENAI_API_KEY'] = 'test-key';
     await rig.setup('json-output-auth-mismatch', {
       settings: {
         security: { auth: { enforcedType: 'qwen-oauth' } },
@@ -277,12 +282,10 @@ describe('JSON output', () => {
 
     let thrown: Error | undefined;
     try {
-      await rig.run('Hello', '--output-format', 'json');
+      await rig.run('Hello', '--output-format', 'json', ...fakeModelArgs());
       expect.fail('Expected process to exit with error');
     } catch (e) {
       thrown = e as Error;
-    } finally {
-      process.env['OPENAI_API_KEY'] = originalOpenaiApiKey;
     }
 
     expect(thrown).toBeDefined();
