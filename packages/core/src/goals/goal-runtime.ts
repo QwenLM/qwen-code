@@ -16,7 +16,6 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
-  InvalidGoalCheckpointError,
   isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
@@ -1204,17 +1203,22 @@ export function createGoalRuntime(
           );
           return;
         }
-        if (error instanceof InvalidGoalCheckpointError && window.truncated) {
-          // An unusable result while the window overflows is a compaction
-          // that produced nothing: like a full claim list, it counts toward
-          // the stall limit.
+        if (window.truncated) {
+          // A check that produced nothing while the window overflows is a
+          // compaction that gave no relief, whatever stopped it: a result
+          // that could not be folded into claims, a provider failure, or a
+          // verifier that never answered before its timeout. Like a full
+          // claim list, it counts toward the stall limit. Counting only the
+          // unusable-result shape let a verifier that timed out on every
+          // overflowing window run a Goal in circles: each turn paid the
+          // call, kept the same cursor, and was told to retry, with nothing
+          // but the token budget left to stop it.
           await finishCheckpointCheck(attempt, 'stalled');
           return;
         }
-        // A transient failure, or an unusable result while the window still
-        // has room, must not abort a healthy Goal: settle the attempt as
-        // bookkeeping so the evidence stays citable and a later turn retries
-        // the checkpoint.
+        // A failure while the window still has room must not abort a
+        // healthy Goal: settle the attempt as bookkeeping so the evidence
+        // stays citable and a later turn retries the checkpoint.
         await finishCheckpointCheck(attempt);
         return;
       }

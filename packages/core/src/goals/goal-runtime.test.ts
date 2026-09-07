@@ -1781,6 +1781,9 @@ describe('goal runtime', () => {
       goal: { status: 'active' },
     });
     expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
+    // The window had room, so the failure proves nothing about compaction
+    // and must not spend a stall.
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -2095,7 +2098,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
   });
 
-  it('keeps the stall streak through a transient checkpoint verifier failure', async () => {
+  it('counts a verifier failure on an overflowing window as a stall', async () => {
     const { journal, host, runtime, checkpointVerifier, setRecords } =
       stallHarness();
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -2119,35 +2122,16 @@ describe('goal runtime', () => {
     );
     expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
 
-    // The window still overflows when the verifier fails intermittently, so
-    // the skipped checkpoint proves no room: resetting the streak there would
-    // let transient errors launder the count and the breaker would never fire.
+    // The window still overflows when the verifier fails, and the failed
+    // check folded nothing into claims: that is a compaction without relief
+    // whatever stopped it, so it spends the third stall and stops the Goal
+    // exactly as a full claim list would.
     checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'c',
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'c');
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
     );
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 2,
-    });
-
-    // The failed turn wrote no checkpoint, so the next window starts from the
-    // same cursor: append the new evidence to the existing chain directly.
-    const permit = host.started.at(-1)!;
-    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = [
-      ...records,
-      ...verifierEvidenceWindow(permit, cursor, 101, 'd').slice(1),
-    ];
-    setRecords(records);
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(4);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'idle',
       goal: {
@@ -2158,7 +2142,65 @@ describe('goal runtime', () => {
       },
     });
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it('stops a Goal whose verifier never answers on an overflowing window', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    // The reported loop: one long turn overflowed the window, and every
+    // checkpoint after it timed out. Nothing was ever folded into claims,
+    // the cursor never moved, and each new turn was told to retry.
+    checkpointVerifier.mockRejectedValue(
+      new Error('Goal checkpoint verifier timed out after 30000ms'),
+    );
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      const permit = host.started.at(-1)!;
+      records = [
+        ...records,
+        ...verifierEvidenceWindow(permit, cursor, 101, `t${turn}`).slice(
+          records.length === 0 ? 0 : 1,
+        ),
+      ];
+      setRecords(records);
+      await runtime.finishTurn(permit);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        checkpointStalls: turn,
+        evidenceCursor: { recordId: cursor },
+      });
+      expect(runtime.getSnapshot().goal).not.toHaveProperty(
+        'evidenceCheckpoint',
+      );
+    }
+
+    const permit = host.started.at(-1)!;
+    records = [
+      ...records,
+      ...verifierEvidenceWindow(permit, cursor, 101, 'last').slice(1),
+    ];
+    setRecords(records);
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
+    );
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+    // No fourth continuation was minted.
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
   });
 
   it('stops a Goal whose verifier keeps returning unusable checkpoint results', async () => {
