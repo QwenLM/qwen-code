@@ -25717,6 +25717,45 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- the round merges main with `-s ours`, discarding main's side for
+    //    this file, and removes an assertion of its own in the same round.
+    //    Main contributed nothing the tip took, so nothing may be
+    //    subtracted: crediting the round with main's discarded delta would
+    //    absorb its own removal exactly.
+    'strategy-ours-hole': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same shape in the binary lane, where the auto-merge cannot be
+    //    computed at all: the result still equals the branch's side, so
+    //    main still contributed nothing.
+    'strategy-ours-hole-binary': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit -s ours origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        "printf '// \\000\\n' >> 'pkg/a.test.ts'",
+        AGENT_COMMIT,
+      ],
+    },
     'merge-delete-freight': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -26241,6 +26280,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'net 1 assertion(s) removed',
       );
       expect(bothMoved.rejection).toContain('pkg/a.test.ts');
+      // A merge that DISCARDED main's side adopted nothing from it, so
+      // nothing is subtracted: the round's own removal stands charged. Both
+      // lanes, because the model is what the tip took, not what an
+      // auto-merge would have produced.
+      for (const shape of ['strategy-ours-hole', 'strategy-ours-hole-binary']) {
+        const discarded = rejectsWeakening(shape, 'net 1 assertion(s) removed');
+        expect(discarded.rejection).toContain('pkg/a.test.ts');
+      }
       // The round dropped an assertion, main edited it, and the merge
       // resolution took main's side: the tip carries the assertion.
       acceptsWithoutCharge('merge-restore');

@@ -1077,6 +1077,12 @@ fi
 # zero whichever commit sequence produced the tip, and main's own delta
 # neither charges nor shields the round. An event that moved nothing for
 # the file (byte-identical or absent on both sides) is not recorded.
+# The model is bounded by what the tip actually TOOK: a merge whose result
+# is the branch's side byte for byte adopted nothing from main, so main
+# contributes nothing for that file whatever the auto-merge would have
+# produced. Without that bound a round can merge main with `-s ours` and
+# delete an assertion in the same breath, and the credit for main's
+# discarded delta absorbs the deletion exactly.
 # `--ours` is the attribution MODEL, not a claim about how the round
 # actually resolved: a resolution that took main's side over an edit of
 # the branch's own reads as the round having made that change, which
@@ -1246,7 +1252,7 @@ weaken_blob() {
 # ${1} for file ${2}: print the blob file, or nothing when the auto-merge
 # holds no file.
 weaken_auto_blob() {
-  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base weaken_rc=0 out="${WEAKEN_TMP}/${4}.auto"
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base res weaken_rc=0 out="${WEAKEN_TMP}/${4}.auto"
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
   p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
@@ -1285,6 +1291,18 @@ weaken_auto_blob() {
   if [[ -z "${base}" ]]; then
     # Both sides added the file: an add/add conflict, the branch's side
     # stands.
+    printf '%s\n' "${p1}"
+    return 0
+  fi
+  # A merge whose RESULT is the branch's side byte for byte adopted nothing
+  # from main -- `-s ours` onto main, or a conflict resolved by checking the
+  # branch's own version back out. Main contributed nothing to this file
+  # then, whatever an auto-merge would have produced, and subtracting a
+  # delta the tip never took would credit the round for a change that is
+  # not there: a round can otherwise merge main with `-s ours` and delete
+  # an assertion in the same breath, and the phantom credit absorbs it.
+  res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
+  if [[ -n "${res}" ]] && cmp -s "${p1}" "${res}"; then
     printf '%s\n' "${p1}"
     return 0
   fi
