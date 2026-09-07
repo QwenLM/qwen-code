@@ -248,7 +248,7 @@ class ThreadBlockInvocation extends CloseInvocation<ThreadBlockParams> {
     return { kind: 'blocked', question: this.params.question } as const;
   }
   protected success() {
-    return 'Question posted and your run ends here. A person will be notified; their reply wakes you again.';
+    return 'Question posted and your run ends here. The thread is marked blocked for a person to answer; their reply wakes you again.';
   }
 }
 
@@ -262,8 +262,9 @@ export class ThreadBlockTool extends BaseDeclarativeTool<
     super(
       ThreadBlockTool.Name,
       'ThreadBlock',
-      'Ask a person a question and end your run. Costs nothing while you ' +
-        'wait, and their reply wakes you again. Use this instead of guessing.',
+      'Ask a person a question, mark the thread blocked, and end your run. ' +
+        'Costs nothing while you wait, and their reply wakes you again. Use ' +
+        'this instead of guessing.',
       Kind.Other,
       {
         type: 'object',
@@ -437,7 +438,7 @@ class ThreadCreateInvocation extends BaseToolInvocation<
         assignee
           ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(assignee)}.${
               created.booked > 0
-                ? ' They have been woken.'
+                ? ' Their work has been queued.'
                 : ' No run was booked — check the thread for the reason.'
             }${shares}`
           : `Created sub-thread ${created.child.id} with no assignee; it stays idle until someone is mentioned on it.${shares}`,

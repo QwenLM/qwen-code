@@ -541,7 +541,7 @@ export interface BindRunSessionInput {
    * reports draining it.
    */
   contextThroughSequence?: number;
-  /** Launch/revive input is already in history when start returns. */
+  /** A fresh launch prompt is already consumed when start returns. */
   consumedOnStart?: boolean;
   /** Content hash of the agent definition in force, for drift audit (§9.4). */
   definitionVersion?: string;
