@@ -25,7 +25,16 @@ const optionalWorkspaceState = vi.hoisted(() => ({
         actions: {
           loadExtensionsStatus: () => Promise<{ extensions: never[] }>;
         };
-        capabilities: { features: string[] };
+        capabilities: {
+          features: string[];
+          workspaces?: Array<{
+            id: string;
+            cwd: string;
+            primary: boolean;
+            trusted: boolean;
+            kind?: 'live';
+          }>;
+        };
         client: {
           workspaceByCwd: (cwd: string) => {
             ensureRuntime: () => Promise<unknown>;
@@ -276,6 +285,37 @@ it('loads composer extensions from the selected workspace runtime when advertise
   expect(ensureRuntime).toHaveBeenCalledOnce();
   expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
   expect(legacyLoad).not.toHaveBeenCalled();
+});
+
+it('keeps the legacy composer extension loader for an untrusted workspace', async () => {
+  const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
+  const ensureRuntime = vi.fn(async () => ({}));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    extensions: [] as never[],
+  }));
+  const workspaceByCwd = vi.fn(() => ({
+    ensureRuntime,
+    workspaceRuntimeExtensions,
+  }));
+  optionalWorkspaceState.current = {
+    actions: { loadExtensionsStatus: legacyLoad },
+    capabilities: {
+      features: ['workspace_extension_mentions'],
+      workspaces: [
+        { id: 'id-main', cwd: '/secondary', primary: true, trusted: false },
+      ],
+    },
+    client: { workspaceByCwd },
+  };
+
+  await mount({ atWorkspaceCwd: '/secondary' });
+  await latest!.workspaceActionsRef.current!.loadExtensionsStatus!();
+
+  // The qualified runtime route rejects an untrusted target with 403, so the
+  // composer must stay on the trust-free legacy loader.
+  expect(legacyLoad).toHaveBeenCalledOnce();
+  expect(ensureRuntime).not.toHaveBeenCalled();
+  expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
 });
 
 it('keeps the legacy composer extension loader without the capability', async () => {

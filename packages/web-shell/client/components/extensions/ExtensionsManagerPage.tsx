@@ -444,10 +444,22 @@ export function ExtensionsManagerPage({
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
+  // The split runtime routes are trust-gated per target. An untrusted
+  // primary keeps the trust-free legacy read; an untrusted secondary stays
+  // on the qualified route's 403 as its declared failure semantics.
+  const targetWorkspaceUntrustedPrimary = (
+    workspace.capabilities?.workspaces ?? []
+  ).some(
+    (entry) =>
+      entry.kind !== 'live' &&
+      entry.cwd === targetWorkspaceCwd &&
+      entry.primary &&
+      !entry.trusted,
+  );
   const splitRuntimeAvailable =
     workspace.capabilities?.features?.includes(
       'workspace_extensions_config_runtime',
-    ) === true;
+    ) === true && !targetWorkspaceUntrustedPrimary;
   const workspaceClient = useMemo(
     () =>
       targetWorkspaceCwd

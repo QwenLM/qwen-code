@@ -874,10 +874,14 @@ export function ScheduledTasksDialog({
         let items: PromptReferenceItem[];
         if (kind === 'extension') {
           let status;
+          // The qualified runtime route is trust-gated per target; an
+          // untrusted primary keeps the trust-free legacy loader. Untrusted
+          // secondaries are never offered as a form target.
           if (
             workspace?.capabilities?.features.includes(
               'workspace_extension_mentions',
-            ) === true
+            ) === true &&
+            !(formWorkspace?.primary === true && !formWorkspace.trusted)
           ) {
             if (formWorkspace?.primary === false) {
               const client = workspace.client.workspaceByCwd(formWorkspace.cwd);

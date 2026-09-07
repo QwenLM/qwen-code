@@ -1446,6 +1446,73 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
   });
 
+  it('keeps the legacy extension loader when the form targets an untrusted primary', async () => {
+    const ensureWorkspaceRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      extensions: [],
+    }));
+    optionalWorkspaceState.current = {
+      capabilities: { features: ['workspace_extension_mentions'] },
+      client: {
+        ensureWorkspaceRuntime,
+        workspaceRuntimeExtensions,
+        workspaceByCwd: vi.fn(),
+      },
+    };
+    await mountMulti({ primary: [], 'id-other': [] }, [
+      { ...WORKSPACES[0]!, trusted: false },
+      WORKSPACES[1]!,
+    ]);
+    click(findButton('New scheduled task'));
+
+    // The create form defaults to the primary, which is untrusted here: its
+    // qualified runtime route rejects with 403, so the picker must stay on
+    // the trust-free legacy loader.
+    click(findButtonContaining('Extensions'));
+    await flush();
+
+    expect(actions.loadExtensionsStatus).toHaveBeenCalledOnce();
+    expect(ensureWorkspaceRuntime).not.toHaveBeenCalled();
+    expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
+  });
+
+  it('loads extension references from a trusted secondary when the primary is untrusted', async () => {
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      extensions: [],
+    }));
+    const workspaceByCwd = vi.fn(() => ({
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+    }));
+    optionalWorkspaceState.current = {
+      capabilities: { features: ['workspace_extension_mentions'] },
+      client: {
+        ensureWorkspaceRuntime: vi.fn(),
+        workspaceRuntimeExtensions: vi.fn(),
+        workspaceByCwd,
+      },
+    };
+    await mountMulti({ primary: [], 'id-other': [] }, [
+      { ...WORKSPACES[0]!, trusted: false },
+      WORKSPACES[1]!,
+    ]);
+    click(findButton('New scheduled task'));
+
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    click(findButtonContaining('Extensions'));
+    await flush();
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/repo/other');
+    expect(ensureRuntime).toHaveBeenCalledOnce();
+    expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
+    expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
+  });
+
   it('closes the extension reference picker when the target workspace changes', async () => {
     const workspaceRuntimeExtensions = vi.fn(async () => ({
       extensions: [

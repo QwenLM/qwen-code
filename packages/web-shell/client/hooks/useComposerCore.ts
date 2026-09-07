@@ -1574,11 +1574,17 @@ export function useComposerCore(
     workspaceActionsRef.current = undefined;
   } else if (workspace && atWorkspaceCwd) {
     const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
+    // The qualified runtime routes are trust-gated per target, so an
+    // untrusted workspace keeps the trust-free legacy extension loader.
+    const atWorkspaceUntrusted = workspace.capabilities?.workspaces?.some(
+      (entry) =>
+        entry.kind !== 'live' && entry.cwd === atWorkspaceCwd && !entry.trusted,
+    );
     workspaceActionsRef.current = {
       ...workspace.actions,
       ...(workspace.capabilities?.features.includes(
         'workspace_extension_mentions',
-      ) === true
+      ) === true && !atWorkspaceUntrusted
         ? {
             async loadExtensionsStatus() {
               await client.ensureRuntime();

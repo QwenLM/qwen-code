@@ -296,8 +296,9 @@ describe('WorkspaceRuntimeCoordinator', () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
     harness.invokeWorkspaceCommand.mockResolvedValueOnce({
-      sessionsRefreshed: 0,
-      sessionsFailed: 0,
+      sessionsRefreshed: 2,
+      sessionsFailed: 1,
+      sessionsSkipped: 1,
       configsRefreshed: 0,
       configsFailed: 1,
       configErrors: [
@@ -308,7 +309,13 @@ describe('WorkspaceRuntimeCoordinator', () => {
 
     const reconciliation = await coordinator.reconcileExtensionGeneration(7);
 
-    expect(reconciliation.state).toBe('failed');
+    // The ExtensionRuntimeRefreshError result payload must survive into the
+    // returned counters, not just the error message.
+    expect(reconciliation).toMatchObject({
+      state: 'failed',
+      refreshed: 2,
+      failed: 3,
+    });
     // The extensions_changed broadcast reads reconciliation.error verbatim.
     expect(reconciliation.error).not.toContain('tok3n');
     expect(reconciliation.error).not.toContain('\x1b');
