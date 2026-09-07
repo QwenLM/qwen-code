@@ -17,7 +17,9 @@ internal deadlines:
 
 Model streaming, round transitions, usage, and external input renew the model
 deadline. Tool output and liveness heartbeats renew only that tool's deadline.
-Parallel tools retain independent deadlines.
+The model deadline is suspended during transport retry backoff. A tool's own
+deadline starts when the scheduler reports it executing, so a silent tool is
+not charged to the model deadline. Parallel tools retain independent deadlines.
 
 The relevant tool deadline is suspended while user approval is pending. The
 model deadline is suspended only after a no-tool round enters a Monitor-owned

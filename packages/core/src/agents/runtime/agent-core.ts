@@ -248,7 +248,8 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
+          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
+          | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -1035,6 +1036,12 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            this.eventEmitter?.emit(AgentEventType.MODEL_RETRY, {
+              subagentId: this.subagentId,
+              round: turnCounter,
+              promptId,
+              timestamp: Date.now(),
+            } as AgentRoundEvent);
             if (
               checkSubagentLoop({
                 type: LlmEventType.Retry,
@@ -1634,7 +1641,8 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      { serverName?: unknown; serverToolName?: unknown } | undefined;
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'
@@ -1944,6 +1952,7 @@ export class AgentCore {
         );
       }
     };
+    const executingToolCallIds = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
@@ -1951,6 +1960,27 @@ export class AgentCore {
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
+      onToolCallsUpdate: (toolCalls) => {
+        const started = toolCalls.filter(
+          (call) =>
+            call.status === 'executing' &&
+            !executingToolCallIds.has(call.request.callId),
+        );
+        executingToolCallIds.clear();
+        for (const call of toolCalls) {
+          if (call.status === 'executing') {
+            executingToolCallIds.add(call.request.callId);
+          }
+        }
+        for (const call of started) {
+          this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+            subagentId: this.subagentId,
+            round: currentRound,
+            callId: call.request.callId,
+            timestamp: Date.now(),
+          } as AgentToolProgressEvent);
+        }
+      },
       outputUpdateHandler: (callId, outputChunk) => {
         this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
           subagentId: this.subagentId,

@@ -1820,7 +1820,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          string | Content,
+          | string
+          | Content,
         initialMessages,
       };
       toolConfig = {
@@ -3005,8 +3006,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const shouldBubble = Boolean(
         shouldRunInBackground &&
-        subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-        this.config.isInteractive(),
+          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
+          this.config.isInteractive(),
       );
       if (shouldRunInBackground) {
         stampBackgroundPromptPolicy(agentConfig, shouldBubble);
@@ -3537,7 +3538,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     terminateMode,
                     signalAborted:
                       turnAbortController.signal.aborted &&
-                      terminateMode !== AgentTerminateMode.TIMEOUT,
+                      !getAgentProgressTimeout(turnAbortController.signal),
                     resultSummaryPresent: Boolean(
                       subagentRawText && subagentRawText.length > 0,
                     ),
