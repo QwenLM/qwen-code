@@ -1594,7 +1594,7 @@ export function useComposerCore(
           : atEntry.primary
             ? workspace.actions.loadExtensionsStatus
             : undefined;
-    const baseActions = { ...workspace.actions };
+    const baseActions: AtMentionWorkspaceActions = { ...workspace.actions };
     if (loadExtensionsStatus === undefined) {
       delete baseActions.loadExtensionsStatus;
     } else {
