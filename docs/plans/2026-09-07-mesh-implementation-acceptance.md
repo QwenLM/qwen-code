@@ -114,8 +114,8 @@ run pass. A first demo input also mentioned Bob directly and therefore woke him
 according to the real routing rule; addressing only Alice fixed the driver, not
 the product.
 
-This proves the demo steps 1-5 only. The forced delivery miss, 12-turn
-ping-pong, daemon reaper/reload observation, and bare-mode exposure remain
+This proves the demo steps 1-5 only. The forced `queueExternalInput` miss,
+12-turn ping-pong, daemon reaper replacement, and bare-mode exposure remain
 unrun, so the full step-7 gate is not yet claimed.
 
 **Direct steering and concurrency observation (2026-09-07).** In thread
@@ -174,6 +174,21 @@ rejected before later launch or dispatch; generation checks bracket host claims
 and releases, and a raced stale spawn is cleaned up. Reusing the same bridge
 object cannot keep the old owner alive. This path was source-inspected only
 under the same demo-first constraint.
+
+**Crash-recovery observation (2026-09-07).** A real daemon was killed with
+`SIGKILL` while run `rn_4bd80535-7fe6-4024-aeac-70dbaf338fea` was `running`.
+Restart recovery kept the run id, advanced it to attempt 2, consumed its durable
+trigger, and completed it with `thread_review`. A second run,
+`rn_04d3aa17-39d1-4ddc-958f-38c5f003c537`, was killed after message
+`ms_d4fe89c5-ecaa-4a87-a7c2-6c6f451c2476` appeared in
+`acceptedMessageIds` but before it appeared in `consumedMessageIds`. On restart,
+the same run advanced to attempt 2, consumed that delivery, and its final review
+contained both requested replay markers. This manually proves running-run
+restart and accepted-but-unconsumed replay; it does not prove enqueue returning
+false, transcript-written-before-consumed recovery, stale-host replacement, or
+the watchdog. The long replay run also exposed the conservative accounting
+policy visibly: it closed at `666,749 / 200,000` tokens because the limit is
+checked at admission, not between tool rounds.
 
 ### Step 9 — REST and Web Shell
 
