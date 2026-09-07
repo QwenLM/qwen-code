@@ -11,8 +11,12 @@ import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
-import { workspaceBasename } from '../../utils/workspace';
-import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverTrigger,
+} from '../ui/popover';
 import {
   SessionIssueStateIcon,
   SessionPrStateIcon,
@@ -28,6 +32,7 @@ interface SessionDetailsTooltipProps {
   time: string;
   completedUnread: boolean;
   worktreeOnly?: boolean;
+  openOnClick?: boolean;
   children: ReactElement;
 }
 
@@ -37,6 +42,7 @@ export function SessionDetailsTooltip({
   time,
   completedUnread,
   worktreeOnly = false,
+  openOnClick = false,
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
@@ -49,14 +55,15 @@ export function SessionDetailsTooltip({
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
-  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<HTMLElement | null>(null);
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(
-        anchorRef.current?.closest<HTMLElement>('aside') ?? null,
+        anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+          anchorRef.current?.closest<HTMLElement>('aside') ??
+          null,
       )
     : null;
   const folderPath = session.workspaceCwd;
-  const folderName = workspaceBasename(folderPath);
   const branch = session.worktree?.branch ?? session.branch?.name;
   const prs = [...(session.prs ?? [])]
     .reverse()
@@ -71,11 +78,15 @@ export function SessionDetailsTooltip({
         !seenIssueUrls.has(issue.url) &&
         seenIssueUrls.add(issue.url),
     );
-  const status = session.hasActivePrompt
-    ? t('sidebar.running')
-    : completedUnread
-      ? t('sidebar.completedUnread')
-      : t('sidebar.clients', { count: session.clientCount ?? 0 });
+  const status = session.isWaitingForPermission
+    ? t('sessionsOverview.status.needsApproval')
+    : session.isWaitingForUserQuestion
+      ? t('sessionsOverview.status.askUserQuestion')
+      : session.hasActivePrompt
+        ? t('sidebar.running')
+        : completedUnread
+          ? t('sidebar.completedUnread')
+          : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
     return () => {
@@ -119,20 +130,33 @@ export function SessionDetailsTooltip({
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverAnchor
-        ref={anchorRef}
-        asChild
-        onPointerEnter={(event) => {
-          if (event.currentTarget.contains(event.target as Node)) {
-            openAfterDelay();
-          }
-        }}
-        onPointerLeave={closeAfterDelay}
-        onPointerDownCapture={close}
-        onClick={() => handleOpenChange(false)}
-      >
-        {children}
-      </PopoverAnchor>
+      {openOnClick ? (
+        <PopoverTrigger
+          ref={(node) => {
+            anchorRef.current = node;
+          }}
+          asChild
+        >
+          {children}
+        </PopoverTrigger>
+      ) : (
+        <PopoverAnchor
+          ref={(node) => {
+            anchorRef.current = node;
+          }}
+          asChild
+          onPointerEnter={(event) => {
+            if (event.currentTarget.contains(event.target as Node)) {
+              openAfterDelay();
+            }
+          }}
+          onPointerLeave={closeAfterDelay}
+          onPointerDownCapture={close}
+          onClick={() => handleOpenChange(false)}
+        >
+          {children}
+        </PopoverAnchor>
+      )}
       <PopoverContent
         side="right"
         align={worktreeOnly ? 'center' : 'start'}
@@ -143,15 +167,20 @@ export function SessionDetailsTooltip({
         showArrow
         role="dialog"
         aria-label={label}
-        onOpenAutoFocus={(event) => event.preventDefault()}
-        onPointerEnter={cancelClose}
-        onPointerLeave={closeAfterDelay}
+        onOpenAutoFocus={(event) => {
+          if (!openOnClick) event.preventDefault();
+        }}
+        onPointerEnter={openOnClick ? undefined : cancelClose}
+        onPointerLeave={openOnClick ? undefined : closeAfterDelay}
+        onClick={(event) => event.stopPropagation()}
         className={styles.sessionDetailsTooltip}
       >
         {!worktreeOnly && (
           <>
             <div className={styles.sessionDetailsHeader}>
-              <span className={styles.sessionDetailsTitle} title={label}>
+              <span
+                className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
+              >
                 {label}
               </span>
               {time && (
@@ -160,7 +189,9 @@ export function SessionDetailsTooltip({
             </div>
             <div className={styles.sessionDetailsRow}>
               <FolderClosedIcon aria-hidden="true" />
-              <span title={folderPath}>{folderName}</span>
+              <span className="!whitespace-normal break-all" title={folderPath}>
+                {folderPath}
+              </span>
             </div>
           </>
         )}
@@ -233,11 +264,18 @@ export function SessionDetailsTooltip({
               <span>{status}</span>
             </div>
             <div className={styles.sessionDetailsIdRow}>
-              <span title={session.sessionId}>{session.sessionId}</span>
+              <span
+                className="!whitespace-normal break-all"
+                data-web-shell-session-id
+                title={session.sessionId}
+              >
+                {session.sessionId}
+              </span>
               <button
                 type="button"
-                tabIndex={-1}
+                tabIndex={openOnClick ? undefined : -1}
                 className={styles.sessionDetailsCopyButton}
+                data-web-shell-session-id-copy
                 aria-label={t('sidebar.copySessionId')}
                 title={t('sidebar.copySessionId')}
                 onClick={() => {

@@ -381,6 +381,14 @@ function setInputValue(input: HTMLInputElement, value: string): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function statusFilterButton(label: string): HTMLButtonElement {
+  return Array.from(
+    container!.querySelectorAll<HTMLButtonElement>(
+      '[aria-label="Filter by session status"] button',
+    ),
+  ).find((button) => button.textContent?.startsWith(label))!;
+}
+
 describe('deriveSessionCards', () => {
   it('ranks needs-approval above user-input above running above idle, then by recency', () => {
     const sessions = [
@@ -509,6 +517,79 @@ describe('deriveSessionCards', () => {
 });
 
 describe('SessionOverviewPanel', () => {
+  it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
+    'searches branch, PR and ID metadata: %s',
+    (query) => {
+      sessionsState.sessions = [
+        session('session-search', {
+          displayName: 'Match',
+          branch: { name: 'feature/topic', baseBranch: 'main' },
+          prs: [{ number: 1234, url: 'https://github.com/o/r/pull/1234' }],
+        }),
+        session('other', { displayName: 'Other' }),
+      ];
+      render();
+      act(() => setInputValue(container!.querySelector('input')!, query));
+      expect(rowTitles()).toEqual(['Match']);
+    },
+  );
+
+  it('groups approval and question sessions as needing attention and drops stale selections', () => {
+    sessionsState.sessions = [
+      session('approval', {
+        displayName: 'Approval',
+        isWaitingForPermission: true,
+      }),
+      session('question', {
+        displayName: 'Question',
+        isWaitingForUserQuestion: true,
+      }),
+      session('running', { displayName: 'Run', hasActivePrompt: true }),
+      session('idle', { displayName: 'Idle' }),
+    ];
+    render();
+    act(() => click(statusFilterButton('Needs attention')));
+    expect(rowTitles()).toEqual(['Approval', 'Question']);
+    expect(
+      statusFilterButton('Needs attention').getAttribute('aria-pressed'),
+    ).toBe('true');
+    act(() => click(rowCheckbox(rows()[0]!)));
+    sessionsState.sessions = sessionsState.sessions.map((s) =>
+      s.sessionId === 'approval'
+        ? { ...s, isWaitingForPermission: false, hasActivePrompt: true }
+        : s,
+    );
+    rerender();
+    expect(rowTitles()).toEqual(['Question']);
+    expect(footerButton('Open in new tab')).toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('2');
+  });
+
+  it('resets page and selection on status changes and combines them with search', () => {
+    window.localStorage.setItem(
+      'qwen-web-shell-session-overview-page-size',
+      '10',
+    );
+    sessionsState.sessions = [
+      ...Array.from({ length: 12 }, (_, i) =>
+        session(`run-${i}`, { displayName: `Run ${i}`, hasActivePrompt: true }),
+      ),
+      session('idle', { displayName: 'Idle match' }),
+    ];
+    render();
+    act(() => click(footerButton('Next')!));
+    act(() => click(rowCheckbox(rows()[0]!)));
+    act(() => click(statusFilterButton('Idle')));
+    expect(rowTitles()).toEqual(['Idle match']);
+    expect(container!.textContent).toContain('Page 1 of 1');
+    expect(footerButton('Open in new tab')).toBeNull();
+    act(() => setInputValue(container!.querySelector('input')!, 'Run'));
+    expect(container!.textContent).toContain('No data');
+    act(() => click(statusFilterButton('Running')));
+    expect(rowTitles()).toHaveLength(10);
+    expect(statusFilterButton('Idle').textContent).toContain('0');
+  });
+
   it('renders an empty state when there are no sessions', () => {
     render();
     const empty = container!.querySelector('[data-slot="data-table-empty"]');
@@ -540,45 +621,55 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toEqual(['Charlie', 'Alpha', 'Bravo']);
   });
 
-  it('shows loading after the title for every non-idle session', () => {
+  it('distinguishes actionable states and only spins for running turns', () => {
     sessionsState.sessions = [
       session('s-run', { displayName: 'Run', hasActivePrompt: true }),
       session('s-appr', {
         displayName: 'Approval',
         isWaitingForPermission: true,
+        hasActivePrompt: true,
       }),
       session('s-q', {
         displayName: 'Question',
         isWaitingForUserQuestion: true,
+        hasActivePrompt: true,
       }),
       session('s-idle', { displayName: 'Still' }),
     ];
     render();
-    for (const label of ['Run', 'Approval', 'Question']) {
-      const row = rows().find((candidate) =>
-        candidate.textContent?.includes(label),
-      )!;
-      expect(
-        titleTrigger(row).nextElementSibling?.hasAttribute(
-          'data-web-shell-session-loading',
-        ),
-      ).toBe(true);
-    }
-    const idle = rows().find((tr) => tr.textContent?.includes('Still'))!;
-    expect(idle.querySelector('[data-web-shell-session-loading]')).toBeNull();
+    const states = rows().map((row) =>
+      row.querySelector('[data-web-shell-session-status]'),
+    );
+    expect(states.map((state) => state?.textContent)).toEqual([
+      'Needs approval',
+      'User input needed',
+      'Running',
+      'Idle',
+    ]);
+    expect(
+      states.map(
+        (state) => !!state?.querySelector('[data-web-shell-session-loading]'),
+      ),
+    ).toEqual([false, false, true, false]);
+    expect(states[0]?.querySelector('svg')).not.toBeNull();
+    expect(states[1]?.querySelector('svg')).not.toBeNull();
+    expect(states[0]?.querySelector('svg')?.innerHTML).not.toBe(
+      states[1]?.querySelector('svg')?.innerHTML,
+    );
   });
 
-  it('toggles selection when the row is clicked', () => {
+  it('opens the owning session on row click and selects only with the checkbox', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
-    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
-    expect(onOpenSession).not.toHaveBeenCalled();
-
-    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
+    onOpenSession.mockClear();
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
 
   it('keeps the title keyboard-focusable for opening a session', () => {
@@ -593,81 +684,110 @@ describe('SessionOverviewPanel', () => {
     );
   });
 
-  it('shows the full title in a tooltip on hover', async () => {
+  it('shows full session details on title hover including compatibility approval state', async () => {
     sessionsState.sessions = [
-      session('s1', { displayName: 'A long session title' }),
+      session('session-details', {
+        displayName: 'A long session title',
+        workspaceCwd: '/workspace/long/path',
+        branch: { name: 'feature/details', baseBranch: 'main' },
+        prs: [
+          {
+            number: 123,
+            url: 'https://github.com/o/r/pull/123',
+            issues: [
+              {
+                number: 45,
+                url: 'https://github.com/o/r/issues/45',
+                state: 'open',
+              },
+            ],
+          },
+        ],
+      }),
     ];
+    statusState.report = {
+      full: {
+        sessions: [
+          statusSession('session-details', {
+            workspaceCwd: '/workspace/long/path',
+            pendingPermissionCount: 1,
+          }),
+        ],
+      },
+    };
     vi.useFakeTimers();
     try {
       render();
       await act(async () => {
         titleTrigger(rows()[0]!).dispatchEvent(
-          new Event('pointermove', { bubbles: true }),
+          new Event('pointerover', { bubbles: true }),
         );
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
+        vi.advanceTimersByTime(299);
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('A long session title');
-      expect(
-        document
-          .querySelector('[data-slot="tooltip-arrow"]')
-          ?.getAttribute('viewBox'),
-      ).toBe('0 0 30 10');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('shows the full session id in a tooltip on hover', async () => {
-    sessionsState.sessions = [session('session-id-for-tooltip')];
-    vi.useFakeTimers();
-    try {
-      render();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
       await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
+        vi.advanceTimersByTime(1);
         await Promise.resolve();
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('session-id-for-tooltip');
-      expect(
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .className.includes('truncate'),
-      ).toBe(true);
+      const details = document.querySelector('[role="dialog"]');
+      for (const text of [
+        'A long session title',
+        '/workspace/long/path',
+        'feature/details',
+        'session-details',
+        'Pull Request #123',
+        'Issue #45',
+        'Needs approval',
+      ]) {
+        expect(details?.textContent).toContain(text);
+      }
+      expect(onOpenSession).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('shows the full workspace path in a tooltip on hover', async () => {
+  it('keeps the session ID out of the table and offers a details button', async () => {
     sessionsState.sessions = [
-      session('s1', { workspaceCwd: '/workspace/with/a/long/path' }),
+      session('session-id-for-details', { displayName: 'Details' }),
     ];
-    vi.useFakeTimers();
-    try {
-      render();
-      await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-workspace]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('/workspace/with/a/long/path');
-    } finally {
-      vi.useRealTimers();
-    }
+    render();
+    expect(container!.querySelector('[data-web-shell-session-id]')).toBeNull();
+    expect(
+      Array.from(container!.querySelectorAll('thead th')).map(
+        (header) => header.textContent,
+      ),
+    ).not.toContain('Session ID');
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Details')),
+    );
+    expect(
+      document.querySelector('[role="dialog"] [data-web-shell-session-id]')
+        ?.textContent,
+    ).toBe('session-id-for-details');
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
   });
 
-  it('shows worktree metadata in a column immediately after the title', () => {
+  it('shows the full workspace path through the explicit details entry', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        workspaceCwd: '/workspace/with/a/long/path',
+      }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for One')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      '/workspace/with/a/long/path',
+    );
+  });
+
+  it('keeps workspace, branch and PR together below the session title', () => {
     sessionsState.sessions = [
       session('s1', {
         displayName: 'One',
@@ -686,100 +806,62 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const headers = Array.from(container!.querySelectorAll('thead th'));
-    expect(headers[1]?.textContent).toBe('Title');
-    expect(headers[2]?.textContent).toBe('Worktree');
-    expect(headers[3]?.textContent).toBe('Session ID');
+    expect(headers.map((header) => header.textContent)).toEqual([
+      '',
+      'Title',
+      'Status',
+      'Time',
+      'Actions',
+    ]);
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git]')?.textContent,
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
     ).toBe('feature/a-very-long-branch-name');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git] svg'),
-    ).toBeNull();
-    const gitCell = rows()[0]
-      ?.querySelector('[data-web-shell-session-git]')
-      ?.closest('td');
-    const worktree = rows()[0]?.querySelector('[data-web-shell-session-git]');
-    expect(worktree?.className).toContain('min-w-0');
-    expect(worktree?.className).toContain('flex-1');
-    expect(worktree?.className).toContain('truncate');
-    expect(gitCell?.querySelector('a')?.textContent).toBe('#123 +2');
-    expect(
-      rows()[0]
-        ?.querySelector('[data-web-shell-session-title]')
-        ?.closest('td')
-        ?.querySelector('a'),
-    ).toBeNull();
-    expect(
-      rows()[1]?.querySelector('[data-web-shell-session-git]')?.textContent,
-    ).toBe('-');
+      titleCell?.querySelector('[data-web-shell-session-workspace]')
+        ?.textContent,
+    ).toBe('w');
+    expect(titleCell?.querySelector('a')?.textContent).toBe('#123 +2');
+    expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
-  it('shows the sidebar details popover from the worktree column', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [
-        session('session-details', {
-          displayName: 'Detailed session',
-          workspaceCwd: '/work/qwen-code',
-          updatedAt: '2026-08-26T09:00:00.000Z',
-          clientCount: 2,
-          worktree: {
-            slug: 'details',
-            path: '/work/qwen-code/.worktrees/details',
-            branch: 'worktree/details',
-          },
-          prs: [
-            { number: 121, url: 'https://github.com/o/r/pull/121' },
-            { number: 123, url: 'https://github.com/o/r/pull/123' },
-          ],
-        }),
-      ];
-      render();
-      const trigger = container!
-        .querySelector('[data-web-shell-session-git]')!
-        .closest('div')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      const details = document.querySelector('[role="dialog"]');
-      expect(details?.getAttribute('data-align')).toBe('center');
-      expect(details?.textContent).toContain('worktree/details');
-      expect(details?.textContent).toContain('Pull Request #123');
-      expect(details?.textContent).toContain('Pull Request #121');
-      expect(details?.textContent).not.toContain('Detailed session');
-      expect(details?.textContent).not.toContain('qwen-code');
-      expect(details?.textContent).not.toContain('session-details');
-      expect(details?.textContent).not.toContain('2 client(s)');
-      expect(
-        details?.querySelectorAll('a[href*="/pull/"]')[0]?.getAttribute('href'),
-      ).toBe('https://github.com/o/r/pull/123');
-    } finally {
-      vi.useRealTimers();
-    }
+  it('does not open the session when a PR badge is clicked', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        prs: [{ number: 123, url: 'https://github.com/o/r/pull/123' }],
+      }),
+    ];
+    render();
+    const badge = rows()[0]!.querySelector('a')!;
+    await act(async () =>
+      badge.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
   });
 
-  it('does not show an empty worktree popover', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [session('no-worktree')];
-      render();
-      const trigger = container!.querySelector('[data-web-shell-session-git]')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it('provides details even when a session has no Git metadata', async () => {
+    sessionsState.sessions = [
+      session('no-worktree', { displayName: 'No worktree' }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for No worktree')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'no-worktree',
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Idle',
+    );
   });
 
-  it('copies the session ID and restores the hover icon after two seconds', async () => {
+  it('copies the session ID from details without opening or selecting the row', async () => {
     vi.useFakeTimers();
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
@@ -787,30 +869,27 @@ describe('SessionOverviewPanel', () => {
       value: { writeText },
     });
     try {
-      sessionsState.sessions = [session('session-to-copy')];
+      sessionsState.sessions = [
+        session('session-to-copy', { displayName: 'Copy' }),
+      ];
       render();
-      const copy = container!.querySelector(
+      await act(async () =>
+        click(rowActionButton(rows()[0]!, 'Details for Copy')),
+      );
+      const copy = document.querySelector(
         '[data-web-shell-session-id-copy]',
       ) as HTMLButtonElement;
-      expect(copy.className).toContain('opacity-0');
-      expect(copy.className).toContain('group-hover:opacity-100');
-      expect(copy.querySelector('.lucide-copy')).not.toBeNull();
-
+      expect(copy.tabIndex).toBe(0);
       await act(async () => copy.click());
       expect(writeText).toHaveBeenCalledWith('session-to-copy');
       expect(copy.querySelector('.lucide-check')).not.toBeNull();
-      expect(copy.className).not.toContain('opacity-0');
+      expect(onOpenSession).not.toHaveBeenCalled();
       expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
         'unchecked',
       );
-
       act(() => vi.advanceTimersByTime(2000));
       expect(copy.querySelector('.lucide-copy')).not.toBeNull();
     } finally {
-      act(() => root?.unmount());
-      container?.remove();
-      root = null;
-      container = null;
       Reflect.deleteProperty(navigator, 'clipboard');
       vi.useRealTimers();
     }
@@ -883,24 +962,23 @@ describe('SessionOverviewPanel', () => {
     expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
   });
 
-  it('keeps footer actions visible and disables them until a row is selected', () => {
+  it('shows batch actions only while selected and keeps pagination available', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render({ onOpenSplit: vi.fn() });
-    expect(selectAllCheckbox()).not.toBeNull();
-    const actions = [
-      footerButton('Archive'),
-      footerButton('Delete'),
-      footerButton('Open in new tab'),
-      footerButton('Open in split'),
-    ] as HTMLButtonElement[];
-    expect(actions.every((button) => button.disabled)).toBe(true);
+    const labels = ['Archive', 'Delete', 'Open in new tab', 'Open in split'];
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(footerButton('Next')).not.toBeNull();
     act(() => click(rowCheckbox(rows()[0]!)));
     expect(onOpenSession).not.toHaveBeenCalled();
     expect(container!.textContent).toContain('1 of 1 row(s) selected.');
-    const openInTab = footerButton('Open in new tab') as HTMLButtonElement;
-    expect(actions.every((button) => button.disabled)).toBe(false);
-    // The new-tab action is not the primary button style.
-    expect(openInTab.getAttribute('data-variant')).toBe('outline');
+    for (const label of labels) {
+      const button = footerButton(label);
+      expect(button).not.toBeNull();
+      expect(button!.disabled).toBe(false);
+    }
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(footerButton('Next')).not.toBeNull();
   });
 
   it('opens the selected sessions as a split in ONE new tab (?split=…)', () => {
@@ -1100,7 +1178,7 @@ describe('SessionOverviewPanel', () => {
     render();
 
     const search = container!.querySelector(
-      'input[aria-label="Search sessions…"]',
+      'input[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     expect(search.parentElement?.className).toContain('w-full');
     expect(search.parentElement?.className).toContain('max-w-[300px]');
@@ -1219,7 +1297,7 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const input = container!.querySelector(
-      '[aria-label="Search sessions…"]',
+      '[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     act(() => {
       setInputValue(input, 'Alpha');
@@ -1265,7 +1343,8 @@ describe('SessionOverviewPanel', () => {
     const trigger = container!.querySelector(
       'button[aria-label="Filter by workspace"]',
     ) as HTMLElement;
-    expect(trigger.closest('th')?.textContent).toContain('Workspace');
+    expect(trigger.closest('th')).toBeNull();
+    expect(trigger.textContent).toContain('All workspaces');
     expect(trigger.querySelector('.lucide-funnel')).not.toBeNull();
     act(() => click(trigger));
     const filterPanel = document.querySelector(
@@ -1474,41 +1553,31 @@ describe('SessionOverviewPanel', () => {
       '[data-slot="table"]',
     ) as HTMLTableElement;
     expect(renderedTable.dataset.layout).toBe('scroll');
-    expect(renderedTable.style.minWidth).toBe('912px');
+    expect(renderedTable.style.minWidth).toBe('696px');
     expect(renderedTable.style.tableLayout).toBe('fixed');
     expect(renderedTable.querySelectorAll('col')).toHaveLength(headers.length);
     expect(
       (renderedTable.querySelectorAll('col')[1] as HTMLTableColElement).style
         .width,
-    ).toBe('224px');
+    ).toBe('260px');
     expect(headers.at(-1)?.textContent).toContain('Actions');
     expect(headers.at(-1)?.className).toContain('text-center');
-    expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
-    expect((cells.at(-1) as HTMLElement).style.width).toBe('128px');
+    expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
+    expect((cells.at(-1) as HTMLElement).style.width).toBe('156px');
     expect(cells.at(-1)?.firstElementChild?.className).toContain(
       'justify-center',
     );
     const timeHeader = headers.find((header) =>
       header.textContent?.includes('Time'),
     );
-    const sessionIdHeader = headers.find((header) =>
-      header.textContent?.includes('Session ID'),
+    expect(headers.some((header) => header.textContent === 'Session ID')).toBe(
+      false,
     );
-    const gitHeader = headers.find(
-      (header) => header.textContent === 'Worktree',
+    expect(headers.some((header) => header.textContent === 'Worktree')).toBe(
+      false,
     );
-    const workspaceHeader = headers.find((header) =>
-      header.textContent?.includes('Workspace'),
-    );
-    const sessionIdColumnIndex = headers.indexOf(sessionIdHeader!);
-    expect((gitHeader as HTMLElement).style.width).toBe('144px');
-    expect(cells[2]?.firstElementChild?.className).toContain('truncate');
-    expect((sessionIdHeader as HTMLElement).style.width).toBe('136px');
-    expect((cells[sessionIdColumnIndex] as HTMLElement).style.width).toBe(
-      '136px',
-    );
-    expect((workspaceHeader as HTMLElement).style.width).toBe('128px');
-    expect((timeHeader as HTMLElement).style.width).toBe('112px');
+    expect((headers[2] as HTMLElement).style.width).toBe('144px');
+    expect((timeHeader as HTMLElement).style.width).toBe('96px');
     const timeSortButton = timeHeader?.querySelector('button');
     expect(timeSortButton?.className).toContain('px-0');
     expect(timeSortButton?.className).toContain('text-sm');
@@ -1521,7 +1590,7 @@ describe('SessionOverviewPanel', () => {
     expect((headers[0] as HTMLElement).style.width).toBe('40px');
     expect(headers[1]?.className).toContain('sticky');
     expect((headers[1] as HTMLElement).style.left).toBe('40px');
-    expect((headers[1] as HTMLElement).style.width).toBe('224px');
+    expect((headers[1] as HTMLElement).style.width).toBe('260px');
     expect(headers.at(-1)?.className).toContain('sticky');
     expect((headers.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(cells[0]?.className).toContain('sticky');
@@ -1529,14 +1598,10 @@ describe('SessionOverviewPanel', () => {
     expect((cells[0] as HTMLElement).style.width).toBe('40px');
     expect(cells[1]?.className).toContain('sticky');
     expect((cells[1] as HTMLElement).style.left).toBe('40px');
-    expect((cells[1] as HTMLElement).style.width).toBe('224px');
+    expect((cells[1] as HTMLElement).style.width).toBe('260px');
     expect(titleTrigger(rows()[0]!).closest('.truncate')).not.toBeNull();
-    expect(titleTrigger(rows()[0]!).className).toContain('text-xs');
+    expect(titleTrigger(rows()[0]!).className).toContain('text-sm');
     expect(cells[1]?.querySelector('.font-semibold')).not.toBeNull();
-    for (const cell of cells.slice(2, 6)) {
-      expect(cell.querySelector('.text-muted-foreground')).toBeNull();
-      expect(cell.querySelector('.text-current')).not.toBeNull();
-    }
     expect(cells.at(-1)?.className).toContain('sticky');
     expect((cells.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(headers.at(-1)?.className).not.toContain('border-l');
@@ -1590,9 +1655,9 @@ describe('SessionOverviewPanel', () => {
       expect(table.style.tableLayout).toBe('fixed');
       expect(
         parseFloat((headers[1] as HTMLElement).style.width),
-      ).toBeGreaterThan(224);
-      expect((headers[1] as HTMLElement).style.minWidth).toBe('224px');
-      expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
+      ).toBeGreaterThan(260);
+      expect((headers[1] as HTMLElement).style.minWidth).toBe('260px');
+      expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
       const columnWidth = Array.from(table.querySelectorAll('col')).reduce(
         (total, column) => total + parseFloat(column.style.width),
         0,
