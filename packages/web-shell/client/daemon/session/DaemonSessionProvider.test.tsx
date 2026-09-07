@@ -41,6 +41,7 @@ import {
   useDaemonTranscriptStore,
   useDaemonTurnNavigationState,
   useDaemonTurnNavigationStore,
+  useDaemonHistoryNavigationStore,
   useDaemonWorkspaceEventSignals,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
@@ -571,6 +572,64 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
 });
 
 describe('DaemonSessionProvider', () => {
+  it('retains a persisted viewport boundary after the legacy live window reaches capacity', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replay = (id: number): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: `turn-${id}` },
+          _meta: {
+            'qwen.session.recordId': `record-${id}`,
+            qwenTranscript: { sourceRecordIds: [`record-${id}`] },
+          },
+        },
+      },
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [replay(1), replay(2), replay(3)],
+          liveJournal: [],
+        },
+      }),
+    );
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let navigation:
+      | ReturnType<typeof useDaemonHistoryNavigationStore>
+      | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      navigation = useDaemonHistoryNavigationStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true, maxBlocks: 2 });
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      events: [replay(0)],
+      hasMore: false,
+    });
+    expect(navigation?.captureLiveBoundary()).toMatchObject({
+      beforeRecordId: 'record-2',
+      reachable: true,
+    });
+    await act(async () => {
+      await history?.loadMore();
+    });
+    expect(history).toMatchObject({ hasMore: false, capacityReached: true });
+    expect(navigation?.captureLiveBoundary()).toMatchObject({
+      beforeRecordId: 'record-2',
+      reachable: true,
+    });
+  });
+
   let container: HTMLDivElement | null = null;
   let root: Root | null = null;
 
