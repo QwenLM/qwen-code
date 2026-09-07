@@ -83,7 +83,6 @@ export class DiffManager {
 
   private readonly onDidClosePermissionDiffEmitter = new vscode.EventEmitter<{
     permissionRequestId: string;
-    filePath: string;
   }>();
   /**
    * Fires when a diff opened for a pending permission is closed without a vote.
@@ -476,7 +475,6 @@ export class DiffManager {
     if (diffInfo.permissionRequestId) {
       this.onDidClosePermissionDiffEmitter.fire({
         permissionRequestId: diffInfo.permissionRequestId,
-        filePath: diffInfo.originalFilePath,
       });
     }
   }

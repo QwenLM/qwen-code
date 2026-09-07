@@ -5,7 +5,6 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import * as path from 'node:path';
 
 const executeCommand = vi.fn().mockResolvedValue(undefined);
 
@@ -210,13 +209,10 @@ describe('DiffManager permission diff dismissal', () => {
     });
     await manager.cancelDiff(lastOpenedRightUri() as never);
 
-    // The payload carries the normalized path `showDiff` stored, not the
-    // caller's argument, so derive the expectation from the same transform:
-    // on Windows `path.normalize('/workspace/foo.ts')` is '\workspace\foo.ts'.
-    expect(closed).toHaveBeenCalledWith({
-      permissionRequestId: 'req-1',
-      filePath: path.normalize('/workspace/foo.ts'),
-    });
+    // Deep equality on purpose: the fan-out in extension.ts consumes only the
+    // request id, so a field added here without a reader would be dead weight
+    // and this assertion is what stops one creeping back in.
+    expect(closed).toHaveBeenCalledWith({ permissionRequestId: 'req-1' });
   });
 
   it('stays quiet for a diff that no approval is waiting on', async () => {
