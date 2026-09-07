@@ -188,15 +188,36 @@ jobs:
       # this job needs lives in the workspace yet — the npm cache and the
       # docker locks are under $HOME — so wipe it and let the retry fetch
       # into an empty root: no corrupt object survives, and the outage has
-      # had one attempt's span to clear.
+      # had one attempt's span to clear. The wipe follows the guarded pool
+      # idiom of qwen-code-pr-review.yml and serve-ab.yml: validate the
+      # path before any rm — a symlinked component would redirect the
+      # delete, and the root sudo leg with it, outside the runner
+      # workspace — empty the directory but keep the node itself (the
+      # runner owns the mount point), and announce both the heal and any
+      # survivors, or a sick host heals silently for weeks.
       - name: 'Reset workspace after failed checkout'
         if: "${{ steps.checkout.outcome == 'failure' }}"
         run: |-
           set -uo pipefail
-          rm -rf -- "$GITHUB_WORKSPACE" 2>/dev/null ||
-            sudo -n rm -rf -- "$GITHUB_WORKSPACE" 2>/dev/null ||
+          echo "::warning::checkout failed on ${RUNNER_NAME:-this runner}; wiping the workspace and retrying once (#11292)"
+          WS="${GITHUB_WORKSPACE:?}"
+          RWS="${RUNNER_WORKSPACE:?}"
+          if [ "$(realpath -- "$WS")" != "$WS" ] || [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            echo "::error::workspace is not a plain directory or resolves through symlinks: $WS"
+            exit 1
+          fi
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: $WS"; exit 1 ;;
+            "$RWS"/*) ;;
+            *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;
+          esac
+          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null ||
+            sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null ||
             echo "::warning::could not clear the workspace; the checkout retry proceeds in place"
-          mkdir -p "$GITHUB_WORKSPACE"
+          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::workspace wipe left survivors: ${survivors}; the retry runs against them"
+          fi
 
       - name: 'Checkout (retry)'
         if: "${{ steps.checkout.outcome == 'failure' }}"
