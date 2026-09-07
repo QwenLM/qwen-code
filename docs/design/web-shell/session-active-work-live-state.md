@@ -22,6 +22,11 @@ renders `activeWorkState: active` separately when no foreground prompt is
 running; this state can represent queued prompt work as well as background
 work.
 
+The floating Todo panel animates an `in_progress` item only while the local
+stream, daemon foreground state, or per-session active-work state confirms
+that execution is live. A persisted `in_progress` value without live activity
+keeps its static status glyph instead of implying that work is still running.
+
 The field is optional for compatibility with older daemons. It uses the
 bridge's existing hold cache, capability negotiation, and freshness window, so
 the live-state request remains an in-memory read with no ACP round trip.
