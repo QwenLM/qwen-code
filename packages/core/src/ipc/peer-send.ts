@@ -15,6 +15,7 @@ import type { ApprovalMode } from '../config/approval-mode.js';
 import { readOwnSessionRecord } from '../services/session-registry.js';
 import { modeClass } from './inbound-gate.js';
 import {
+  hashBody,
   PEER_ADMISSION_LIMITS,
   PEER_BURST_WINDOW_MS,
   refillBucket,
@@ -247,6 +248,15 @@ interface PacedTarget {
   /** Sends in the current burst, for the message the refusal carries. */
   sentInBurst: number;
   burstStartedAt: number;
+  /**
+   * The previous body sent to this target, as the digest the receiver's
+   * meter keeps. The receiver drops a repeat of it inside the dedup
+   * window without charging the sender's bucket, so the mirror skips the
+   * charge for one too; charging would drift the mirror below the real
+   * bucket until it refuses sends the receiver would have taken.
+   */
+  lastBodyHash: string | undefined;
+  lastBodyAt: number;
 }
 
 const pacedTargets = new Map<string, PacedTarget>();
@@ -268,13 +278,26 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
     lastRefill: now,
     sentInBurst: 0,
     burstStartedAt: now,
+    lastBodyHash: undefined,
+    lastBodyAt: 0,
   };
   pacedTargets.set(ipcPath, fresh);
   return fresh;
 }
 
+let pacerNow: () => number = () => performance.now();
+
 /**
- * Take one token for a send to `ipcPath`, or report that there is none.
+ * Test-only: drive the pacer's clock. Pass nothing to restore the
+ * monotonic clock production runs on.
+ */
+export function setSendPacerClockForTest(now?: () => number): void {
+  pacerNow = now ?? (() => performance.now());
+}
+
+/**
+ * Take one token for a send of `body` to `ipcPath`, or report that there
+ * is none.
  *
  * The refund exists because a token stands for a message the receiver
  * will have to meter, and a frame that was never written is not one. It
@@ -283,8 +306,9 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
  */
 function reservePacerToken(
   ipcPath: string,
+  body: string,
 ): { ok: true; refund: () => void } | { ok: false; sentInBurst: number } {
-  const now = performance.now();
+  const now = pacerNow();
   const target = pacedTargetFor(ipcPath, now);
   target.tokens = refillBucket(
     target.tokens,
@@ -294,6 +318,12 @@ function reservePacerToken(
     PEER_ADMISSION_LIMITS.refillPerSecond,
   );
   target.lastRefill = now;
+
+  if (target.tokens < 1) {
+    // Refused before the burst window rolls over, so the count this
+    // quotes is the window that emptied the bucket, not a fresh one.
+    return { ok: false, sentInBurst: target.sentInBurst };
+  }
 
   // The burst is over once the bucket is whole again, or once enough time
   // has passed that it would have been had nothing been sent. Without
@@ -307,10 +337,15 @@ function reservePacerToken(
     target.burstStartedAt = now;
   }
 
-  if (target.tokens < 1) {
-    return { ok: false, sentInBurst: target.sentInBurst };
+  const bodyHash = hashBody(body);
+  const repeat =
+    target.lastBodyHash === bodyHash &&
+    now - target.lastBodyAt < PEER_ADMISSION_LIMITS.dedupWindowMs;
+  if (!repeat) {
+    target.tokens -= 1;
+    target.lastBodyHash = bodyHash;
+    target.lastBodyAt = now;
   }
-  target.tokens -= 1;
   target.sentInBurst += 1;
 
   let refunded = false;
@@ -319,11 +354,20 @@ function reservePacerToken(
     refund: () => {
       if (refunded) return;
       refunded = true;
+      target.sentInBurst = Math.max(0, target.sentInBurst - 1);
+      // A repeat was never charged, so there is no token to hand back.
+      if (repeat) return;
       target.tokens = Math.min(
         PEER_ADMISSION_LIMITS.bucketCapacity,
         target.tokens + 1,
       );
-      target.sentInBurst = Math.max(0, target.sentInBurst - 1);
+      // The receiver records a body only when it admits the message, and
+      // this frame never arrived — so the record rolls back with the
+      // token unless a later send already recorded a body of its own.
+      if (target.lastBodyHash === bodyHash) {
+        target.lastBodyHash = undefined;
+        target.lastBodyAt = 0;
+      }
     },
   };
 }
@@ -338,11 +382,12 @@ function reservePacerToken(
  * nothing is left and let it refill at the rate the receiver refills at.
  */
 export function drainSendPacer(ipcPath: string): void {
-  const now = performance.now();
+  const now = pacerNow();
   const target = pacedTargetFor(ipcPath, now);
   target.tokens = 0;
   target.lastRefill = now;
-  target.sentInBurst = PEER_ADMISSION_LIMITS.bucketCapacity;
+  // The burst count is this session's own — the receiver's level says
+  // nothing about how much this session sent — so it is left alone.
   target.burstStartedAt = now;
 }
 
@@ -476,7 +521,7 @@ export async function sendToPeer(
   // connection and an answer that arrives too late for a model already
   // composing the next one. Failing now puts the reason where the caller
   // will read it: batch, or wait.
-  const reservation = reservePacerToken(peer.ipcPath);
+  const reservation = reservePacerToken(peer.ipcPath, options.message);
   if (!reservation.ok) {
     return {
       kind: 'failed',

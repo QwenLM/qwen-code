@@ -687,6 +687,29 @@ describe('settled ids', () => {
     expect(h.delivered).toHaveLength(1);
   });
 
+  it('lets an honest retry of the same body land after a queue-full drop', () => {
+    // On a real meter the failed delivery's body is rolled back with the
+    // drop: a verbatim retry once the queue drains must meet the same
+    // repeat check it would have met had the first attempt never
+    // arrived, not be dropped as a duplicate of a message that never
+    // landed.
+    const h = harness({
+      mode: ApprovalMode.DEFAULT,
+      admission: new PeerAdmission(),
+    });
+    h.failDelivery();
+    const f = frame({ msgId: 'task-0007', fromMode: 'prompting' });
+    expect(h.gate.admit(f)).toBe('dropped');
+    expect(h.drops.at(-1)).toEqual({
+      msgId: 'task-0007',
+      reason: 'queue-full',
+    });
+
+    h.recoverDelivery();
+    expect(h.gate.admit({ ...f, msgId: 'task-0008' })).toBe('accept');
+    expect(h.delivered).toHaveLength(1);
+  });
+
   it('prunes the oldest settled ids beyond the cap', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
     const ids = Array.from({ length: MAX_SETTLED_IDS + 1 }, (_, i) => `s-${i}`);

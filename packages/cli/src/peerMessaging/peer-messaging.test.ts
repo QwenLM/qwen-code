@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -21,6 +22,7 @@ import {
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  parsePeerFrame,
   PeerAdmission,
   removePeerController,
   resetPeerControllerRegistryPathForTest,
@@ -119,6 +121,13 @@ afterEach(async () => {
   messaging = null;
   await senderInbox?.close();
   senderInbox = null;
+  for (const socket of slowSockets) socket.destroy();
+  slowSockets.clear();
+  if (slowServer) {
+    const server = slowServer;
+    slowServer = null;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -134,6 +143,43 @@ async function startSenderInbox(): Promise<PeerInbox> {
   if (!inbox) throw new Error('sender inbox failed to start');
   senderInbox = inbox;
   return inbox;
+}
+
+let slowServer: net.Server | null = null;
+const slowSockets = new Set<net.Socket>();
+
+/**
+ * A peer inbox that reads nothing until `delayMs` after each connection
+ * arrives, mirroring a peer whose event loop is busy: receipts addressed
+ * to it still land, just late.
+ */
+async function startSlowSenderInbox(
+  delayMs: number,
+): Promise<{ socketPath: string; received: PeerFrame[] }> {
+  const received: PeerFrame[] = [];
+  const socketPath = path.join(tmpDir, 'socks', 'slow-sender.sock');
+  await fs.mkdir(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer((socket) => {
+    slowSockets.add(socket);
+    socket.on('close', () => slowSockets.delete(socket));
+    setTimeout(() => {
+      let buffer = '';
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newline = buffer.indexOf('\n');
+        while (newline !== -1) {
+          const frame = parsePeerFrame(buffer.slice(0, newline));
+          if (frame) received.push(frame);
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf('\n');
+        }
+      });
+      socket.on('end', () => socket.end());
+    }, delayMs);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  slowServer = server;
+  return { socketPath, received };
 }
 
 /** A meter that admits everything, so policy tests stay policy tests. */
@@ -1908,7 +1954,7 @@ describe.skipIf(isWindows)('controller grants', () => {
   });
 });
 
-describe('PeerMessaging drops', () => {
+describe.skipIf(isWindows)('PeerMessaging drops', () => {
   it('answers a flood with one receipt now and one folding the rest', async () => {
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
@@ -2043,5 +2089,163 @@ describe('PeerMessaging drops', () => {
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'dropped'),
     ).toHaveLength(2);
+  });
+
+  it('receipts or refuses a drop that arrives while the session closes', async () => {
+    // A drop noted while close() runs must not vanish: either the sender
+    // gets its folded receipt, or the inbox is already gone and the send
+    // itself fails. A frame accepted into silence is the one outcome
+    // close() must not have.
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    let policy: InboundPolicy | undefined = 'hold';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const m = started;
+
+    // a1 parks, so settling held messages at close takes the slow path;
+    // a2 lands but is never consumed, so settling the backlog does too.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a1', from: slow.socketPath }),
+    );
+    policy = undefined;
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a2', from: slow.socketPath }),
+    );
+    // b1 and b2 spend the fast sender's bucket, b3 answers at once, and
+    // b4 folds into a batch only close can flush.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b1', from: sender.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b2', from: sender.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b3', from: sender.socketPath }),
+    );
+    const b4 = peerFrame({ content: 'b4', from: sender.socketPath });
+    await send(m.socketPath!, b4);
+
+    const closing = m.close();
+    messaging = null;
+    // Shutdown is over once the held message's expiry reaches the slow
+    // inbox; the settle window — its own slow expiry receipt — is still
+    // open, and the probe lands inside it.
+    for (
+      let waits = 0;
+      waits < 50 &&
+      !slow.received.some(
+        (r) => r.type === 'control' && r.status === 'expired',
+      );
+      waits++
+    ) {
+      await settle();
+    }
+    await settle();
+    await settle();
+
+    const probeFrame = peerFrame({ content: 'late', from: sender.socketPath });
+    const probe = await send(m.socketPath!, probeFrame).then(
+      () => 'sent' as const,
+      () => 'refused' as const,
+    );
+    await closing;
+
+    // The folded batch close flushed still reached the fast sender.
+    expect(
+      receipts.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'dropped' &&
+          r.origMsgId === b4.msgId,
+      ),
+    ).toBe(true);
+
+    if (probe === 'sent') {
+      // The inbox took the late frame, so its drop is owed a receipt.
+      for (
+        let waits = 0;
+        waits < 10 &&
+        !receipts.some(
+          (r) =>
+            r.type === 'control' &&
+            r.status === 'dropped' &&
+            r.origMsgId === probeFrame.msgId,
+        );
+        waits++
+      ) {
+        await settle();
+      }
+      expect(
+        receipts.some(
+          (r) =>
+            r.type === 'control' &&
+            r.status === 'dropped' &&
+            r.origMsgId === probeFrame.msgId,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('flushes a folded batch whose receipt is slow before close resolves', async () => {
+    // A slow-but-alive peer is still owed what was folded before close()
+    // resolves: the flush waits inside the cleanup budget rather than
+    // giving up while the receipt is mid-write.
+    const slow = await startSlowSenderInbox(800);
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const m = started;
+
+    // a1 parks; a2 and a3 are turned away by the meter — the first
+    // answers at once, the second folds into a batch only close flushes.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a1', from: slow.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a2', from: slow.socketPath }),
+    );
+    const a3 = peerFrame({ content: 'a3', from: slow.socketPath });
+    await send(m.socketPath!, a3);
+
+    await m.close();
+    messaging = null;
+
+    // The folded receipt took the slow path (~800 ms, outside the stock
+    // flush bound) and is still there when close() resolves.
+    expect(
+      slow.received.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'dropped' &&
+          r.origMsgId === a3.msgId,
+      ),
+    ).toBe(true);
   });
 });

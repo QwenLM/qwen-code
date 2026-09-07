@@ -102,6 +102,26 @@ describe('PeerAdmission', () => {
     });
   });
 
+  it('judges the repeat window across a system suspend', () => {
+    // A monotonic clock does not tick while the machine is asleep, so a
+    // re-send right after a resume must not be judged against only the
+    // seconds it was awake: the window runs on the larger of the wall
+    // and monotonic deltas, the way the hold buffer's age does.
+    const mono = stubClock();
+    const wall = stubClock();
+    const admission = new PeerAdmission({ now: mono.now, wallNow: wall.now });
+
+    expect(admission.admit({ senderKey: 'peer', body: 'ping' })).toEqual({
+      admitted: true,
+    });
+    // The machine slept past the repeat window; the monotonic clock
+    // barely moved.
+    wall.advance(PEER_ADMISSION_LIMITS.dedupWindowMs + 1);
+    expect(admission.admit({ senderKey: 'peer', body: 'ping' })).toEqual({
+      admitted: true,
+    });
+  });
+
   it('does not charge a sender for a message it dropped as a repeat', () => {
     const clock = stubClock();
     const admission = new PeerAdmission({

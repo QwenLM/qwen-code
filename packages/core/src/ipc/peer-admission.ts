@@ -150,6 +150,8 @@ interface SenderMeter {
   lastRefill: number;
   lastBodyHash: string | undefined;
   lastBodyAt: number;
+  /** Wall-clock counterpart of `lastBodyAt`; see the repeat check. */
+  lastBodyAtWall: number;
 }
 
 export interface AdmissionRequest {
@@ -171,8 +173,13 @@ export type AdmissionVerdict =
   | { admitted: false; reason: 'rate-limited' | 'duplicate' };
 
 export interface PeerAdmissionOptions {
-  /** Injectable clock. Production uses `performance.now()`. */
+  /** Injectable monotonic clock. Production uses `performance.now()`. */
   now?: () => number;
+  /**
+   * Injectable wall clock, read only for the repeat window. Production
+   * uses `Date.now()`.
+   */
+  wallNow?: () => number;
   limits?: Partial<PeerAdmissionLimits>;
 }
 
@@ -183,17 +190,25 @@ export interface PeerAdmissionOptions {
  */
 export class PeerAdmission {
   private readonly now: () => number;
+  private readonly wallNow: () => number;
   private readonly limits: PeerAdmissionLimits;
   private readonly senders = new Map<string, SenderMeter>();
   private globalTokens: number;
   private globalRefill: number;
 
   constructor(options: PeerAdmissionOptions = {}) {
-    // performance.now(), not Date.now(): a wall-clock step would either
-    // hand a flooding peer a full bucket or freeze a well-behaved one out
-    // for as long as the step, and neither is about how fast it is
-    // actually sending. Same reasoning as the hold buffer's clock.
+    // The buckets run on performance.now(), not Date.now(): a wall-clock
+    // step would either hand a flooding peer a full bucket or freeze a
+    // well-behaved one out for as long as the step, and neither is about
+    // how fast it is actually sending. The repeat window cannot: a
+    // monotonic clock does not tick across a system suspend, so a re-send
+    // after a resume would be judged against only the seconds the machine
+    // was awake. There the larger of the wall and monotonic deltas is
+    // what counts — the same max the hold buffer's `ageOf` takes. A
+    // forward wall step can then admit one repeat, which the
+    // still-monotonic buckets bound.
     this.now = options.now ?? (() => performance.now());
+    this.wallNow = options.wallNow ?? (() => Date.now());
     this.limits = { ...PEER_ADMISSION_LIMITS, ...options.limits };
     this.globalTokens = this.limits.globalBucketCapacity;
     this.globalRefill = this.now();
@@ -210,6 +225,7 @@ export class PeerAdmission {
    */
   admit(request: AdmissionRequest): AdmissionVerdict {
     const now = this.now();
+    const wallNow = this.wallNow();
 
     this.globalTokens = refillBucket(
       this.globalTokens,
@@ -234,7 +250,8 @@ export class PeerAdmission {
     if (
       bodyHash !== undefined &&
       meter.lastBodyHash === bodyHash &&
-      now - meter.lastBodyAt < this.limits.dedupWindowMs
+      Math.max(now - meter.lastBodyAt, wallNow - meter.lastBodyAtWall) <
+        this.limits.dedupWindowMs
     ) {
       debugLogger.debug(
         `dropping a peer message from ${request.senderKey}: identical to its previous message`,
@@ -262,6 +279,7 @@ export class PeerAdmission {
     if (bodyHash !== undefined) {
       meter.lastBodyHash = bodyHash;
       meter.lastBodyAt = now;
+      meter.lastBodyAtWall = wallNow;
     }
     return { admitted: true };
   }
@@ -269,6 +287,24 @@ export class PeerAdmission {
   /** How many senders are metered right now. For tests and diagnostics. */
   trackedSenderCount(): number {
     return this.senders.size;
+  }
+
+  /**
+   * Forget the body remembered for `senderKey`, leaving its bucket alone.
+   *
+   * The gate calls this when a message it admitted could not be delivered
+   * (its input queue was full): the admission is rolled back, so a
+   * verbatim retry once the queue drains meets the same repeat check it
+   * would have met had this message never arrived. The token stays spent
+   * — it is the only bound on how often a peer can make the receiver
+   * attempt a delivery into a full queue.
+   */
+  forgetLastBody(senderKey: string): void {
+    const meter = this.senders.get(senderKey);
+    if (meter === undefined) return;
+    meter.lastBodyHash = undefined;
+    meter.lastBodyAt = 0;
+    meter.lastBodyAtWall = 0;
   }
 
   /**
@@ -317,12 +353,14 @@ export class PeerAdmission {
       lastRefill: now,
       lastBodyHash: undefined,
       lastBodyAt: 0,
+      lastBodyAtWall: 0,
     };
     this.senders.set(key, fresh);
     return fresh;
   }
 }
 
-function hashBody(body: string): string {
+/** The digest a body is remembered by; see `SenderMeter`. */
+export function hashBody(body: string): string {
   return createHash('sha256').update(body).digest('hex');
 }

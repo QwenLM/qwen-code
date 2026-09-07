@@ -26,9 +26,11 @@
  * what was suppressed. Both are also capped globally, because a flood
  * that rotates its `from` would otherwise mint a fresh budget per name.
  *
- * Receipts are best-effort throughout: over the global budget they are
- * simply not sent. The sender is already being told to stop, and the
- * budget exists precisely because more receipts would not help.
+ * Receipts are best-effort: over the global budget they wait for the
+ * next window rather than going out at once — a drop noted under someone
+ * else's flood is still owed its answer — and a session that closes
+ * first may never send them. The sender is already being told to stop,
+ * and the budget exists precisely because more receipts would not help.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -128,10 +130,14 @@ export class DropReceiptCoalescer {
     // started overrunning should learn immediately, while it can still
     // stop. After that the trailing batch is what answers, so a sender
     // that keeps going costs one receipt per trail rather than one per
-    // message.
+    // message. When the window's receipt budget is spent, the immediate
+    // answer is deferred to the trailing batch instead of discarded: the
+    // drop it answers may be a legitimate message caught in someone
+    // else's flood, and its sender is still owed the receipt.
     if (
       batch.pending === 0 &&
-      now - batch.lastImmediateAt >= DROP_REPORT_WINDOW_MS
+      now - batch.lastImmediateAt >= DROP_REPORT_WINDOW_MS &&
+      !this.budgetSpent(now)
     ) {
       batch.lastImmediateAt = now;
       void this.dispatch({ frame, reason, droppedMsgIds: [] });
@@ -194,8 +200,32 @@ export class DropReceiptCoalescer {
   }
 
   private sendBatch(batch: ReceiptBatch): Promise<void> | void {
+    if (this.disposed) return;
     const frame = batch.frame;
     const reason = batch.reason;
+    if (frame === undefined || reason === undefined) {
+      batch.pending = 0;
+      batch.ids = [];
+      if (batch.timer !== undefined) {
+        clearTimeout(batch.timer);
+        batch.timer = undefined;
+      }
+      return;
+    }
+    if (this.budgetSpent(this.now())) {
+      // The window's budget is still spent: keep the batch and re-arm the
+      // trail, so these drops are receipted once the window rolls rather
+      // than vanishing. The budget bounds receipts per window, not which
+      // drops ever get one.
+      if (batch.timer === undefined) {
+        batch.timer = setTimeout(() => {
+          batch.timer = undefined;
+          void this.sendBatch(batch);
+        }, this.trailMs);
+        batch.timer.unref?.();
+      }
+      return;
+    }
     const droppedMsgIds = batch.ids;
     batch.frame = undefined;
     batch.reason = undefined;
@@ -205,17 +235,23 @@ export class DropReceiptCoalescer {
       clearTimeout(batch.timer);
       batch.timer = undefined;
     }
-    if (frame === undefined || reason === undefined) return;
     return this.dispatch({ frame, reason, droppedMsgIds });
   }
 
-  private dispatch(receipt: DroppedReceipt): Promise<void> | void {
-    const now = this.now();
+  /**
+   * Roll the receipt window if it has passed, then whether this window's
+   * budget is gone. The accounting itself stays in `dispatch`.
+   */
+  private budgetSpent(now: number): boolean {
     if (now - this.windowStartedAt >= DROP_REPORT_WINDOW_MS) {
       this.windowStartedAt = now;
       this.sentInWindow = 0;
     }
-    if (this.sentInWindow >= MAX_DROP_RECEIPTS_PER_WINDOW) {
+    return this.sentInWindow >= MAX_DROP_RECEIPTS_PER_WINDOW;
+  }
+
+  private dispatch(receipt: DroppedReceipt): Promise<void> | void {
+    if (this.budgetSpent(this.now())) {
       debugLogger.debug(
         'not sending another dropped receipt this minute; the budget is spent',
       );

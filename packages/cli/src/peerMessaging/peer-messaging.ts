@@ -99,6 +99,15 @@ export type PeerSubmitFn = (
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
 /**
+ * How long `close()` waits for folded drop receipts to reach their
+ * senders. Sized against the 2 s ceiling the exit path gives each
+ * cleanup entry: the gate's shutdown receipts and the unconsumed
+ * backlog's receipts each take the same order of time, and the three
+ * together must fit.
+ */
+const CLOSE_DROP_FLUSH_BOUND_MS = 1_000;
+
+/**
  * A delivery receipt for a message this session sent, as surfaced to
  * the UI: which address it went to and what became of it there.
  */
@@ -567,16 +576,18 @@ export class PeerMessaging {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // Settle held messages before the socket goes away: the expiry
-    // receipts have to travel over it, and the process exits once close
-    // resolves — a receipt still in flight then is one the sender never
-    // receives. A dropped batch still waiting out its trail is owed the
-    // same, and for the same reason.
+    // Stop arrivals before draining the reporters: the gate settles its
+    // parked messages, then the socket goes away so no new drop can be
+    // noted into a coalescer that is about to be flushed and disposed.
+    // Outbound receipts do not need the listening socket — each opens
+    // its own connection, and `socketPath` survives `close()` — so
+    // flushing after the inbox closes loses nothing, and a receipt still
+    // in flight when the process exits is one the sender never receives.
     await this.gate?.shutdown();
-    await this.dropReceipts?.flush();
+    await this.inbox?.close();
+    await this.dropReceipts?.flush(CLOSE_DROP_FLUSH_BOUND_MS);
     this.dropReceipts?.dispose();
     await this.settleUnconsumed();
-    await this.inbox?.close();
     // Same pair, same removal as the startup scrub — one writer for it.
     clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);

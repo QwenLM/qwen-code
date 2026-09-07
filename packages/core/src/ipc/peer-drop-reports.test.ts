@@ -183,6 +183,37 @@ describe('DropReceiptCoalescer', () => {
     expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
   });
 
+  it('defers an over-budget receipt to the next window instead of dropping it', () => {
+    // The budget bounds receipts per window, not which drops ever get
+    // one: a drop noted under someone else's flood is still owed its
+    // answer, so it waits out the window in the trailing batch.
+    const clock = stubClock();
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer(
+      (receipt) => {
+        sent.push(receipt);
+      },
+      { now: clock.now },
+    );
+
+    for (let index = 0; index < MAX_DROP_RECEIPTS_PER_WINDOW; index++) {
+      coalescer.note(frameFrom(`/tmp/peer-${index}.sock`), 'rate-limited');
+    }
+    expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
+
+    // One more drop inside the same window: nothing goes out, but the
+    // drop is not discarded either.
+    coalescer.note(frameFrom('/tmp/legit.sock'), 'rate-limited');
+    clock.advance(DROP_RECEIPT_TRAIL_MS);
+    expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW);
+
+    // The window rolls, the re-armed trail fires, and the receipt that
+    // was owed goes out.
+    clock.advance(DROP_REPORT_WINDOW_MS);
+    expect(sent).toHaveLength(MAX_DROP_RECEIPTS_PER_WINDOW + 1);
+    expect(sent.at(-1)?.frame.from).toBe('/tmp/legit.sock');
+  });
+
   it('says nothing to a sender that gave no reply address', () => {
     const clock = stubClock();
     const sent: DroppedReceipt[] = [];

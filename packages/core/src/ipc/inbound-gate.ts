@@ -679,7 +679,13 @@ export class InboundGate {
         // backlog being full, so this is a queue-full drop rather than an
         // expiry: 'expired' would tell the sender a decision ran out when
         // no decision was ever pending. The id is deliberately not
-        // settled, so an honest retry once the queue drains can land.
+        // settled, and the admission's record of the body is rolled back,
+        // so an honest retry once the queue drains can land instead of
+        // reading as a repeat of a message that never arrived. The token
+        // the meter charged stays spent: it is the only bound on how
+        // often a peer can make this session attempt a delivery into a
+        // full queue.
+        this.admission.forgetLastBody(peerSenderKey(frame, origin));
         return this.drop(frame, origin, 'queue-full');
       }
       this.recordSettled(frame.msgId, 'delivered');
