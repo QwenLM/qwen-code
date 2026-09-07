@@ -151,6 +151,103 @@ describe('HistoricalTranscriptPageTable', () => {
     expect(table.getSnapshot()).toBe(before);
   });
 
+  it('preserves a pinned sequential range when another viewport opens overlapping history', () => {
+    const table = createTable();
+    const target = table.admitBefore('live', 's', response(['b', 'c']))!;
+    table.setViewportAnchor('reader', target.pageId);
+    const before = table.getSnapshot();
+
+    expect(() => table.admitBefore('c', 's', response(['a', 'b']))).toThrow(
+      HistoricalTranscriptWindowFullError,
+    );
+    expect(table.getSnapshot()).toBe(before);
+    expect(
+      table
+        .getSnapshot()
+        .pages.get(target.pageId)
+        ?.blocks.map((b) => b.text),
+    ).toEqual(['b', 'c']);
+
+    table.setViewportAnchor('reader');
+    const replacement = table.admitBefore('c', 's', response(['a', 'b']))!;
+    expect(table.getSnapshot().pages.has(target.pageId)).toBe(false);
+    expect(
+      table
+        .getSnapshot()
+        .pages.get(replacement.pageId)
+        ?.blocks.map((b) => b.text),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('cancels a boundary load only for the owning request identity', () => {
+    const table = createTable();
+    const target = table.admitBefore(
+      'live',
+      's',
+      response(['b'], { hasMore: true, nextCursor: 'older' }),
+    )!;
+    const request = table.beginBoundaryLoad(target.rangeId, 'older')!;
+    const loading = table.getSnapshot();
+
+    table.cancelBoundaryLoad(target.rangeId, 'older', { ...request });
+    expect(table.getSnapshot()).toBe(loading);
+    expect(table.getSnapshot().ranges[0]?.older.kind).toBe('loading');
+
+    table.cancelBoundaryLoad(target.rangeId, 'older', request);
+    expect(table.getSnapshot().ranges[0]?.older).toEqual({
+      kind: 'loadable',
+      request,
+    });
+    expect(table.getSnapshot().pages.get(target.pageId)).toBe(
+      loading.pages.get(target.pageId),
+    );
+    expect(table.beginBoundaryLoad(target.rangeId, 'older')).toBe(request);
+  });
+
+  it('retains colliding continuation records independently in both origin families', () => {
+    const table = createTable();
+    const legacy = table.admitAnchor(
+      0,
+      'a',
+      's',
+      response(['a', 'b'], {
+        targetRecordId: 'a',
+        hasMore: true,
+        nextCursor: 'legacy-newer',
+      }),
+    );
+    const sequential = table.admitBefore(
+      'live',
+      's',
+      response(['c', 'd'], { hasMore: true, nextCursor: 'sequential-older' }),
+    )!;
+
+    table.beginBoundaryLoad(sequential.rangeId, 'older');
+    table.admitBoundary(sequential.rangeId, 'older', 's', response(['a', 'b']));
+    table.beginBoundaryLoad(legacy.rangeId, 'newer');
+    table.admitBoundary(legacy.rangeId, 'newer', 's', response(['c', 'd']));
+
+    const snapshot = table.getSnapshot();
+    expect(snapshot.ranges).toHaveLength(2);
+    for (const range of snapshot.ranges) {
+      expect(range.pageIds).toHaveLength(2);
+      expect(
+        range.pageIds.flatMap((id) =>
+          snapshot.pages.get(id)!.blocks.map((b) => b.text),
+        ),
+      ).toEqual(['a', 'b', 'c', 'd']);
+    }
+    expect(
+      snapshot.ranges.find((r) => r.id === sequential.rangeId)?.older,
+    ).toEqual({ kind: 'end' });
+    expect(snapshot.ranges.find((r) => r.id === legacy.rangeId)?.newer).toEqual(
+      {
+        kind: 'end',
+      },
+    );
+    expect(snapshot.pages.size).toBe(4);
+  });
+
   it('reopens a trimmed live edge with a fresh before-origin and exact retained record', () => {
     const table = createTable();
     const target = table.admitBefore('live-1', 's1', response(['a']))!;
