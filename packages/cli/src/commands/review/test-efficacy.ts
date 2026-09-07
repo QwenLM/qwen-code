@@ -1671,10 +1671,12 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
-  // A pathspec checkout runs no hook — but the config that decides that lives
-  // in a tree this code is defending against, so it is emptied here the way
-  // every other checkout in this pipeline empties it. `--` and a pathspec:
-  // this restores FILES and never moves HEAD.
+  // A pathspec checkout DOES run `post-checkout` — measured on both shapes
+  // below, `checkout --force HEAD -- .` and a pathspec checkout of one file —
+  // and the config that decides whether it does lives in a tree this code is
+  // defending against, so it is emptied here the way every other checkout in
+  // this pipeline empties it. `--` and a pathspec: this restores FILES and
+  // never moves HEAD.
   // Filters, before either spawn. A checkout EXECUTES `filter.<name>.smudge`
   // whenever it rewrites a file, and the restore below rewrites every tracked
   // file this tree has — so the same surface `scratch-tree` refuses to reset
@@ -2713,9 +2715,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let created = false;
     let sweep: SweepResult | undefined;
     try {
-      // Clear a stale probe tree left by a crashed run — it would fail `add`.
-      // Its stderr is kept to explain a subsequent `add` failure.
-      sweep = discardWorktree(worktree, probeTree);
       // Screened at RUN ENTRY, before the first spawn that materialises files.
       // `worktree add` checks out `headSha` into the new tree, so it executes a
       // planted `filter.<name>.smudge` exactly as the restore does (measured:
@@ -2728,6 +2727,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // cannot reach back to it. Same repo-local scope, for the same git-lfs
       // reason. The throw lands in this phase's existing catch, which records
       // every probe as not-run — what it is, since nothing was isolated.
+      //
+      // ABOVE the stale-tree sweep, not below it. The sweep's stderr is
+      // non-empty on the healthy path — `git worktree remove` aimed at a tree
+      // that is not there answers "is not a working tree" — and the failure
+      // detail below appends it, so a refusal sited under the sweep published
+      // an unrelated cause beside the real one. This screens `worktree`, not
+      // the probe tree, so nothing about it depends on the sweep having run,
+      // and refusing before touching anything is the better order anyway.
       const creationFilters = checkoutFilterCommands(worktree);
       if (creationFilters.length > 0) {
         throw new Error(
@@ -2737,6 +2744,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           ),
         );
       }
+      // Clear a stale probe tree left by a crashed run — it would fail `add`.
+      // Its stderr is kept to explain a subsequent `add` failure.
+      sweep = discardWorktree(worktree, probeTree);
       git(
         worktree,
         ...CHECKOUT_INERT,
@@ -2902,11 +2912,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               worktree,
             );
             if (harnessValidated === null) {
-              // The probe file could not be read, so no test was injected and
-              // no run happened. That is not a verdict about the runner —
-              // fall through and let the mutants spend the window as usual.
+              // THREE causes share this `null` and the note must not name one:
+              // the probe target was relinked out of the tree, the restore
+              // refused — a content filter is now among its reasons, which is
+              // this file's own screen — or the probe file could not be read.
+              // Naming the last, as this did, tells an operator the file is
+              // missing when the real answer may be that their repository
+              // defines a filter; the per-probe records below carry the actual
+              // reason, so this one only has to not contradict them. No test
+              // was injected and no run happened either way, which is not a
+              // verdict about the runner — fall through and let the mutants
+              // spend the window as usual.
               noteMutants(
-                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+                `the positive control could not be set up (the probe target was relinked, the probe tree could not be restored, or ${greenProbes[0]} could not be read in it), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
               );
             }
           }

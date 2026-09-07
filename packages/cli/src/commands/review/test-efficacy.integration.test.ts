@@ -1730,6 +1730,13 @@ process.stdout.write(JSON.stringify({
         ),
       }),
     ]);
+    // And it carries no second, unrelated cause. The screen sits above the
+    // stale-tree sweep for exactly this reason: that sweep's stderr is
+    // non-empty on the healthy path (`git worktree remove` aimed at a tree
+    // that is not there answers "is not a working tree"), and the creation
+    // failure detail appends it, so a refusal sited below the sweep published
+    // a problem that did not exist beside the one that did.
+    expect(JSON.stringify(out)).not.toContain('stale-tree sweep');
     expect(JSON.stringify(out)).toContain('filter.evil.smudge');
   });
 
