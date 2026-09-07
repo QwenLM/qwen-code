@@ -53,6 +53,9 @@
       "@qwen-code/qwen-code-core/*": [
         "packages/core/src/*"
       ],
+      "@qwen-code/acp-bridge": [
+        "packages/acp-bridge/src/index.ts"
+      ],
       "@qwen-code/acp-bridge/eventBus": [
         "packages/acp-bridge/src/eventBus.ts"
       ],
@@ -149,17 +152,14 @@
       "@qwen-code/acp-bridge/*": [
         "packages/acp-bridge/src/*"
       ],
-      "@qwen-code/acp-bridge": [
-        "packages/acp-bridge/index.ts"
-      ],
-      "@lydell/node-pty": [
-        "node_modules/@lydell/node-pty/node-pty.d.ts"
-      ],
       "@qwen-code/channel-base": [
         "packages/channels/base/src/index.ts"
       ],
       "@qwen-code/channel-base/*": [
         "packages/channels/base/src/*"
+      ],
+      "@lydell/node-pty": [
+        "node_modules/@lydell/node-pty/node-pty.d.ts"
       ]
     }
   },
