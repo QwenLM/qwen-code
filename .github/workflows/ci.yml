@@ -1293,10 +1293,10 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted runners reuse the workspace; a prior containerised job can
-      # leave root-owned, read-only files anywhere in it. Restore ownership and
-      # write permission unconditionally before checkout — see the test job's
-      # 'Restore workspace ownership' step for why probing first is unsafe.
+      # Retain the shared-pool recovery steps so rerouting needs only a runner
+      # change. Hosted workspaces are fresh; on a reused workspace a prior
+      # containerised job can leave root-owned, read-only files. Restore them
+      # unconditionally before checkout, as in the test job.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -1307,11 +1307,9 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Same pre-checkout recovery as the test job: this job lands on the
-      # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too. The
-      # `.qwen.root-orig` name's provenance (an external recovery tool) is
-      # documented on the test job's copy.
+      # Keep this retained sweep pinned to the test job's hardened recovery
+      # recipe, even while hosted. The `.qwen.root-orig` name's provenance
+      # (an external recovery tool) is documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
@@ -1437,9 +1435,8 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
-      # Same pre-install admission check as the test job (#10035): this job
-      # lands on the same self-hosted pool and installs before the gate would
-      # otherwise have freed space for it.
+      # Retained for a future shared-pool reroute: apply the test job's
+      # pre-install admission check (#10035) before dependency installation.
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'

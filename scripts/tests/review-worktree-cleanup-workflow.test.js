@@ -53,12 +53,15 @@ const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
 // possibly dirty workspace. Match the pool itself, not just the output
 // reference that usually names it: jobs can also hard-code the shared label
 // array, and a checkout on either form inherits the same leftovers.
-// Enumerate by pool + checkout instead of job name so the next such job
-// fails here instead of on the runners.
+// Include retained recovery steps on hosted jobs too, so rerouting cannot
+// silently restore an untested sweep. Select by properties, not job name.
 const ciCleanSteps = Object.entries(ciYaml.jobs)
   .filter(
     ([, job]) =>
-      /ubuntu_runner|ecs-qwen/.test(JSON.stringify(job['runs-on'] ?? '')) &&
+      (/ubuntu_runner|ecs-qwen/.test(JSON.stringify(job['runs-on'] ?? '')) ||
+        (job.steps ?? []).some(
+          (s) => s.name === 'Clean stale .qwen before checkout',
+        )) &&
       (job.steps ?? []).some((s) =>
         String(s.uses ?? '').includes('actions/checkout'),
       ),
@@ -360,7 +363,11 @@ describe('review worktree cleanup steps', () => {
 
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
     expect(ciCleanSteps.map(({ id }) => id)).toEqual(
-      expect.arrayContaining(['test', 'integration_cli']),
+      expect.arrayContaining([
+        'test',
+        'web_shell_e2e_smoke',
+        'integration_cli',
+      ]),
     );
     for (const { id, steps, run } of ciCleanSteps) {
       expect(

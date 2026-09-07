@@ -1302,6 +1302,7 @@ export function ChatPane({
               label={headerLabel}
               time={sessionStamp ? formatDateTime(sessionStamp) : ''}
               completedUnread={false}
+              workspaceLabel={workspaceLabel}
               side="bottom"
             >
               <span className={styles.title}>{headerLabel}</span>

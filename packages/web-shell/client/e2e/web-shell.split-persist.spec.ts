@@ -1,8 +1,8 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import type { DaemonPermissionRequestEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
-  permissionRequestEvent,
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
@@ -151,6 +151,8 @@ test('shows session details without moving focus and preserves drafts across pan
   const editorB = paneB.locator('.cm-content');
   const titleB = paneB.locator('[data-slot="popover-anchor"]');
   const details = page.getByRole('dialog', { name: 'Session B', exact: true });
+  await expect(editorA).toBeEditable();
+  await expect(editorB).toBeEditable();
   await editorA.fill('Draft kept in session A');
   await expect(paneA.getByTestId('chat-pane')).toHaveAttribute(
     'data-pane-active',
@@ -161,6 +163,7 @@ test('shows session details without moving focus and preserves drafts across pan
     .locator('header')
     .evaluate((header) => header.getBoundingClientRect().height);
 
+  await expect(editorA).toBeFocused();
   await titleB.hover();
   await expect(details).toBeVisible();
   await expect(details).toHaveAttribute('data-side', 'bottom');
@@ -243,24 +246,30 @@ test('navigates hidden tool and question approvals without answering them @smoke
 }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const scenario = createSplitScenario();
-  const toolEvent = permissionRequestEvent('split-tool-permission', {
+  const toolEvent: DaemonPermissionRequestEvent = {
+    v: 1,
     id: 1,
-    sessionId: SESSION_A,
-  });
-  toolEvent.data.options = [
-    { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
-    {
-      optionId: 'proceed_always_user',
-      label: 'Always allow for user',
-      kind: 'allow_always',
+    type: 'permission_request',
+    data: {
+      requestId: 'split-tool-permission',
+      sessionId: SESSION_A,
+      toolCall: { name: 'Bash', input: { command: 'printf web-shell-e2e' } },
+      options: [
+        { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
+        {
+          optionId: 'proceed_always_user',
+          label: 'Always allow for user',
+          kind: 'allow_always',
+        },
+        {
+          optionId: 'proceed_always_project',
+          label: 'Always allow for project',
+          kind: 'allow_always',
+        },
+        { optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' },
+      ],
     },
-    {
-      optionId: 'proceed_always_project',
-      label: 'Always allow for project',
-      kind: 'allow_always',
-    },
-    { optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' },
-  ];
+  };
   scenario.events = [toolEvent];
   scenario.branch = {
     sessionId: SESSION_B,
@@ -303,7 +312,7 @@ test('navigates hidden tool and question approvals without answering them @smoke
   const paneA = page.locator(`[data-pane-session-id="${SESSION_A}"]`);
   const paneB = page.locator(`[data-pane-session-id="${SESSION_B}"]`);
   const pending = split.getByRole('button', {
-    name: 'Go to the next session awaiting input',
+    name: '2 awaiting input — Go to the next session awaiting input',
     exact: true,
   });
   await expect(
@@ -364,6 +373,7 @@ test('navigates hidden tool and question approvals without answering them @smoke
   await paneA
     .getByRole('button', { name: 'Maximize pane', exact: true })
     .click();
+  await page.mouse.move(0, 0);
   expect(daemon.permissionRequests()).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath('split-pending.png') });
 
@@ -388,7 +398,7 @@ test('navigates hidden tool and question approvals without answering them @smoke
     },
   });
   const onePending = split.getByRole('button', {
-    name: 'Go to the next session awaiting input',
+    name: '1 awaiting input — Go to the next session awaiting input',
     exact: true,
   });
   await expect(onePending).toHaveText('1 awaiting input');
@@ -404,10 +414,10 @@ test('navigates hidden tool and question approvals without answering them @smoke
     },
   });
   await expect(onePending).toHaveCount(0);
+  await expect(split.locator(':scope > header [role="status"]')).toBeEmpty();
   await expect(
     split.getByRole('button', { name: 'back', exact: true }),
   ).toBeFocused();
-  await expect(split.locator(':scope > header [role="status"]')).toBeEmpty();
   await page.keyboard.press('Escape');
   await expect(paneB).toBeVisible();
   await paneB.getByRole('button', { name: 'Close pane', exact: true }).click();
@@ -448,14 +458,23 @@ test('keeps title details inside narrow panes in an embedded shell @smoke', asyn
     await pane.locator('[data-slot="popover-anchor"]').hover();
     const details = page.getByRole('dialog', { name, exact: true });
     await expect(details).toBeVisible();
-    const bounds = await details.boundingBox();
-    for (const host of [pane, root]) {
-      const hostBounds = (await host.boundingBox())!;
-      expect(bounds!.x).toBeGreaterThanOrEqual(hostBounds.x);
-      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(
-        hostBounds.x + hostBounds.width,
-      );
-    }
+    await expect
+      .poll(async () => {
+        const bounds = await details.boundingBox();
+        const paneBounds = await pane.boundingBox();
+        const rootBounds = await root.boundingBox();
+        return (
+          bounds &&
+          paneBounds &&
+          rootBounds &&
+          [paneBounds, rootBounds].every(
+            (host) =>
+              bounds.x >= host.x &&
+              bounds.x + bounds.width <= host.x + host.width,
+          )
+        );
+      })
+      .toBe(true);
     await page.keyboard.press('Escape');
   }
 });

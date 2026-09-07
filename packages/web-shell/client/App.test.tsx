@@ -27,6 +27,7 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type {
   VoiceStatusRevision,
@@ -615,6 +616,7 @@ const {
         settings: DaemonSettingDescriptor[];
       } | null,
       latestSplitViewProps: null as {
+        onPendingPanesChange?: (ids: string[]) => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -1272,9 +1274,14 @@ vi.mock('./components/dialogs/DialogShell', async () => {
   };
 });
 
-vi.mock('./components/sidebar/WebShellSidebar', async () => {
+vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
   const React = await import('react');
+  const actual =
+    await importOriginal<
+      typeof import('./components/sidebar/WebShellSidebar')
+    >();
   return {
+    DEFAULT_SESSION_ACTION_ITEMS: actual.DEFAULT_SESSION_ACTION_ITEMS,
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
@@ -1704,6 +1711,7 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
+      onPendingPanesChange?: (ids: string[]) => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -27769,12 +27777,12 @@ describe('App session callbacks', () => {
           ?.click();
       });
       expect(testState.latestSplitViewProps?.showSessionDetails).toBe(
-        items === undefined || items.includes('details'),
+        (items ?? DEFAULT_SESSION_ACTION_ITEMS).includes('details'),
       );
     },
   );
 
-  it('keeps the outer approval notice hidden when its session is already a split pane', async () => {
+  it('keeps the outer approval notice until a split pane reports its approval', async () => {
     const { container, rerender } = renderApp();
     await flush();
     await act(async () => {
@@ -27787,11 +27795,21 @@ describe('App session callbacks', () => {
       rerender();
     });
     expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="split-approval-notice"]'),
-    ).toBeNull();
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toContain(mockConnection.sessionId);
+    const notice = () =>
+      container.querySelector('[data-testid="split-approval-notice"]');
+    expect(notice()).not.toBeNull();
+    await act(async () => {
+      testState.latestSplitViewProps?.onPendingPanesChange?.([
+        mockConnection.sessionId!,
+      ]);
+    });
+    expect(notice()).toBeNull();
+    await act(async () => {
+      testState.latestSplitViewProps?.onPendingPanesChange?.([]);
+    });
+    expect(notice()).not.toBeNull();
   });
 
   it('surfaces the outer approval as a split notice and returns to chat when clicked', async () => {

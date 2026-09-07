@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_SESSION_ACTION_ITEMS } from './WebShellSidebar';
 import type {
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
@@ -14,7 +15,7 @@ const ALL_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
   'archive',
 ];
 
-const DEFAULT_ITEMS: readonly WebShellSidebarSessionActionItem[] = ALL_ITEMS;
+const DEFAULT_ITEMS = DEFAULT_SESSION_ACTION_ITEMS;
 
 const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];

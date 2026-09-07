@@ -290,7 +290,10 @@ describe('SplitView', () => {
     )!;
     expect(pendingButton.textContent).toBe('2 awaiting input');
     expect(pendingButton.getAttribute('aria-label')).toBe(
-      'Go to the next session awaiting input',
+      '2 awaiting input — Go to the next session awaiting input',
+    );
+    expect(pendingButton.getAttribute('aria-label')).toContain(
+      pendingButton.textContent,
     );
     expect(container!.querySelector('[role="status"]')?.textContent).toBe(
       '2 awaiting input',
@@ -309,6 +312,71 @@ describe('SplitView', () => {
     expect(scrollPaneIntoView).toHaveBeenCalledTimes(2);
     expect(panes()[0].querySelector('input')).toBe(draft);
     expect(draft.value).toBe('keep this draft');
+  });
+
+  it.each([false, true])(
+    'continues forward from an idle middle pane (maximized: %s)',
+    (maximized) => {
+      waitingSessions = new Set(['s1', 's3']);
+      render({ sessionIds: ['s1', 's2', 's3'] });
+      act(() => panes()[1].querySelector('input')!.focus());
+      if (maximized) {
+        act(() =>
+          panes()[1]
+            .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+            .click(),
+        );
+      }
+      const pending = container!.querySelector<HTMLButtonElement>(
+        '[title="Go to the next session awaiting input"]',
+      )!;
+      for (const index of [2, 0]) {
+        act(() => pending.click());
+        expect(panes()[index].hasAttribute('data-pane-active')).toBe(true);
+        expect(document.activeElement).toBe(
+          panes()[index].closest('[data-pane-session-id]'),
+        );
+        expect(panes()[index].getAttribute('data-maximized')).toBe(
+          String(maximized),
+        );
+      }
+      expect(confirmApproval).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports pending panes while hidden and clears the report on unmount', () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange });
+    act(() =>
+      panes()[1]
+        .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+        .click(),
+    );
+    expect(panes()[0].getAttribute('data-hidden')).toBe('true');
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    act(() => root!.unmount());
+    root = null;
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('stops reporting a crashed pane even though its slot remains', async () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange });
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    sessionsState = sessionsState.map((session) =>
+      session.sessionId === 's1'
+        ? { ...session, displayName: 'BOOM' }
+        : session,
+    );
+    openPicker();
+    await flushAsync();
+    expect(container!.textContent).toContain('This session pane hit an error');
+    expect(
+      container!.querySelector('[data-pane-session-id="s1"]'),
+    ).not.toBeNull();
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith([]);
   });
 
   it('keeps selection and focus on a neighbour when a controlled pane is removed', () => {

@@ -238,6 +238,7 @@ import {
 } from './shadowDom';
 import {
   WebShellSidebar,
+  DEFAULT_SESSION_ACTION_ITEMS,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -7950,6 +7951,9 @@ export function App({
   }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  const [splitPendingSessionIds, setSplitPendingSessionIds] = useState<
+    string[]
+  >([]);
   // Latest pane list, readable from the shrink-close effect without making it a
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
@@ -17370,10 +17374,10 @@ export function App({
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
-                      session isn't one of the panes, the approval would be
-                      invisible — surface a notice with a way back to it. */}
+                      session's pane hasn't surfaced its approval (including
+                      failed or still-attaching panes), show a way back to it. */}
                   {approvalOverlayActive &&
-                    !splitSessionIds.includes(connection.sessionId ?? '') && (
+                    !splitPendingSessionIds.includes(connection.sessionId ?? '') && (
                     <div
                       className={styles.splitApprovalNotice}
                       role="status"
@@ -17393,15 +17397,15 @@ export function App({
                       <SplitView
                         sessionIds={splitSessionIds}
                         showSessionDetails={
-                          sidebarOptions.sessionActions?.items?.includes(
-                            'details',
-                          ) ?? true
+                          (sidebarOptions.sessionActions?.items ??
+                            DEFAULT_SESSION_ACTION_ITEMS).includes('details')
                         }
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Keep this
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPendingPanesChange={setSplitPendingSessionIds}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split

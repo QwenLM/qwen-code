@@ -529,10 +529,14 @@ function deferred<T>() {
 
 describe('ChatPane', () => {
   it('exposes the selected pane without confusing it with a running session', () => {
-    render({ isActive: true });
+    const props = { isActive: true };
+    render(props);
     expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
     expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
     sessionHasActivePromptValue = true;
+    rerender(props);
+    expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(true);
+    expect(testid('chat-pane')?.getAttribute('aria-current')).toBe('location');
     rerender();
     expect(testid('chat-pane')?.hasAttribute('data-pane-active')).toBe(false);
     expect(testid('chat-pane')?.hasAttribute('aria-current')).toBe(false);
@@ -576,52 +580,76 @@ describe('ChatPane', () => {
     );
   });
 
-  it('reuses title details without including actions and dismisses them when hidden', async () => {
-    vi.useFakeTimers();
-    try {
-      const props = {
-        title: 'Pane details',
-        sessionSummary: {
-          sessionId: 'session-details',
+  it.each([false, true])(
+    'reuses title details without including actions and dismisses them when hidden (multiple workspaces: %s)',
+    async (multiWorkspace) => {
+      vi.useFakeTimers();
+      try {
+        const props = {
+          title: 'Pane details',
           workspaceCwd: '/work/split-project',
-          createdAt: '2026-01-01T00:00:00Z',
-          updatedAt: '2026-01-02T00:00:00Z',
-          hasActivePrompt: false,
-          branch: { name: 'codex/split', baseBranch: 'main' },
-        },
-        onToggleMaximize: vi.fn(),
-      };
-      sessionHasActivePromptValue = true;
-      render(props);
-      const title = container!.querySelector('[data-slot="popover-anchor"]')!;
-      expect(title.textContent).toBe('Pane details');
-      expect(title.querySelector('button')).toBeNull();
-      const composerFocus = document.createElement('input');
-      container!.append(composerFocus);
-      composerFocus.focus();
-      await act(async () => {
-        title.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-      });
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-        'split-project',
-      );
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-        'codex/split',
-      );
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-        'Running',
-      );
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-        formatDateTime(props.sessionSummary.updatedAt),
-      );
-      expect(document.activeElement).toBe(composerFocus);
-      rerender({ ...props, hidden: true });
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+          sessionSummary: {
+            sessionId: 'session-details',
+            workspaceCwd: '/work/split-project',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-02T00:00:00Z',
+            hasActivePrompt: false,
+            branch: { name: 'codex/split', baseBranch: 'main' },
+          },
+          onToggleMaximize: vi.fn(),
+        };
+        if (multiWorkspace) {
+          connectionState.capabilities = {
+            features: [],
+            workspaces: [
+              {
+                id: 'w0',
+                cwd: '/work/web-shell',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'w1',
+                cwd: '/work/split-project',
+                displayName: 'Payments API',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          };
+        }
+        sessionHasActivePromptValue = true;
+        render(props);
+        const title = container!.querySelector('[data-slot="popover-anchor"]')!;
+        expect(title.textContent).toBe('Pane details');
+        expect(title.querySelector('button')).toBeNull();
+        const composerFocus = document.createElement('input');
+        container!.append(composerFocus);
+        composerFocus.focus();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(multiWorkspace ? 'Payments API' : 'split-project');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('codex/split');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain('Running');
+        expect(
+          document.querySelector('[role="dialog"]')?.textContent,
+        ).toContain(formatDateTime(props.sessionSummary.updatedAt));
+        expect(document.activeElement).toBe(composerFocus);
+        rerender({ ...props, hidden: true });
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
     connectionState.supportedCommands = { workflowsEnabled: true };

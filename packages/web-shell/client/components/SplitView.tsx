@@ -62,6 +62,8 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report panes surfacing approvals, including hidden panes. Must be stable. */
+  onPendingPanesChange?: (sessionIds: string[]) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
@@ -109,6 +111,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onPendingPanesChange,
   onExit,
   onError,
   onImageIngestionNotice,
@@ -193,7 +196,14 @@ export function SplitView({
       setPaneFocusId(activeId ?? null);
     }
   }, [paneIds, activeId, activePaneId]);
-  const pendingIds = paneIds.filter((id) => pendingPaneIds.has(id));
+  const pendingIds = useMemo(
+    () => paneIds.filter((id) => pendingPaneIds.has(id)),
+    [paneIds, pendingPaneIds],
+  );
+  useEffect(() => {
+    onPendingPanesChange?.(pendingIds);
+    return () => onPendingPanesChange?.([]);
+  }, [pendingIds, onPendingPanesChange]);
   const backButtonRef = useRef<HTMLButtonElement>(null);
   const pendingButtonRef = useRef<HTMLButtonElement | null>(null);
   const setPendingButtonRef = useCallback(
@@ -371,8 +381,10 @@ export function SplitView({
   }, []);
 
   const goToPendingPane = () => {
-    const currentIndex = pendingIds.indexOf(activeId ?? '');
-    const nextId = pendingIds[(currentIndex + 1) % pendingIds.length];
+    const activeIndex = paneIds.indexOf(activeId ?? '');
+    const nextId =
+      pendingIds.find((id) => paneIds.indexOf(id) > activeIndex) ??
+      pendingIds[0];
     if (!nextId) return;
     setActivePaneId(nextId);
     if (maximizedPaneId) setMaximizedPaneId(nextId);
@@ -468,7 +480,9 @@ export function SplitView({
             onClick={goToPendingPane}
             ref={setPendingButtonRef}
             title={t('splitView.nextPending')}
-            aria-label={t('splitView.nextPending')}
+            aria-label={`${t('splitView.pendingCount', {
+              count: pendingIds.length,
+            })} — ${t('splitView.nextPending')}`}
           >
             {t('splitView.pendingCount', { count: pendingIds.length })}
           </button>

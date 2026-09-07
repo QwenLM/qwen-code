@@ -26,7 +26,8 @@ toolbar row or reducing transcript height:
   a response; Escape can restore the row. Tab or a deliberate click enters the
   pane's controls. Announce pending counts without moving focus, and return focus
   to Back if the focused pending button disappears. The outer session's notice
-  appears only when that session is not already represented by a pane.
+  appears until a pane actually reports that approval, so failed or
+  still-attaching panes cannot hide the only available notice.
 
 `ChatPane` already derives its pending tool/question request from its own
 transcript. Report that boolean to `SplitView` with a stable callback, including
