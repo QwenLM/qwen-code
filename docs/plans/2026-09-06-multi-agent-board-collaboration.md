@@ -87,8 +87,8 @@ continuations already emit `EXTERNAL_MESSAGE`, and cold revival explicitly
 seeds the continuation prompt in the transcript. Mesh still uses structured
 input because correlation, not transcript presence, is the missing contract.
 
-**Verified locally in steps 2-4.** The capability table and
-shell predicate pass their named tests. The versioned store tests exercise
+**Verified locally in steps 2-4.** The capability table denies shell and MCP
+tools and passes its named test. The versioned store tests exercise
 newer-version refusal, v0 migration and backup recovery, two-process sequence
 allocation, source-first outbox replay, persisted admission outcomes, and
 tree-wide token accounting. The step-4 tests exercise invocation-time tool
@@ -206,7 +206,7 @@ Recorded so implementation does not relitigate them.
 | #   | Decision                                                                                                                                                                           | Consequence                                                                                                                                                            |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **v1 agents are read-only.** No file writes, no worktrees, no branches.                                                                                                            | Removes all concurrent-write design. The deliverable of a thread is a conclusion, not a diff.                                                                          |
-| 2   | Read-only means **files + read-only shell**, against a **built-in allowlist**. `save_memory`, context-file writes, and every other persistent-write tool are outside that ceiling. | `run_shell_command` can write, so "no writes but any command" is a false boundary. The allowlist is the hard ceiling; agent definitions may narrow it, never widen it. |
+| 2   | Read-only means **workspace file-reading tools only**. Shell, MCP, `save_memory`, context-file writes, and every other persistent-write or host-wide tool are outside that ceiling. | A read-only shell classifier does not confine absolute paths, so it cannot protect secrets outside the workspace. Shell stays denied until execution has a real filesystem sandbox. Agent definitions may narrow the ceiling, never widen it. |
 | 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                        | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                              |
 | 4   | Agents are **scoped to one workspace**.                                                                                                                                            | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                             |
 
@@ -624,12 +624,10 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
 1. **Local admission foundation** — landed in this PR: storage validation,
    mention routing, budget gates, coalescing, retention, and atomic per-thread
    booking. It still has no launcher or dispatcher.
-2. **Capability boundary** — built-in read-only shell allowlist intersected
-   with the agent definition. Explicitly exclude `save_memory`, context-file
-   writes, and every persistent-write tool. This step proves the classification
-   and shell predicate. Step 4/5 wires the predicate at invocation time and
-   proves refused commands cannot execute, because the existing name-level
-   execution allowlist cannot inspect command arguments.
+2. **Capability boundary** — built-in workspace file-reading allowlist
+   intersected with the agent definition. Explicitly exclude shell, MCP,
+   `save_memory`, context-file writes, and every persistent-write or host-wide
+   tool. The name-level execution allowlist enforces this ceiling.
 3. **Versioned storage protocol** — add `schemaVersion`, the workspace mutation
    lock, lock-issued run queue sequence, atomic same-thread booking, parent/
    notification outbox replay, and fail-closed migration before any new process

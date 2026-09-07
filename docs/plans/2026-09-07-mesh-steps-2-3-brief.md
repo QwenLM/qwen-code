@@ -21,11 +21,7 @@
 
 - `MESH_TOOL_CLASSIFICATION: Record<string, 'allow' | 'deny' | 'thread'>` keyed by tool name, covering every `ToolNames` value; `classifyMeshTool(name)` returns the entry or `'deny'` for anything unlisted (MCP tools included).
 - `buildMeshToolConfig(definitionTools?)` → `ToolConfig` with `tools = (definition ∩ allow) ∪ thread_*` (a `'*'` or absent definition list means the full allow set), `executionAllowedTools` equal to that list, `disallowedTools` equal to the deny set. The launcher passes it as `toolConfigOverride`.
-- `checkMeshShellCommand(command, cwd)` → allowed only when classification is `'read-only'`; `'unknown'` is refused and the reason says which of write/unknown it was.
-
-**Confirmed v1 classification:** allow `read_file`, `grep_search`, `glob`, `list_directory`, `zoom_image`, `display_image`, `skill`, `tool_search`, `structured_output`, `get_goal`, `run_shell_command` (guarded). Deny `edit`, `write_file`, `notebook_edit`, `save_memory`, `web_fetch`, `web_search`, `lsp`, `monitor`, `read_mcp_resource`, `ask_user_question`, `enter_plan_mode`, `exit_plan_mode`, `image_gen`, `update_goal`, `propose_goal`, `report_findings`, and everything in `EXCLUDED_TOOLS_FOR_SUBAGENTS`. MCP names also fail closed. A later release may admit only MCP tools whose policy can prove they are read-only; server ownership or naming alone is insufficient.
-
-**What step 2 can and cannot prove.** The acceptance doc's step-2 gate says "a shell command not on the allowlist is refused before execution, in the tool layer". `executionAllowedTools` cannot express a per-command predicate, so the refusal needs a hook at tool-invocation time: either the `PreToolUse` hook path AgentCore already carries (`this.hooks`) or a wrapped shell tool in the launcher's registry. That wiring belongs to step 4/5 with the launcher. Step 2 delivers the predicate, the table, and their tests; the acceptance gate for step 2 is amended to "predicate and table proven; tool-layer refusal proven in step 4".
+**Confirmed v1 classification:** allow `read_file`, `grep_search`, `glob`, `list_directory`, `zoom_image`, `display_image`, `skill`, `tool_search`, `structured_output`, and `get_goal`. Deny `run_shell_command`, `edit`, `write_file`, `notebook_edit`, `save_memory`, `web_fetch`, `web_search`, `lsp`, `monitor`, `read_mcp_resource`, `ask_user_question`, `enter_plan_mode`, `exit_plan_mode`, `image_gen`, `update_goal`, `propose_goal`, `report_findings`, and everything in `EXCLUDED_TOOLS_FOR_SUBAGENTS`. MCP names also fail closed. Shell can return only with a filesystem sandbox that confines reads to the canonical workspace root; classifying a command as read-only does not provide that boundary.
 
 **Resolved by the owner.** V1 mesh agents get no MCP tools. Future admission requires an explicit policy that proves the individual tool is read-only; the definition may narrow that policy but cannot widen it.
 
@@ -49,7 +45,7 @@
 
 **Named tests and what each proves.**
 
-- `capability.test.ts`: every `ToolNames` value is classified; unlisted name → deny; `'*'` and narrowing definitions; shell: `cat`, `git status`, `grep -r` allowed; `rm -rf`, `echo > f`, `git push`, `unknownbin --x` refused with reason.
+- `capability.test.ts`: every `ToolNames` value is classified; unlisted name → deny; `'*'` and narrowing definitions; shell is absent from tool configuration and refused by the invocation guard.
 - `mesh-store.test.ts`: newer `schemaVersion` on thread, agents, and workspace each fail closed; v0 fixtures (bare agents array; thread without version but with messages and runs) migrate with sequences assigned in order and the backup removed; deletion refused with a pending event; a thread-write crash after allocation leaves a run-sequence gap; crash injection — `apply` writes the target then throws, second run finds the message by `originEventId`, event acknowledged with `attempts === 2`, exactly one target message; depth-3 tree with a stale `tokensUsed` on the root gates on the true sum.
 - `workspace-lock.test.ts`: two `tsx` child processes allocate N `queueSequence` each; all 2N unique, each process strictly increasing.
 - `thread-actions.test.ts`: fixtures gain the new fields; message `sequence` monotonic; `queueSequence` increasing across two threads; outcomes persisted on the message; `queue_full` computed from disk.
@@ -68,4 +64,4 @@ A worktree at the branch head with `node_modules` and `packages/core/node_module
 
 ## 6. Still unexecuted after steps 2-3
 
-`queueExternalInput(false)` detach/rebook (step 6/7); shell refusal in the tool layer (step 4/5); assignment trigger through admission (decision 21, step 5/6); creating and reviving the hidden host session recorded by `workspace.json` (step 4).
+`queueExternalInput(false)` detach/rebook (step 6/7); assignment trigger through admission (decision 21, step 5/6); creating and reviving the hidden host session recorded by `workspace.json` (step 4).

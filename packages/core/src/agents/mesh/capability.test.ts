@@ -4,25 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
-import { _resetParser, initParser } from '../../utils/shellAstParser.js';
 import {
   buildMeshToolConfig,
-  checkMeshShellCommand,
   classifyMeshTool,
   createMeshToolInvocationGuard,
   MESH_THREAD_TOOL_NAMES,
   MESH_TOOL_CLASSIFICATION,
 } from './capability.js';
-
-beforeAll(async () => {
-  await initParser();
-});
-
-afterAll(() => {
-  _resetParser();
-});
 
 describe('mesh capability boundary', () => {
   it('classifies every core and mesh thread tool exactly once', () => {
@@ -50,7 +40,7 @@ describe('mesh capability boundary', () => {
     });
 
     expect(wildcard).toEqual(full);
-    expect(full.tools).toContain(ToolNames.SHELL);
+    expect(full.tools).not.toContain(ToolNames.SHELL);
     expect(full.tools).not.toContain(ToolNames.MEMORY);
     expect(full.disallowedTools).toEqual(
       expect.arrayContaining([
@@ -74,35 +64,10 @@ describe('mesh capability boundary', () => {
       disallowedTools: [ToolNames.READ_FILE, 'thread_post'],
     });
 
-    expect(narrowed.tools).toEqual([
-      ToolNames.SHELL,
-      ...MESH_THREAD_TOOL_NAMES,
-    ]);
+    expect(narrowed.tools).toEqual([...MESH_THREAD_TOOL_NAMES]);
     expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
     expect(narrowed.disallowedTools).not.toContain('thread_post');
     expect(narrowed.disallowedTools).toContain(ToolNames.READ_FILE);
-  });
-
-  it.each(['cat package.json', 'git status', 'grep -r TODO packages/core'])(
-    'allows read-only shell command %s',
-    async (command) => {
-      await expect(
-        checkMeshShellCommand(command, process.cwd()),
-      ).resolves.toEqual({ allowed: true });
-    },
-  );
-
-  it.each([
-    ['rm -rf temp', 'write'],
-    ['echo text > file', 'write'],
-    ['git push', 'write'],
-    ['unknownbin --x', 'unknown'],
-  ])('refuses shell command %s classified as %s', async (command, safety) => {
-    const decision = await checkMeshShellCommand(command, process.cwd());
-    expect(decision).toEqual({
-      allowed: false,
-      reason: expect.stringContaining(safety),
-    });
   });
 
   it('enforces the boundary at invocation time', async () => {
@@ -131,6 +96,6 @@ describe('mesh capability boundary', () => {
         args: { command: 'git status' },
         cwd: process.cwd(),
       }),
-    ).resolves.toEqual({ allowed: true });
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
   });
 });
