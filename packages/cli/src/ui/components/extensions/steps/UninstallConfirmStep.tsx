@@ -60,7 +60,10 @@ export function UninstallConfirmStep({
     <Box flexDirection="column" gap={1}>
       <Text color={theme.status.error}>
         {t('Are you sure you want to uninstall extension "{{name}}"?', {
-          name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
         })}
       </Text>
       <Text color={theme.status.error}>

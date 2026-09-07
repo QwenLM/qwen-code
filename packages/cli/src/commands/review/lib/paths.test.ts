@@ -6,8 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { basename, dirname, join, resolve } from 'node:path';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
+  repoRelativeOf,
   inertPath,
+  lastReviewEffortPath,
   tmpFile,
   probeWorktreePath,
   scratchLabel,
@@ -16,6 +20,22 @@ import {
   worktreePath,
   PARSE_ARGS_REPORT,
 } from './paths.js';
+
+describe('lastReviewEffortPath', () => {
+  it('uses the project storage owner exported by the parent session', () => {
+    expect(
+      lastReviewEffortPath('/workspace/repo', '/runtime/projects/repo'),
+    ).toBe(resolve('/runtime/projects/repo/review-last-effort'));
+  });
+
+  it('keeps fallback storage private and project-scoped', () => {
+    const first = lastReviewEffortPath('/workspace/one');
+    const second = lastReviewEffortPath('/workspace/two');
+    expect(first).not.toBe(second);
+    expect(first).not.toContain('/workspace/one/.qwen');
+    expect(second).not.toContain('/workspace/two/.qwen');
+  });
+});
 
 describe('PARSE_ARGS_REPORT', () => {
   it('is the literal path the skill tees to in Step 0', () => {
@@ -179,4 +199,47 @@ describe('inertPath', () => {
     expect(inertPath('caf\u00e9.ts')).toBe('caf\u00e9.ts');
     expect(inertPath('my probe.ts')).toBe('my probe.ts');
   });
+});
+describe('repoRelativeOf — the repository root is inside the repository', () => {
+  it('does not classify the root itself as an escape', () => {
+    // `classifyRunTarget` accepts a directory target, so the root is a
+    // reachable one — and calling it an escape split the two sides that must
+    // agree: the parent pinned the typed spelling while the child derived
+    // `safeTarget('') === 'target'`, so the poll never matched and a review
+    // that HAD run reported no verdict. `--file <root>` also threw
+    // "resolves to <root>, which is outside the repository at <root>".
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+    try {
+      const out = repoRelativeOf(root, root, root);
+      expect(out.escapes).toBe(false);
+      expect(out.rel).toBe('');
+      // …and a genuine escape still is one.
+      expect(repoRelativeOf(root, '..', root).escapes).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('canonicalise walk-up — backslash is a POSIX filename byte', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps a leading backslash through the ancestor walk',
+    () => {
+      // R23: the walk-up strip treated `\` as a separator on POSIX, so a
+      // dangling symlink literally named `\link` (realpath THROWS on a
+      // dangling link, which is what reaches the walk at all) came back as
+      // `link` — the capture then diffed a different name and the real
+      // entry dropped mutely; this PR's own `notes\` fixtures insist the
+      // byte is ordinary. Only the platform's separators are stripped now.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+      try {
+        symlinkSync('no-such-target', join(root, '\\link'));
+        const out = repoRelativeOf(root, '\\link', root);
+        expect(out.escapes).toBe(false);
+        expect(out.rel).toBe('\\link');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

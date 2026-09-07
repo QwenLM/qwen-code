@@ -83,6 +83,7 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       src: string;
       alt?: string;
+      attachmentId?: string;
     }
   | {
       id: string;
@@ -92,6 +93,7 @@ export type TurnOutputOpenRequest = (
       mimeType?: string;
       data?: Blob;
       text?: string;
+      attachmentId?: string;
       workspacePath?: string;
       workspaceCwd?: string;
     }

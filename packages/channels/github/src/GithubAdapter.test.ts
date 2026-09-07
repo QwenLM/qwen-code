@@ -247,6 +247,7 @@ class TestableGithubChannel extends GithubChannel {
   sourceMessageId: string | undefined;
   sourceSenderId: string | undefined;
   sourceMetadata: string | undefined;
+  inboundErrorSourceLabel: string | undefined;
   handleInboundHook: ((envelope: Envelope) => void | Promise<void>) | undefined;
 
   protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -259,6 +260,12 @@ class TestableGithubChannel extends GithubChannel {
 
   protected getResponseMetadata(_sessionId: string): string | undefined {
     return this.sourceMetadata;
+  }
+
+  protected getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
@@ -1454,6 +1461,7 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
+        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -1476,7 +1484,7 @@ describe('GithubChannel', () => {
           makeComment({
             id: 1002,
             node_id: 'C_1002',
-            body: '@test-bot check this review note',
+            body: '@test-bot /review check this review note',
             created_at: '2026-07-04T09:30:00.000Z',
             user: { login: 'bob' },
           }),
@@ -1500,11 +1508,12 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
+        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: ' check this review note',
+        text: 'check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1711,6 +1720,36 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it('filters each aggregated comment and consumes unmatched comments', async () => {
+      await initWithoutLoop({ messagePrefix: '/review' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ignore this' }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            body: '/review inspect this',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        displayText: '- @bob: inspect this',
+        bypassMessagePrefix: true,
+      });
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
+    });
 
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
@@ -2488,6 +2527,49 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('attributes the published comment without changing raw audit metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 2002, html_url: 'https://example.test/comment/2002' },
+      });
+      await connectForPublication();
+      const response = 'Reviewed the implementation.';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+            sourceLabel?: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        response,
+        'session-publication',
+        '[review_*]',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: '\\[review\\_\\*\\]\nReviewed the implementation.',
+      });
+      const audits = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audits.at(-1)).toMatchObject({
+        bodyChars: Array.from(response).length,
+        bodySha256: createHash('sha256').update(response).digest('hex'),
+      });
+      expect(JSON.stringify(audits)).not.toContain('review_');
+    });
+
     it('uses the active prompt thread for final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
@@ -2843,8 +2925,11 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('ignores invalid pending final retry records', async () => {
-      writePending([pendingRecord(), { id: 123, bad: true }]);
+    it('preserves attribution while ignoring invalid pending retry records', async () => {
+      writePending([
+        pendingRecord({ sourceLabel: '[review_*]' }),
+        { id: 123, bad: true },
+      ]);
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2004,
@@ -2859,7 +2944,7 @@ describe('GithubChannel', () => {
         owner: 'owner',
         repo: 'repo',
         issue_number: 42,
-        body: 'Final reply',
+        body: '\\[review\\_\\*\\]\nFinal reply',
       });
     });
 
@@ -3544,8 +3629,9 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('attributes the error comment when a named inbound turn fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      channel.inboundErrorSourceLabel = '[review_*]';
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
@@ -3554,7 +3640,7 @@ describe('GithubChannel', () => {
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          body: '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
         }),
       );
     });

@@ -22,7 +22,7 @@ import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
   Storage,
-  setGeminiMdFilename,
+  setMemoryFilename,
 } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import {
@@ -102,7 +102,7 @@ function buildApp(opts: {
 }
 
 function resetContextFilenames(): void {
-  setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+  setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
 }
 
 describe('workspace memory routes', () => {
@@ -273,7 +273,7 @@ describe('workspace memory routes', () => {
       expect(res.body.code).toBe('content_too_large');
     });
 
-    it('returns 401 token_required when strict gate fires on no-token loopback', async () => {
+    it('returns token_required when the injected strict gate fails closed', async () => {
       const bridge = buildBridgeStub();
       const app = buildApp({
         bridge,

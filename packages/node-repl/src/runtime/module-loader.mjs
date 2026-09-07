@@ -175,9 +175,21 @@ export function createModuleLoader(options) {
     let firstError = null;
     for (const base of [...new Set(bases)]) {
       try {
-        const resolved = getRequireForBase(base).resolve(specifier, {
-          conditions: IMPORT_CONDITIONS,
-        });
+        const parentUrl = pathToFileURL(
+          path.join(base, '__qwen_node_repl__.mjs'),
+        ).href;
+        let resolved;
+        try {
+          resolved = fileURLToPath(import.meta.resolve(specifier, parentUrl));
+        } catch (importError) {
+          try {
+            resolved = getRequireForBase(base).resolve(specifier, {
+              conditions: IMPORT_CONDITIONS,
+            });
+          } catch {
+            throw importError;
+          }
+        }
         const canonical = fs.realpathSync(resolved);
         if (!roots.some((root) => isUnder(canonical, root.canonicalPath))) {
           continue;
@@ -520,11 +532,11 @@ export function createModuleLoader(options) {
     });
     return {
       module: record.module,
-      async evaluate() {
+      async evaluate(options) {
         await record.module.link((specifier) =>
           linker(specifier, record, previousModule),
         );
-        await record.module.evaluate();
+        await record.module.evaluate(options);
       },
     };
   }

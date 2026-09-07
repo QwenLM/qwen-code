@@ -105,6 +105,7 @@ import {
   stripForgedFooterLines,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
   swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
@@ -204,7 +205,14 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // A looping model drafts stacked markers and every other strip iterates
   // to a fixpoint; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.
-  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
+  // The claim LINE strips too — the one-line shape this entry posts as:
+  // the whole-body strip keeps a footer quoted in code, and with an empty
+  // claim the separator strip eats the newline+colon and that footer's
+  // first line becomes the "claim".
+  const claim =
+    rawClaim === null
+      ? null
+      : stripReviewFooterLine(stripSeverityPrefix(rawClaim));
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the
@@ -1291,8 +1299,23 @@ function submit(
       comments: comments.filter((_, i) => !drop.has(i)),
     };
     authoredIndices = base.filter((_, i) => !drop.has(i));
+    // By severity: a moved Critical (#10291 — fails-closed on new surface)
+    // is the move an operator would not expect from a floor, so the line
+    // names it rather than folding it into the Suggestion count.
+    const movedCriticals = floorEnforced.filter(
+      (i) => severityOf(comments[i] ?? {}) === 'critical',
+    ).length;
+    const movedSuggestions = floorEnforced.length - movedCriticals;
+    const moved = [
+      movedSuggestions > 0 ? `${movedSuggestions} Suggestion comment(s)` : '',
+      movedCriticals > 0
+        ? `${movedCriticals} fails-closed, new-surface Critical comment(s)`
+        : '',
+    ]
+      .filter((s) => s !== '')
+      .join(' and ');
     writeStderrLine(
-      `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
+      `Floor enforcement: ${moved} ` +
         `drafted past the resolved critical floor were moved into the ` +
         `body's deferral list and will not post inline.`,
     );

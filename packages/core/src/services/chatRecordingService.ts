@@ -78,15 +78,11 @@ const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
 const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
 
 /**
- * Re-append a fresh `custom_title` record to EOF once this many bytes
- * of other JSONL content have been written since the last title
- * anchor. Half of the picker's 64KB tail-read window so that even an
- * oversized record landing right at the threshold keeps the title
- * within scan range. Lifting this above 64KB would let the title
- * fall out of the tail window between re-anchors; lowering it
- * trades extra writes for a tighter safety margin.
+ * Re-append tail-readable metadata to EOF once this many bytes of other JSONL
+ * content have been written since its last anchor. Half of the reader's 64KB
+ * tail window leaves room for the anchor record itself.
  */
-const TITLE_REANCHOR_BYTES = 32 * 1024;
+const METADATA_REANCHOR_BYTES = 32 * 1024;
 
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (
@@ -993,6 +989,8 @@ export class ChatRecordingService {
   private pendingExplicitTitleWrites = 0;
   /** Title writes whose durable result and final cached value are unresolved. */
   private pendingTitleWrites = 0;
+  /** Source writes whose durable result and cached value are unresolved. */
+  private pendingSourceWrites = 0;
 
   /**
    * JSON-serialized form of the most recent attribution snapshot accepted for
@@ -1022,6 +1020,7 @@ export class ChatRecordingService {
    */
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
+  private bytesSinceSourceAnchor = 0;
 
   constructor(
     config: Config,
@@ -1188,7 +1187,10 @@ export class ChatRecordingService {
       this.currentTitleSource = persistedTitleInfo.source;
     }
     if (this.currentCustomTitle) {
-      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
   }
 
@@ -1213,7 +1215,10 @@ export class ChatRecordingService {
       ? normalizeSessionModelPayload(state.sessionModel)
       : undefined;
     if (this.currentCustomTitle) {
-      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+      this.bytesSinceTitleAnchor = METADATA_REANCHOR_BYTES;
+    }
+    if (this.currentSourceType) {
+      this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
   }
 
@@ -1398,7 +1403,7 @@ export class ChatRecordingService {
       this.updateActiveBranch(record);
     }
     this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
   }
 
   private async appendRecordStrict(
@@ -1436,7 +1441,7 @@ export class ChatRecordingService {
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
     // rollback of this bookkeeping is needed on rejection.
-    this.updateTitleAnchorTracking(record);
+    this.updateMetadataAnchorTracking(record);
 
     await pendingWrite;
   }
@@ -1461,17 +1466,13 @@ export class ChatRecordingService {
   }
 
   /**
-   * Maintain the "title is always in the tail window" invariant by
-   * counting bytes accepted since the last `custom_title` record and
-   * re-anchoring once enough non-title content has been written.
+   * Keep title and source metadata inside the reader's tail window by
+   * counting bytes accepted since each metadata record and re-anchoring
+   * independently before either can drift beyond that window.
    *
-   * - A `custom_title` record IS the new anchor — reset the counter.
-   * - Without a current or pending title, the counter is irrelevant.
-   * - Otherwise accumulate this record's serialized size; if the
-   *   running total breaches the threshold, re-append a fresh
-   *   `custom_title` to EOF. The recursive `appendRecord` call will
-   *   land this branch's first arm (subtype === 'custom_title') and
-   *   reset the counter to 0.
+   * Each metadata subtype resets only its own counter. Otherwise, active or
+   * pending metadata accumulates the serialized record size and is re-appended
+   * to EOF once its threshold is reached.
    *
    * Size estimate uses `JSON.stringify` for parity with the actual
    * write path (`jsonl.writeLine` serializes the same way). It's an
@@ -1485,14 +1486,25 @@ export class ChatRecordingService {
    * actual on-disk distance from the last anchor blow past the 64KB
    * tail window before the threshold fires.
    */
-  private updateTitleAnchorTracking(record: ChatRecord): void {
-    if (record.type === 'system' && record.subtype === 'custom_title') {
+  private updateMetadataAnchorTracking(record: ChatRecord): void {
+    const isTitleAnchor =
+      record.type === 'system' && record.subtype === 'custom_title';
+    const isSourceAnchor =
+      record.type === 'system' && record.subtype === 'session_source';
+    if (isTitleAnchor) {
       this.bytesSinceTitleAnchor = 0;
       this.hasNonTitleContentSinceTitleAnchor = false;
-      return;
     }
-    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
-    this.hasNonTitleContentSinceTitleAnchor = true;
+    if (isSourceAnchor) {
+      this.bytesSinceSourceAnchor = 0;
+    }
+    const trackTitle =
+      !isTitleAnchor &&
+      (this.currentCustomTitle !== undefined || this.pendingTitleWrites > 0);
+    const trackSource =
+      !isSourceAnchor &&
+      (this.currentSourceType !== undefined || this.pendingSourceWrites > 0);
+    if (!trackTitle && !trackSource) return;
     let serializedRecord: string;
     try {
       serializedRecord = JSON.stringify(record);
@@ -1501,14 +1513,25 @@ export class ChatRecordingService {
       // The real serializer will surface the failure through writeChain.
       return;
     }
-    // +1 for the trailing newline jsonl.writeLine appends.
-    this.bytesSinceTitleAnchor +=
-      Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    const bytes = Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    if (trackTitle) {
+      this.hasNonTitleContentSinceTitleAnchor = true;
+      this.bytesSinceTitleAnchor += bytes;
+    }
+    if (trackSource) {
+      this.bytesSinceSourceAnchor += bytes;
+    }
     if (
-      this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+      this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
       this.pendingTitleWrites === 0
     ) {
       this.reanchorTitle();
+    }
+    if (
+      this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingSourceWrites === 0
+    ) {
+      this.reanchorSessionSource();
     }
   }
 
@@ -1520,7 +1543,13 @@ export class ChatRecordingService {
    * scanning the middle of the file.
    */
   private reanchorTitle(): void {
-    if (!this.currentCustomTitle) return;
+    if (
+      !this.currentCustomTitle ||
+      this.bytesSinceTitleAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceTitleAnchor = 0;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1542,6 +1571,32 @@ export class ChatRecordingService {
       // will re-emit one on the next lifecycle event.
       this.bytesSinceTitleAnchor = 0;
       debugLogger.error('Error re-anchoring custom title:', error);
+    }
+  }
+
+  private reanchorSessionSource(): void {
+    if (
+      !this.currentSourceType ||
+      this.bytesSinceSourceAnchor < METADATA_REANCHOR_BYTES
+    ) {
+      return;
+    }
+    this.bytesSinceSourceAnchor = 0;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_source',
+        systemPayload: {
+          sourceType: this.currentSourceType,
+          ...(this.currentSourceId !== undefined
+            ? { sourceId: this.currentSourceId }
+            : {}),
+        },
+      };
+      this.appendRecord(record, { updateActiveTail: false });
+    } catch (error) {
+      debugLogger.error('Error re-anchoring session source:', error);
     }
   }
 
@@ -1626,8 +1681,18 @@ export class ChatRecordingService {
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
     this.beginClose(options);
-    this.closePromise = this.closeOnce();
-    return this.closePromise;
+    const pending = this.closeOnce();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (
+        this.closePromise === pending &&
+        this.binding !== undefined &&
+        this.state === 'integrity_failed'
+      ) {
+        this.closePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   beginClose(options?: { handoff?: boolean }): void {
@@ -1668,7 +1733,10 @@ export class ChatRecordingService {
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
-      if (lease?.isReleased || error instanceof SessionWriterLostError) {
+      if (
+        error instanceof SessionWriterLostError ||
+        (lease?.isReleased && !lease.isReleaseDurabilityPending)
+      ) {
         this.binding = undefined;
         this.state = 'closed';
       } else {
@@ -1680,7 +1748,7 @@ export class ChatRecordingService {
   }
 
   hasWriteOwnership(): boolean {
-    return this.binding !== undefined;
+    return this.binding !== undefined && !this.binding.lease.isReleased;
   }
 
   /**
@@ -2553,7 +2621,7 @@ export class ChatRecordingService {
       if (
         persisted &&
         this.pendingTitleWrites === 0 &&
-        this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+        this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
         !this.writeFailure
       ) {
         this.reanchorTitle();
@@ -2608,6 +2676,8 @@ export class ChatRecordingService {
         this.currentSourceId === sourceId
       );
     }
+    this.pendingSourceWrites++;
+    let persisted = false;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2621,12 +2691,23 @@ export class ChatRecordingService {
       await this.appendRecordStrict(record);
       this.currentSourceType = sourceType;
       this.currentSourceId = sourceId;
+      persisted = true;
       return true;
     } catch (error) {
       if (error !== this.writeFailure) {
         debugLogger.error('Error saving session source:', error);
       }
       return false;
+    } finally {
+      this.pendingSourceWrites--;
+      if (
+        persisted &&
+        this.pendingSourceWrites === 0 &&
+        this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+        !this.writeFailure
+      ) {
+        this.reanchorSessionSource();
+      }
     }
   }
 

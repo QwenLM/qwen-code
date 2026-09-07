@@ -520,7 +520,7 @@ export class LiveSessionCoordinator {
         try {
           context.runtime?.bridge.updateSessionMetadata(
             context.coordinator.sessionId,
-            { displayName: 'Voice chat' },
+            { displayName: 'Voice chat', titleSource: 'auto' },
           );
         } catch {
           /* the session remains usable when a title write fails */

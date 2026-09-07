@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import yargs from 'yargs';
 import { join } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import {
   parseArgsCommand,
   parseReviewArgs,
@@ -23,6 +24,7 @@ import {
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
 import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
+import { lastReviewEffortPath } from './lib/paths.js';
 import {
   FOREIGN_DIGEST,
   makeStaleBundleFixture,
@@ -39,23 +41,50 @@ import {
 const fsState = vi.hoisted(() => ({
   stdin: '',
   written: new Map<string, string>(),
+  effortReadError: undefined as Error | undefined,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   const mock = {
     ...real,
-    readFileSync: vi.fn((path: unknown, ...rest: unknown[]) =>
-      path === 0
-        ? fsState.stdin
-        : (real['readFileSync'] as (...a: unknown[]) => unknown)(path, ...rest),
-    ),
+    readFileSync: vi.fn((path: unknown, ...rest: unknown[]) => {
+      if (path === 0) return fsState.stdin;
+      const key = String(path);
+      if (key.endsWith('review-last-effort')) {
+        if (fsState.effortReadError !== undefined) {
+          throw fsState.effortReadError;
+        }
+        return fsState.written.get(key);
+      }
+      return (real['readFileSync'] as (...a: unknown[]) => unknown)(
+        path,
+        ...rest,
+      );
+    }),
+    existsSync: vi.fn((path: unknown) => {
+      const key = String(path);
+      return key.endsWith('review-last-effort')
+        ? fsState.written.has(key)
+        : (real['existsSync'] as (path: unknown) => boolean)(path);
+    }),
     writeFileSync: vi.fn((path: unknown, data: unknown) => {
       fsState.written.set(String(path), String(data));
     }),
     mkdirSync: vi.fn(),
   };
   return { ...mock, default: mock };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    atomicWriteFileSync: vi.fn((path: unknown, data: unknown) => {
+      fsState.written.set(String(path), String(data));
+    }),
+  };
 });
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -1118,6 +1147,91 @@ describe('parseReviewArgs — settings-provided defaults', () => {
   });
 });
 
+describe('parseReviewArgs — remembered effort', () => {
+  it('reuses the last explicitly typed level when no flag or setting applies', () => {
+    const got = parseReviewArgs('src/foo.ts', { lastUsedEffort: 'high' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings).toContain(
+      'No effort level given — reusing high, the level you typed last time. Type a level like `/review --effort medium` to change it.',
+    );
+  });
+
+  it('keeps the precedence explicit > remembered > configured > target default', () => {
+    expect(
+      parseReviewArgs('6711 --effort low', {
+        effort: 'medium',
+        lastUsedEffort: 'high',
+      }),
+    ).toMatchObject({ effort: 'low', effortSource: 'explicit' });
+    expect(
+      parseReviewArgs('6711', {
+        effort: 'medium',
+        lastUsedEffort: 'high',
+      }),
+    ).toMatchObject({ effort: 'high', effortSource: 'last_used' });
+    expect(parseReviewArgs('6711', { lastUsedEffort: 'medium' })).toMatchObject(
+      { effort: 'medium', effortSource: 'last_used' },
+    );
+    expect(parseReviewArgs('6711')).toMatchObject({
+      effort: 'high',
+      effortSource: 'default',
+    });
+  });
+
+  it('records an explicitly typed target default without re-recording memory', () => {
+    const remember = vi.fn();
+    parseReviewArgs('6711 --effort high', { lastUsedEffort: 'low' }, remember);
+    expect(remember).toHaveBeenCalledOnce();
+    expect(remember).toHaveBeenCalledWith('high');
+
+    remember.mockClear();
+    parseReviewArgs('6711', { lastUsedEffort: 'high' }, remember);
+    expect(remember).not.toHaveBeenCalled();
+  });
+
+  it('falls back to memory without recording an invalid explicit value', () => {
+    const remember = vi.fn();
+    const got = parseReviewArgs(
+      '6711 --effort bogus',
+      { lastUsedEffort: 'medium' },
+      remember,
+    );
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings.some((warning) => warning.includes('"bogus"'))).toBe(
+      true,
+    );
+    expect(remember).not.toHaveBeenCalled();
+  });
+
+  it('lets the posting and fix safety floors override a remembered level', () => {
+    expect(
+      parseReviewArgs('6711 --comment', { lastUsedEffort: 'low' }),
+    ).toMatchObject({ effort: 'high', effortSource: 'forced-by-comment' });
+    expect(parseReviewArgs('--fix', { lastUsedEffort: 'low' })).toMatchObject({
+      effort: 'medium',
+      effortSource: 'forced-by-fix',
+    });
+  });
+
+  it('keeps remembered effort across effective and ignored --resume shapes', () => {
+    for (const raw of [
+      '6711 --resume',
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+      '--resume',
+      'src/foo.ts --resume',
+    ]) {
+      const got = parseReviewArgs(raw, { lastUsedEffort: 'high' });
+      expect(got.effort).toBe('high');
+      expect(got.effortSource).toBe('last_used');
+      expect(got.warnings.some((warning) => warning.includes('reusing'))).toBe(
+        true,
+      );
+    }
+  });
+});
+
 describe('parseReviewArgs — `--fix` is `--comment` reflected: it needs a tree, not a PR', () => {
   // The two flags are gated on opposite targets, and each is *ignored with a
   // warning* on the other's. A PR review's tree is the ephemeral worktree Step 9
@@ -1275,6 +1389,7 @@ describe('parseArgsCommand wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
   });
 
@@ -1405,8 +1520,11 @@ describe('parseArgsCommand — configured defaults wiring', () => {
   beforeEach(() => {
     fsState.stdin = '';
     fsState.written.clear();
+    fsState.effortReadError = undefined;
     vi.mocked(writeStdoutLine).mockClear();
+    vi.mocked(writeStderrLineSafe).mockClear();
     reviewSettingsMock.mockReturnValue({});
+    vi.mocked(atomicWriteFileSync).mockClear();
   });
 
   async function verdictFor(stdin: string): Promise<ParsedReviewArgs> {
@@ -1522,6 +1640,179 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(got.comment).toEqual({ requested: false, effective: false });
     expect(got.effort).toBe('high');
     expect(got.effortSource).toBe('default');
+  });
+
+  it('persists an explicit effort and reuses it on the next invocation', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    const first = await verdictFor('src/foo.ts --effort high\n');
+    expect(first.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('high\n');
+    expect(atomicWriteFileSync).toHaveBeenCalledWith(storedEffort, 'high\n', {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+
+    const second = await verdictFor('src/foo.ts\n');
+    expect(second.effort).toBe('high');
+    expect(second.effortSource).toBe('last_used');
+    expect(second.warnings).toContain(
+      'No effort level given — reusing high, the level you typed last time. Type a level like `/review --effort medium` to change it.',
+    );
+  });
+
+  it('lets remembered effort outrank configured effort before comment forcing', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'high\n');
+    reviewSettingsMock.mockReturnValue({ effort: 'low', comment: true });
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('last_used');
+    expect(
+      got.warnings.some((warning) => warning.includes('reusing high')),
+    ).toBe(true);
+  });
+
+  it('keeps remembered effort when an explicit value is invalid', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'medium\n');
+
+    const got = await verdictFor('6711 --effort bogus\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('last_used');
+    expect(got.warnings).toContain(
+      'No effort level given — reusing medium, the level you typed last time. Type a level like `/review --effort high` to change it.',
+    );
+    expect(got.warnings).toContain(
+      'Invalid --effort value "bogus" discarded; using the last explicitly typed effort.',
+    );
+    expect(fsState.written.get(storedEffort)).toBe('medium\n');
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  it('lets an explicit effort replace malformed remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'not-an-effort\n');
+
+    const got = await verdictFor('src/foo.ts --effort medium\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('medium\n');
+  });
+
+  it('lets an explicit effort replace valid remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'high\n');
+
+    const got = await verdictFor('src/foo.ts --effort low\n');
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+    expect(fsState.written.get(storedEffort)).toBe('low\n');
+  });
+
+  it('ignores malformed remembered state when no explicit effort replaces it', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'not-an-effort\n');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(fsState.written.get(storedEffort)).toBe('not-an-effort\n');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} must contain low, medium, or high`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'resolving from review.effort and the target default instead',
+    );
+  });
+
+  it('ignores unreadable remembered state', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'low\n');
+    fsState.effortReadError = new Error('EACCES: permission denied');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} could not be read`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'EACCES: permission denied',
+    );
+  });
+
+  it('reports the resolved effort when remembering an explicit effort fails', async () => {
+    vi.mocked(atomicWriteFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+
+    const got = await verdictFor('6711 --comment --effort low\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not be remembered',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'ENOSPC: no space left on device',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'this review still uses high',
+    );
+  });
+
+  it('uses the project storage owner exported by the parent session', async () => {
+    const previous = process.env['QWEN_CODE_PROJECT_DIR'];
+    const owner = '/runtime/session-project-owner';
+    process.env['QWEN_CODE_PROJECT_DIR'] = owner;
+    try {
+      const got = await verdictFor('src/foo.ts --effort high\n');
+      expect(got.effortSource).toBe('explicit');
+      expect(
+        fsState.written.get(lastReviewEffortPath(process.cwd(), owner)),
+      ).toBe('high\n');
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_PROJECT_DIR'];
+      } else {
+        process.env['QWEN_CODE_PROJECT_DIR'] = previous;
+      }
+    }
+  });
+
+  it('does not persist a target default', async () => {
+    const got = await verdictFor('6711\n');
+    expect(got.effortSource).toBe('default');
+    expect(
+      fsState.written.has(
+        lastReviewEffortPath(
+          process.cwd(),
+          process.env['QWEN_CODE_PROJECT_DIR'],
+        ),
+      ),
+    ).toBe(false);
   });
 });
 

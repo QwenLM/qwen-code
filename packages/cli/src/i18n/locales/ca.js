@@ -477,6 +477,7 @@ export default {
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
   'Hide Tips': 'Amaga els consells',
+  'Show Tool Call Arguments': 'Mostra els arguments de les crides a eines',
   'Show Line Numbers in Code': 'Mostra els números de línia al codi',
   'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
@@ -1179,6 +1180,12 @@ export default {
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
     "No s'ha pogut comprimir l'historial del xat per un error de recompte de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió era buit.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
+  'Could not compress chat history due to an API error.':
+    "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================

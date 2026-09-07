@@ -357,6 +357,7 @@ export default {
   'Vim Mode': 'Vim モード',
   'Output Format': '出力形式',
   'Hide Tips': 'ヒントを非表示',
+  'Show Tool Call Arguments': 'ツール呼び出し引数を表示',
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',
@@ -816,6 +817,12 @@ export default {
     'チャット履歴の圧縮でサイズが減少しませんでした。圧縮プロンプトに問題がある可能性があります',
   'Could not compress chat history due to a token counting error.':
     'トークンカウントエラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was empty.':
+    '圧縮サマリーが空だったため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was truncated.':
+    '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history due to an API error.':
+    'API エラーのため、チャット履歴を圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':

@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   type ChatCompressionInfo,
-  type GeminiClient,
+  type LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { compressFastCommand } from './compressFastCommand.js';
@@ -23,10 +23,10 @@ describe('compressFastCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -75,10 +75,10 @@ describe('compressFastCommand', () => {
       },
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -108,10 +108,10 @@ describe('compressFastCommand', () => {
       },
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -225,10 +225,10 @@ describe('compressFastCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -266,10 +266,10 @@ describe('compressFastCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -294,10 +294,10 @@ describe('compressFastCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChatFast: mockTryCompressChatFast,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });

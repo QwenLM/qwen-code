@@ -38,7 +38,7 @@ describe('TemplateRenderer', () => {
 
     // The raw closing tag / injected element must not appear verbatim.
     expect(html).not.toContain('</script><img');
-    expect(html).toContain('\\u003c/script>');
+    expect(html).toContain('\\u003c/script\\u003e');
   });
 
   it('escapes U+2028/U+2029 so pre-ES2019 engines can still parse the script', async () => {

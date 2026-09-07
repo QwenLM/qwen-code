@@ -215,7 +215,7 @@ export function useBackgroundTaskView(
       // touching the task map.) Extract tasks also intentionally
       // stay out of this view — they fire on every UserQuery and
       // their completion is already covered by the `memory_saved`
-      // toast in useGeminiStream.
+      // toast in useLlmStream.
       //
       // Cap retained terminal entries — MemoryManager.tasks Map has no
       // eviction path, so completed/failed dreams accumulate forever

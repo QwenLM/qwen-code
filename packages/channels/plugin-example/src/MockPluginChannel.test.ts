@@ -19,6 +19,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(): string | undefined {
       return undefined;
     }
+
+    protected formatAttributedText(text: string, sourceLabel?: string): string {
+      return sourceLabel && text.trim().length > 0
+        ? `${sourceLabel} ${text}`
+        : text;
+    }
   },
 }));
 
@@ -155,6 +161,83 @@ describe('MockPluginChannel message correlation', () => {
           chatId: 'shared-chat',
           text: 'final-b',
         },
+      ],
+    );
+  });
+
+  it('attributes the first chunk and the final response for a segment', async () => {
+    const { channel, send } = createChannel();
+    const output = channel as unknown as {
+      onResponseChunk: (
+        chatId: string,
+        chunk: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => void;
+      onResponseComplete: (
+        chatId: string,
+        text: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => Promise<void>;
+    };
+    const segment = {
+      messageId: 'msg-a',
+      segmentId: 'segment-a',
+      sourceLabel: '[review]',
+    };
+
+    output.onResponseChunk('shared-chat', 'first', 'session-a', segment);
+    output.onResponseChunk('shared-chat', 'second', 'session-a', segment);
+    await output.onResponseComplete(
+      'shared-chat',
+      'complete',
+      'session-a',
+      segment,
+    );
+
+    expect(send.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toEqual(
+      [
+        expect.objectContaining({ type: 'chunk', text: '[review] first' }),
+        expect.objectContaining({ type: 'chunk', text: 'second' }),
+        expect.objectContaining({
+          type: 'outbound',
+          text: '[review] complete',
+        }),
+      ],
+    );
+    expect(
+      (
+        channel as unknown as {
+          attributedSegments: Set<string>;
+        }
+      ).attributedSegments.size,
+    ).toBe(0);
+  });
+
+  it('waits for non-whitespace content before marking a segment attributed', () => {
+    const { channel, send } = createChannel();
+    const output = channel as unknown as {
+      onResponseChunk: (
+        chatId: string,
+        chunk: string,
+        sessionId: string,
+        segment: { messageId: string; segmentId: string; sourceLabel: string },
+      ) => void;
+    };
+    const segment = {
+      messageId: 'msg-a',
+      segmentId: 'segment-a',
+      sourceLabel: '[review]',
+    };
+
+    output.onResponseChunk('shared-chat', '   ', 'session-a', segment);
+    output.onResponseChunk('shared-chat', 'body', 'session-a', segment);
+
+    expect(send.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toEqual(
+      [
+        expect.objectContaining({ type: 'chunk', text: '   ' }),
+        expect.objectContaining({ type: 'chunk', text: '[review] body' }),
       ],
     );
   });

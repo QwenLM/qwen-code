@@ -142,7 +142,11 @@ function SessionListItemView({
         ? prefixChars.scrollDown
         : prefixChars.normal;
 
-  const promptText = session.customTitle || session.prompt || '(empty prompt)';
+  const promptText =
+    session.customTitle ||
+    session.prompt ||
+    session.goalObjective ||
+    '(empty prompt)';
   // Reserve space for the checkbox when multi-select is active so the
   // prompt column doesn't shift between modes.
   const checkboxWidth = isChecked === undefined ? 0 : 4; // "[x] "
@@ -274,7 +278,11 @@ export function SessionPicker(props: SessionPickerProps) {
       <SessionPreview
         sessionService={sessionService}
         sessionId={picker.previewSessionId}
-        sessionTitle={previewed?.customTitle ?? previewed?.prompt ?? undefined}
+        sessionTitle={
+          previewed?.customTitle ||
+          previewed?.prompt ||
+          previewed?.goalObjective
+        }
         messageCount={previewed?.messageCount}
         mtime={previewed?.mtime}
         gitBranch={previewed?.gitBranch}

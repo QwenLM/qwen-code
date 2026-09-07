@@ -68,7 +68,7 @@ describe('advisorCommand', () => {
   let mockContext: CommandContext;
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({
+    getLlmClient: () => ({
       getHistoryForForkWindow: () => [
         { role: 'user', parts: [{ text: 'hello' }] },
       ],
@@ -335,7 +335,7 @@ describe('advisorCommand', () => {
       mockContext = createMockCommandContext({
         services: {
           config: createConfig({
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryForForkWindow: () => [],
             }),
           }),

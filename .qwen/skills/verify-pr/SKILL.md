@@ -743,10 +743,10 @@ since the merge-base, say so and re-measure there.
   `bash -n` and `shellcheck` on extracted `run:` blocks always work; the
   repo's wrapper only lints when the pinned binaries are present, so
   install them with `node scripts/lint.js --setup` and then invoke the
-  individual non-mutating checks (`--actionlint`, `--yamllint`, `--eslint`).
-  **Never run `node scripts/lint.js` with no arguments** — the no-arg form
-  also runs `prettier --write .`, which rewrites the PR working tree
-  underneath your A/B and replay harnesses. If the tools cannot be installed
+  individual non-mutating checks (`--actionlint`, `--yamllint`, `--eslint`,
+  `--prettier`). **Never run `node scripts/lint.js` with no arguments** — the
+  no-arg form calls `setupLinters()`, which wipes the linter temp dir and
+  re-downloads three pinned binaries before running anything. If the tools cannot be installed
   in-container, say which gate you could not run rather than implying it
   passed. For a new automated trigger, do the day-one cost math
   — arrival rate against the job's drain rate. Event history needs the API,
@@ -828,9 +828,8 @@ workflow globs). It must contain:
   fails, say so under _Not covered_ in one line and ship the text-only report;
   do not reconstruct the pipeline by hand.
 
-  The publish job hosts what you produce on a per-PR branch
-  (`pr-assets/<N>-verify`) and appends it below the report, capped at
-  **8 images, 2 MB each**; anything
+  The publish job hosts what you produce on Aliyun OSS and appends it below the
+  report, capped at **8 images, 2 MB each**; anything
   beyond stays in the run artifacts. Name each file as a kebab-case caption
   that binds image to claim (`01-bundle-ab-base-vs-head.png`,
   `02-repaint-after-sigcont.png`) — the filename becomes the published

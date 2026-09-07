@@ -707,7 +707,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       }
       case 'compact_history': {
         try {
-          const client = this.coreConfig.getGeminiClient?.();
+          const client = this.coreConfig.getLlmClient?.();
           if (!client?.isInitialized?.()) {
             debugLogger.debug(
               '[COMPACT_HISTORY] skipped: client not initialized',

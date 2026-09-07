@@ -121,7 +121,7 @@ Then the gate matching what you touched:
 | user-facing strings, `i18n/locales/*`              | `npm run check-i18n`                                                                                                                           |
 | `package.json` or dependencies                     | `npm run check:lockfile`                                                                                                                       |
 | `scripts/`                                         | `npm run test:scripts` — plain `npm test` does not cover it                                                                                    |
-| `packages/desktop*`                                | `npm run check:desktop-isolation`                                                                                                              |
+| `packages/desktop-shell`                           | `npm run check:desktop-isolation`                                                                                                              |
 | bundling, the serve fast path, `esbuild.config.js` | `npm run check:serve-fast-path-bundle`                                                                                                         |
 | CLI behavior                                       | the matching `npm run test:integration:*` script                                                                                               |
 
@@ -139,9 +139,8 @@ Green CI is weaker evidence than it looks for a deletion:
   skips most steps. Deleting docs alongside code can quietly buy you less CI
   than you think.
 - The Prettier CI step (the `Run Prettier` step in `ci.yml` → `runPrettier()`
-  in `scripts/lint.js`) runs `prettier --write .`, not `--check`, so
-  formatting never fails a build — and a formatting-only diff carries zero
-  signal.
+  in `scripts/lint.js`) runs `prettier --check .`, so unformatted code fails
+  the build. Run `npm run format` before pushing.
 - The pre-commit hook runs formatters over staged files. Re-read the diff
   after committing; if the hook reformatted lines you did not otherwise touch,
   restore them in a follow-up commit (history is additive here — never amend).

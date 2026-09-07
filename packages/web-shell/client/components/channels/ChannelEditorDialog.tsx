@@ -102,13 +102,14 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'allowedUsers',
   'groupPolicy',
 ]);
-const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope']);
+const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope', 'multiSession']);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   senderPolicy: 'channels.editor.field.shared.senderPolicy',
   allowedUsers: 'channels.editor.field.shared.allowedUsers',
   groupPolicy: 'channels.editor.field.shared.groupPolicy',
   sessionScope: 'channels.editor.field.shared.sessionScope',
+  multiSession: 'channels.editor.field.shared.multiSession',
 };
 
 export interface ChannelEditorDialogProps {
@@ -482,7 +483,13 @@ export function ChannelEditorDialog({
     const update = (next: string | boolean) =>
       setDraft((current) => ({
         ...current,
-        values: { ...current.values, [field.key]: next },
+        values: {
+          ...current.values,
+          [field.key]: next,
+          ...(field.key === 'multiSession' && next === true
+            ? { sessionScope: 'user' }
+            : {}),
+        },
       }));
     if (field.kind === 'boolean') {
       return (

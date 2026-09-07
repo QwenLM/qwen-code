@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
+} from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -63,22 +66,28 @@ const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const setReasoningEffort = vi.fn(async () => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
+const getContextUsage = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
   cancel,
   setApprovalMode,
   setModel,
+  setReasoningEffort,
   loadArtifacts,
   getTasks,
+  getWorkflowTasks,
   getGoal,
   controlGoal,
   readAttachment,
+  getContextUsage,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -93,7 +102,7 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
   useConnection: () => connectionState,
@@ -139,7 +148,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
-  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
+  useDaemonActivePromptBridge: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -426,12 +435,17 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getWorkflowTasks.mockReset();
   getGoal.mockReset();
   controlGoal.mockReset();
   readAttachment.mockReset();
   readAttachment.mockResolvedValue({
     data: 'eyJoaSI6IuS9oOWlvSJ9',
     mimeType: 'application/json',
+  });
+  getContextUsage.mockReset();
+  getContextUsage.mockResolvedValue({
+    usage: { totalTokens: 1200, contextWindowSize: 8192 },
   });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
@@ -443,6 +457,7 @@ beforeEach(() => {
   cancel.mockClear();
   setApprovalMode.mockClear();
   setModel.mockClear();
+  setReasoningEffort.mockClear();
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -512,6 +527,36 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
+    connectionState.supportedCommands = { workflowsEnabled: true };
+    messagesState = [
+      {
+        id: 'workflow-group',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
+        ],
+      },
+    ];
+    getWorkflowTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 1_000,
+      tasks: [],
+    });
+
+    render({ sessionWorkflowEnabled: false });
+    await act(async () => Promise.resolve());
+
+    expect(getWorkflowTasks).toHaveBeenCalledWith({ silent: true });
+    expect(getTasks).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       'images',
@@ -820,6 +865,7 @@ describe('ChatPane', () => {
       action: 'pause',
       expectedGoalId: 'goal-1',
       expectedRevision: 9,
+      reason: GOAL_PAUSE_REASON_COMMAND,
     });
 
     // `/goal set` maps to a versioned replace against the same fresh snapshot.
@@ -1347,6 +1393,7 @@ describe('ChatPane', () => {
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
     render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('addMenu');
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
       'workspace',
     );
@@ -1605,6 +1652,7 @@ describe('ChatPane', () => {
       kind: 'attachment',
       title: 'data.json',
       turnId: 'sess-1',
+      attachmentId: 'attachment-1',
       mimeType: 'application/json',
       data: expect.any(Blob),
       workspaceCwd: '/w',
@@ -2476,6 +2524,22 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'keeps reasoning persistence scoped with standalone=%s',
+    async (standalone) => {
+      connectionState.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      render();
+      await act(async () => {
+        await latestChatEditorProps.onSelectReasoningEffort('medium');
+      });
+      expect(setReasoningEffort).toHaveBeenCalledWith('medium', {
+        persist: !standalone,
+      });
+    },
+  );
+
   it('renders no maximize toggle without onToggleMaximize', () => {
     render({ onClose: () => {} });
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
@@ -2623,11 +2687,42 @@ describe('ChatPane', () => {
     );
   });
 
-  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+  it('enables the interactive composer controls', () => {
+    connectionState.tokenCount = 1200;
+    connectionState.contextWindow = 8192;
     render();
     expect(testid('pane-toolbar')?.textContent).toBe(
-      JSON.stringify(['approvalMode', 'model', 'voice']),
+      JSON.stringify([
+        'addMenu',
+        'approvalMode',
+        'contextUsage',
+        'model',
+        'voice',
+      ]),
     );
+    expect(latestChatEditorProps.tokenCount).toBe(1200);
+    expect(latestChatEditorProps.contextWindow).toBe(8192);
+    expect(latestChatEditorProps.onShowContextUsage).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('shows context usage for this pane session', async () => {
+    render();
+
+    await act(async () => {
+      latestChatEditorProps.onShowContextUsage();
+    });
+
+    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+    expect(transcriptDispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: expect.stringContaining('web-shell:context-usage:v1:'),
+      }),
+    ]);
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -2640,6 +2735,27 @@ describe('ChatPane', () => {
     // 'compress' is daemon-only — so the count is localCount + 1.
     const count = Number(testid('pane-commands')?.textContent);
     expect(count).toBeGreaterThan(30);
+  });
+
+  it("passes the pane session's skills to the add menu", () => {
+    connectionState.skills = ['review'];
+    connectionState.commands = [
+      {
+        name: 'review',
+        description: 'Review code',
+        argumentHint: '[path]',
+        source: 'skill',
+      },
+    ];
+    render();
+
+    expect(latestChatEditorProps.skills).toEqual([
+      {
+        name: 'review',
+        description: 'Review changed code for bugs, security, and quality',
+        argumentHint: '[path]',
+      },
+    ]);
   });
 
   it('hides internal composer models and labels the rest', () => {

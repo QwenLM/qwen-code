@@ -3,7 +3,7 @@ name: 'Web-shell Visuals Publish'
 # Privileged companion to `web-shell-visuals.yml`. It runs AFTER that workflow
 # via workflow_run, so it executes in the base-repo context with a write token
 # but NEVER checks out or runs PR code — it only downloads the image artifact
-# (opaque bytes), hosts it on the `pr-assets` branch, and posts an inline
+# (opaque bytes), hosts it on Aliyun OSS, and posts an inline
 # comment. This is the GitHub-recommended split for commenting on fork PRs with
 # the results of untrusted-code execution.
 on:
@@ -13,15 +13,13 @@ on:
     types:
       - 'completed'
 
-# GITHUB_TOKEN only needs to read the triggering run's artifact; the branch push
-# and PR comment are done with CI_BOT_PAT, which carries its own scope.
+# GITHUB_TOKEN only needs to read the triggering run's artifact. The PR comment
+# is posted with CI_BOT_PAT; OSS uses its own repository secrets.
 permissions:
   actions: 'read'
 
-# Serialize publishes for the SAME PR (identified by its source repo + branch),
-# since they force-push to that PR's own `pr-assets/web-shell-visuals-<n>`
-# branch; serializing means the force-push never has to reconcile a concurrent
-# same-PR snapshot (a bounded retry below covers transient failures). Different
+# Serialize publishes for the SAME PR (identified by its source repo + branch)
+# so an older run cannot replace a newer run's marker comment. Different
 # PRs — including forks that happen to share a branch name like `main` — get
 # distinct groups and publish in parallel. Never cancel an in-flight publish.
 concurrency:
@@ -43,14 +41,72 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
-      # Trusted base-repo script (staging + comment builder). workflow_run
-      # checks out the default branch, never PR code. Sparse — just the script.
-      - name: 'Checkout the publish script'
+      # Trusted base-repo scripts. workflow_run checks out the default branch,
+      # never PR code (the PR head is github.event.workflow_run.head_sha,
+      # consumed below as RUN_HEAD_SHA — never as a checkout ref). Sparse —
+      # the publisher, its helper dependency, and the root package.json that
+      # marks the uploader's `.js` as ESM (without it the uploader only
+      # parses on the Node versions that infer module syntax, and this job
+      # pins no Node).
+      - name: 'Checkout the publish scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          sparse-checkout: '.github/scripts/web-shell-visuals-publish.mjs'
+          # Pin the trusted ref explicitly: on workflow_run events
+          # github.sha is the default-branch head this workflow runs from,
+          # so the pin makes "never PR code" a property of this step
+          # instead of an inference from the event's default resolution.
+          ref: '${{ github.sha }}'
+          sparse-checkout: |-
+            /package.json
+            .github/scripts/web-shell-visuals-publish.mjs
+            scripts/upload-aliyun-oss-assets.js
+            scripts/release-script-utils.js
           sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      - name: 'Install ossutil'
+        id: 'install-ossutil'
+        # Evidence hosting is best-effort: a setup failure must not block the
+        # marker-comment path. When images exist, the publish step records the
+        # hosting failure and refreshes the comment without broken image URLs.
+        continue-on-error: true
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          # Retry, unlike the release syncs: a red run there is simply rerun,
+          # but a CDN blip here costs this PR its preview comment (the
+          # upload aborts the step) or its evidence images. The worst-case
+          # budget stays inside the 10-minute job cap: 3 attempts x 120s
+          # max-time + 2 x 2s delays ≈ 6.1 minutes (an unreachable mirror
+          # fails the connect-timeout long before that).
+          curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          [ -n "$ossutil_path" ] || { echo '::error::ossutil binary not found'; exit 1; }
+          chmod +x "$ossutil_path"
+          install -m 0755 "$ossutil_path" "$RUNNER_TEMP/ossutil"
+          "$RUNNER_TEMP/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        if: "${{ steps.install-ossutil.outcome == 'success' }}"
+        continue-on-error: true
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          if [ -z "$ALIYUN_OSS_ACCESS_KEY_ID" ] || [ -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]; then
+            echo '::error::Missing Aliyun OSS credentials.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/ossutil" config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
 
       - name: 'Download visuals artifact'
         id: 'download'
@@ -66,6 +122,10 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RUN_ID: '${{ github.event.workflow_run.id }}'
+          # The run id is stable across re-run attempts — only the attempt
+          # number increments — so it alone cannot keep a re-run off the
+          # previous attempt's object keys in the OSS prefix below.
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           RUN_URL: '${{ github.event.workflow_run.html_url }}'
           # Authenticated (NOT artifact-sourced) head SHA of the run that
           # triggered this publish — used to bind the artifact to its real PR.
@@ -75,6 +135,23 @@ jobs:
           # shares the same head commit SHA.
           RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
           RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          # PR evidence is untrusted, PR-derived content, so it gets its own
+          # bucket knob: set ALIYUN_OSS_PR_ASSETS_BUCKET to move it off the
+          # bucket that also serves release, desktop, and live-host downloads.
+          # Unset, it falls back to the shared bucket — today's behaviour.
+          # The default public URL is derived from the resolved bucket so that
+          # overriding only one of the two vars cannot post comment links
+          # that 404 against (or show stale objects from) the other bucket.
+          # A cross-region ALIYUN_OSS_ENDPOINT override must also override
+          # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          # A stalled upload must not burn this job's 10-minute cap: bound
+          # every ossutil attempt so the uploader exhausts its retries (and
+          # aborts this publish, which stays re-triggerable) instead of
+          # hanging one black-hole socket until the job dies mid-upload.
+          # Worst case is one image's 3 attempts x 120s + backoffs ≈ 6.1 min.
+          OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'
         run: |-
           set -euo pipefail
 
@@ -174,58 +251,53 @@ jobs:
             HAS_IMAGES=1
           fi
 
-          # Re-validate right before the force-push too: a close/new-head during
-          # download+staging must not force-push a stale snapshot (which would
-          # orphan the commit the existing comment still points at).
+          # Re-validate right before the upload too: a close/new-head during
+          # download+staging must not publish a stale snapshot.
           gate
 
-          # --- Host on the PR's own pr-assets branch (bounded) --------------
-          # Replace the branch with a SINGLE orphan snapshot each run and
-          # force-push, so untrusted PR content can't accumulate unbounded
-          # history in the base repo. The comment always points at the new
-          # immutable commit SHA; the previous snapshot becomes unreachable and
-          # is GC'd. Per-PR branch under the existing pr-assets/<slug> convention
-          # (a bare `pr-assets` branch would D/F-conflict with pr-assets/*), and
-          # the per-PR concurrency group serializes same-PR runs so the
-          # force-push never drops a concurrent snapshot.
+          # --- Host on Aliyun OSS -------------------------------------------
+          # Head SHA, run id *and* run attempt, so every publish writes a
+          # prefix nothing has ever served before. The run id is not
+          # decoration: GitHub renders comment images through its camo proxy,
+          # which caches by URL, so re-running a preview for the SAME head
+          # onto the same object keys would leave reviewers looking at the
+          # previous run's screenshots. The run id alone is not enough either:
+          # it is stable across re-run attempts (only run_attempt increments),
+          # so the attempt segment keeps a maintainer re-run off the exact
+          # keys the previous attempt's comment already references. The old
+          # design got this free from the per-run commit SHA in the raw URL;
+          # the verify lane keeps it via <run-id>-<attempt>.
           # Host the images ONLY when there are changed views. A no-change run
-          # skips the asset commit entirely; RAW_BASE stays empty and the
+          # skips the upload entirely; RAW_BASE stays empty and the
           # comment below is image-less ("no screenshot changes").
           RAW_BASE=''
+          HOSTING_STATUS_FILE="${RUNNER_TEMP}/visuals-hosting-status.txt"
+          echo 'success' > "${HOSTING_STATUS_FILE}"
           if [ "${HAS_IMAGES}" = "1" ]; then
-            BRANCH="pr-assets/web-shell-visuals-${PR}"
-            AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            WORK="${RUNNER_TEMP}/pr-assets"
-            rm -rf "${WORK}"
-            mkdir -p "${WORK}/imgs"
-            cp "${STAGE}"/* "${WORK}/imgs/"
-            cd "${WORK}"
-            git init -q
-            git config user.name 'qwen-code-bot'
-            git config user.email 'qwen-code-bot@users.noreply.github.com'
-            git checkout -q --orphan snapshot
-            git add imgs
-            git commit -q -m "web-shell visuals: PR #${PR} (run ${RUN_ID})"
-            # Bounded retry for transient push failures (network / brief lock).
-            # Same-PR runs are serialized by concurrency, so this never needs to
-            # reconcile a concurrent snapshot — a plain retry suffices.
-            pushed=0
-            for attempt in 1 2 3; do
-              if git push -q --force "${AUTH_URL}" "HEAD:${BRANCH}"; then
-                pushed=1
-                break
-              fi
-              echo "::notice::force-push attempt ${attempt} failed; retrying."
-              sleep 2
-            done
-            if [ "${pushed}" -ne 1 ]; then
-              echo "::error::Failed to push web-shell visuals to ${BRANCH} after retries."
-              exit 1
+            ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}/${RUN_ID}/${RUN_ATTEMPT}"
+            # Same PATH discipline as qwen-triage.yml's publish-verify: never
+            # resolve node or ossutil through the shared $RUNNER_TEMP. node
+            # is resolved under the inherited PATH and ossutil runs from a
+            # fresh job-private copy of the sha256-verified binary installed
+            # above. Not exploitable on today's ephemeral runners, but the
+            # shape must not regress if this job ever moves to a persistent
+            # pool.
+            node_bin="$(command -v node)"
+            trusted_bin="$(mktemp -d)"
+            if install -m 0755 "${RUNNER_TEMP}/ossutil" "$trusted_bin/ossutil" &&
+              PATH="$trusted_bin" "$node_bin" scripts/upload-aliyun-oss-assets.js \
+                --bucket "${ALIYUN_OSS_BUCKET}" \
+                --config "${RUNNER_TEMP}/.ossutilconfig" \
+                --prefix "${ASSET_PREFIX}" \
+                "${STAGE}"/*
+            then
+              RAW_BASE="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ASSET_PREFIX}"
+              echo "Web-shell visuals hosted at ${RAW_BASE}."
+            else
+              echo "::warning::Failed to host web-shell visuals; updating the PR comment with a hosting-failure note."
+              echo 'failure' > "${HOSTING_STATUS_FILE}"
             fi
-            ASSET_SHA="$(git rev-parse HEAD)"
-            cd "${GITHUB_WORKSPACE}"
-            echo "web-shell visuals hosted on ${BRANCH} at ${ASSET_SHA}."
-            RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
+            rm -rf "$trusted_bin"
           fi
 
           # --- Changed paths, for triaging an EMPTY preview ------------------
@@ -259,7 +331,8 @@ jobs:
             "${RAW_BASE}" \
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}" \
             "${CHANGED_PATHS_FILE}" \
-            "${RENDER_STATUS_FILE}"
+            "${RENDER_STATUS_FILE}" \
+            "${HOSTING_STATUS_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Dedup only against OUR OWN prior comment (bot author + marker), and
@@ -295,3 +368,7 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"${BODY_FILE}" >/dev/null
             echo "Posted web-shell visuals comment on PR #${PR}."
           fi
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

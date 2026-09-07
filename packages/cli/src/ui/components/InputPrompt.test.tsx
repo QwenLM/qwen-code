@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
@@ -114,6 +115,12 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
 
 const mockSlashCommands: SlashCommand[] = [
   {
+    name: 'quit',
+    kind: CommandKind.BUILT_IN,
+    description: 'Quit',
+    action: vi.fn(),
+  },
+  {
     name: 'clear',
     kind: CommandKind.BUILT_IN,
     description: 'Clear screen',
@@ -123,6 +130,8 @@ const mockSlashCommands: SlashCommand[] = [
     name: 'memory',
     kind: CommandKind.BUILT_IN,
     description: 'Manage memory',
+    // InputPrompt's live-slash submit gate requires action !== undefined.
+    action: vi.fn(),
     subCommands: [
       {
         name: 'show',
@@ -221,7 +230,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
@@ -327,6 +336,7 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       activeCategory: 'all' as const,
       availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
       switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
@@ -640,7 +650,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: true,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -667,7 +677,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(createVoiceRecorder).mockReturnValue({
@@ -1756,7 +1766,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
@@ -2036,6 +2046,53 @@ describe('InputPrompt', () => {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
     });
+    unmount();
+  });
+
+  it('should submit a live exact slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'model', value: 'model' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/quit');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
+      deferUntilIdle: false,
+      submittedPrompt: '/quit',
+    });
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should not submit a live partial slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'clear', value: 'clear' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/cle');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     unmount();
   });
 
@@ -5485,7 +5542,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [
+        pendingLlmHistoryItems: [
           {
             type: 'tool_group',
             tools: [
@@ -5988,7 +6045,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued message'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6019,7 +6076,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
 
@@ -6046,7 +6103,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6081,7 +6138,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued follow-up'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -6115,7 +6172,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       props.buffer.setText('draft to clear');

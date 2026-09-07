@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Mock } from 'vitest';
@@ -70,7 +71,7 @@ const mockConfig = {
   }),
   getBaseLlmClient: vi.fn(),
   getUseModelRouter: () => false,
-  getGeminiClient: () => null, // No client needed for these tests
+  getLlmClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
   getChatRecordingService: vi.fn(() => undefined),
   getMessageBus: vi.fn().mockReturnValue(undefined),

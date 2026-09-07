@@ -16,7 +16,7 @@ import type {
   DaemonSessionArtifact,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -130,7 +130,7 @@ export interface WebShellChatHeaderOptions {
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to all actions. */
@@ -140,7 +140,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */
@@ -167,6 +169,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
@@ -224,6 +228,16 @@ export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
   message: WebShellAssistantMessageInfo;
+}
+
+export type WebShellSessionArtifactsChangeReason = 'restore' | 'change';
+
+export interface WebShellSessionArtifactsChange {
+  reason: WebShellSessionArtifactsChangeReason;
+  sessionId: string;
+  sequence: number;
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
 }
 
 export type AssistantTurnFooterRenderer = (
@@ -316,6 +330,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 
@@ -381,6 +396,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(
@@ -459,10 +475,27 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
   exitCode?: number;
 }
 
+export interface WebShellWorkflowTask extends WebShellTaskBase {
+  kind: 'workflow';
+  status:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  currentPhase?: string;
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal?: number;
+}
+
 export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
-  | WebShellMonitorTask;
+  | WebShellMonitorTask
+  | WebShellWorkflowTask;
 
 // ---- Model info (public type for footer renderer) ----
 
@@ -516,6 +549,8 @@ export type LoadingPhrasesResolver = (
 
 export interface WebShellCustomization {
   artifact?: WebShellArtifactCustomization;
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
@@ -539,6 +574,7 @@ export interface WebShellCustomization {
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
+  hostOwnsEditDiffPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving

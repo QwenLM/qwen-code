@@ -9,7 +9,9 @@ name: 'CD: Qwen CUA Driver'
 #                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
 #     The Developer ID Application identity is auto-discovered from the
 #     imported cert (no DEVELOPER_NAME secret needed).
-# Windows ships UNSIGNED (matches upstream — no EV cert).
+# Windows archives carry the unsigned UIAccess worker. Deployments that need
+# UIAccess must sign and trust that worker on the target machine before placing
+# it under the secure Program Files path required by Windows.
 #
 # Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
@@ -28,7 +30,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.0'
+        default: '0.20.3'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -39,7 +41,7 @@ on:
       dry_run:
         description:
           'Build release assets and clean-install both npm packages without
-          creating a GitHub Release, npm version, tag, or installer sync PR.'
+          creating a GitHub Release, npm version, or tag.'
         required: false
         type: 'boolean'
         default: true
@@ -97,6 +99,37 @@ jobs:
             exit 1
           fi
 
+          INSTALL_SH_VERSION=$(sed -nE 's/^CUA_DRIVER_RS_BAKED_VERSION="([^"]+)"$/\1/p' packages/cua-driver/scripts/_install-rust.sh)
+          # shellcheck disable=SC2016
+          INSTALL_PS1_VERSION=$(sed -nE 's/^\$Script:CuaDriverRsBakedVersion = "([^"]+)"$/\1/p' packages/cua-driver/scripts/install.ps1)
+          INSTALL_ENTRYPOINT_RS_VERSION=$(sed -nE 's/^#   CUA_DRIVER_RS_VERSION=([^ ]+)   pin a specific Rust release tag$/\1/p' packages/cua-driver/scripts/install.sh)
+          INSTALL_ENTRYPOINT_LEGACY_VERSION=$(sed -nE 's/^#   CUA_DRIVER_VERSION=([^ ]+)      legacy alias for CUA_DRIVER_RS_VERSION$/\1/p' packages/cua-driver/scripts/install.sh)
+          DRIVER_SKILL_VERSION=$(sed -nE 's/^version: ([^ ]+) # x-release-please-version$/\1/p' packages/cua-driver/rust/Skills/cua-driver/SKILL.md)
+          README_SH_VERSION=$(sed -nE 's/^CUA_DRIVER_RS_VERSION=([^ ]+) \\$/\1/p' packages/cua-driver/README.md)
+          # shellcheck disable=SC2016
+          README_PS1_VERSION=$(sed -nE 's/^\$env:CUA_DRIVER_RS_VERSION = "([^"]+)"$/\1/p' packages/cua-driver/README.md)
+          README_EXPECTED_VERSION=$(sed -nE 's/^Expected: qwen-cua-driver ([0-9A-Za-z.-]+)\.$/\1/p' packages/cua-driver/README.md)
+          SKILL_SDK_VERSION=$(sed -nE 's/^npm install --no-save --package-lock=false @qwen-code\/cua-sdk@([^ ]+)$/\1/p' packages/core/src/skills/bundled/computer-use/SKILL.md | sort -u)
+          USER_GUIDE_SDK_VERSION=$(sed -nE 's/^npm install --no-save --package-lock=false @qwen-code\/cua-sdk@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
+          for PAIR in \
+            "shell installer:$INSTALL_SH_VERSION" \
+            "PowerShell installer:$INSTALL_PS1_VERSION" \
+            "installer entrypoint Rust pin:$INSTALL_ENTRYPOINT_RS_VERSION" \
+            "installer entrypoint legacy pin:$INSTALL_ENTRYPOINT_LEGACY_VERSION" \
+            "driver skill:$DRIVER_SKILL_VERSION" \
+            "README shell command:$README_SH_VERSION" \
+            "README PowerShell command:$README_PS1_VERSION" \
+            "README expected output:$README_EXPECTED_VERSION" \
+            "Computer Use skill SDK:$SKILL_SDK_VERSION" \
+            "Computer Use user guide SDK:$USER_GUIDE_SDK_VERSION"; do
+            LABEL=${PAIR%%:*}
+            VALUE=${PAIR#*:}
+            if [[ "$VALUE" != "$VERSION" ]]; then
+              echo "::error::$LABEL version $VALUE does not match release version $VERSION"
+              exit 1
+            fi
+          done
+
           NODE_REPL_NAME=$(node -p "require('./packages/node-repl/package.json').name")
           NODE_REPL_VERSION=$(node -p "require('./packages/node-repl/package.json').version")
           if [[ "$NODE_REPL_NAME" != "@qwen-code/node-repl-mcp" ]]; then
@@ -107,6 +140,18 @@ jobs:
             echo "::error::Invalid Node REPL package version $NODE_REPL_VERSION"
             exit 1
           fi
+          SKILL_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' packages/core/src/skills/bundled/computer-use/SKILL.md)
+          USER_GUIDE_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
+          for PAIR in \
+            "Computer Use skill Node REPL:$SKILL_NODE_REPL_VERSION" \
+            "Computer Use user guide Node REPL:$USER_GUIDE_NODE_REPL_VERSION"; do
+            LABEL=${PAIR%%:*}
+            VALUE=${PAIR#*:}
+            if [[ "$VALUE" != "$NODE_REPL_VERSION" ]]; then
+              echo "::error::$LABEL version $VALUE does not match Node REPL version $NODE_REPL_VERSION"
+              exit 1
+            fi
+          done
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::A production dispatch must run from protected main"
@@ -231,7 +276,7 @@ jobs:
           path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
           if-no-files-found: 'error'
 
-  # ── Windows (x86_64 + arm64) — UNSIGNED ──────────────────────────────────
+  # ── Windows (x86_64 + arm64) — unsigned UIAccess worker ────────────────────
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
@@ -277,9 +322,14 @@ jobs:
             }}"
           restore-keys: |
             cua-driver-windows-${{ matrix.arch }}-
-      - name: 'Build (release, unsigned)'
+      - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
+        shell: 'pwsh'
+        run: |
+          # A cached target may contain a worker mutated by an earlier signing
+          # job. Remove the final PE so Cargo always relinks an unsigned worker.
+          Remove-Item "target/${{ matrix.target }}/release/cua-driver-uia.exe" -Force -ErrorAction SilentlyContinue
+          cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}
       - name: 'Build Electron-compatible Node runtime'
         working-directory: 'packages/cua-driver'
         shell: 'bash'
@@ -288,6 +338,17 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
+      - name: 'Verify unsigned UIAccess worker'
+        shell: 'pwsh'
+        run: |
+          $worker = "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
+          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
+            throw 'Windows build did not produce cua-driver-uia.exe'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $worker
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Release worker must be unsigned for target-machine signing; status is $($signature.Status)"
+          }
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         shell: 'pwsh'
@@ -771,7 +832,9 @@ jobs:
 
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
-            - **Windows**: unsigned (x86_64 + arm64)
+            - **Windows**: unsigned UIAccess worker + native SDK payload
+              (x86_64 + arm64); deployments must sign and trust the worker
+              on the target machine before UIAccess activation
             - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
               after a clean install against these release assets and publishes
               the independently versioned `@qwen-code/node-repl-mcp` package
@@ -975,62 +1038,3 @@ jobs:
           done
           echo '::error::Published npm version did not become visible'
           exit 1
-
-  sync-installer-version:
-    name: 'Sync installer version to main'
-    needs: ['release', 'publish-sdk', 'publish-node-repl']
-    runs-on: 'ubuntu-latest'
-    permissions:
-      contents: 'write'
-      pull-requests: 'write'
-    steps:
-      - name: 'Require CI bot token'
-        env:
-          CI_BOT_PAT_SECRET: '${{ secrets.CI_BOT_PAT }}'
-        run: |
-          if [[ -z "$CI_BOT_PAT_SECRET" ]]; then
-            echo "::error::CI_BOT_PAT is required to create the installer version sync PR"
-            exit 1
-          fi
-      - uses: 'actions/checkout@v4'
-        with:
-          token: '${{ secrets.CI_BOT_PAT }}'
-          ref: 'main'
-          fetch-depth: 0
-      - name: 'Create installer version sync PR'
-        env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          VERSION: '${{ needs.release.outputs.version }}'
-        run: |
-          sed -E -i.bak "s/^CUA_DRIVER_RS_BAKED_VERSION=\"[^\"]+\"$/CUA_DRIVER_RS_BAKED_VERSION=\"${VERSION}\"/" packages/cua-driver/scripts/_install-rust.sh
-          sed -E -i.bak "s/^\\\$Script:CuaDriverRsBakedVersion = \"[^\"]+\"$/\\\$Script:CuaDriverRsBakedVersion = \"${VERSION}\"/" packages/cua-driver/scripts/install.ps1
-          sed -E -i.bak "s/(CUA_DRIVER_RS_VERSION=)[0-9]+\\.[0-9]+\\.[0-9]+/\\1${VERSION}/" packages/cua-driver/README.md
-          sed -E -i.bak "s/(\\\$env:CuaDriverRsVersion = \"|\\\$env:CUA_DRIVER_RS_VERSION = \"|Expected: qwen-cua-driver )[0-9]+\\.[0-9]+\\.[0-9]+/\\1${VERSION}/" packages/cua-driver/README.md
-          rm -f packages/cua-driver/README.md.bak packages/cua-driver/scripts/_install-rust.sh.bak packages/cua-driver/scripts/install.ps1.bak
-
-          grep -Fqx "CUA_DRIVER_RS_BAKED_VERSION=\"${VERSION}\"" packages/cua-driver/scripts/_install-rust.sh
-          grep -Fqx "\$Script:CuaDriverRsBakedVersion = \"${VERSION}\"" packages/cua-driver/scripts/install.ps1
-          grep -Fq "CUA_DRIVER_RS_VERSION=${VERSION} " packages/cua-driver/README.md
-          grep -Fq "\$env:CUA_DRIVER_RS_VERSION = \"${VERSION}\"" packages/cua-driver/README.md
-          grep -Fq "Expected: qwen-cua-driver ${VERSION}" packages/cua-driver/README.md
-
-          if git diff --quiet; then
-            echo "Installer references already point to ${VERSION}"
-            exit 0
-          fi
-
-          BRANCH="chore/cua-driver-v${VERSION}-installers"
-          PR_URL=$(gh pr list --head "$BRANCH" --base main --state open --json url --jq '.[0].url')
-          if [[ -z "$PR_URL" ]]; then
-            if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git switch -c "$BRANCH"
-              git add packages/cua-driver/README.md packages/cua-driver/scripts/_install-rust.sh packages/cua-driver/scripts/install.ps1
-              git commit -m "chore(cua-driver): bake v${VERSION} into installers"
-              git push --set-upstream origin "$BRANCH"
-            fi
-            PR_URL=$(gh pr create --base main --head "$BRANCH" --label skip-changelog --title "chore(cua-driver): bake v${VERSION} into installers" --body "Syncs the default installers and documentation to the published cua-driver-rs v${VERSION} release.")
-          fi
-
-          gh pr merge "$PR_URL" --squash --auto --subject "chore(cua-driver): bake v${VERSION} into installers [skip ci]"

@@ -821,7 +821,7 @@ describe('doctorCommand', () => {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
             getTruncateToolOutputThreshold: () => 25_000,
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => {
                 if (options.historyThrows) {
                   throw new Error('history unavailable');
@@ -1014,7 +1014,7 @@ describe('doctorCommand', () => {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
             getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => [],
             }),
             getToolRegistry: () => ({
@@ -1108,7 +1108,7 @@ describe('doctorCommand', () => {
           config: {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => history,
             }),
           },

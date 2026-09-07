@@ -39,6 +39,21 @@ function displayOf(result: { returnDisplay: unknown }): FindingsResultDisplay {
 }
 
 describe('ReportFindingsTool', () => {
+  it('does not constrain finding summaries in its tool schema', () => {
+    const tool = new ReportFindingsTool();
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        findings: {
+          items: { properties: { summary: Record<string, unknown> } };
+        };
+      };
+    };
+
+    expect(
+      schema.properties.findings.items.properties.summary,
+    ).not.toHaveProperty('maxLength');
+  });
+
   it('reports findings as a findings_list display with counts in llmContent', async () => {
     const result = await run({
       level: 'high',
@@ -592,5 +607,41 @@ describe('compressFindingSummary', () => {
     // rescue out of the way.
     const short = compressFindingSummary(`${'a'.repeat(58)}𝕏 tail words`);
     expect(short).toBe(`${'a'.repeat(58)}…`);
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('passes direction and baseline through to the display, and omits them when absent', async () => {
+    const display = displayOf(
+      await run({
+        findings: [
+          finding({ direction: 'fails-closed', baseline: 'new-surface' }),
+          finding({ file: 'src/bar.ts' }),
+        ],
+      }),
+    );
+    // Located by file: the display is sorted, and `src/bar.ts` sorts first.
+    const foo = display.findings.find((f) => f.file === 'src/foo.ts')!;
+    const bar = display.findings.find((f) => f.file === 'src/bar.ts')!;
+    expect(foo).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+    expect(bar.direction).toBeUndefined();
+    expect(bar.baseline).toBeUndefined();
+  });
+
+  it('refuses an axis outside its list', () => {
+    const tool = new ReportFindingsTool();
+    expect(() =>
+      tool.build({
+        findings: [finding({ direction: 'fails-open' as 'fails-closed' })],
+      }),
+    ).toThrow();
+    expect(() =>
+      tool.build({
+        findings: [finding({ baseline: 'old-surface' as 'regression' })],
+      }),
+    ).toThrow();
   });
 });

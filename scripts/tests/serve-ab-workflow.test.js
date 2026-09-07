@@ -82,11 +82,11 @@ describe('serve-ab pre-checkout workspace wipe', () => {
   });
 
   // The job drives BOTH checkouts end-to-end (npm ci, full monorepo build,
-  // daemon drive, each); a healthy run lands near twenty minutes, so the
-  // old 30-minute bound left a slow runner no headroom and the run timed
-  // out as CANCELLED. Pin the floor — dropping it back re-cancels the run.
+  // daemon drive, each); a contended shared runner exhausted 45 minutes near
+  // the end of the second cycle. Pin the floor so that cancellation does not
+  // recur.
   it('keeps a job timeout with headroom for two full build cycles', () => {
-    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(45);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(60);
   });
 
   it('carries the full checkout-heal guard (#9220, #9265)', () => {
