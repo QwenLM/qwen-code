@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { getPty } from '../utils/getPty.js';
+import { releaseConPtyHost } from './conpty-host.js';
 
 /**
  * Minimal PTY surface used by the web terminal registry. Backed by node-pty.
@@ -15,6 +16,12 @@ export interface WebTerminalPty {
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(): void;
+  /**
+   * Release the Windows ConPTY host and conout worker without signalling the
+   * shell pid. Used when the shell has already exited, where `kill()` would
+   * reach a possibly recycled pid. No-op off Windows. See #11303.
+   */
+  releaseHost?(): void;
 }
 
 export interface WebTerminalSnapshot {
@@ -279,6 +286,7 @@ export class WebTerminalRegistry {
         write: (data) => spawned.write(data),
         resize: (cols, rows) => spawned.resize(cols, rows),
         kill: () => spawned.kill(),
+        releaseHost: () => releaseConPtyHost(spawned),
       };
     } catch {
       this.finishCreating(terminalId);
@@ -413,18 +421,13 @@ export class WebTerminalRegistry {
     session.exitListeners.clear();
     if (!session.exited) {
       killPtyTree(session.pty);
-    } else if (process.platform === 'win32') {
-      // The shell already exited, so a tree kill would target a possibly
-      // recycled pid — but node-pty does NOT release the ConPTY host on a
-      // natural exit (only `kill()` reaches `ClosePseudoConsole`), so without
-      // this every terminal the user exits leaves a headless `conhost.exe`
-      // behind for the life of the CLI. Same defect as the shell-tool path in
-      // shellExecutionService. See #11303.
-      try {
-        session.pty.kill();
-      } catch {
-        // Already gone.
-      }
+    } else {
+      // The shell already exited, so nothing may signal its (possibly recycled)
+      // pid — but node-pty releases neither the ConPTY host nor its conout
+      // worker thread on a natural exit, so without this every terminal the
+      // user exits leaks both for the life of the CLI. Same defect as the
+      // shell-tool path in shellExecutionService. See #11303.
+      session.pty.releaseHost?.();
     }
     return true;
   }

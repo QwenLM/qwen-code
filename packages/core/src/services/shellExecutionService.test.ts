@@ -244,6 +244,8 @@ describe('ShellExecutionService', () => {
     };
   };
   let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
+  let mockPtyNativeKill: Mock;
+  let mockConoutWorkerDispose: Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -269,6 +271,19 @@ describe('ShellExecutionService', () => {
     };
     mockPtyProcess.pid = 12345;
     mockPtyProcess.kill = vi.fn();
+    // node-pty's WindowsPtyAgent internals. releaseConPtyHost drives these
+    // directly instead of ptyProcess.kill(), which would also fork a helper to
+    // enumerate the console process list and then TerminateProcess a pid that
+    // ClosePseudoConsole has already freed for reuse. See #11303.
+    mockPtyNativeKill = vi.fn();
+    mockConoutWorkerDispose = vi.fn();
+    (mockPtyProcess as unknown as { _agent: Record<string, unknown> })._agent =
+      {
+        _pty: 777,
+        _useConptyDll: false,
+        _ptyNative: { kill: mockPtyNativeKill },
+        _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
+      };
     // node-pty's onData/onExit return IDisposable; the production
     // background-promote path calls .dispose() on those handles to detach
     // its listeners cleanly. Mock them to return a disposable stub so the
@@ -1842,23 +1857,27 @@ describe('ShellExecutionService', () => {
   });
 
   describe('Windows ConPTY host release (#11303)', () => {
-    // taskkill owns the shell process; the pseudo-console host
-    // (`conhost.exe --headless`) is bound to the HPCON handle we hold and is
-    // released only by ptyProcess.kill(). node-pty does NOT release it on a
-    // natural shell exit, so before this fix every completed tool call orphaned
-    // one ~8 MB conhost for the lifetime of the CLI — hundreds of processes and
-    // gigabytes of RAM over a workday. See #11303.
+    // A finished PTY leaves two Windows resources behind: the ConPTY host
+    // process (`conhost.exe --headless`) and the worker thread node-pty runs to
+    // read the conout pipe. node-pty releases neither on a natural shell exit,
+    // so before this fix every completed tool call orphaned both — the reporter
+    // measured 347 conhosts against 353 threads in the parent.
+    //
+    // The release deliberately does NOT go through ptyProcess.kill(): that also
+    // forks a helper to enumerate the console process list and, when the shell
+    // has already exited (the healthy path), falls back after 5s to
+    // TerminateProcess on a pid ClosePseudoConsole just freed for reuse — the
+    // #6067 collateral-kill mode, on every tool call.
 
     beforeEach(() => {
       mockCpSpawn.mockReturnValue(new EventEmitter());
       mockSpawnSync.mockReturnValue({ status: 0 });
     });
 
-    it('releases the ConPTY host on a clean win32 completion (the leaking path)', async () => {
+    it('releases host and conout worker on a clean win32 completion (the leaking path)', async () => {
       mockPlatform.mockReturnValue('win32');
       // The shell exited cleanly: isPtyActive is false, so the taskkill reap is
-      // (correctly) skipped — and that is exactly the path that leaked, because
-      // nothing then closed the pseudo-console.
+      // (correctly) skipped — and that is exactly the path that leaked.
       mockProcessKill.mockImplementation(
         (_pid: number, signal?: string | number) => {
           if (signal === 0) {
@@ -1880,14 +1899,17 @@ describe('ShellExecutionService', () => {
           expect.anything(),
           HIDDEN_WINDOW,
         );
-        // ...but the pseudo-console host is still released.
-        expect(mockPtyProcess.kill).toHaveBeenCalled();
+        // ...but both leaked resources are released.
+        expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+        expect(mockConoutWorkerDispose).toHaveBeenCalled();
+        // Never through kill(): see the block comment above.
+        expect(mockPtyProcess.kill).not.toHaveBeenCalled();
       } finally {
         mockProcessKill.mockImplementation(() => true);
       }
     });
 
-    it('releases the ConPTY host even when the shell lingers and taskkill fires', async () => {
+    it('releases them even when the shell lingers and taskkill fires', async () => {
       mockPlatform.mockReturnValue('win32');
       // Default liveness mock: node-pty reported exit but the shell lingers.
       const { result } = await simulateExecution('echo hi', (pty) => {
@@ -1900,12 +1922,13 @@ describe('ShellExecutionService', () => {
         ['/f', '/pid', String(mockPtyProcess.pid)],
         HIDDEN_WINDOW,
       );
-      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
-    it('does not fail the result when releasing the host throws', async () => {
+    it('does not fail the result when ClosePseudoConsole throws', async () => {
       mockPlatform.mockReturnValue('win32');
-      mockPtyProcess.kill.mockImplementation(() => {
+      mockPtyNativeKill.mockImplementation(() => {
         throw new Error('pty already gone');
       });
 
@@ -1915,22 +1938,37 @@ describe('ShellExecutionService', () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.error).toBeNull();
-      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      // A throwing host close must not skip the worker teardown.
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
-    it('never touches the pty host on non-win32 (no ConPTY, recycled-pid hazard)', async () => {
-      // Default platform is 'linux'. UnixTerminal.kill() signals the pid, which
-      // has normally already exited — no cleanup value, and it could reach a
-      // recycled pid.
+    it('degrades to the pre-fix leak, not to kill(), if node-pty internals change', async () => {
+      mockPlatform.mockReturnValue('win32');
+      delete (mockPtyProcess as unknown as { _agent?: unknown })._agent;
+
       const { result } = await simulateExecution('echo hi', (pty) => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
       });
 
       expect(result.exitCode).toBe(0);
+      // Leaking is recoverable by restarting the CLI; killing a recycled pid is
+      // not, so the fallback must never be ptyProcess.kill().
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
-    it('releases the ConPTY host of a promoted shell when it settles', async () => {
+    it('never touches the pty on non-win32 (no ConPTY host, no conout worker)', async () => {
+      // Default platform is 'linux'.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+      expect(mockConoutWorkerDispose).not.toHaveBeenCalled();
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('releases the host of a promoted shell when it settles', async () => {
       mockPlatform.mockReturnValue('win32');
 
       const { result } = await simulateExecution(
@@ -1945,8 +1983,8 @@ describe('ShellExecutionService', () => {
         { postPromote: { onSettle: () => {} } },
       );
       expect(result.promoted).toBe(true);
-      // Promote itself must not kill anything — the caller owns the child.
-      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+      // Promote itself must not tear anything down — the caller owns the child.
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
 
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
       const postPromoteExitHandler =
@@ -1954,9 +1992,9 @@ describe('ShellExecutionService', () => {
       postPromoteExitHandler({ exitCode: 0, signal: undefined });
 
       // The promote branch already dropped this pid from activePtys, so the
-      // process-exit cleanup() cannot reach it: settle is the last chance to
-      // release the host.
-      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      // process-exit cleanup() cannot reach it: settle is the last chance.
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
   });
 

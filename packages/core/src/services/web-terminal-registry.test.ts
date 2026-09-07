@@ -27,6 +27,8 @@ describe('WebTerminalRegistry', () => {
   let write: ReturnType<typeof vi.fn>;
   let resize: ReturnType<typeof vi.fn>;
   let kill: ReturnType<typeof vi.fn>;
+  let nativeKill: ReturnType<typeof vi.fn>;
+  let conoutDispose: ReturnType<typeof vi.fn>;
   let disposeData: ReturnType<typeof vi.fn>;
   let disposeExit: ReturnType<typeof vi.fn>;
 
@@ -35,6 +37,8 @@ describe('WebTerminalRegistry', () => {
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
+    nativeKill = vi.fn();
+    conoutDispose = vi.fn();
     disposeData = vi.fn();
     disposeExit = vi.fn();
     spawnSync.mockReturnValue({ stdout: '' });
@@ -43,6 +47,14 @@ describe('WebTerminalRegistry', () => {
       write,
       resize,
       kill,
+      // node-pty's WindowsPtyAgent internals, which releaseConPtyHost drives
+      // directly instead of going through kill(). See #11303.
+      _agent: {
+        _pty: 42,
+        _useConptyDll: false,
+        _ptyNative: { kill: nativeKill },
+        _conoutSocketWorker: { dispose: conoutDispose },
+      },
       onData: vi.fn((listener) => {
         onData = listener;
         return { dispose: disposeData };
@@ -242,7 +254,7 @@ describe('WebTerminalRegistry', () => {
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
   });
 
-  it('releases an exited session without a tree kill, closing the ConPTY host on Windows', async () => {
+  it('releases an exited session by tearing down the host, never by signalling the pid', async () => {
     const registry = new WebTerminalRegistry();
     await registry.create({
       terminalId: 'terminal:release-exited',
@@ -251,16 +263,18 @@ describe('WebTerminalRegistry', () => {
     onExit({ exitCode: 0 });
 
     expect(registry.release('terminal:release-exited')).toBe(true);
-    // The shell is gone, so nothing may signal its (possibly recycled) pid —
-    // no taskkill, no process-group kill.
+    // The shell is gone, so nothing may signal its (possibly recycled) pid:
+    // no taskkill, no process-group kill, and no ptyProcess.kill() either --
+    // node-pty's kill() force-terminates the console process list. See #11303.
     expect(spawnSync).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+    // node-pty releases neither the ConPTY host nor its conout worker on a
+    // natural exit, so the release goes at the agent directly.
     if (process.platform === 'win32') {
-      // ...but node-pty leaves the pseudo-console open on a natural exit, so
-      // the host still has to be closed or a headless conhost.exe survives for
-      // the life of the CLI. See #11303.
-      expect(kill).toHaveBeenCalledOnce();
+      expect(nativeKill).toHaveBeenCalledOnce();
+      expect(conoutDispose).toHaveBeenCalledOnce();
     } else {
-      expect(kill).not.toHaveBeenCalled();
+      expect(nativeKill).not.toHaveBeenCalled();
     }
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
