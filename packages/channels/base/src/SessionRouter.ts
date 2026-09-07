@@ -961,6 +961,9 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    if (this.toManagedMeta.delete(sessionId)) {
+      removed = true;
+    }
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -1107,6 +1110,12 @@ export class SessionRouter {
             // re-attach through the managed path: load by workspace root and
             // re-validate the daemon's worktree attestation. A superseded
             // id redirects to its replacement inside the managed load.
+            // Death-during-restore is deliberately not re-checked here the
+            // way the generic branch does: the managed load's internal
+            // window already covers the load itself, and nothing below
+            // yields between its return and the route set, so a death
+            // notification cannot interleave (run-to-completion). The next
+            // death event lands after routing and is handled normally.
             const managed = await this.loadManagedSession(
               entry.sessionId,
               entry.target,

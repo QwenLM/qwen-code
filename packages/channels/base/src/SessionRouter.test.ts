@@ -2750,6 +2750,23 @@ describe('SessionRouter', () => {
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
     });
 
+    it('clears restore metadata when the session is removed by id', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      router.activateManagedSession(
+        'worktree-session',
+        target,
+        '/tmp/worktree-task',
+        { isolation: 'worktree', workspaceCwd: '/tmp' },
+      );
+      expect(router.removeSessionId('worktree-session')).toBe(true);
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
     it('requires a workspace cwd for worktree managed sessions', () => {
       const router = new SessionRouter(bridge, '/tmp', 'user');
 
