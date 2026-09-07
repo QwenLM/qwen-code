@@ -23,10 +23,16 @@
     // on whether someone had built them recently — a missing dist used to fail
     // resolution outright and a stale one silently typechecked against old
     // declarations. nodenext does no extension or index probing on
-    // substituted paths, so every subpath the program imports needs an
-    // explicit entry naming its source file; a bare wildcard falls through to
-    // the package exports map, i.e. back to dist. Keep these in sync with the
-    // packages' exports maps. The runtime vitest aliases
+    // substituted paths, but it does substitute `.js` for `.ts`, so the
+    // `@qwen-code/qwen-code-core/*` wildcard below covers every specifier
+    // whose source file sits at the matching path under `packages/core/src/`.
+    // Explicit entries remain necessary only where the specifier does not name
+    // its file — `noFollowOpen` lives at `utils/no-follow-open.ts`, and the
+    // wildcard would map it to a file that does not exist. Do not delete those
+    // entries: since core's exports map gained a `./*` catch-all they would
+    // still resolve, silently, against dist declarations rather than failing.
+    // Keep these in sync with the packages' exports maps. The runtime vitest
+    // aliases
     // (`integration-tests/vitest.config.ts`) still point at the built SDK
     // bundle to exercise the published-bundle shape; these entries only affect
     // type resolution.
@@ -48,6 +54,25 @@
       "@qwen-code/qwen-code-core/noFollowOpen": [
         "../packages/core/src/utils/no-follow-open.ts"
       ],
+      "@qwen-code/qwen-code-core/toolWriteOrigin": [
+        "../packages/core/src/services/tool-write-origin.ts"
+      ],
+      "@qwen-code/qwen-code-core/envVarResolver": [
+        "../packages/core/src/utils/envVarResolver.ts"
+      ],
+      "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
+        "../packages/core/src/utils/conversations-runtime-marker.ts"
+      ],
+      "@qwen-code/qwen-code-core/storage": [
+        "../packages/core/src/config/storage.ts"
+      ],
+      "@qwen-code/qwen-code-core/atomicFileWrite": [
+        "../packages/core/src/utils/atomicFileWrite.ts"
+      ],
+      "@qwen-code/qwen-code-core/debugLogger": [
+        "../packages/core/src/utils/debugLogger.ts"
+      ],
+      "@qwen-code/qwen-code-core/*": ["../packages/core/src/*"],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"
       ],
