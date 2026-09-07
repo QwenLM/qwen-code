@@ -1035,6 +1035,13 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 // into an unrelated turn's context.
 const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+// `waitForActiveTurnsToSettle` polls at this interval when the active turn
+// publishes no completion promise to await — `goalProcessing` and
+// `historyMutationActive` both block `#hasActiveTurn()` without one. Yielding
+// on `setImmediate` alone would cycle the event loop as fast as it can turn and
+// burn a core for the whole wait, which on the conditional-close path is the
+// full drain budget.
+const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
@@ -2526,6 +2533,7 @@ export class Session implements SessionContext {
     if (!turn) return;
 
     this.goalProcessing = true;
+    this.#activeWorkChanged();
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
     let result: PromptResponse | undefined;
@@ -2568,6 +2576,7 @@ export class Session implements SessionContext {
       await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
@@ -4048,6 +4057,20 @@ export class Session implements SessionContext {
         holds.push({ category: 'workflow', id: task.runId });
       }
     }
+    if (
+      this.historyMutationActive ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.cronCompletion ||
+      this.notificationQueue.some((item) => item.kind === 'monitor') ||
+      (this.notificationCompletion &&
+        this.currentAgentNotificationTaskId === null &&
+        this.currentWorkflowNotificationTaskId === null &&
+        !this.currentShellNotificationActive)
+    ) {
+      holds.push({ category: 'session', id: 'session:active-turn' });
+    }
     return holds;
   }
 
@@ -4090,12 +4113,14 @@ export class Session implements SessionContext {
       });
     }
     this.historyMutationActive = true;
+    this.#activeWorkChanged();
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.historyMutationActive = false;
       if (this.disposed) return;
+      this.#activeWorkChanged();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
@@ -4154,8 +4179,15 @@ export class Session implements SessionContext {
       );
       if (pending.length > 0) {
         await Promise.allSettled(pending);
+        // Yield a macrotask, not just microtasks: these flags can be cleared by
+        // work queued behind this loop, and re-reading them before that runs
+        // would miss the settle.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } else {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, ACTIVE_TURN_POLL_INTERVAL_MS),
+        );
       }
-      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
 
@@ -8895,6 +8927,7 @@ export class Session implements SessionContext {
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     this.cronProcessing = true;
+    this.#activeWorkChanged();
 
     let resolveCompletion!: () => void;
     this.cronCompletion = new Promise<void>((resolve) => {
@@ -8913,6 +8946,7 @@ export class Session implements SessionContext {
       this.cronProcessing = false;
       resolveCompletion();
       this.cronCompletion = null;
+      this.#activeWorkChanged();
 
       void this.#drainGoalQueue();
       void this.#drainNotificationQueue();

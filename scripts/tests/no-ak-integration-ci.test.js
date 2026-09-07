@@ -173,6 +173,7 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './skill-hooks-invocation-parity.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
