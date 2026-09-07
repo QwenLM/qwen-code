@@ -671,9 +671,15 @@ Ordered steps, with the crash behavior of each:
    papered over: the barrier stays armed on it as the only fence left, the
    daemon logs the hold, and the `200` body carries
    `supersededSessionLive: true` so the caller knows the old id is still live
-   and re-attachable. Escalating to a kill is not an option — a close error
-   becomes a channel kill, and `S_new` was spawned onto that same
-   workspace-bound bridge. Set `persisted-v1` on the response and respond.
+   and re-attachable. That field is diagnostic surface only: no first-party
+   caller reads it, and the channel worker reports the same success message
+   either way, so nothing here depends on a consumer checking it — what
+   keeps the survivor out of the checkout is the armed barrier and the
+   on-disk sidecar link. It is published for external callers and operators
+   who need to tell "the old id is gone" from "still live but fenced".
+   Escalating to a kill is not an option — a close error becomes a channel
+   kill, and `S_new` was spawned onto that same workspace-bound bridge. Set
+   `persisted-v1` on the response and respond.
 
 Controlled failure at steps 3–5 (no crash) compensates by removing `S_new`
 first and then unwriting the links in the reverse of the write order —
