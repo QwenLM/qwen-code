@@ -28127,14 +28127,21 @@ describe('createAcpSessionBridge', () => {
           },
         });
         capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        // A killed child exits, and the bridge frees a generation slot
+        // only once `exited` fires — it admits no fresh work while two
+        // OS-live generations are still pending reap.
+        let resolveExited: (() => void) | undefined;
+        const exited = new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >((r) => {
+          resolveExited = () => r(undefined);
+        });
         return {
           stream: clientStream,
-          exited: new Promise<
-            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
-            | undefined
-          >(() => {}),
-          kill: async () => {},
-          killSync: () => {},
+          exited,
+          kill: async () => resolveExited!(),
+          killSync: () => resolveExited!(),
         };
       };
       const bridge = makeBridge({ channelFactory: factory });
