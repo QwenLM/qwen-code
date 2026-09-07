@@ -34,7 +34,6 @@ export const workspacePackageNames = new Set([
   '@qwen-code/sdk',
   '@qwen-code/web-shell',
   '@qwen-code/web-templates',
-  '@qwen-code/webui',
   'qwen-code-vscode-ide-companion',
 ]);
 
