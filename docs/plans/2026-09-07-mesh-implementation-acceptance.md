@@ -224,7 +224,8 @@ generic server failure.
 Deleting an idle identity now makes the hidden host forget its resident body
 and removes that deterministic body's transcript and sidecar from every host
 session directory under the selected workspace runtime; historical thread posts
-keep their name snapshot.
+keep their name snapshot. Removing the last identity also stops the owner,
+releases its workspace claim, and closes the now-unused hidden host session.
 The thread header also supports atomic human reassignment: changing the default
 assignee writes a structured assignment through admission without cancelling
 work already booked for another agent; choosing no assignee only clears the

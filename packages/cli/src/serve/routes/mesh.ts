@@ -46,7 +46,9 @@ import {
   parseMentions,
   postMessage,
   readMeshAgents,
+  readMeshWorkspace,
   readThread,
+  releaseMeshHostSession,
   removeMeshAgent,
   resolveThreadStatus,
   setMeshAgentEnabled,
@@ -835,6 +837,20 @@ export function registerMeshRoutes(
           runtime.sessionRuntimeBaseDir,
           agentId,
         );
+        if ((await readMeshAgents(runtime.workspaceCwd)).length === 0) {
+          owners.get(runtime.workspaceCwd)?.owner.stop();
+          owners.delete(runtime.workspaceCwd);
+          const workspace = await readMeshWorkspace(runtime.workspaceCwd);
+          if (workspace.hostSessionId) {
+            await releaseMeshHostSession(
+              runtime.workspaceCwd,
+              workspace.hostSessionId,
+            );
+            await runtime.bridge.closeSession(workspace.hostSessionId).catch(
+              () => {},
+            );
+          }
+        }
         res.json({
           id: agentId,
           deleted: true,
