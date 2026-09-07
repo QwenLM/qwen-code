@@ -235,14 +235,26 @@ const ENVIRONMENT_KEYS = [
         expect(constrainedConfirmation).not.toContain('CONFIRM_TAIL');
 
         ptyProcess.write('\x13');
+        // CONFIRM_TAIL only becomes visible after expansion on both legs,
+        // so it is the transition detector. The hidden-label assertion
+        // differs by rendering model: OpenTUI's fixed alt-screen viewport
+        // keeps the dialog on screen but also keeps the transcript's own
+        // capped copy of the payload (with its label) above it, so the
+        // check must be scoped to the confirmation section; ink's expanded
+        // dialog grows past the viewport and scrolls the section heading
+        // away, where the whole-screen check is the one that holds.
         const expandedScreen = await waitForScreen(
           screen,
-          (value) =>
-            value.includes('CONFIRM_TAIL') && !value.includes('lines hidden'),
+          (value) => value.includes('CONFIRM_TAIL'),
           'expanded complete content confirmation',
         );
-        expect(expandedScreen).toContain('CONFIRM_TAIL');
-        expect(expandedScreen).not.toContain('lines hidden');
+        if (pickE2eRenderer() === 'opentui') {
+          const expandedConfirmation = confirmationSection(expandedScreen);
+          expect(expandedConfirmation).toContain('CONFIRM_TAIL');
+          expect(expandedConfirmation).not.toContain('lines hidden');
+        } else {
+          expect(expandedScreen).not.toContain('lines hidden');
+        }
       } else if (scenario.verifiesShortLiteral) {
         const screenWithConfirmation = await waitForScreen(
           screen,
@@ -461,9 +473,17 @@ function runInteractive(rig: TestRig, ...args: string[]) {
   rig._interactiveOutput = '';
   const renderer = pickE2eRenderer();
   const { Terminal } = xtermHeadless;
+  // OpenTUI needs a tall viewport for the long-confirmation scenario: its
+  // expand guard only opens ctrl-s once the expanded tail window (height -
+  // 20 reserve rows) reveals more rows than the collapsed head window
+  // (fixed 20), and the tail must hold the whole payload for the expanded
+  // view to be label-free. Ink derives its cap from terminal height, so at
+  // 80 rows its collapsed body never bounds and the bounded-view oracle
+  // would not trigger — keep ink at its historical 38 rows.
+  const rows = renderer === 'opentui' ? 80 : 38;
   const terminal = new Terminal({
     cols: 110,
-    rows: 38,
+    rows,
     scrollback: 1000,
     allowProposedApi: true,
   });
@@ -474,7 +494,7 @@ function runInteractive(rig: TestRig, ...args: string[]) {
     {
       name: 'xterm-color',
       cols: 110,
-      rows: 38,
+      rows,
       cwd: rig.testDir!,
       env: {
         ...process.env,
