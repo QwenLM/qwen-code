@@ -288,6 +288,44 @@ describe('AcpConnection child exit cleanup', () => {
     }
   });
 
+  it('a superseded child exiting does not tear down its replacement', () => {
+    // disconnect() now lets the CLI wind down on its own, so a superseded child
+    // can still be exiting after connect() installed its replacement. An exit
+    // handler keyed only on `this.child` would null out the live connection.
+    let exitHandler:
+      | ((code: number | null, signal: string | null) => void)
+      | undefined;
+    const oldChild = createMockChild({
+      on: vi.fn((event: string, listener: unknown) => {
+        if (event === 'exit') {
+          exitHandler = listener as (
+            code: number | null,
+            signal: string | null,
+          ) => void;
+        }
+      }),
+    });
+    const conn = createConnection({ child: oldChild });
+    const acpConn = conn as unknown as AcpConnection;
+    const onDisconnected = vi.fn();
+    acpConn.onDisconnected = onDisconnected;
+
+    // Only the listener wiring matters here; the rest of the setup (its 1s
+    // settle, the web-stream conversion) has nothing to assert on these mocks.
+    void (conn as unknown as { setupChildProcessHandlers: () => Promise<void> })
+      .setupChildProcessHandlers()
+      .catch(() => {});
+
+    // connect() has since replaced the child.
+    const newChild = createMockChild();
+    conn.child = newChild;
+
+    exitHandler?.(0, null);
+
+    expect(conn.child).toBe(newChild);
+    expect(onDisconnected).not.toHaveBeenCalled();
+  });
+
   it('disconnect does not force-kill a CLI that exited on its own', () => {
     vi.useFakeTimers();
     try {

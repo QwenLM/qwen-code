@@ -151,13 +151,19 @@ export class AcpConnection {
   private async setupChildProcessHandlers(): Promise<void> {
     let spawnError: Error | null = null;
     const stderrChunks: string[] = [];
+    // Bind the handlers below to THIS child. `disconnect()` now lets the CLI
+    // wind down on its own, so a superseded child can still be exiting while
+    // `connect()` has already installed its replacement — and an exit handler
+    // that only tested `this.child` would then tear down the live connection
+    // and report it as disconnected.
+    const ownChild = this.child!;
 
     let rejectOnExit: ((error: Error) => void) | null = null;
     const processExitPromise = new Promise<never>((_resolve, reject) => {
       rejectOnExit = reject;
     });
 
-    this.child!.stderr?.on('data', (data: Buffer) => {
+    ownChild.stderr?.on('data', (data: Buffer) => {
       const message = data.toString();
       stderrChunks.push(message);
       if (
@@ -170,11 +176,11 @@ export class AcpConnection {
       }
     });
 
-    this.child!.on('error', (error: Error) => {
+    ownChild.on('error', (error: Error) => {
       spawnError = error;
     });
 
-    this.child!.on('exit', (code: number | null, signal: string | null) => {
+    ownChild.on('exit', (code: number | null, signal: string | null) => {
       logger.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
@@ -191,7 +197,7 @@ export class AcpConnection {
         ),
       );
 
-      if (this.child) {
+      if (this.child === ownChild) {
         this.sdkConnection = null;
         this.sessionId = null;
         this.child = null;
