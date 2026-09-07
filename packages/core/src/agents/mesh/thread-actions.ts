@@ -196,8 +196,7 @@ export async function postMessageInTransaction(
     id: generateMessageId(),
     sequence: current.nextMessageSequence,
     authorKind:
-      input.authorKind ??
-      (input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent'),
+      input.authorKind ?? (input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent'),
     from: input.from,
     authorNameSnapshot:
       input.from === HUMAN_AUTHOR_ID || input.from === SYSTEM_AUTHOR_ID
@@ -329,7 +328,17 @@ export async function postMessageInTransaction(
     dispatched.length > 0 ||
     outcomes.some((o) => o.decision.kind === 'coalesce')
   ) {
-    next = acknowledgeCloseObligations(next, storedMessage.sequence);
+    next = acknowledgeCloseObligations(
+      next,
+      storedMessage.sequence,
+      (obligation) =>
+        storedMessage.authorKind === 'human' ||
+        obligation.kind === 'failure' ||
+        obligation.kind === 'unclosed' ||
+        (storedMessage.authorKind === 'system' &&
+          storedMessage.triggerKind === 'child_report' &&
+          obligation.kind === 'waiting'),
+    );
   }
   // The status is an aggregate over every run, never last-writer-wins, and it
   // is recomputed here so an admission that books nothing cannot leave the
@@ -356,9 +365,63 @@ export async function postMessage(
   );
 }
 
-export interface StartRunInput {
+export interface ClaimRunInput {
   threadId: string;
   runId: string;
+  now?: number;
+}
+
+export interface ClaimedRun {
+  thread: Thread;
+  run: ThreadRun;
+}
+
+export async function claimRun(
+  projectRoot: string,
+  input: ClaimRunInput,
+): Promise<ClaimedRun | undefined> {
+  const now = input.now ?? Date.now();
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    const target = thread?.runs.find((run) => run.id === input.runId);
+    if (!thread || !target || target.status !== 'queued') return undefined;
+
+    const { threads, unreadable } = await transaction.listThreads();
+    if (unreadable.length > 0) {
+      throw new Error(
+        `Cannot claim a run while thread records are unreadable: ${unreadable.join(', ')}.`,
+      );
+    }
+    const alreadyLive = threads.some((candidate) =>
+      candidate.runs.some(
+        (run) =>
+          run.id !== target.id &&
+          run.agentId === target.agentId &&
+          (run.status === 'running' ||
+            run.status === 'finishing' ||
+            run.status === 'cancelling'),
+      ),
+    );
+    if (alreadyLive) return undefined;
+
+    const claimed: ThreadRun = {
+      ...target,
+      status: 'running',
+      startedAt: now,
+      attempts: target.attempts + 1,
+    };
+    const stored = await transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((run) => (run.id === target.id ? claimed : run)),
+    });
+    return { thread: stored, run: claimed };
+  });
+}
+
+export interface BindRunSessionInput {
+  threadId: string;
+  runId: string;
+  attempt: number;
   /** Session carrying the work, so the run maps to a transcript slice. */
   sessionId: string;
   /**
@@ -373,21 +436,23 @@ export interface StartRunInput {
   definitionVersion?: string;
   /** Byte offset into the agent's transcript where this run's slice begins. */
   transcriptStartOffset?: number;
-  now?: number;
 }
 
-export async function startRun(
+export async function bindRunSession(
   projectRoot: string,
-  input: StartRunInput,
+  input: BindRunSessionInput,
 ): Promise<Thread> {
-  const now = input.now ?? Date.now();
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(input.threadId);
     if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
     const target = thread.runs.find((run) => run.id === input.runId);
-    if (!target || target.status !== 'queued') {
+    if (
+      !target ||
+      target.status !== 'running' ||
+      target.attempts !== input.attempt
+    ) {
       throw new Error(
-        `Run "${input.runId}" is not queued on thread "${input.threadId}".`,
+        `Run "${input.runId}" is not the claimed attempt on thread "${input.threadId}".`,
       );
     }
     const delivery =
@@ -410,10 +475,7 @@ export async function startRun(
         run.id === input.runId
           ? {
               ...run,
-              status: 'running',
               sessionId: input.sessionId,
-              startedAt: now,
-              attempts: run.attempts + 1,
               ...(input.contextThroughSequence !== undefined
                 ? { contextThroughSequence: input.contextThroughSequence }
                 : {}),
@@ -423,6 +485,38 @@ export async function startRun(
               ...(input.transcriptStartOffset !== undefined
                 ? { transcriptStartOffset: input.transcriptStartOffset }
                 : {}),
+            }
+          : run,
+      ),
+    });
+  });
+}
+
+export async function releaseRunClaim(
+  projectRoot: string,
+  input: { threadId: string; runId: string; attempt: number },
+): Promise<void> {
+  await withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    if (!thread) return;
+    const target = thread.runs.find((run) => run.id === input.runId);
+    if (
+      !target ||
+      target.status !== 'running' ||
+      target.sessionId ||
+      target.attempts !== input.attempt
+    ) {
+      return;
+    }
+    await transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((run) =>
+        run.id === target.id
+          ? {
+              ...run,
+              status: 'queued',
+              attempts: run.attempts - 1,
+              startedAt: undefined,
             }
           : run,
       ),

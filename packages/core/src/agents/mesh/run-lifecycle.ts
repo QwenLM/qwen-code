@@ -31,6 +31,7 @@ import {
   acknowledgeCloseObligations,
   resolveThreadStatus,
 } from './thread-status.js';
+import type { MeshRunContext } from './run-context.js';
 import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
@@ -51,10 +52,8 @@ export class MeshCloseRejectedError extends Error {
 }
 
 export interface CloseRunInput {
-  threadId: string;
-  runId: string;
-  /** From the ambient frame, never from the model. */
-  agentId: string;
+  /** The ambient frame, never model input. */
+  context: MeshRunContext;
   request: RunCloseRequest;
   now?: number;
 }
@@ -63,6 +62,29 @@ export interface CloseRunResult {
   thread: Thread;
   /** Present for `blocked` and `review`, which post before they close. */
   message?: ThreadMessage;
+}
+
+export async function requireLiveRunInTransaction(
+  transaction: MeshStoreTransaction,
+  context: MeshRunContext,
+  toolName: string,
+): Promise<Thread> {
+  const thread = await transaction.readThread(context.threadId);
+  const run = thread?.runs.find((entry) => entry.id === context.runId);
+  if (
+    transaction.workspaceId !== context.workspaceId ||
+    thread?.rootThreadId !== context.rootThreadId ||
+    !run ||
+    run.agentId !== context.agentId ||
+    run.status !== 'running' ||
+    run.attempts !== context.attempt
+  ) {
+    throw new MeshCloseRejectedError(
+      'run_not_bound',
+      `${toolName}: run "${context.runId}" is no longer the active attempt on this thread.`,
+    );
+  }
+  return thread;
 }
 
 /**
@@ -160,22 +182,20 @@ export async function closeRunInTransaction(
   input: CloseRunInput,
 ): Promise<CloseRunResult> {
   const now = input.now ?? Date.now();
-  const thread = await transaction.readThread(input.threadId);
-  if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+  const { context } = input;
+  const thread = await requireLiveRunInTransaction(
+    transaction,
+    context,
+    `thread_${input.request.kind}`,
+  );
   if (thread.status === 'done') {
     throw new MeshCloseRejectedError(
       'thread_done',
-      `Thread "${input.threadId}" is done; it accepts no further work.`,
+      `Thread "${context.threadId}" is done; it accepts no further work.`,
     );
   }
 
-  const run = thread.runs.find((entry) => entry.id === input.runId);
-  if (!run || run.agentId !== input.agentId || run.status !== 'running') {
-    throw new MeshCloseRejectedError(
-      'run_not_bound',
-      `Run "${input.runId}" is not a running run of agent "${input.agentId}" on thread "${input.threadId}".`,
-    );
-  }
+  const run = thread.runs.find((entry) => entry.id === context.runId)!;
 
   if (input.request.kind === 'waiting') {
     const otherLive = thread.runs.some(
@@ -195,8 +215,8 @@ export async function closeRunInTransaction(
   }
 
   const agents = await transaction.readAgents();
-  const self = agents.find((agent) => agent.id === input.agentId);
-  const authorName = self?.name ?? input.agentId;
+  const self = agents.find((agent) => agent.id === context.agentId);
+  const authorName = self?.name ?? context.agentId;
 
   let next = thread;
   let message: ThreadMessage | undefined;
@@ -205,7 +225,7 @@ export async function closeRunInTransaction(
       next,
       {
         authorKind: 'agent',
-        from: input.agentId,
+        from: context.agentId,
         authorNameSnapshot: authorName,
         sourceRunId: run.id,
         triggerKind: `thread_${input.request.kind}`,
@@ -253,7 +273,7 @@ export async function closeRunInTransaction(
         payload: {
           event: 'blocker_raised',
           threadId: thread.id,
-          agentId: input.agentId,
+          agentId: context.agentId,
           messageId: message?.id,
         },
       },

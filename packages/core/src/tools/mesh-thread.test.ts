@@ -13,6 +13,7 @@ import { Storage } from '../config/storage.js';
 import type { Config } from '../config/config.js';
 import {
   createThread,
+  readMeshWorkspace,
   readThread,
   updateMeshAgents,
   writeThread,
@@ -37,6 +38,7 @@ const OFF: MeshAgent = {
   enabled: false,
   createdAt: 1,
 };
+let workspaceId: string;
 
 const config = { getProjectRoot: () => PROJECT_ROOT } as unknown as Config;
 
@@ -70,7 +72,7 @@ async function seedThread(overrides: Partial<Thread> = {}): Promise<Thread> {
 
 function frame(thread: Thread, overrides: Partial<MeshRunContext> = {}) {
   return {
-    workspaceId: 'ws_1',
+    workspaceId,
     agentId: ALICE.id,
     runId: 'rn_alice',
     threadId: thread.id,
@@ -87,6 +89,7 @@ describe('mesh thread tools', () => {
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mesh-tools-'));
     Storage.setRuntimeBaseDir(runtimeDir);
     await updateMeshAgents(PROJECT_ROOT, () => [ALICE, BOB, OFF]);
+    workspaceId = (await readMeshWorkspace(PROJECT_ROOT)).workspaceId;
   });
 
   afterEach(async () => {
@@ -161,7 +164,7 @@ describe('mesh thread tools', () => {
         .execute(new AbortController().signal),
     );
 
-    expect(result.error?.message).toMatch(/no longer running on this thread/);
+    expect(result.error?.message).toMatch(/no longer the active attempt/);
   });
 
   // The failure this design exists to prevent: one body, many threads, and a

@@ -138,7 +138,7 @@ describe('resolveThreadStatus', () => {
     });
     expect(resolve(failed).status).toBe('blocked');
 
-    const afterBooking = acknowledgeCloseObligations(failed, 2);
+    const afterBooking = acknowledgeCloseObligations(failed, 2, () => true);
     const withReview = {
       ...afterBooking,
       runs: [

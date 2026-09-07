@@ -25,6 +25,7 @@ import type { Config } from '../config/config.js';
 import {
   closeRun,
   MeshCloseRejectedError,
+  requireLiveRunInTransaction,
 } from '../agents/mesh/run-lifecycle.js';
 import {
   createThreadInTransaction,
@@ -34,45 +35,13 @@ import {
   withMeshStoreTransaction,
 } from '../agents/mesh/mesh-store.js';
 import {
-  postMessage,
   postMessageInTransaction,
   SYSTEM_AUTHOR_ID,
 } from '../agents/mesh/thread-actions.js';
 import { requireMeshRunContext } from '../agents/mesh/run-context.js';
 import { mentionToken } from '../agents/mesh/mentions.js';
-import type { MeshRunContext } from '../agents/mesh/run-context.js';
-import type { Thread } from '../agents/mesh/types.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-
-/**
- * Confirms the ambient frame still names a live run of this agent on this
- * thread before anything is written.
- *
- * The frame says what the dispatcher intended; the store says what is still
- * true. They diverge after a cancellation, a sweeper revival, or a replayed
- * turn, and acting on the stale one would post into work that has already
- * been accounted for.
- */
-async function requireLiveRun(
-  config: Config,
-  toolName: string,
-): Promise<{ context: MeshRunContext; thread: Thread }> {
-  const context = requireMeshRunContext(toolName);
-  const thread = await readThread(config.getProjectRoot(), context.threadId);
-  if (!thread) {
-    throw new Error(
-      `${toolName}: thread "${context.threadId}" no longer exists.`,
-    );
-  }
-  const run = thread.runs.find((entry) => entry.id === context.runId);
-  if (!run || run.agentId !== context.agentId || run.status !== 'running') {
-    throw new Error(
-      `${toolName}: run "${context.runId}" is no longer running on this thread; it may have been cancelled or already closed.`,
-    );
-  }
-  return { context, thread };
-}
 
 function ok(text: string): ToolResult {
   return { llmContent: text, returnDisplay: text };
@@ -109,14 +78,20 @@ class ThreadPostInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     try {
-      const { context } = await requireLiveRun(this.config, 'thread_post');
-      const result = await postMessage(
+      const context = requireMeshRunContext('thread_post');
+      const result = await withMeshStoreTransaction(
         this.config.getProjectRoot(),
-        context.threadId,
-        {
-          from: context.agentId,
-          sourceRunId: context.runId,
-          text: this.params.text,
+        async (transaction) => {
+          await requireLiveRunInTransaction(
+            transaction,
+            context,
+            'thread_post',
+          );
+          return postMessageInTransaction(transaction, context.threadId, {
+            from: context.agentId,
+            sourceRunId: context.runId,
+            text: this.params.text,
+          });
         },
       );
       const routed = result.outcomes
@@ -201,11 +176,9 @@ abstract class CloseInvocation<
 
   async execute(): Promise<ToolResult> {
     try {
-      const { context } = await requireLiveRun(this.config, this.toolName());
+      const context = requireMeshRunContext(this.toolName());
       await closeRun(this.config.getProjectRoot(), {
-        threadId: context.threadId,
-        runId: context.runId,
-        agentId: context.agentId,
+        context,
         request: this.request(),
       });
       return ok(this.success());
@@ -398,7 +371,7 @@ class ThreadCreateInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     try {
-      const { context } = await requireLiveRun(this.config, 'thread_create');
+      const context = requireMeshRunContext('thread_create');
       const projectRoot = this.config.getProjectRoot();
       const agents = await readMeshAgents(projectRoot);
       const assignee = this.params.assignee
@@ -421,6 +394,11 @@ class ThreadCreateInvocation extends BaseToolInvocation<
       const created = await withMeshStoreTransaction(
         projectRoot,
         async (transaction) => {
+          await requireLiveRunInTransaction(
+            transaction,
+            context,
+            'thread_create',
+          );
           const child = await createThreadInTransaction(transaction, {
             title: this.params.title,
             ...(this.params.body ? { body: this.params.body } : {}),
@@ -617,4 +595,3 @@ export const MESH_THREAD_TOOLS = [
   ThreadCreateTool,
   ThreadReadTool,
 ] as const;
-

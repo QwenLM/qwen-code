@@ -30,8 +30,10 @@ import {
 } from './mesh-store.js';
 import { finishRunInTransaction, hasLiveDescendant } from './run-lifecycle.js';
 import {
+  bindRunSession,
+  claimRun,
   postMessageInTransaction,
-  startRun,
+  releaseRunClaim,
   SYSTEM_AUTHOR_ID,
 } from './thread-actions.js';
 import type { MeshAgent, Thread, ThreadEvent, ThreadRun } from './types.js';
@@ -193,14 +195,18 @@ export async function dispatchOnce(
     }
 
     const definitionVersion = await port.definitionVersion?.(agent);
+    const claimed = await claimRun(projectRoot, {
+      threadId: thread.id,
+      runId: run.id,
+      now,
+    });
+    if (!claimed) continue;
+
     const prompt = assembleMeshPrompt({
       workspaceId: workspace.workspaceId,
       agent,
-      // `attempts` has not been incremented yet — the prompt describes the
-      // attempt about to happen, which is why the retry label reads correctly
-      // on a revived run.
-      run: { ...run, attempts: run.attempts + 1 },
-      thread,
+      run: claimed.run,
+      thread: claimed.thread,
       roster: agents,
       ...(definitionVersion ? { definitionVersion } : {}),
     });
@@ -212,20 +218,20 @@ export async function dispatchOnce(
       threadId: thread.id,
       rootThreadId: thread.rootThreadId,
       runId: run.id,
-      attempt: run.attempts + 1,
+      attempt: claimed.run.attempts,
     });
 
     if (result.status === 'started') {
-      await startRun(projectRoot, {
+      await bindRunSession(projectRoot, {
         threadId: thread.id,
         runId: run.id,
+        attempt: claimed.run.attempts,
         sessionId: result.sessionId,
         contextThroughSequence: prompt.contextThroughSequence,
         ...(definitionVersion ? { definitionVersion } : {}),
         ...(result.transcriptStartOffset !== undefined
           ? { transcriptStartOffset: result.transcriptStartOffset }
           : {}),
-        now,
       });
       records.push({ ...base, kind: 'started' });
       continue;
@@ -233,6 +239,11 @@ export async function dispatchOnce(
 
     if (result.status === 'capacity_wait') {
       // Backpressure, not failure: the run keeps its place and its attempt.
+      await releaseRunClaim(projectRoot, {
+        threadId: thread.id,
+        runId: run.id,
+        attempt: claimed.run.attempts,
+      });
       records.push({ ...base, kind: 'capacity_wait' });
       continue;
     }

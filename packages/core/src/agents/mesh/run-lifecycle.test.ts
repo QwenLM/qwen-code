@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import {
   createThread,
+  readMeshWorkspace,
   readThread,
   updateMeshAgents,
   writeThread,
@@ -30,10 +31,12 @@ import {
   type Thread,
   type ThreadRun,
 } from './types.js';
+import type { MeshRunContext } from './run-context.js';
 
 const PROJECT_ROOT = '/mesh-lifecycle-test';
 const ALICE: MeshAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 const BOB: MeshAgent = { id: 'ag_bob', name: 'bob', createdAt: 1 };
+let workspaceId: string;
 
 function run(overrides: Partial<ThreadRun> = {}): ThreadRun {
   return {
@@ -49,6 +52,21 @@ function run(overrides: Partial<ThreadRun> = {}): ThreadRun {
     queueSequence: 100,
     queuedAt: 1_000,
     attempts: 1,
+    ...overrides,
+  };
+}
+
+function context(
+  threadId: string,
+  overrides: Partial<MeshRunContext> = {},
+): MeshRunContext {
+  return {
+    workspaceId,
+    agentId: ALICE.id,
+    runId: 'rn_alice',
+    threadId,
+    rootThreadId: threadId,
+    attempt: 1,
     ...overrides,
   };
 }
@@ -82,6 +100,7 @@ describe('mesh run lifecycle', () => {
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mesh-lifecycle-'));
     Storage.setRuntimeBaseDir(runtimeDir);
     await updateMeshAgents(PROJECT_ROOT, () => [ALICE, BOB]);
+    workspaceId = (await readMeshWorkspace(PROJECT_ROOT)).workspaceId;
   });
 
   afterEach(async () => {
@@ -93,9 +112,7 @@ describe('mesh run lifecycle', () => {
     const thread = await seed();
 
     const result = await closeRun(PROJECT_ROOT, {
-      threadId: thread.id,
-      runId: 'rn_alice',
-      agentId: ALICE.id,
+      context: context(thread.id),
       request: { kind: 'blocked', question: 'which retry path?' },
     });
 
@@ -117,9 +134,7 @@ describe('mesh run lifecycle', () => {
 
     await expect(
       closeRun(PROJECT_ROOT, {
-        threadId: thread.id,
-        runId: 'rn_alice',
-        agentId: ALICE.id,
+        context: context(thread.id),
         request: { kind: 'waiting' },
       }),
     ).rejects.toThrow(MeshCloseRejectedError);
@@ -133,9 +148,7 @@ describe('mesh run lifecycle', () => {
     });
 
     const waited = await closeRun(PROJECT_ROOT, {
-      threadId: parent.id,
-      runId: 'rn_alice',
-      agentId: ALICE.id,
+      context: context(parent.id),
       request: { kind: 'waiting' },
     });
     expect(waited.thread.runs[0]?.closeKind).toBe('waiting');
@@ -161,12 +174,10 @@ describe('mesh run lifecycle', () => {
 
     await expect(
       closeRun(PROJECT_ROOT, {
-        threadId: thread.id,
-        runId: 'rn_alice',
-        agentId: BOB.id,
+        context: context(thread.id, { agentId: BOB.id }),
         request: { kind: 'review', summary: 'done' },
       }),
-    ).rejects.toThrow(/not a running run of agent "ag_bob"/);
+    ).rejects.toThrow(/no longer the active attempt/);
   });
 
   it('discharges a peer wait so a review is not reported as blocked', async () => {
@@ -183,9 +194,7 @@ describe('mesh run lifecycle', () => {
     });
 
     const closed = await closeRun(PROJECT_ROOT, {
-      threadId: thread.id,
-      runId: 'rn_bob',
-      agentId: BOB.id,
+      context: context(thread.id, { agentId: BOB.id, runId: 'rn_bob' }),
       request: { kind: 'review', summary: 'the flake is the retry path' },
     });
     expect(
@@ -226,9 +235,7 @@ describe('mesh run lifecycle', () => {
     });
 
     await closeRun(PROJECT_ROOT, {
-      threadId: created.id,
-      runId: 'rn_alice',
-      agentId: ALICE.id,
+      context: context(created.id, { rootThreadId: parent.id }),
       request: { kind: 'review', summary: 'root cause found' },
     });
     const finished = await finish(created.id, 'rn_alice', {
@@ -267,9 +274,7 @@ describe('mesh run lifecycle', () => {
 
     await expect(
       closeRun(PROJECT_ROOT, {
-        threadId: thread.id,
-        runId: 'rn_alice',
-        agentId: ALICE.id,
+        context: context(thread.id),
         request: { kind: 'review', summary: 'late' },
       }),
     ).rejects.toThrow(/is done/);
@@ -327,9 +332,7 @@ describe('mesh run lifecycle', () => {
     });
 
     await closeRun(PROJECT_ROOT, {
-      threadId: thread.id,
-      runId: 'rn_alice',
-      agentId: ALICE.id,
+      context: context(thread.id),
       request: { kind: 'review', summary: 'my part is done' },
     });
     const finished = await finish(thread.id, 'rn_alice', {

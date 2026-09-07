@@ -944,6 +944,7 @@ async function writeThreadUnlocked(
 
 export interface MeshStoreTransaction {
   readonly projectRoot: string;
+  readonly workspaceId: string;
   readAgents(): Promise<MeshAgent[]>;
   writeAgents(agents: readonly MeshAgent[]): Promise<void>;
   readThread(threadId: string): Promise<Thread | undefined>;
@@ -961,6 +962,7 @@ function makeTransaction(
   let workspace = initialWorkspace;
   return {
     projectRoot,
+    workspaceId: workspace.workspaceId,
     readAgents: () => readAgentsUnlocked(projectRoot),
     writeAgents: (agents) => writeAgentsUnlocked(projectRoot, agents),
     readThread: (threadId) => readThreadUnlocked(projectRoot, threadId),

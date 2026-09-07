@@ -13,6 +13,7 @@ import { Storage } from '../../config/storage.js';
 import {
   createThread,
   listThreads,
+  readMeshWorkspace,
   readThread,
   updateMeshAgents,
   writeThread,
@@ -38,6 +39,7 @@ import {
 const PROJECT_ROOT = '/mesh-dispatch-test';
 const ALICE: MeshAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 const BOB: MeshAgent = { id: 'ag_bob', name: 'bob', createdAt: 1 };
+let workspaceId: string;
 
 function run(overrides: Partial<ThreadRun> = {}): ThreadRun {
   return {
@@ -167,6 +169,7 @@ describe('dispatchOnce', () => {
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mesh-dispatch-'));
     Storage.setRuntimeBaseDir(runtimeDir);
     await updateMeshAgents(PROJECT_ROOT, () => [ALICE, BOB]);
+    workspaceId = (await readMeshWorkspace(PROJECT_ROOT)).workspaceId;
   });
 
   afterEach(async () => {
@@ -295,9 +298,14 @@ describe('dispatchOnce', () => {
       runs: [run({ id: 'rn_child', status: 'running', attempts: 1 })],
     });
     await closeRun(PROJECT_ROOT, {
-      threadId: created.id,
-      runId: 'rn_child',
-      agentId: ALICE.id,
+      context: {
+        workspaceId,
+        agentId: ALICE.id,
+        runId: 'rn_child',
+        threadId: created.id,
+        rootThreadId: parent.id,
+        attempt: 1,
+      },
       request: { kind: 'review', summary: 'root cause found' },
     });
     await withMeshStoreTransaction(PROJECT_ROOT, (transaction) =>

@@ -53,11 +53,7 @@ export const LIVE_RUN_STATUSES = new Set([
  * died never reached a closing tool, so it has no `closeKind` to read.
  */
 export type CloseObligationKind =
-  | 'blocked'
-  | 'failure'
-  | 'unclosed'
-  | 'waiting'
-  | 'review';
+  'blocked' | 'failure' | 'unclosed' | 'waiting' | 'review';
 
 export interface CloseObligation {
   runId: string;
@@ -242,18 +238,14 @@ export function resolveThreadStatus(
 /**
  * Discharges outstanding close obligations at a message sequence.
  *
- * `select` narrows which ones. Two callers use it today: the close path passes
- * `waiting` so a later close on the same thread releases a peer's wait, and the
- * admission path passes nothing so any successful booking releases failures and
- * unclosed returns. Whether a human reply should discharge a blocker raised by
- * an agent it did not address is §9.11 and deliberately unresolved — until it
- * is, the default discharges every outstanding obligation, and narrowing it is
- * a change to this predicate rather than to the callers.
+ * `select` narrows which ones. The close path releases peer waits; admission
+ * always releases superseded failures and unclosed returns, while the
+ * conservative §9.11 default lets only a human booking release every blocker.
  */
 export function acknowledgeCloseObligations(
   thread: Thread,
   atSequence: number,
-  select: (obligation: CloseObligation) => boolean = () => true,
+  select: (obligation: CloseObligation) => boolean,
 ): Thread {
   const outstanding = new Map(
     outstandingCloseObligations(thread)

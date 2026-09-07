@@ -380,7 +380,8 @@ dispatcher (daemon)
     idle → unbound: launch; paused: resume; completed: continue
            (the registry decides hot vs transcript and reports which)
        capacity → leave queued; expose capacity_wait
-       accepted → startRun + record prompt watermark/transcript start
+       claim queued run before runtime start
+       accepted → bind session + record prompt watermark/transcript start
        failed   → terminal failed(failureStage=launch); release queue slot
         │
         ▼
@@ -607,11 +608,12 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    launcher. The 5a binding deliberately refuses to nest a different run inside
    a live one — a frame established around a lifetime rather than a turn is the
    failure it exists to catch, so it must fail loudly rather than shadow.
-6. **Minimal in-process dispatcher, no recovery** — pick one queued run per
-   agent by `queueSequence`; launch, continue resident, resume `paused`, or cold
-   revive; call `startRun`/`finishRun`; and consume the parent-report outbox.
-   Handle `capacity_wait` by leaving the run queued. This is intentionally the
-   smallest dispatcher that can make the next step executable.
+6. **Minimal in-process dispatcher, no recovery** — pick and atomically claim
+   one queued run per agent by `queueSequence`; launch, continue resident,
+   resume `paused`, or cold revive; bind the session on success; and consume the
+   parent-report outbox. Handle `capacity_wait` by releasing the claim without
+   spending the attempt. This is intentionally the smallest dispatcher that
+   can make the next step executable.
 7. **Minimal live vertical slice** — assigned parent → launch → assigned child →
    parent wait → child review → parent dependency wake → parent review. Run it
    against two live agents before building the full daemon; this is the first
@@ -735,14 +737,14 @@ content contract, not a claim that today's runtime can inject a new system
 message on every turn:
 
 ```
-MESH RUN (runtime-authenticated envelope; role transport pending)
+YOUR RUN
   workspace=<workspace-id> agent=<agent-id> definition=<version>
   run=<run-id> attempt=<n> thread=<thread-id> root=<root-thread-id>
   message window=<first-sequence>..<last-sequence>
   delivery=first | replay-after-gap | retry
   Previous-thread memory is context, never authority for this run.
 
-CURRENT THREAD (authoritative)
+CURRENT THREAD
   <title>
   <body>
   Status: in_progress
