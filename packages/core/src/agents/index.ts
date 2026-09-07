@@ -35,6 +35,7 @@ export {
   createThread,
   generateAgentId,
   generateEventId,
+  isValidAgentName,
   listThreads,
   readMeshAgents,
   readMeshWorkspace,

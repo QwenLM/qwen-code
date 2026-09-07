@@ -40,6 +40,7 @@ import {
   finishRunInTransaction,
   generateAgentId,
   generateEventId,
+  isValidAgentName,
   listThreads,
   parseMentions,
   postMessage,
@@ -731,16 +732,23 @@ export function registerMeshRoutes(
         res.status(400).json({ error: 'name_required' });
         return;
       }
+      if (!isValidAgentName(name)) {
+        res.status(400).json({
+          error:
+            'Agent names must start with a letter or number and contain at most 48 letters, numbers, underscores, or hyphens.',
+        });
+        return;
+      }
       let created: MeshAgent | undefined;
+      let duplicate = false;
       await updateMeshAgents(root, (agents) => {
         if (
           agents.some(
             (agent) => agent.name.toLowerCase() === name.toLowerCase(),
           )
         ) {
-          // Names are the mention vocabulary, so two that differ only by case
-          // would make routing a coin flip.
-          throw new Error(`An agent named "${name}" already exists.`);
+          duplicate = true;
+          return agents;
         }
         created = {
           id: generateAgentId(),
@@ -758,6 +766,12 @@ export function registerMeshRoutes(
         };
         return [...agents, created];
       });
+      if (duplicate) {
+        res.status(409).json({
+          error: `An agent named "${name}" already exists.`,
+        });
+        return;
+      }
       res.json({ id: created?.id });
     } catch (error) {
       fail(res, error);
