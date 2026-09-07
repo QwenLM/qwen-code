@@ -33,6 +33,7 @@ const {
   renameSessionCatalog,
   refreshSessionCatalogQueries,
   useSessionCatalogPollingSpy,
+  listStandaloneSessionsPage,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -104,10 +105,18 @@ const {
   const renameSessionCatalog = vi.fn();
   const refreshSessionCatalogQueries = vi.fn();
   const useSessionCatalogPollingSpy = vi.fn();
+  const listStandaloneSessionsPage = vi
+    .fn()
+    .mockResolvedValue({ sessions: [] });
   return {
     connection: {
       status: 'connected',
       sessionId: null as string | null,
+      sessionContext: undefined as
+        | { kind: 'workspace'; cwd: string }
+        | { kind: 'standalone' }
+        | { kind: 'live' }
+        | undefined,
       workspaceCwd: '/tmp/project',
       supportedCommands: undefined as
         | { workflowsEnabled?: boolean }
@@ -131,6 +140,9 @@ const {
           }
         | undefined,
       client: {
+        listStandaloneSessionsPage,
+        archiveStandaloneSessions: archiveSessionsData,
+        unarchiveStandaloneSessions: unarchiveSessionsData,
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
           // The header actions poll git; answer as a non-git workspace.
@@ -175,12 +187,14 @@ const {
     renameSessionCatalog,
     refreshSessionCatalogQueries,
     useSessionCatalogPollingSpy,
+    listStandaloneSessionsPage,
   };
 });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => sessionActions,
+  useStreamingState: () => 'idle',
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useSessions,
@@ -423,13 +437,17 @@ function renderSidebar(
     onOpenWorkspacesOverview?: () => void;
     footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
+    onNewStandaloneSession?: () => Promise<boolean> | boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
+    onLoadStandaloneSession?: (sessionId: string) => void;
+    onStandaloneNotice?: (message: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
     lockedWorkspaceCwd?: string;
     lockedWorkspace?: {
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
     };
     showSessionSourceSwitch?: boolean;
+    showLive?: boolean;
     projectFeaturesEnabled?: boolean;
     sessionActions?: {
       items?: readonly (
@@ -459,7 +477,10 @@ function renderSidebar(
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={overrides.onNewSession ?? (() => false)}
+          onNewStandaloneSession={overrides.onNewStandaloneSession}
           onLoadSession={overrides.onLoadSession ?? (() => {})}
+          onLoadStandaloneSession={overrides.onLoadStandaloneSession}
+          onStandaloneNotice={overrides.onStandaloneNotice}
           onError={overrides.onError ?? (() => {})}
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
@@ -474,6 +495,7 @@ function renderSidebar(
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
           showSessionSourceSwitch={overrides.showSessionSourceSwitch}
+          showLive={overrides.showLive}
           projectFeaturesEnabled={overrides.projectFeaturesEnabled}
           sessionActions={overrides.sessionActions}
         />
@@ -780,6 +802,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.sessionId = null;
+  connection.sessionContext = undefined;
   connection.workspaceCwd = '/tmp/project';
   connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
@@ -789,6 +812,8 @@ beforeEach(() => {
   workspace.client.workspaceByCwd.mockReset();
   listWorkspaceSessions.mockReset();
   listWorkspaceSessions.mockResolvedValue([]);
+  listStandaloneSessionsPage.mockReset();
+  listStandaloneSessionsPage.mockResolvedValue({ sessions: [] });
   archiveSessionsData.mockReset();
   archiveSessionsData.mockResolvedValue({
     archived: [],
@@ -1634,7 +1659,7 @@ describe('WebShellSidebar workspace removal', () => {
     );
   });
 
-  it('hides workspace management navigation outside workspace contexts', async () => {
+  it('hides runtime management but keeps global workspace actions outside workspace contexts', async () => {
     connection.capabilities = {
       ...capabilities,
       features: [...capabilities.features, 'session_organization'],
@@ -1664,14 +1689,12 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('button[aria-label="Plugins"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
-    // These open a project panel or dialog that only renders inside a
-    // workspace context, so offering them here would be a dead click.
     expect(
       container.querySelector('button[aria-label="Add workspace"]'),
-    ).toBeNull();
+    ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="manage-workspaces"]'),
-    ).toBeNull();
+    ).not.toBeNull();
     expect(workspaceGit).not.toHaveBeenCalled();
   });
 
@@ -4454,26 +4477,43 @@ describe('WebShellSidebar goals entry', () => {
 });
 
 describe('WebShellSidebar workflows entry', () => {
-  it('opens the workflow runs page from primary navigation', () => {
-    const onOpenWorkflows = vi.fn();
-    workspace.capabilities = {
-      ...capabilities,
-      workspaces: capabilities.workspaces.map((entry) =>
-        entry.primary ? { ...entry, workflowsEnabled: true } : entry,
-      ),
-    };
-    connection.capabilities = workspace.capabilities;
-    connection.supportedCommands = { workflowsEnabled: false };
-    renderSidebar({ onOpenWorkflows });
-    const button = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Workflows"]',
-    );
-    expect(button).not.toBeNull();
-
-    click(button!);
-
-    expect(onOpenWorkflows).toHaveBeenCalledTimes(1);
-  });
+  it.each(['draft', 'standalone', 'live', 'workspace', 'legacy'] as const)(
+    'uses the project or session Workflows capability for %s',
+    (context) => {
+      const onOpenWorkflows = vi.fn();
+      workspace.capabilities = {
+        ...capabilities,
+        workspaces: capabilities.workspaces.map((entry) =>
+          entry.primary ? { ...entry, workflowsEnabled: true } : entry,
+        ),
+      };
+      connection.capabilities = workspace.capabilities;
+      connection.supportedCommands = { workflowsEnabled: false };
+      if (context !== 'draft') {
+        connection.sessionId = `${context}-session`;
+        if (context !== 'legacy') {
+          connection.sessionContext =
+            context === 'workspace'
+              ? { kind: 'workspace', cwd: '/tmp/project' }
+              : { kind: context };
+        }
+        if (context === 'standalone' || context === 'live') {
+          connection.workspaceCwd = '';
+        }
+      }
+      renderSidebar({ onOpenWorkflows });
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Workflows"]',
+      );
+      if (context === 'workspace' || context === 'legacy') {
+        expect(button).toBeNull();
+        return;
+      }
+      expect(button).not.toBeNull();
+      click(button!);
+      expect(onOpenWorkflows).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('hides workflows when the current session has not enabled them', () => {
     renderSidebar();
@@ -5771,7 +5811,7 @@ describe('WebShellSidebar session list notices', () => {
     expect(container.textContent).not.toContain('Failed to load sessions');
   });
 
-  it('shows the loading notice until the first page settles', async () => {
+  it('loads the first page silently', async () => {
     active.sessions = [];
     active.loading = true;
     useSessions.mockImplementation((options?: { archiveState?: string }) => {
@@ -5782,7 +5822,7 @@ describe('WebShellSidebar session list notices', () => {
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
-    expect(container.textContent).toContain('Loading sessions...');
+    expect(container.textContent).not.toContain('Loading sessions...');
   });
 
   it('keeps the settled empty notice while a background refresh is in flight', async () => {
@@ -5832,6 +5872,25 @@ describe('WebShellSidebar session list notices', () => {
 });
 
 describe('WebShellSidebar Live group', () => {
+  it('hides Live sessions by default', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    renderSidebar({
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+
+    expect(container.textContent).not.toContain('Live');
+    expect(listWorkspaceSessions).not.toHaveBeenCalledWith(
+      liveWorkspace.cwd,
+      expect.anything(),
+    );
+  });
+
   it('shows Live sessions without exposing the backing Conversations workspace', async () => {
     enableChannelOrganization();
     const liveWorkspace: DaemonWorkspaceCapability = {
@@ -5848,6 +5907,7 @@ describe('WebShellSidebar Live group', () => {
         : [],
     );
     renderSidebar({
+      showLive: true,
       workspaces: [...capabilities.workspaces, liveWorkspace],
     });
 
@@ -5930,6 +5990,7 @@ describe('WebShellSidebar pinned live session rows', () => {
     });
 
     renderSidebar({
+      showLive: true,
       workspaces: [...capabilities.workspaces, liveWorkspace],
       sessionActions: { items: ['rename'], inlineItems: ['rename'] },
     });
@@ -6265,7 +6326,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
 });
 
 describe('WebShellSidebar manage workspaces entry', () => {
-  it('opens the Workspaces overview from the end of the Projects section', async () => {
+  it('opens the Workspaces overview from the Projects header', async () => {
     const onOpenWorkspacesOverview = vi.fn();
     renderSidebar({ onOpenWorkspacesOverview });
     await act(async () => {
@@ -6275,7 +6336,8 @@ describe('WebShellSidebar manage workspaces entry', () => {
       '[data-testid="manage-workspaces"]',
     );
     expect(entry).not.toBeNull();
-    expect(entry!.textContent).toContain('Manage workspaces');
+    expect(entry!.getAttribute('aria-label')).toBe('Manage workspaces…');
+    expect(entry!.closest('[class*="projectsHeader"]')).not.toBeNull();
     await act(async () => {
       entry!.click();
     });
@@ -6350,5 +6412,452 @@ describe('WebShellSidebar manage workspaces entry', () => {
     expect(
       container.querySelector('[data-testid="manage-workspaces"]'),
     ).toBeNull();
+  });
+});
+
+describe('WebShellSidebar standalone grouping', () => {
+  it('hides standalone UI when the daemon does not advertise it', () => {
+    const unsupportedCapabilities = {
+      ...capabilities,
+      features: ['workspace_qualified_rest_core'],
+    };
+    connection.capabilities = unsupportedCapabilities;
+    workspace.capabilities = unsupportedCapabilities;
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain('Archived');
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+  });
+
+  it('keeps project lists mounted while Projects is collapsed', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await vi.waitFor(() =>
+      expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1),
+    );
+    const projects = container.querySelector<HTMLButtonElement>(
+      'button[class*="projectsHeaderToggle"]',
+    )!;
+
+    act(() => projects.click());
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).not.toBeNull();
+    act(() => projects.click());
+
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes both standalone groups after archive and restore', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    const sessionId = 'standalone-moving';
+    let isArchived = false;
+    listStandaloneSessionsPage.mockImplementation(
+      async ({ archiveState }: { archiveState: string }) => ({
+        sessions:
+          archiveState === (isArchived ? 'archived' : 'active')
+            ? [
+                {
+                  sessionId,
+                  workspaceCwd: `/private/standalone/${sessionId}`,
+                  displayName: 'Moving conversation',
+                  sourceType: 'standalone',
+                  context: { kind: 'standalone' },
+                  isArchived,
+                },
+              ]
+            : [],
+      }),
+    );
+    archiveSessionsData.mockResolvedValue({
+      archived: [sessionId],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
+    unarchiveSessionsData.mockResolvedValue({
+      unarchived: [sessionId],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    });
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await expandArchived();
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Moving conversation'),
+    );
+    listStandaloneSessionsPage.mockClear();
+
+    const archiveItem = await openSessionMenuItem(
+      'Moving conversation',
+      'Archive',
+    );
+    isArchived = true;
+    await act(async () => {
+      click(archiveItem);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'active',
+        ),
+      ).toHaveLength(1);
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'archived',
+        ),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector('[data-testid="standalone-archived-group"]')
+          ?.textContent,
+      ).toContain('Moving conversation');
+      expect(
+        container.querySelector('[data-testid="standalone-active-group"]')
+          ?.textContent,
+      ).not.toContain('Moving conversation');
+    });
+
+    listStandaloneSessionsPage.mockClear();
+    const restoreItem = await openSessionMenuItem(
+      'Moving conversation',
+      'Restore',
+    );
+    isArchived = false;
+    await act(async () => {
+      click(restoreItem);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'active',
+        ),
+      ).toHaveLength(1);
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'archived',
+        ),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector('[data-testid="standalone-active-group"]')
+          ?.textContent,
+      ).toContain('Moving conversation');
+      expect(
+        container.querySelector('[data-testid="standalone-archived-group"]'),
+      ).toBeNull();
+    });
+  });
+
+  it('renders standalone chats with the shared session row', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-active';
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['details', 'archive'] },
+    });
+
+    let row: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      row = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Standalone active chat'));
+      expect(row).toBeDefined();
+      expect(row!.tabIndex).toBe(0);
+      expect(row!.getAttribute('aria-current')).toBe('page');
+      expect(
+        row!.querySelector('button[aria-label="More actions"]'),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      row?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 320));
+    });
+    const details = document.body.querySelector('[role="dialog"]');
+    expect(details?.textContent).toContain('No workspace');
+    expect(details?.textContent).not.toContain('/private/standalone');
+  });
+
+  it('puts No workspace in Projects and hides it for a locked workspace', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const group = container.querySelector(
+      '[data-testid="standalone-active-group"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group!.closest('[class*="workspaceList"]')).not.toBeNull();
+    expect(listStandaloneSessionsPage).toHaveBeenCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+    });
+
+    listStandaloneSessionsPage.mockClear();
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+  });
+
+  it('loads standalone archive inside the shared Archived section', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    listStandaloneSessionsPage.mockImplementation(
+      async ({ archiveState }: { archiveState: string }) => ({
+        sessions:
+          archiveState === 'archived'
+            ? [
+                {
+                  sessionId: 'standalone-archived',
+                  displayName: 'Archived without workspace',
+                  context: { kind: 'standalone' },
+                  isArchived: true,
+                },
+              ]
+            : [],
+      }),
+    );
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+
+    await expandArchived();
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Archived without workspace');
+    });
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group!.closest('[class*="archivedList"]')).not.toBeNull();
+  });
+
+  it('keeps the standalone archive mounted while Archived is collapsed', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    listStandaloneSessionsPage.mockImplementation(
+      async ({ archiveState }: { archiveState: string }) => ({
+        sessions:
+          archiveState === 'archived'
+            ? [
+                {
+                  sessionId: 'standalone-archived',
+                  displayName: 'Archived without workspace',
+                  context: { kind: 'standalone' },
+                  isArchived: true,
+                },
+              ]
+            : [],
+      }),
+    );
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+
+    await expandArchived();
+    await vi.waitFor(() =>
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'archived',
+        ),
+      ).toHaveLength(1),
+    );
+    await expandArchived();
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group!.closest('[hidden]')).not.toBeNull();
+
+    await expandArchived();
+    expect(
+      listStandaloneSessionsPage.mock.calls.filter(
+        ([options]) => options.archiveState === 'archived',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('groups archived rows under their workspace labels', async () => {
+    const groupedCapabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) => ({
+        ...entry,
+        displayName:
+          entry.id === 'primary'
+            ? 'Primary label'
+            : entry.id === 'secondary'
+              ? 'Secondary label'
+              : undefined,
+      })),
+    };
+    connection.capabilities = groupedCapabilities;
+    workspace.capabilities = groupedCapabilities;
+    archived.sessions.push(
+      {
+        sessionId: 'primary-archive',
+        displayName: 'Primary archived row',
+        isArchived: true,
+      },
+      {
+        sessionId: 'secondary-archive',
+        displayName: 'Secondary archived row',
+        workspaceCwd: '/tmp/other',
+        isArchived: true,
+      },
+      {
+        sessionId: 'unknown-archive',
+        displayName: 'Unknown archived row',
+        workspaceCwd: '/tmp/unregistered',
+        isArchived: true,
+      },
+    );
+    renderSidebar({ workspaces: groupedCapabilities.workspaces });
+
+    await expandArchived();
+    const sections = Array.from(container.querySelectorAll('section'));
+    const sectionFor = (label: string) =>
+      sections.find((section) =>
+        section.firstElementChild?.textContent?.includes(label),
+      );
+    expect(sectionFor('Primary label')?.textContent).toContain(
+      'Primary archived row',
+    );
+    expect(sectionFor('Primary label')?.getAttribute('aria-label')).toBe(
+      'Archived: Primary label',
+    );
+    expect(sectionFor('Secondary label')?.textContent).toContain(
+      'Secondary archived row',
+    );
+    expect(sectionFor('unregistered')?.textContent).toContain(
+      'Unknown archived row',
+    );
+  });
+
+  it('keeps archived rows visible when the daemon omits its primary cwd', async () => {
+    const capabilitiesWithoutWorkspace = {
+      ...capabilities,
+      workspaceCwd: undefined,
+      workspaces: [],
+    };
+    connection.workspaceCwd = '';
+    connection.capabilities = capabilitiesWithoutWorkspace;
+    workspace.capabilities = capabilitiesWithoutWorkspace;
+    archived.sessions.push({
+      sessionId: 'archive-without-cwd',
+      displayName: 'Archive without cwd',
+      isArchived: true,
+    });
+    renderSidebar({ workspaces: [] });
+
+    await expandArchived();
+
+    const projectGroup = container.querySelector(
+      'section[aria-label="Archived: Project"]',
+    );
+    expect(projectGroup?.textContent).toContain('Archive without cwd');
+  });
+
+  it('retries a failed standalone archive load from the shared retry', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    listStandaloneSessionsPage.mockRejectedValue(new Error('offline'));
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+
+    await expandArchived();
+    const retry = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll('button')).find(
+        (entry) =>
+          entry.textContent === 'Failed to load sessions. Click to retry.',
+      );
+      expect(button).toBeDefined();
+      return button!;
+    });
+    listStandaloneSessionsPage.mockResolvedValue({ sessions: [] });
+    const callsBeforeRetry = listStandaloneSessionsPage.mock.calls.length;
+
+    await act(async () => retry.click());
+
+    await vi.waitFor(() => {
+      expect(listStandaloneSessionsPage.mock.calls.length).toBeGreaterThan(
+        callsBeforeRetry,
+      );
+    });
   });
 });

@@ -301,7 +301,7 @@ async function selectNoWorkspaceTarget(page: Page): Promise<void> {
   await page.locator('button[aria-label="Workspace"]').click();
   await page
     .getByRole('menuitemradio', {
-      name: 'No workspace (standalone)',
+      name: 'No workspace',
       exact: true,
     })
     .click();
@@ -324,10 +324,13 @@ async function openSessionAction(
   sessionName: string,
   actionName: string,
 ): Promise<void> {
-  const row = page
-    .getByRole('button', { name: sessionName, exact: true })
-    .locator('..');
-  await row.getByRole('button', { name: 'Conversation actions' }).click();
+  const row = page.locator('[role="button"]').filter({
+    has: page.locator('[data-web-shell-session-title]', {
+      hasText: sessionName,
+    }),
+  });
+  await row.hover();
+  await row.getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: actionName, exact: true }).click();
 }
 
