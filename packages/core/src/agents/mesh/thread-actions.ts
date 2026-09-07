@@ -356,26 +356,73 @@ export async function postMessage(
   );
 }
 
+export interface StartRunInput {
+  threadId: string;
+  runId: string;
+  /** Session carrying the work, so the run maps to a transcript slice. */
+  sessionId: string;
+  /**
+   * Highest message sequence the prompt for this turn contained. Recorded on
+   * the run and committed to the agent's delivery watermark, because the
+   * initial prompt is consumed the moment the turn starts — unlike input
+   * pushed into a running turn, which is committed only when the runtime
+   * reports draining it.
+   */
+  contextThroughSequence?: number;
+  /** Content hash of the agent definition in force, for drift audit (§9.4). */
+  definitionVersion?: string;
+  /** Byte offset into the agent's transcript where this run's slice begins. */
+  transcriptStartOffset?: number;
+  now?: number;
+}
+
 export async function startRun(
   projectRoot: string,
-  threadId: string,
-  runId: string,
-  sessionId: string,
-  now = Date.now(),
+  input: StartRunInput,
 ): Promise<Thread> {
+  const now = input.now ?? Date.now();
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread) throw new Error(`No thread with id "${threadId}".`);
+    const thread = await transaction.readThread(input.threadId);
+    if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+    const target = thread.runs.find((run) => run.id === input.runId);
+    if (!target || target.status !== 'queued') {
+      throw new Error(
+        `Run "${input.runId}" is not queued on thread "${input.threadId}".`,
+      );
+    }
+    const delivery =
+      input.contextThroughSequence === undefined
+        ? thread.deliveryByAgent
+        : {
+            ...thread.deliveryByAgent,
+            [target.agentId]: {
+              committedThroughSequence: Math.max(
+                thread.deliveryByAgent[target.agentId]
+                  ?.committedThroughSequence ?? 0,
+                input.contextThroughSequence,
+              ),
+            },
+          };
     return transaction.writeThread({
       ...thread,
+      deliveryByAgent: delivery,
       runs: thread.runs.map((run) =>
-        run.id === runId && run.status === 'queued'
+        run.id === input.runId
           ? {
               ...run,
               status: 'running',
-              sessionId,
+              sessionId: input.sessionId,
               startedAt: now,
               attempts: run.attempts + 1,
+              ...(input.contextThroughSequence !== undefined
+                ? { contextThroughSequence: input.contextThroughSequence }
+                : {}),
+              ...(input.definitionVersion
+                ? { definitionVersion: input.definitionVersion }
+                : {}),
+              ...(input.transcriptStartOffset !== undefined
+                ? { transcriptStartOffset: input.transcriptStartOffset }
+                : {}),
             }
           : run,
       ),

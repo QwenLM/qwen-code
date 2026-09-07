@@ -534,6 +534,7 @@ starts an agent yet):
 | `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding       |
 | `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers        |
 | `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only           |
+| `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports   |
 
 ### 5.1 Local review correction — committed and verified
 

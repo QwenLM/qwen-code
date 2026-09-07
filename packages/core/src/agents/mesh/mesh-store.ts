@@ -1275,12 +1275,18 @@ export async function reconcileThreadOutbox(
     transaction: MeshStoreTransaction,
     event: ThreadEvent,
   ) => Promise<void>,
+  /**
+   * Which pending events this pass owns. An event no consumer claims is left
+   * pending rather than acknowledged, so a kind whose consumer does not exist
+   * yet is visibly outstanding instead of silently dropped.
+   */
+  filter: (event: ThreadEvent) => boolean = () => true,
 ): Promise<Thread> {
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     let source = await transaction.readThread(threadId);
     if (!source) throw new Error(`No thread with id "${threadId}".`);
     for (const event of source.outbox) {
-      if (event.status !== 'pending') continue;
+      if (event.status !== 'pending' || !filter(event)) continue;
       const attempted = { ...event, attempts: event.attempts + 1 };
       source = await transaction.writeThread({
         ...source,
