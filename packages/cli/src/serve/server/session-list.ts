@@ -1586,7 +1586,11 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item?.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE)
+      // Both conditions, and in this order. `item?.sourceType !== X` is true
+      // when the read found nothing, so folding the existence check into the
+      // optional chain lets a session that vanished between the search hit and
+      // this read through as an undefined summary.
+      if (item && item.sourceType !== MESH_HOST_SESSION_SOURCE_TYPE)
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
