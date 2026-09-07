@@ -30,6 +30,8 @@ interface MockGoal {
       evidenceCursor: { recordId: string | null };
       turnCount: number;
       activeTimeMs: number;
+      tokensUsed?: number;
+      tokenBudget?: number;
       createdAt: number;
       updatedAt: number;
       lastReason?: string;
@@ -200,6 +202,46 @@ describe('GoalsDialog', () => {
   it('shows no degradation notice when every session was probed', async () => {
     await mount([baseGoal()]);
     expect(document.querySelector('[data-testid="goals-dropped"]')).toBeNull();
+  });
+
+  const withSpend = (over: Partial<MockGoal['snapshot']['goal']>): MockGoal => {
+    const base = baseGoal();
+    return {
+      ...base,
+      snapshot: {
+        ...base.snapshot,
+        goal: { ...base.snapshot.goal, ...over },
+      },
+    };
+  };
+
+  it('shows spend against the budget once a turn has billed', async () => {
+    await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k / 30.0M tokens');
+  });
+
+  it('shows spend alone when the Goal has no budget', async () => {
+    await mount([withSpend({ tokensUsed: 1_234 })]);
+
+    expect(
+      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
+    ).toBe('1.2k tokens');
+  });
+
+  it('shows nothing for a Goal that has not billed a turn', async () => {
+    await mount([withSpend({ tokensUsed: 0, tokenBudget: 30_000_000 })]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
+  });
+
+  it('shows nothing for a daemon that does not report spend', async () => {
+    // An older daemon's snapshot carries neither field.
+    await mount([baseGoal()]);
+
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
   const stopped = (
