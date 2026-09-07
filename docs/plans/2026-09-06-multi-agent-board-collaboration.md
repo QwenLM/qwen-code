@@ -135,8 +135,10 @@ child completion already reports to the parent. Re-running with fresh bodies
 removed the unintended bookings and completed the loop.
 
 **Still unverified.** Running-delivery miss reconciliation, the 12-turn
-ping-pong gate, restart and stall recovery, daemon host replacement/reaper,
-bare-mode tool exposure, and notifications have not been run end to end.
+ping-pong gate, stall recovery, daemon host replacement/reaper, bare-mode tool
+exposure, and notifications have not been run end to end. Daemon restart and
+accepted-but-unconsumed replay have been observed with the same run recovering
+on attempt 2, as recorded in the acceptance document.
 Production paths now exist for correlated running delivery, delivery-race
 rebooking, one retry after restart or a three-minute no-activity stall, stale
 host replacement after a definitive resume failure, source-first cancellation,
@@ -145,6 +147,17 @@ been tested locally while the demo path is being completed. Cancellation,
 transcript slicing, blocked-question rendering, inline children, and
 deleted-agent tombstones have been exercised through the real daemon and
 browser.
+
+The first deliberate live ping-pong attempt also showed that the two settled
+default gates cannot both be reached with the current model footprint. Alice
+and Bob produced three unattended deliveries before the thread reached 428,636
+accounted tokens; the 200,000-token gate therefore pre-empted the 12-turn gate.
+Both agents did run concurrently, and a coalesced mid-run delivery was accepted
+and consumed, but the receiving model closed without producing another reply.
+This is an observed acceptance constraint, not evidence that the turn gate is
+broken. A full 12-turn runtime proof needs either a cheaper/minimal model frame
+or an explicit scenario-only token-limit override; changing the product's
+200,000-token ceiling is not implied.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,

@@ -128,6 +128,17 @@ the aggregate thread reached `in_review`. This proves the accepted direct-input
 path and concurrent agents on one shared thread; it does not prove the forced
 enqueue-miss recovery path.
 
+**Deliberate ping-pong observation (2026-09-07).** Thread
+`th_ea937a51-1e41-406c-b328-878fcab0b06e` launched Alice and Bob concurrently
+and recorded three unattended deliveries. The second Alice post coalesced into
+Bob's running attempt; its id appears in both `acceptedMessageIds` and
+`consumedMessageIds`. Bob then closed without emitting another reply. The three
+runs accounted 428,636 tokens, so the 200,000-token gate pre-empts a 12-turn
+live loop with this model footprint. The run therefore does not satisfy the
+12-turn gate. Reaching that gate without changing product semantics requires a
+minimal model frame or a scenario-only token-limit override; the ordinary
+runtime correctly keeps the settled token ceiling in force.
+
 ### Step 8 — Dispatcher reliability
 
 Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stale host-session binding replacement after a definitive resume failure; stall sweeper; full outbox replay on startup.
