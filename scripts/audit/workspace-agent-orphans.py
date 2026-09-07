@@ -17,11 +17,15 @@ SCOPE = [
     'packages/core/src/agents/workspace-agents',
     'packages/core/src/tools/thread-tools.ts',
     'packages/cli/src/serve/workspace-agents',
+    # The REST layer belongs to this subsystem too. Leaving it out meant the
+    # whole surface went unswept, which is how a baseline entry came to name a
+    # symbol the scan could not see.
+    'packages/cli/src/serve/routes/workspace-agents.ts',
 ]
 
 # Accepted: each is reachable, or deliberately kept, for the stated reason.
 BASELINE = {
-    'createWorkspaceAgentRoutes': 'route entry point; express calls it',
+    'registerWorkspaceAgentRoutes': 'route entry point; server.ts calls it',
     'startAgentHostSessionOwner': 'daemon entry point',
     'AGENTS_DISPLAY_PATH': 'user-facing path string, used in messages',
     'AGENT_NAME_PATTERN': 'consumed via isValidAgentName in the same file',
@@ -85,6 +89,12 @@ for scope in SCOPE:
             f.read_text(), re.M):
             exports.setdefault(m.group(1) or m.group(2), rel)
 
+# A baseline entry naming a symbol that no longer exists protects nothing and
+# hides that it stopped: the excuse outlives the thing it excused. This was
+# real — `createWorkspaceAgentRoutes` was baselined under a name the code has
+# never had, so the entry was inert from the day it was written.
+stale_baseline = sorted(set(BASELINE) - set(exports))
+
 orphans = [
     (n, o, len(tests[n]))
     for n, o in sorted(exports.items())
@@ -102,6 +112,14 @@ if orphans:
               (f'  <-- ALIVE ONLY IN TESTS ({nt})' if nt else '  (unused entirely)'))
 else:
     print('OK: no unexplained orphan.')
+
+if stale_baseline:
+    failed = True
+    print(f'\n{len(stale_baseline)} baseline entr(ies) naming no export:\n')
+    for name in stale_baseline:
+        print(f'  {name:<34} remove it or fix the name')
+else:
+    print('OK: every baseline entry still names a real export.')
 
 
 # --- second sweep: fields declared on a stored record that nothing uses ------
