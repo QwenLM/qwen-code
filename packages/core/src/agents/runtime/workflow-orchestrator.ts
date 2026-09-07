@@ -1907,14 +1907,6 @@ export class WorkflowOrchestrator {
           .catch((e) =>
             debugLogger.warn(`journal started-append failed: ${e}`),
           );
-        if (respawnLine) {
-          parentSandboxRef.current?.appendLog(respawnLine);
-          try {
-            emitter?.resumeRespawn?.(respawnLine);
-          } catch (e) {
-            debugLogger.warn('emitter.resumeRespawn threw:', e);
-          }
-        }
       }
       // P4b: emit dispatch-start outside the scheduler so the registry
       // sees "queued" the moment the script issued the call, not after
@@ -1972,6 +1964,14 @@ export class WorkflowOrchestrator {
                 budget.total,
                 budget.spent(),
               );
+            }
+            if (respawnLine) {
+              parentSandboxRef.current?.appendLog(respawnLine);
+              try {
+                emitter?.resumeRespawn?.(respawnLine);
+              } catch (e) {
+                debugLogger.warn('emitter.resumeRespawn threw:', e);
+              }
             }
             const result = await this.dispatch(prompt, opts, dispatchId);
             emitCompletion();
@@ -2216,12 +2216,31 @@ async function settleToNullArray(
   // consistency choice, not a script-observable one.
   if (signal?.aborted)
     throw new DOMException('Workflow run aborted.', 'AbortError');
-  const runFailure = settled.find(
-    (result) =>
-      result.status === 'rejected' &&
-      (result.reason as { __wfRunFailure?: unknown })?.__wfRunFailure === true,
-  );
-  if (runFailure?.status === 'rejected') throw runFailure.reason;
+  const visitedReasons = new WeakSet<object>();
+  const findRunFailureReason = (reason: unknown): unknown | undefined => {
+    if (reason === null || typeof reason !== 'object') return undefined;
+    if (visitedReasons.has(reason)) return undefined;
+    visitedReasons.add(reason);
+    try {
+      if ((reason as { __wfRunFailure?: unknown }).__wfRunFailure === true) {
+        return reason;
+      }
+      const errors = (reason as { errors?: unknown })?.errors;
+      if (!Array.isArray(errors)) return undefined;
+      for (const error of errors) {
+        const runFailure = findRunFailureReason(error);
+        if (runFailure !== undefined) return runFailure;
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  };
+  for (const result of settled) {
+    if (result.status !== 'rejected') continue;
+    const runFailure = findRunFailureReason(result.reason);
+    if (runFailure !== undefined) throw runFailure;
+  }
   // Errors-as-data: a rejected thunk becomes null at its index. Log the
   // discarded rejection reason at debug level so operators investigating a
   // workflow that returned unexpected nulls can disambiguate between (a) a

@@ -879,6 +879,52 @@ describe('WorkflowOrchestrator', () => {
     expect(completed).toBe(dispatched);
   });
 
+  it('reports respawns only after the slot-acquire budget gate admits them', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const { buildReplay, deriveAgentKey, deriveArgsSeed } = await import(
+      './workflow-journal.js'
+    );
+    const budget = new WorkflowBudgetImpl(100);
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(40);
+      return 'ok';
+    });
+    let key = deriveArgsSeed(undefined);
+    const priorEntries: Array<import('./workflow-journal.js').JournalEntry> =
+      [];
+    for (let i = 0; i < 10; i++) {
+      key = deriveAgentKey(key, 'q', {});
+      priorEntries.push({
+        type: 'started',
+        key,
+        agentId: String(i + 1),
+      });
+    }
+    const { journal, entries } = memoryJournal();
+    const respawns: string[] = [];
+
+    await expect(
+      orchestrator.run({
+        script: `return await parallel(Array.from({length: 10}, () => () => agent('q')));`,
+        args: undefined,
+        budget,
+        scheduler,
+        journal,
+        resumeReplay: buildReplay(priorEntries),
+        emitter: { resumeRespawn: (line) => respawns.push(line) },
+      }),
+    ).rejects.toThrow(/exceeded the token budget/);
+
+    expect(dispatchCalls).toBe(3);
+    expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
+      10,
+    );
+    expect(respawns).toHaveLength(3);
+  });
+
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
   // sites); no dedicated test — debugLogger has its own enable/disable
   // gating and a spy here would be brittle. Manual verification path:
@@ -2785,6 +2831,30 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       // 50 thunks >> window, so the window fully fills: peak === cap.
       const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
+    });
+
+    it('propagates run-level failures wrapped by Promise.any', async () => {
+      const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+      const budget = new WorkflowBudgetImpl(1);
+      budget.recordSpent(1);
+      const budgetOrchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        budgetOrchestrator.run({
+          script: `return await parallel([() => Promise.any([Promise.any([agent('x')])])]);`,
+          args: undefined,
+          budget,
+        }),
+      ).rejects.toThrow(/exceeded the token budget/);
+
+      const capOrchestrator = new WorkflowOrchestrator(async () => {
+        throw new WorkflowAgentCapExceededError(1000);
+      });
+      await expect(
+        capOrchestrator.run({
+          script: `return await parallel([() => Promise.any([agent('x')])]);`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/maximum of 1000 agent\(\) calls/);
     });
   });
 

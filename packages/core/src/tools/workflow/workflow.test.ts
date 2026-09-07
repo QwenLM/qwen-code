@@ -157,10 +157,15 @@ describe('WorkflowTool', () => {
     );
     expect(description).toMatch(/exhausted stall retries/);
     expect(description).not.toMatch(/user stopped it/);
-    expect(description).toMatch(/It THROWS only for run-level conditions/);
-    expect(description).toMatch(/run-level rejections end a `parallel\(\)`/);
+    expect(description).toMatch(/Call-shape validation failures/);
+    expect(description).toMatch(
+      /Run-level rejections no later call could survive/,
+    );
     expect(description).toMatch(
       /named, with its error, in the run's failures list/,
+    );
+    expect(description).toMatch(
+      /a `null` returned by an ordinary thunk or stage is not an agent dispatch/,
     );
   });
 
@@ -651,6 +656,11 @@ await agent('scan package.json')
       'subagent completed without calling StructuredOutput (after 2 in-conversation nudges)',
     );
     expect(scriptDescription).toContain('run-level token/agent-cap refusal');
+    expect(scriptDescription).not.toContain('Unresolved names throw');
+    expect(scriptDescription).not.toContain("'remote' throws");
+    expect(scriptDescription).toContain(
+      'Unresolved names make the admitted agent() resolve to null',
+    );
     // Both halves must agree on the agent cap, whatever it is.
     expect(tool.description).toContain(
       `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
