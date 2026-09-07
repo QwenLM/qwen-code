@@ -30,7 +30,7 @@ function toExpressPath(openApiPath: string): string {
 
 function callGate(profile: 'full' | 'minimal', reqPath: string) {
   const gate = apiProfileGate(profile);
-  const next = vi.fn<NextFunction>();
+  const next = vi.fn() as unknown as NextFunction;
   const res = {
     status: vi.fn().mockReturnThis(),
     json: vi.fn().mockReturnThis(),
