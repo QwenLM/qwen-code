@@ -89,8 +89,8 @@ import type {
 import {
   buildAgentToolConfig,
   createAgentToolInvocationGuard,
-} from './agent/capability.js';
-import { runAgentTurn } from './agent/runtime-bridge.js';
+} from './workspace-agents/capability.js';
+import { runAgentTurn } from './workspace-agents/runtime-bridge.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 

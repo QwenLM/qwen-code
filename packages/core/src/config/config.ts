@@ -2164,7 +2164,7 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
-  private readonly systemPrompt: string | undefined;
+  private systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -4401,6 +4401,34 @@ export class Config {
         );
       }
     }
+  }
+
+  /**
+   * Gives this session the persona of the workspace agent it *is*.
+   *
+   * The bridge's spawn request carries no persona, so an agent session is told
+   * only its identity and resolves the rest itself at boot. This is the one
+   * write it needs: `getMainSessionBaseSystemPrompt` already prefers
+   * `systemPrompt` over the default core prompt, so the prompt half needs no
+   * new machinery, and tools and model are applied by the caller through
+   * `deriveConfig`, which already overrides both.
+   *
+   * Refuses on anything but an agent session, and refuses a second call. A
+   * session's prompt is part of what its transcript means; changing it under a
+   * running conversation would make the record a lie.
+   */
+  applyWorkspaceAgentPersona(systemPrompt: string): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'A workspace-agent persona may only be applied to an agent session.',
+      );
+    }
+    if (this.systemPrompt !== undefined) {
+      throw new Error(
+        'This session already has a persona; it cannot be changed in place.',
+      );
+    }
+    this.systemPrompt = systemPrompt;
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {

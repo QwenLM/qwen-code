@@ -23,7 +23,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AgentRunContext } from './agent/run-context.js';
+import type { AgentRunContext } from './workspace-agents/run-context.js';
 import {
   AgentEventType,
   type AgentEventEmitter,

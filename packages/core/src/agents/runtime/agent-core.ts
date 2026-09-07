@@ -24,7 +24,7 @@ import {
   subagentNameContext,
 } from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
-import { isAgentRun } from '../agent/run-context.js';
+import { isAgentRun } from '../workspace-agents/run-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,

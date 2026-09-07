@@ -155,6 +155,7 @@ import {
   readAgentWorkspace,
   type WorkspaceAgent,
   type WorkspaceAgentLaunchResult,
+  resolveAgentPersona,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -409,7 +410,10 @@ import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge/sessionSource';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -14054,6 +14058,26 @@ class QwenAgent implements Agent {
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
+    // An agent session *is* one workspace agent. The spawn request carries no
+    // persona, so the child resolves its own from the roster the dispatcher
+    // reads, at the moment the body starts — which is what makes definition
+    // drift observable rather than frozen at spawn time.
+    if (sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE) {
+      if (!sessionSource.sourceId) {
+        throw RequestError.invalidParams(
+          undefined,
+          'An agent session must name the agent it is',
+        );
+      }
+      const persona = await resolveAgentPersona(config, sessionSource.sourceId);
+      if (persona.status !== 'resolved') {
+        // Fail the spawn rather than booting a generic assistant that would
+        // still post under this agent's name. Every guard in the capability
+        // boundary is derived from the definition this would have skipped.
+        throw RequestError.invalidParams(undefined, persona.error);
+      }
+      config.applyWorkspaceAgentPersona(persona.systemPrompt);
     }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);

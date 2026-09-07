@@ -47,36 +47,47 @@ export {
   updateThread,
   withAgentStoreTransaction,
   setAgentNotifyTarget,
-} from './agent/agent-store.js';
-export { decideDispatch, resolveTargets } from './agent/dispatch-policy.js';
-export { parseMentions } from './agent/mentions.js';
+} from './workspace-agents/store.js';
+export {
+  decideDispatch,
+  resolveTargets,
+} from './workspace-agents/dispatch-policy.js';
+export { parseMentions } from './workspace-agents/mentions.js';
 export {
   assignThread,
   createAssignedThread,
   finishRun,
   postMessage,
-} from './agent/thread-actions.js';
-export { resolveThreadStatus } from './agent/thread-status.js';
+} from './workspace-agents/thread-actions.js';
+export { resolveThreadStatus } from './workspace-agents/thread-status.js';
 export {
   finishRunInTransaction,
   hasLiveDescendant,
-} from './agent/run-lifecycle.js';
-export { createAgentDispatchPort, agentBodyId } from './agent/dispatch-port.js';
-export { dispatchOnce } from './agent/dispatcher.js';
-export { deliverNotifications, notificationText } from './agent/dispatcher.js';
-export type { AgentNotificationSender } from './agent/dispatcher.js';
-export { launchWorkspaceAgent } from './agent/launcher.js';
-export type { WorkspaceAgentLaunchResult } from './agent/launcher.js';
-export type { DispatchRecord } from './agent/dispatcher.js';
+} from './workspace-agents/run-lifecycle.js';
+export {
+  createAgentDispatchPort,
+  agentBodyId,
+} from './workspace-agents/dispatch-port.js';
+export { dispatchOnce } from './workspace-agents/dispatcher.js';
+export {
+  deliverNotifications,
+  notificationText,
+} from './workspace-agents/dispatcher.js';
+export type { AgentNotificationSender } from './workspace-agents/dispatcher.js';
+export { launchWorkspaceAgent } from './workspace-agents/launcher.js';
+export { resolveAgentPersona } from './workspace-agents/persona.js';
+export type { AgentPersonaResolution } from './workspace-agents/persona.js';
+export type { WorkspaceAgentLaunchResult } from './workspace-agents/launcher.js';
+export type { DispatchRecord } from './workspace-agents/dispatcher.js';
 export {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
   HUMAN_AUTHOR_ID,
-} from './agent/types.js';
+} from './workspace-agents/types.js';
 export type {
   WorkspaceAgent,
   AgentWorkspaceState,
   Thread,
   ThreadRun,
-} from './agent/types.js';
+} from './workspace-agents/types.js';
 export * from './tasks/types.js';

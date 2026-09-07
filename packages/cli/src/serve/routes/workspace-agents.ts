@@ -64,7 +64,7 @@ import {
   type ThreadRun,
   deliverNotifications,
 } from '@qwen-code/qwen-code-core';
-import { startAgentHostSessionOwner } from '../agent/agent-host-session.js';
+import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
   requireTrustedWorkspaceRuntime,
