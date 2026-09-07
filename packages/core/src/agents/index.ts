@@ -34,6 +34,7 @@ export {
   claimMeshHostSession,
   createThread,
   generateAgentId,
+  generateEventId,
   listThreads,
   readMeshAgents,
   readMeshWorkspace,

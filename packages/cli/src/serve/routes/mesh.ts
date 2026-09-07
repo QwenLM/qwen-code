@@ -36,6 +36,7 @@ import {
   createThread,
   decideDispatch,
   generateAgentId,
+  generateEventId,
   listThreads,
   parseMentions,
   postMessage,
@@ -795,16 +796,45 @@ export function registerMeshRoutes(
           });
           return;
         }
+        const now = Date.now();
         const updated = await updateThread(root, threadId, (thread) => ({
           ...thread,
           status: 'done',
           runs: thread.runs.map((run) =>
             run.status === 'queued'
-              ? { ...run, status: 'cancelled' as const, endedAt: Date.now() }
+              ? { ...run, status: 'cancelled' as const, endedAt: now }
               : run,
           ),
+          outbox:
+            thread.parentThreadId &&
+            !thread.outbox.some(
+              (event) =>
+                event.payload['event'] === 'child_done' &&
+                event.status === 'pending',
+            )
+              ? [
+                  ...thread.outbox,
+                  {
+                    id: generateEventId(),
+                    kind: 'parent_report' as const,
+                    payload: {
+                      event: 'child_done',
+                      threadId: thread.id,
+                      parentThreadId: thread.parentThreadId,
+                    },
+                    status: 'pending' as const,
+                    attempts: 0,
+                    createdAt: now,
+                  },
+                ]
+              : thread.outbox,
         }));
-        res.json({ id: updated.id, status: updated.status });
+        const dispatchError = await startBookedRuns(runtime);
+        res.json({
+          id: updated.id,
+          status: updated.status,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
       } catch (error) {
         fail(res, error);
       }

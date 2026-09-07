@@ -651,6 +651,22 @@ function isParentReport(event: ThreadEvent): boolean {
   return event.kind === 'parent_report';
 }
 
+function parentReportText(thread: Thread, event: ThreadEvent): string {
+  const label = `Sub-thread ${thread.id} ("${thread.title}")`;
+  switch (event.payload['event']) {
+    case 'child_blocked':
+      return `${label} is blocked: ${String(event.payload['reason'] ?? 'it needs input')}`;
+    case 'child_failed':
+      return `${label} failed: ${String(event.payload['error'] ?? 'unknown error')}`;
+    case 'child_cancelled':
+      return `${label} was cancelled.`;
+    case 'child_done':
+      return `${label} was marked done by a person.`;
+    default:
+      return `${label} is ready for review.`;
+  }
+}
+
 /**
  * Posts each pending parent report into its parent thread, exactly once.
  *
@@ -688,7 +704,7 @@ export async function deliverParentReports(
           ...(event.causedByRunId ? { sourceRunId: event.causedByRunId } : {}),
           triggerKind: 'child_report',
           originEventId: event.id,
-          text: `Sub-thread ${thread.id} ("${thread.title}") is ready for review.`,
+          text: parentReportText(thread, event),
         });
         delivered += 1;
       },

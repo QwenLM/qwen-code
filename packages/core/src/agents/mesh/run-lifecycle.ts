@@ -351,6 +351,35 @@ export async function applyAggregateStatus(
     }
   }
 
+  if (
+    resolution.status === 'blocked' &&
+    next.parentThreadId &&
+    !resolution.outstanding.some(
+      (obligation) =>
+        obligation.kind === 'failure' &&
+        obligation.acknowledgedAtSequence === undefined,
+    ) &&
+    !alreadyReported('child_blocked')
+  ) {
+    const cause = resolution.outstanding.find(
+      (obligation) => obligation.acknowledgedAtSequence === undefined,
+    );
+    next = enqueue(
+      next,
+      {
+        kind: 'parent_report',
+        ...(cause ? { causedByRunId: cause.runId } : {}),
+        payload: {
+          event: 'child_blocked',
+          threadId: next.id,
+          parentThreadId: next.parentThreadId,
+          reason: resolution.reason,
+        },
+      },
+      now,
+    );
+  }
+
   if (resolution.status === 'blocked' && !alreadyReported('thread_blocked')) {
     next = enqueue(
       next,
@@ -468,6 +497,73 @@ export async function finishRunInTransaction(
         : run,
     ),
   };
+
+  if (
+    input.outcome.status === 'failed' &&
+    !next.messages.some(
+      (message) =>
+        message.sourceRunId === target.id &&
+        message.triggerKind === 'run_failure',
+    )
+  ) {
+    const message: ThreadMessage = {
+      id: generateMessageId(),
+      sequence: next.nextMessageSequence,
+      authorKind: 'system',
+      from: 'system',
+      authorNameSnapshot: 'system',
+      sourceRunId: target.id,
+      triggerKind: 'run_failure',
+      text: `Run ${target.id} failed${input.outcome.failureStage ? ` during ${input.outcome.failureStage}` : ''}: ${input.outcome.error ?? 'unknown error'}`,
+      mentions: [],
+      outcomes: [],
+      at: now,
+    };
+    next = {
+      ...next,
+      messages: [...next.messages, message],
+      nextMessageSequence: next.nextMessageSequence + 1,
+    };
+  }
+
+  const hasLiveRun = next.runs.some(
+    (run) =>
+      run.status === 'queued' ||
+      run.status === 'running' ||
+      run.status === 'finishing' ||
+      run.status === 'cancelling',
+  );
+  const parentEvent =
+    input.outcome.status === 'failed'
+      ? 'child_failed'
+      : input.outcome.status === 'cancelled'
+        ? 'child_cancelled'
+        : undefined;
+  if (
+    next.parentThreadId &&
+    !hasLiveRun &&
+    parentEvent &&
+    !next.outbox.some(
+      (event) =>
+        event.payload['event'] === parentEvent &&
+        event.status === 'pending',
+    )
+  ) {
+    next = enqueue(
+      next,
+      {
+        kind: 'parent_report',
+        causedByRunId: target.id,
+        payload: {
+          event: parentEvent,
+          threadId: next.id,
+          parentThreadId: next.parentThreadId,
+          ...(input.outcome.error ? { error: input.outcome.error } : {}),
+        },
+      },
+      now,
+    );
+  }
 
   if (
     input.outcome.status === 'failed' &&
