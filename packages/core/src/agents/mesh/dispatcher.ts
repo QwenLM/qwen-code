@@ -82,6 +82,12 @@ export type MeshStartResult =
 
 export interface MeshDispatchPort {
   inspect(agent: MeshAgent): Promise<MeshBodyState>;
+  cancel?(input: {
+    agent: MeshAgent;
+    threadId: string;
+    runId: string;
+    attempt: number;
+  }): Promise<boolean>;
   deliver?(input: {
     agent: MeshAgent;
     prompt: string;
@@ -109,6 +115,7 @@ export type DispatchResultKind =
   | 'started'
   | 'delivered'
   | 'delivery_race'
+  | 'cancelled'
   | 'requeued'
   | 'recovered_terminal'
   | 'recovery_failed'
@@ -341,6 +348,32 @@ async function reconcileInterruptedRuns(
       if (!agent) continue;
       const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
       const state = await port.inspect(agent);
+      if (run.status === 'cancelling') {
+        if (state.kind === 'running' && !bodyCarriesRun(state, thread, run)) {
+          records.push({
+            ...base,
+            kind: 'runtime_divergence',
+            detail: state.threadId ?? state.runId ?? 'unknown running body',
+          });
+          continue;
+        }
+        await port.cancel?.({
+          agent,
+          threadId: thread.id,
+          runId: run.id,
+          attempt: run.attempts,
+        });
+        await withMeshStoreTransaction(projectRoot, (transaction) =>
+          finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: { status: 'cancelled', attempt: run.attempts },
+            now,
+          }),
+        );
+        records.push({ ...base, kind: 'cancelled' });
+        continue;
+      }
       if (bodyCarriesRun(state, thread, run)) continue;
       if (state.kind === 'running') {
         records.push({
@@ -351,18 +384,6 @@ async function reconcileInterruptedRuns(
         continue;
       }
 
-      if (run.status === 'cancelling') {
-        await withMeshStoreTransaction(projectRoot, (transaction) =>
-          finishRunInTransaction(transaction, {
-            threadId: thread.id,
-            runId: run.id,
-            outcome: { status: 'cancelled', attempt: run.attempts },
-            now,
-          }),
-        );
-        records.push({ ...base, kind: 'recovered_terminal' });
-        continue;
-      }
       const hasUndrainedInput = run.acceptedMessageIds.some(
         (id) => !run.consumedMessageIds.includes(id),
       );

@@ -134,7 +134,12 @@ after the resume promise definitively rejects, never merely on its timeout.
 Mesh reuses the existing three-minute workflow watchdog, including its
 tool-in-flight suspension, and requeues the first stalled attempt. Per the
 demo-first instruction, no local tests, lint, typecheck, build, or CI wait was
-performed for this implementation.
+performed for this implementation. Route startup now reopens owners for durable
+live work or pending outbox events. Cancellation is source-first: the run is
+persisted as `cancelling`, the dispatcher verifies the ambient runtime binding,
+then stops the body and records terminal `cancelled`; queued cancellation also
+wakes the dispatcher so the next FIFO item is not stranded. A racing runtime
+completion observes `cancelling` and also settles as `cancelled`.
 
 ### Step 9 — REST and Web Shell
 
@@ -173,9 +178,12 @@ running agent changed the row from `working` to `stopping`, reached terminal
 `cancelled`, and the thread could then be marked done. Deleting `alice-demo`
 removed it from the roster while its existing post remained attributed as
 `alice-demo (removed)`. The first-class Agents sidebar entry from #11140 and
-inline child-thread navigation were also exercised in the same browser. No
-local unit tests, lint, typecheck, or build were run; the remaining gate item is
-the branch CI visual evidence.
+inline child-thread navigation were also exercised in the same browser.
+Assigned creation now writes the new thread, assignment, admission outcome, and
+first run in one replacement; a human post also invokes the dispatcher for a
+running coalesce, not only for a newly queued run. These last production-path
+changes were inspected from source only. No local unit tests, lint, typecheck,
+build, or CI wait were run.
 
 ### Step 10 — Channel notifications
 

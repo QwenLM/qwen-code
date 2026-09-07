@@ -207,6 +207,31 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
     async inspect(agent) {
       return inspectBody(config, agent);
     },
+    async cancel({ agent, threadId, runId, attempt }) {
+      const agentId = meshBackgroundAgentId(agent);
+      const metaPath = getAgentMetaPath(
+        config.storage.getProjectDir(),
+        config.getSessionId(),
+        agentId,
+      );
+      const binding = readAgentMeta(metaPath)?.meshRun;
+      if (
+        binding?.threadId !== threadId ||
+        binding.runId !== runId ||
+        binding.attempt !== attempt
+      ) {
+        return false;
+      }
+      const registry = config.getBackgroundTaskRegistry();
+      const entry = registry.get(agentId);
+      if (entry?.status === 'paused') {
+        registry.abandon(agentId);
+        return true;
+      }
+      if (entry?.status !== 'running') return false;
+      registry.cancel(agentId, { notify: false });
+      return true;
+    },
     async deliver({ agent, prompt, deliveryId, threadId, runId, attempt }) {
       const metaPath = getAgentMetaPath(
         config.storage.getProjectDir(),

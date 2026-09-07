@@ -356,7 +356,8 @@ export async function applyAggregateStatus(
     next.parentThreadId &&
     !resolution.outstanding.some(
       (obligation) =>
-        obligation.kind === 'failure' &&
+        (obligation.kind === 'failure' ||
+          obligation.kind === 'cancelled') &&
         obligation.acknowledgedAtSequence === undefined,
     ) &&
     !alreadyReported('child_blocked')
@@ -434,6 +435,14 @@ export async function finishRunInTransaction(
   ) {
     return thread;
   }
+  const terminalStatus =
+    target.status === 'cancelling' ? 'cancelled' : input.outcome.status;
+  const terminalError =
+    terminalStatus === input.outcome.status ? input.outcome.error : undefined;
+  const terminalFailureStage =
+    terminalStatus === input.outcome.status
+      ? input.outcome.failureStage
+      : undefined;
 
   const closedThrough =
     target.status === 'finishing'
@@ -470,7 +479,7 @@ export async function finishRunInTransaction(
         run.status === 'cancelling')
         ? {
             ...run,
-            status: input.outcome.status,
+            status: terminalStatus,
             endedAt: now,
             consumedMessageIds:
               run.status === 'finishing'
@@ -485,10 +494,10 @@ export async function finishRunInTransaction(
             // `unclosed`, never as an implicit success.
             closeKind:
               run.closeKind ??
-              (input.outcome.status === 'completed' ? 'unclosed' : undefined),
-            ...(input.outcome.error ? { error: input.outcome.error } : {}),
-            ...(input.outcome.failureStage
-              ? { failureStage: input.outcome.failureStage }
+              (terminalStatus === 'completed' ? 'unclosed' : undefined),
+            ...(terminalError ? { error: terminalError } : {}),
+            ...(terminalFailureStage
+              ? { failureStage: terminalFailureStage }
               : {}),
             ...(input.outcome.transcriptEndOffset !== undefined
               ? { transcriptEndOffset: input.outcome.transcriptEndOffset }
@@ -499,7 +508,7 @@ export async function finishRunInTransaction(
   };
 
   if (
-    input.outcome.status === 'failed' &&
+    terminalStatus === 'failed' &&
     !next.messages.some(
       (message) =>
         message.sourceRunId === target.id &&
@@ -514,7 +523,7 @@ export async function finishRunInTransaction(
       authorNameSnapshot: 'system',
       sourceRunId: target.id,
       triggerKind: 'run_failure',
-      text: `Run ${target.id} failed${input.outcome.failureStage ? ` during ${input.outcome.failureStage}` : ''}: ${input.outcome.error ?? 'unknown error'}`,
+      text: `Run ${target.id} failed${terminalFailureStage ? ` during ${terminalFailureStage}` : ''}: ${terminalError ?? 'unknown error'}`,
       mentions: [],
       outcomes: [],
       at: now,
@@ -534,9 +543,9 @@ export async function finishRunInTransaction(
       run.status === 'cancelling',
   );
   const parentEvent =
-    input.outcome.status === 'failed'
+    terminalStatus === 'failed'
       ? 'child_failed'
-      : input.outcome.status === 'cancelled'
+      : terminalStatus === 'cancelled'
         ? 'child_cancelled'
         : undefined;
   if (
@@ -558,7 +567,7 @@ export async function finishRunInTransaction(
           event: parentEvent,
           threadId: next.id,
           parentThreadId: next.parentThreadId,
-          ...(input.outcome.error ? { error: input.outcome.error } : {}),
+          ...(terminalError ? { error: terminalError } : {}),
         },
       },
       now,
@@ -566,7 +575,7 @@ export async function finishRunInTransaction(
   }
 
   if (
-    input.outcome.status === 'failed' &&
+    terminalStatus === 'failed' &&
     target.attempts >= 2 &&
     !next.outbox.some(
       (event) =>
@@ -583,7 +592,7 @@ export async function finishRunInTransaction(
           event: 'run_failed_after_retry',
           threadId: next.id,
           agentId: target.agentId,
-          error: input.outcome.error,
+          error: terminalError,
         },
       },
       now,

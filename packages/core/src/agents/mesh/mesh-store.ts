@@ -1157,12 +1157,19 @@ export interface CreateThreadInput {
 /**
  * Creates a thread inside an open transaction.
  *
- * Exposed separately so a caller that must create a thread *and* do something
- * else atomically — assigning it, which books a run — can do both under one
- * lock. Two transactions would leave a crash window in which an assigned
- * sub-thread exists with nothing scheduled to work it.
+ * Use `prepareThreadInTransaction` when the first message and run must be part
+ * of the initial file replacement too.
  */
 export async function createThreadInTransaction(
+  transaction: MeshStoreTransaction,
+  input: CreateThreadInput,
+): Promise<Thread> {
+  return transaction.writeThread(
+    await prepareThreadInTransaction(transaction, input),
+  );
+}
+
+export async function prepareThreadInTransaction(
   transaction: MeshStoreTransaction,
   input: CreateThreadInput,
 ): Promise<Thread> {
@@ -1181,7 +1188,7 @@ export async function createThreadInTransaction(
       throw new Error(`No valid root thread with id "${rootThreadId}".`);
     }
   }
-  return transaction.writeThread({
+  return {
     schemaVersion: MESH_SCHEMA_VERSION,
     id,
     title: input.title,
@@ -1201,7 +1208,7 @@ export async function createThreadInTransaction(
     ...(input.assigneeAgentId
       ? { assigneeAgentId: input.assigneeAgentId }
       : {}),
-  });
+  };
 }
 
 export async function createThread(

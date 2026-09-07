@@ -28,8 +28,8 @@ import {
   requireLiveRunInTransaction,
 } from '../agents/mesh/run-lifecycle.js';
 import {
-  createThreadInTransaction,
   findAgentByName,
+  prepareThreadInTransaction,
   readMeshAgents,
   readThread,
   withMeshStoreTransaction,
@@ -399,26 +399,36 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             context,
             'thread_create',
           );
-          const child = await createThreadInTransaction(transaction, {
+          const child = await prepareThreadInTransaction(transaction, {
             title: this.params.title,
             ...(this.params.body ? { body: this.params.body } : {}),
             createdBy: context.agentId,
             parentThreadId: context.threadId,
             ...(assignee ? { assigneeAgentId: assignee.id } : {}),
           });
-          if (!assignee) return { child, booked: 0 };
+          if (!assignee) {
+            return { child: await transaction.writeThread(child), booked: 0 };
+          }
           // Assignment is a structured trigger through the same admission
           // path, so it cannot bypass budgets, the queue limit, or the
           // outcome model. It is system-authored but keeps the run that
           // caused it, so it is charged as unattended work.
-          const posted = await postMessageInTransaction(transaction, child.id, {
-            from: SYSTEM_AUTHOR_ID,
-            authorKind: 'system',
-            sourceRunId: context.runId,
-            triggerKind: 'assignment',
-            text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
-          });
-          return { child, booked: posted.dispatched.length };
+          const posted = await postMessageInTransaction(
+            transaction,
+            child.id,
+            {
+              from: SYSTEM_AUTHOR_ID,
+              authorKind: 'system',
+              sourceRunId: context.runId,
+              triggerKind: 'assignment',
+              text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
+            },
+            { initialThread: child },
+          );
+          return {
+            child: posted.thread,
+            booked: posted.dispatched.length,
+          };
         },
       );
 

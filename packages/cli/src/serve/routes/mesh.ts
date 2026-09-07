@@ -33,8 +33,10 @@ import type {
   Response,
 } from 'express';
 import {
+  createAssignedThread,
   createThread,
   decideDispatch,
+  finishRun,
   generateAgentId,
   generateEventId,
   listThreads,
@@ -222,6 +224,27 @@ export function registerMeshRoutes(
       return error instanceof Error ? error.message : String(error);
     }
   };
+
+  for (const runtime of deps.workspaceRegistry.list()) {
+    if (!runtime.trusted) continue;
+    void Promise.all([
+      readMeshAgents(runtime.workspaceCwd),
+      listThreads(runtime.workspaceCwd),
+    ])
+      .then(([agents, { threads }]) => {
+        if (
+          agents.length > 0 ||
+          threads.some(
+            (thread) =>
+              liveRunCount(thread) > 0 ||
+              thread.outbox.some((event) => event.status === 'pending'),
+          )
+        ) {
+          return dispatch(runtime);
+        }
+      })
+      .catch(() => {});
+  }
 
   app.get(`${prefix}/agents`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);
@@ -529,58 +552,75 @@ export function registerMeshRoutes(
   /**
    * Creates a thread, and starts it when it names an assignee.
    *
-   * Assignment is the trigger, so the assignee is applied at creation and a
-   * first post books the work through ordinary admission rather than through
-   * a side channel that could bypass budgets or the queue limit.
+   * Assignment is a structured first post through ordinary admission, so it
+   * cannot bypass budgets or the queue limit.
    */
-  app.post(`${prefix}/threads`, deps.mutate({ strict: true }), async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const payload = (req.body ?? {}) as {
-        title?: unknown;
-        body?: unknown;
-        assignee?: unknown;
-      };
-      const title = String(payload.title ?? '').trim();
-      if (!title) {
-        res.status(400).json({ error: 'title_required' });
-        return;
-      }
-      const agents = await readMeshAgents(root);
-      const assigneeName =
-        typeof payload.assignee === 'string'
-          ? payload.assignee.replace(/^@/, '')
-          : '';
-      const assignee = assigneeName
-        ? agents.find(
-            (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
-          )
-        : undefined;
-      if (assigneeName && !assignee) {
-        res.status(400).json({ error: 'assignee_unknown' });
-        return;
-      }
-      const thread = await createThread(root, {
-        title,
-        ...(typeof payload.body === 'string' ? { body: payload.body } : {}),
-        ...(assignee ? { assigneeAgentId: assignee.id } : {}),
-      });
-      let booked = 0;
-      if (assignee && typeof payload.body === 'string' && payload.body.trim()) {
-        const posted = await postMessage(root, thread.id, {
-          from: HUMAN_AUTHOR_ID,
-          text: payload.body,
+  app.post(
+    `${prefix}/threads`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const root = runtime.workspaceCwd;
+      try {
+        const payload = (req.body ?? {}) as {
+          title?: unknown;
+          body?: unknown;
+          assignee?: unknown;
+        };
+        const title = String(payload.title ?? '').trim();
+        if (!title) {
+          res.status(400).json({ error: 'title_required' });
+          return;
+        }
+        const agents = await readMeshAgents(root);
+        const assigneeName =
+          typeof payload.assignee === 'string'
+            ? payload.assignee.replace(/^@/, '')
+            : '';
+        const assignee = assigneeName
+          ? agents.find(
+              (agent) =>
+                agent.name.toLowerCase() === assigneeName.toLowerCase(),
+            )
+          : undefined;
+        if (assigneeName && !assignee) {
+          res.status(400).json({ error: 'assignee_unknown' });
+          return;
+        }
+        const body =
+          typeof payload.body === 'string' ? payload.body : undefined;
+        const created = assignee
+          ? await createAssignedThread(root, {
+              title,
+              ...(body !== undefined ? { body } : {}),
+              assignee,
+            })
+          : {
+              thread: await createThread(root, {
+                title,
+                ...(body !== undefined ? { body } : {}),
+              }),
+            };
+        const thread = created.thread;
+        const booked =
+          'assignment' in created
+            ? created.assignment.outcomes.filter(
+                (outcome) => outcome.decision.kind !== 'skip',
+              ).length
+            : 0;
+        const dispatchError =
+          booked > 0 ? await startBookedRuns(runtime) : undefined;
+        res.json({
+          id: thread.id,
+          booked,
+          ...(dispatchError ? { dispatchError } : {}),
         });
-        booked = posted.dispatched.length;
+      } catch (error) {
+        fail(res, error);
       }
-      const dispatchError = booked > 0 ? await startBookedRuns(runtime) : undefined;
-      res.json({ id: thread.id, booked, ...(dispatchError ? { dispatchError } : {}) });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
+    },
+  );
 
   app.post(`${prefix}/agents`, deps.mutate({ strict: true }), async (req, res) => {
     const runtime = runtimeFor(req, res);
@@ -685,53 +725,53 @@ export function registerMeshRoutes(
           return;
         }
         if (run.status === 'queued') {
-          await updateThread(runtime.workspaceCwd, threadId, (current) => ({
-            ...current,
-            runs: current.runs.map((candidate) =>
-              candidate.id === runId && candidate.status === 'queued'
-                ? {
-                    ...candidate,
-                    status: 'cancelled' as const,
-                    endedAt: Date.now(),
-                  }
-                : candidate,
-            ),
-          }));
-          res.json({ runId, cancelled: true, status: 'cancelled' });
+          await finishRun(runtime.workspaceCwd, threadId, runId, {
+            status: 'cancelled',
+            attempt: run.attempts,
+          });
+          const dispatchError = await startBookedRuns(runtime);
+          res.json({
+            runId,
+            cancelled: true,
+            status: 'cancelled',
+            ...(dispatchError ? { dispatchError } : {}),
+          });
           return;
         }
         if (run.status === 'cancelling') {
-          res.json({ runId, cancelled: true, status: 'cancelling' });
+          const dispatchError = await startBookedRuns(runtime);
+          res.json({
+            runId,
+            cancelled: true,
+            status: 'cancelling',
+            ...(dispatchError ? { dispatchError } : {}),
+          });
           return;
         }
-        if (
-          !run.sessionId ||
-          (run.status !== 'running' && run.status !== 'finishing')
-        ) {
+        if (run.status !== 'running' && run.status !== 'finishing') {
           res.status(409).json({ error: 'run_not_cancellable' });
           return;
         }
-        const result = await runtime.bridge.cancelSessionTask(
-          run.sessionId,
-          meshBackgroundAgentId({ id: run.agentId }),
-          'agent',
-        );
-        if (result.cancelled) {
-          await updateThread(runtime.workspaceCwd, threadId, (current) => ({
-            ...current,
-            runs: current.runs.map((candidate) =>
-              candidate.id === runId &&
-              (candidate.status === 'running' ||
-                candidate.status === 'finishing')
-                ? { ...candidate, status: 'cancelling' as const }
-                : candidate,
-            ),
-          }));
-        }
+        await updateThread(runtime.workspaceCwd, threadId, (current) => ({
+          ...current,
+          runs: current.runs.map((candidate) =>
+            candidate.id === runId &&
+            (candidate.status === 'running' ||
+              candidate.status === 'finishing')
+              ? { ...candidate, status: 'cancelling' as const }
+              : candidate,
+          ),
+        }));
+        const dispatchError = await startBookedRuns(runtime);
+        const settled = await readThread(runtime.workspaceCwd, threadId);
+        const status = settled?.runs.find(
+          (candidate) => candidate.id === runId,
+        )?.status;
         res.json({
           runId,
-          cancelled: result.cancelled,
-          status: result.cancelled ? 'cancelling' : run.status,
+          cancelled: status === 'cancelling' || status === 'cancelled',
+          status: status ?? run.status,
+          ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {
         fail(res, error);
@@ -759,17 +799,6 @@ export function registerMeshRoutes(
         const target = threads.find((thread) => thread.id === threadId);
         if (!target) {
           res.status(404).json({ error: 'thread_not_found' });
-          return;
-        }
-        if (
-          target.runs.some(
-            (run) =>
-              run.status === 'running' ||
-              run.status === 'finishing' ||
-              run.status === 'cancelling',
-          )
-        ) {
-          res.status(409).json({ error: 'thread_has_live_work' });
           return;
         }
         const byId = new Map(threads.map((thread) => [thread.id, thread]));
@@ -803,7 +832,9 @@ export function registerMeshRoutes(
           runs: thread.runs.map((run) =>
             run.status === 'queued'
               ? { ...run, status: 'cancelled' as const, endedAt: now }
-              : run,
+              : run.status === 'running' || run.status === 'finishing'
+                ? { ...run, status: 'cancelling' as const }
+                : run,
           ),
           outbox:
             thread.parentThreadId &&
@@ -841,43 +872,47 @@ export function registerMeshRoutes(
     },
   );
 
-  app.post(`${prefix}/threads/:id/posts`, deps.mutate({ strict: true }), async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const text = String(
-        (req.body as { text?: unknown } | undefined)?.text ?? '',
-      ).trim();
-      if (!text) {
-        res.status(400).json({ error: 'text_required' });
-        return;
+  app.post(
+    `${prefix}/threads/:id/posts`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const root = runtime.workspaceCwd;
+      try {
+        const text = String(
+          (req.body as { text?: unknown } | undefined)?.text ?? '',
+        ).trim();
+        if (!text) {
+          res.status(400).json({ error: 'text_required' });
+          return;
+        }
+        // Authorship comes from the authenticated surface. There is no field a
+        // caller can set to post as an agent.
+        const result = await postMessage(root, String(req.params['id']), {
+          from: HUMAN_AUTHOR_ID,
+          text,
+        });
+        const dispatchError =
+          result.outcomes.some((outcome) => outcome.decision.kind !== 'skip')
+            ? await startBookedRuns(runtime)
+            : undefined;
+        res.json({
+          messageId: result.message.id,
+          sequence: result.message.sequence,
+          outcomes: result.outcomes.map((outcome) => ({
+            agentName: outcome.agentName ?? outcome.agentId,
+            kind: outcome.decision.kind,
+            ...(outcome.decision.kind === 'skip'
+              ? { reason: outcome.decision.reason }
+              : {}),
+          })),
+          unknownMentions: result.unknownMentions,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
+      } catch (error) {
+        fail(res, error);
       }
-      // Authorship comes from the authenticated surface. There is no field a
-      // caller can set to post as an agent.
-      const result = await postMessage(root, String(req.params['id']), {
-        from: HUMAN_AUTHOR_ID,
-        text,
-      });
-      const dispatchError =
-        result.dispatched.length > 0
-          ? await startBookedRuns(runtime)
-          : undefined;
-      res.json({
-        messageId: result.message.id,
-        sequence: result.message.sequence,
-        outcomes: result.outcomes.map((outcome) => ({
-          agentName: outcome.agentName ?? outcome.agentId,
-          kind: outcome.decision.kind,
-          ...(outcome.decision.kind === 'skip'
-            ? { reason: outcome.decision.reason }
-            : {}),
-        })),
-        unknownMentions: result.unknownMentions,
-        ...(dispatchError ? { dispatchError } : {}),
-      });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
+    },
+  );
 }

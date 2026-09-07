@@ -1,8 +1,10 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: The two-agent happy path and Web demo are verified. Dispatcher
-> reliability is implemented but not failure-injection verified; channel
-> delivery remains.
+> Status: The two-agent happy path and Web demo are verified. Production paths
+> exist for direct delivery, recovery, startup replay, source-first
+> cancellation, and the Web surface, but the negative reliability matrix has
+> not been run. Channel delivery is blocked on the destination decision in
+> §9.12.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: §0.2 separates earlier targeted checks from the first live
 > two-agent run and from everything still unverified
@@ -134,14 +136,15 @@ removed the unintended bookings and completed the loop.
 
 **Still unverified.** Running-delivery miss reconciliation, the 12-turn
 ping-pong gate, restart and stall recovery, daemon host replacement/reaper,
-bare-mode tool exposure, visual CI, and notifications have not been run end to
-end. Production paths now exist for correlated running delivery, delivery-race
+bare-mode tool exposure, and notifications have not been run end to end.
+Production paths now exist for correlated running delivery, delivery-race
 rebooking, one retry after restart or a three-minute no-activity stall, stale
-host replacement after a definitive resume failure, and attempt-guarded late
-callbacks. They have deliberately not been tested locally while the demo path
-is being completed. Cancellation, transcript slicing, blocked-question
-rendering, inline children, and deleted-agent tombstones have been exercised
-through the real daemon and browser.
+host replacement after a definitive resume failure, source-first cancellation,
+startup replay, and attempt-guarded late callbacks. They have deliberately not
+been tested locally while the demo path is being completed. Cancellation,
+transcript slicing, blocked-question rendering, inline children, and
+deleted-agent tombstones have been exercised through the real daemon and
+browser.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -367,8 +370,10 @@ that root id.
 
 The workspace lock prevents concurrent writers; it does **not** make two JSON
 files one transaction. A thread post, its admission outcomes, and its booked run
-share one atomic thread-file replacement. Cross-file parent reports and
-notifications use durable, idempotent outbox events. Every runtime
+share one atomic thread-file replacement. For an assigned new thread, the
+thread, assignment message, outcomes, and first run are all written by that
+initial replacement, so no empty assigned thread can survive a crash. Cross-file
+parent reports and notifications use durable, idempotent outbox events. Every runtime
 `USAGE_METADATA` event upserts `(runId, attempt, cumulativeRound, usage)` on the
 source run; duplicate events replace the same entry. Admission sums
 `runs[].usageByRound` across the root's thread tree under the workspace lock
@@ -507,6 +512,10 @@ The daemon scans durable unaccepted triggers and outbox events after startup and
 periodically, so a crash between a successful file write and an in-process wake
 notification only adds latency.
 
+Cancellation intent is persisted before the runtime is touched. Once a run is
+`cancelling`, any racing completion callback resolves it as `cancelled`; a late
+normal return cannot reverse the person's stop request.
+
 ### Status transition matrix
 
 | Action                                                                                          | Allowed from           | Result and durable side effects                                                                                                            |
@@ -603,14 +612,10 @@ kept in the next isolated child PR:
 5. Stale daemon-session comments and the unreachable `explicit_routing` outcome
    were removed. The latter remains a target-resolution rule.
 
-Steps 1-3 cover admission, capability classification, and the versioned storage
-protocol. Step 4 now has a source-tested hidden host and typed launcher; it is
-not complete until the #11206 CI gate passes. Its daemon-process observation is
-deferred to step 6, where the dispatcher first gives the host owner a server
-caller. Delivery acknowledgement, assignment triggers, status commands,
-provenance producers, and transcript slices remain scheduled below; their
-storage fields exist because v1 deliberately batches the full §3 schema, not
-because those behaviors have run.
+Steps 1-9 now have production paths. The live vertical slice and Web demo prove
+the ordinary parent/child return flow; §0.2 names the recovery and delivery
+paths that still lack runtime observations. Step 10 cannot safely deliver until
+§9.12 defines a concrete channel recipient.
 
 ### 5.2 Order of work
 
@@ -674,8 +679,9 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    Shell: Alice created Bob's child, waited, received its parent report, and
    reviewed the root. The live surface now also covers cancellation,
    transcript-slice reading, blocked questions, tombstoned agent names, inline
-   children, mark-done, and the Agents sidebar entry. Branch visual CI remains
-   before this step is complete.
+   children, mark-done, and the Agents sidebar entry. Assigned creation now
+   persists its first booking atomically, human posts wake both new and
+   coalesced work, and cancel/done persist intent before touching the runtime.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate
     tripped, and terminal failure. Last because it consumes state transitions
     proven by steps 7-9.
@@ -766,18 +772,13 @@ does not hide another still running; a human reply on one child does not reset a
 sibling; parent done refuses a live child; and marking a leaf done stops its
 queued and running work.
 
-Still to build:
+Production surface status:
 
-| Piece                                                                                                       | Where                                  |
-| ----------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Run envelope, delivery state, prompt assembler, ambient run context                                         | `core/src/agents/mesh/`                |
-| Consume the integrated correlated external-input runtime contract                                           | `core/src/agents/mesh/`                |
-| Thread tools: `thread_post`, `thread_wait`, `thread_block`, `thread_review`, `thread_create`, `thread_read` | `core/src/tools/`                      |
-| Dispatcher, reconciliation, FIFO, and sweeper                                                               | `cli/src/serve/mesh/`                  |
-| REST: agents, threads, posts, runs                                                                          | `cli/src/serve/routes/mesh.ts`         |
-| Channel notifications for the four events                                                                   | reuse the channel workers              |
-| Web Shell: roster, thread list, thread view, run transcripts                                                | `web-shell/client/`                    |
-| #11140's sidebar entry, absorbed                                                                            | `web-shell/client/components/sidebar/` |
+| State | Piece |
+| --- | --- |
+| Implemented and exercised on the happy path | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Web Shell, transcript slices, cancellation UI |
+| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay |
+| Not implemented pending product decision | channel delivery for the four notification events (§9.12) |
 
 ## 6. What an agent actually receives
 

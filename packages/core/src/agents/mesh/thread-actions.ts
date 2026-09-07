@@ -7,10 +7,11 @@
 import {
   generateMessageId,
   generateRunId,
+  prepareThreadInTransaction,
   withMeshStoreTransaction,
   type MeshStoreTransaction,
 } from './mesh-store.js';
-import { parseMentions } from './mentions.js';
+import { mentionToken, parseMentions } from './mentions.js';
 import {
   applyAggregateStatus,
   finishRunInTransaction,
@@ -72,6 +73,8 @@ export interface PostMessageOptions {
   agents?: readonly MeshAgent[];
   limits?: BudgetLimits;
   now?: number;
+  /** New thread not yet written, so its first assignment lands atomically. */
+  initialThread?: Thread;
 }
 
 export function countQueuedElsewhere(
@@ -137,8 +140,12 @@ export async function postMessageInTransaction(
   input: PostMessageInput,
   options: PostMessageOptions = {},
 ): Promise<PostMessageResult> {
-  const current = await transaction.readThread(threadId);
+  const current =
+    options.initialThread ?? (await transaction.readThread(threadId));
   if (!current) throw new Error(`No thread with id "${threadId}".`);
+  if (current.id !== threadId) {
+    throw new Error(`Initial thread id does not match "${threadId}".`);
+  }
 
   if (input.originEventId) {
     const persisted = current.messages.find(
@@ -163,12 +170,18 @@ export async function postMessageInTransaction(
   }
 
   const agents = options.agents ?? (await transaction.readAgents());
-  const { threads, unreadable } = await transaction.listThreads();
+  const listed = await transaction.listThreads();
+  const { unreadable } = listed;
   if (unreadable.length > 0) {
     throw new Error(
       `Cannot admit a message while thread records are unreadable: ${unreadable.join(', ')}.`,
     );
   }
+  const threads = listed.threads.some((thread) => thread.id === current.id)
+    ? listed.threads.map((thread) =>
+        thread.id === current.id ? current : thread,
+      )
+    : [...listed.threads, current];
   const root = threads.find((thread) => thread.id === current.rootThreadId);
   if (!root || root.rootThreadId !== root.id) {
     throw new Error(
@@ -334,6 +347,7 @@ export async function postMessageInTransaction(
       storedMessage.sequence,
       (obligation) =>
         storedMessage.authorKind === 'human' ||
+        obligation.kind === 'cancelled' ||
         obligation.kind === 'failure' ||
         obligation.kind === 'unclosed' ||
         (storedMessage.authorKind === 'system' &&
@@ -364,6 +378,35 @@ export async function postMessage(
   return withMeshStoreTransaction(projectRoot, (transaction) =>
     postMessageInTransaction(transaction, threadId, input, options),
   );
+}
+
+export async function createAssignedThread(
+  projectRoot: string,
+  input: {
+    title: string;
+    body?: string;
+    assignee: MeshAgent;
+  },
+): Promise<{ thread: Thread; assignment: PostMessageResult }> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await prepareThreadInTransaction(transaction, {
+      title: input.title,
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      assigneeAgentId: input.assignee.id,
+    });
+    const assignment = await postMessageInTransaction(
+      transaction,
+      thread.id,
+      {
+        from: HUMAN_AUTHOR_ID,
+        authorKind: 'human',
+        triggerKind: 'assignment',
+        text: `Assigned to ${mentionToken(input.assignee)}.`,
+      },
+      { initialThread: thread },
+    );
+    return { thread: assignment.thread, assignment };
+  });
 }
 
 export interface ClaimRunInput {
