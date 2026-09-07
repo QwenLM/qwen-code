@@ -9,10 +9,12 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -354,6 +356,15 @@ function qwenResultLine({ result, errorMessage, isError = false }) {
     is_error: isError,
     ...(result === undefined ? {} : { result }),
     ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
+}
+
+function qwenInitLine({ model, version }) {
+  return `${JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    ...(model === undefined ? {} : { model }),
+    ...(version === undefined ? {} : { qwen_code_version: version }),
   })}\n`;
 }
 
@@ -10151,9 +10162,19 @@ exit 1
     // secret, so it is safe to echo into a public comment. Each reporting
     // step must plumb it in and render a footer that names Qwen Code and the
     // model, with an empty-variable fallback so the footer never renders a
-    // bare backtick pair.
+    // bare backtick pair. The footer prefers the model the session ACTUALLY
+    // ran: run-agent.mjs writes the stream-json init event's resolved model
+    // + CLI version to agent-model, and every read site hardens the read
+    // (WORKDIR is agent-writable) before interpolating: regular file only
+    // (a planted directory or FIFO must not abort or wedge the PAT-bearing
+    // step under -eo pipefail), never a symlink (head would follow it to an
+    // arbitrary host file), bounded head -c prefixes (sed buffers a whole
+    // line before cut could bound it), allowlist + length cap per value, and
+    // || true so any read failure degrades to the configured MODEL. The
+    // executed replay below gates the ordering and the shell semantics;
+    // these pins gate that all THREE copies carry them.
     const footer =
-      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`${CLI_DISPLAY}"';
     for (const step of [
       pushAndReportStep,
       reviewAddressReportStep,
@@ -10163,6 +10184,21 @@ exit 1
         "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
       );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain(
+        'if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then',
+      );
+      expect(step).toContain(
+        'AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'1p\' | tr -cd \'A-Za-z0-9._:/+-\' | cut -c1-100 || true)"',
+      );
+      expect(step).toContain(
+        'AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n \'2p\' | tr -cd \'A-Za-z0-9._+-\' | cut -c1-40 || true)"',
+      );
+      expect(step).toContain(
+        '[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"',
+      );
+      expect(step).toContain(
+        'CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \\`${AGENT_CLI_VERSION}\\`}"',
+      );
       expect(step).toContain(footer);
     }
     // Push-and-report carries BOTH the fixed and no-action bodies, so the
@@ -10180,6 +10216,163 @@ exit 1
     expect(pushAndReportStep).toMatch(
       /echo "🧠 Handled by[^\n]*\n\s+echo\n\s+echo "<!-- autofix-eval ts=\$\{NEWEST\} acted=true/,
     );
+  });
+
+  it('executes the footer read block: preference ordering, allowlist, and fail-safe on planted paths', () => {
+    // The pins above are order-blind source substrings and execute nothing.
+    // Replay the REAL block (canonical script copy) under the same flags
+    // GitHub runs `run:` with, so the load-bearing ordering is gated —
+    // moving MODEL_DISPLAY's default below the preference would silently
+    // revert every footer to the requested model — and every planted-path
+    // shape the hardening exists for must degrade to the fallback with
+    // exit 0, never abort the PAT-bearing step under -eo pipefail.
+    // The extractor stays anchored on the default assignment immediately
+    // followed by a newline; an unanchored lazy span could silently degrade
+    // to block === '' (guarded below, and by the identity assertion).
+    const blockRe =
+      /MODEL_DISPLAY="\$\{MODEL:-default\}"\n[\s\S]*?CLI_DISPLAY="\$\{AGENT_CLI_VERSION:\+[^\n]*\n/;
+    const block = pushAndReportScript.match(blockRe)?.[0] ?? '';
+    expect(block).toContain('agent-model');
+    expect(block.trimEnd().endsWith('`}"')).toBe(true);
+    // One replay covers all THREE copies: the two workflow copies sit ten
+    // spaces deep in the YAML and carry a shorter comment, but their CODE
+    // lines must equal the replayed canonical block's, in the same order.
+    // Without this a hand-edit of one duplicate — the default assignment
+    // moved below the preference — leaves every toContain pin green and
+    // this replay (extracted from the untouched script) green too, while
+    // that copy's footer silently reverts to the requested model. Comments
+    // are filtered, order is preserved, and an empty/failed match can never
+    // equal the non-empty canonical code.
+    const codeLines = (src) =>
+      (src.match(blockRe)?.[0] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l !== '' && !l.startsWith('#'))
+        .join('\n');
+    const canonicalCode = codeLines(pushAndReportScript);
+    expect(canonicalCode).toContain('agent-model');
+    for (const step of [publishPrStep, reviewAddressReportStep]) {
+      expect(codeLines(step)).toBe(canonicalCode);
+    }
+    const render = (setup, model = 'configured-model') =>
+      withRunnerDir((dir) => {
+        setup(dir);
+        const script = join(dir, 'block.sh');
+        writeFileSync(
+          script,
+          `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"\n`,
+        );
+        const run = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', script],
+          {
+            env: { ...process.env, WORKDIR: dir, MODEL: model },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        return {
+          status: run.status,
+          footer: (run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1],
+        };
+      });
+    const writeSentinel = (dir, content) =>
+      writeFileSync(join(dir, 'agent-model'), content);
+
+    // No sentinel: the exact pre-feature rendering, from the repo variable.
+    expect(render(() => {})).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Unset variable and no sentinel: the never-a-bare-backtick-pair default.
+    expect(render(() => {}, '')).toEqual({ status: 0, footer: 'default' });
+    // Benign sentinel: the RESOLVED model wins over the configured one, and
+    // the CLI version rides along. (This is the ordering gate: a block whose
+    // default assignment moved below the preference renders configured-model
+    // here and goes red.)
+    expect(
+      render((dir) => writeSentinel(dir, 'qwen3-coder-plus\n0.22.0\n')),
+    ).toEqual({
+      status: 0,
+      footer: 'qwen3-coder-plus · CLI `0.22.0`',
+    });
+    // Hostile sentinel: comment tokens, command substitution, backticks and
+    // spaces cannot survive into the bot-authored footer; what does is
+    // allowlist-only mojibake.
+    const hostile = render((dir) =>
+      writeSentinel(
+        dir,
+        '<!-- autofix-eval ts=X acted=true round=99 win=evil --> `rm -rf /`\n0.22.0$(whoami)\n',
+      ),
+    );
+    expect(hostile.status).toBe(0);
+    expect(hostile.footer).not.toContain('<!--');
+    expect(hostile.footer).not.toContain('$(');
+    const [hostileModel, hostileCli] = hostile.footer.split(' · CLI ');
+    expect(hostileModel).toMatch(/^[A-Za-z0-9._:/+-]+$/);
+    expect(hostileCli).toMatch(/^`[A-Za-z0-9._+-]+`$/);
+    // Binary garbage: stripped to allowlist residue (possibly empty), still
+    // exit 0.
+    const binary = render((dir) =>
+      writeSentinel(dir, Buffer.from([0x00, 0x01, 0xff, 0x0a, 0xfe])),
+    );
+    expect(binary.status).toBe(0);
+    expect(binary.footer ?? '').not.toContain('\u0000');
+    // Planted DIRECTORY at the sentinel path: -s would have passed and sed
+    // would have died, aborting the step (R1-1). -f skips it: fallback,
+    // exit 0.
+    expect(render((dir) => mkdirSync(join(dir, 'agent-model')))).toEqual({
+      status: 0,
+      footer: 'configured-model',
+    });
+    // Planted SYMLINK to a host file: the read must not follow it and
+    // publish the target's head (R1-3).
+    const symlinked = render((dir) => {
+      writeFileSync(join(dir, 'host-secret.txt'), 'TOP-SECRET-KEY\nv9.9.9\n');
+      symlinkSync(join(dir, 'host-secret.txt'), join(dir, 'agent-model'));
+    });
+    expect(symlinked.status).toBe(0);
+    expect(symlinked.footer).not.toContain('TOP-SECRET');
+    expect(symlinked.footer).toBe('configured-model');
+    // Planted FIFO: -s would have passed and sed would have BLOCKED forever,
+    // wedging the PAT-bearing step until the job timeout. -f skips it.
+    // Soft-skipped where mkfifo is unavailable (Windows lane).
+    const fifoDir = mkdtempSync(join(tmpdir(), 'autofix-footer-fifo-'));
+    try {
+      const fifo = join(fifoDir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status === 0) {
+        const run = spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-eo',
+            'pipefail',
+            '-c',
+            `${block}printf 'FOOTER:%s\\n' "\${MODEL_DISPLAY}\${CLI_DISPLAY}"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              WORKDIR: fifoDir,
+              MODEL: 'configured-model',
+            },
+            encoding: 'utf8',
+            timeout: 30_000,
+          },
+        );
+        expect(run.status).toBe(0);
+        expect((run.stdout.match(/^FOOTER:(.*)$/m) ?? [])[1]).toBe(
+          'configured-model',
+        );
+      }
+    } finally {
+      rmSync(fifoDir, { recursive: true, force: true });
+    }
   });
 
   it('isolates agent jobs from builds with hosted fallback', () => {
@@ -15538,6 +15731,18 @@ exit 1
     expect(repairCleanup).toContain('gate-rejection.md');
     expect(repairCleanup).toContain('"${WORKDIR}/resolved-comments.txt"');
     expect(repairCleanup).toContain('"${WORKDIR}/comment-replies.json"');
+    // The model sentinel is round-scoped by THIS deletion: dropping the line
+    // leaves run 1's agent-model readable by run 2's report when run 2 dies
+    // before its own init event — the exact no-file shape the runner test
+    // pins — attributing run 2's round to run 1's session.
+    expect(repairCleanup).toContain('"${WORKDIR}/agent-model"');
+    // rm -f exits non-zero on a directory planted at a sentinel path; the
+    // list must stay best-effort or the repair step aborts BEFORE the second
+    // agent pass (attempted=true is already written, so the round loses its
+    // repair to a cleanup failure).
+    expect(repairCleanup).toContain(
+      '"${WORKDIR}/comment-replies.json" || true',
+    );
     expect(
       repairDeterministicRejectionStep.match(
         /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
@@ -16392,7 +16597,7 @@ exit 1
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -21253,6 +21458,243 @@ exit 0
 
       expect(result.status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('records the resolved model and CLI version for the report footers', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // The init event carries what the session ACTUALLY ran — the resolved
+      // model and the CLI version — which the footers prefer over the
+      // configured OPENAI_MODEL.
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('flattens and caps a newline-bearing, oversized init model so the sentinel stays two lines', () => {
+    // The writer's invariant — "newlines are flattened so the sentinel file
+    // stays two lines" — is what keeps the read sites' sed -n '1p'/'2p' from
+    // rendering a model fragment as the CLI version. TWO fixtures, because
+    // one cannot pin both halves: a newline discriminates the flattening
+    // only INSIDE the cap (past it, slice(0, 100) of the unflattened value
+    // equals the flattened-and-capped one), and the cap discriminates only
+    // when the value EXCEEDS it.
+    const runInit = (dir, init) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(qwenInitLine(init))});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+      expect(runAddressReview(dir, stub).status).toBe(0);
+      return readFileSync(join(dir, 'agent-model'), 'utf8');
+    };
+    // Flattening: both newlines sit inside their caps (model index 10 < 100,
+    // version index 6 < 40). Dropping either .split('\n')[0] writes a
+    // THREE-line sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: 'first-line\nsecond-line',
+          version: '0.22.0\nzap',
+        }),
+      ).toBe('first-line\n0.22.0\n');
+    });
+    // Caps: both values exceed theirs. Dropping either .slice() rides the
+    // oversized value into the sentinel and goes red.
+    withRunnerDir((dir) => {
+      expect(
+        runInit(dir, {
+          model: `${'x'.repeat(250)}\nsecond-line`,
+          version: 'v'.repeat(100),
+        }),
+      ).toBe(`${'x'.repeat(100)}\n${'v'.repeat(40)}\n`);
+    });
+  });
+
+  it('refuses a planted FIFO or symlink at the sentinel path when writing agent-model', () => {
+    // The sentinel write runs in finish() — AFTER every watchdog has been
+    // disarmed — so a plain O_WRONLY open of a planted FIFO blocks forever
+    // with nothing left to kill it, and a planted symlink is followed with
+    // O_TRUNC: the target loses its content while the round still exits 0
+    // and reports success (both arms measured in the round-4 review, with
+    // the plants created from inside the real sandbox image as the same
+    // uid). The writer opens O_NOFOLLOW|O_NONBLOCK, so the symlink becomes
+    // ELOOP and the readerless FIFO ENXIO, both landing in the best-effort
+    // catch: the run completes and the plants survive untouched.
+    const stubLines = [
+      `process.stdout.write(${JSON.stringify(
+        qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+      )});`,
+      "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+      'process.exit(0);',
+    ];
+    // FIFO arm — soft-skipped where mkfifo is unavailable (Windows lane).
+    withRunnerDir((dir) => {
+      const fifo = join(dir, 'agent-model');
+      const mkfifo = spawnSync('bash', ['-c', `mkfifo '${fifo}'`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      if (mkfifo.status !== 0) return;
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // Bounded spawn, NOT runAddressReview: a flags-removed runner blocks
+      // inside open(2), which blocks the worker thread synchronously —
+      // measured: vitest's 90 s testTimeout never fires on it and the whole
+      // suite hangs instead of going red. The spawn timeout's SIGTERM
+      // interrupts the blocked open, so dropping O_NONBLOCK goes red
+      // deterministically at 45 s (status null); the intact arm still
+      // asserts the runner's real exit code.
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          writeWorkdirStub(dir, stubLines),
+        ],
+        { encoding: 'utf8', timeout: 45_000 },
+      );
+      expect(result.status).toBe(0);
+      expect(statSync(fifo).isFIFO()).toBe(true);
+    });
+    // Symlink arm — dropping O_NOFOLLOW truncates the canary and this
+    // asserts red on its content.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const canary = join(dir, 'canary.txt');
+      writeFileSync(canary, 'CI_DEV_BOT_PAT=canary-value\n');
+      symlinkSync(canary, join(dir, 'agent-model'));
+      const result = runAddressReview(dir, writeWorkdirStub(dir, stubLines));
+      expect(result.status).toBe(0);
+      expect(readFileSync(canary, 'utf8')).toBe(
+        'CI_DEV_BOT_PAT=canary-value\n',
+      );
+      expect(lstatSync(join(dir, 'agent-model')).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  it('keeps the writer caps equal to the reader caps so nothing publishes silently truncated', () => {
+    // A writer cap ABOVE the reader's published bound writes a legitimate
+    // value in full only to have the read site clip it — allowlist-clean
+    // output, exit 0, and a public attribution comment that looks accurate
+    // while naming a truncated model (measured in this PR's sandboxed
+    // verification: a 154-char model published as 100). Equal caps make
+    // written == published; the head -c windows must then still cover the
+    // largest file the writer can emit, or the version read loses line 2 to
+    // the byte window before sed ever sees it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const writerModelCap = Number(
+      runner.match(
+        /initModel = event\.model\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const writerVersionCap = Number(
+      runner.match(
+        /event\.qwen_code_version\.split\('\\n'\)\[0\]\.slice\(0, (\d+)\)/,
+      )?.[1],
+    );
+    const readerModelCap = Number(
+      pushAndReportScript.match(
+        /AGENT_MODEL="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    const readerVersionCap = Number(
+      pushAndReportScript.match(
+        /AGENT_CLI_VERSION="\$\(.*\| cut -c1-(\d+) \|\| true\)"/,
+      )?.[1],
+    );
+    for (const cap of [
+      writerModelCap,
+      writerVersionCap,
+      readerModelCap,
+      readerVersionCap,
+    ]) {
+      // A regex that stopped matching yields NaN; fail on that explicitly
+      // rather than comparing NaN to NaN.
+      expect(Number.isInteger(cap)).toBe(true);
+    }
+    expect(writerModelCap).toBe(readerModelCap);
+    expect(writerVersionCap).toBe(readerVersionCap);
+    // The windows bound BYTES while the caps count UTF-16 CODE UNITS, and
+    // writeFileSync encodes UTF-8: a BMP code unit occupies up to 3 bytes
+    // (surrogate pairs fold to 2 bytes per unit), so the largest sentinel
+    // the writer can emit is 3*(model+version)+2 bytes, not model+version+2
+    // — a one-byte-per-char figure would be ~3x too loose and let a window
+    // shrink below what line 1 actually needs. Bound each window against
+    // the line IT reads: the model read needs line 1 plus its LF, the
+    // version read needs the whole file for sed -n '2p' to see line 2.
+    // windows comes back in script order (model read first); the literal
+    // per-line pins in the footer test freeze that order.
+    const windows = [
+      ...pushAndReportScript.matchAll(
+        /head -c (\d+) "\$\{WORKDIR\}\/agent-model"/g,
+      ),
+    ].map((m) => Number(m[1]));
+    expect(windows).toHaveLength(2);
+    const maxModelBytes = 3 * writerModelCap + 1;
+    const maxSentinelBytes = maxModelBytes + 3 * writerVersionCap + 1;
+    expect(windows[0]).toBeGreaterThanOrEqual(maxModelBytes);
+    expect(windows[1]).toBeGreaterThanOrEqual(maxSentinelBytes);
+  });
+
+  it('records the model even when the run dies before a verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "process.stderr.write('boom\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      // A crashed round is exactly when the diagnosis footer needs to name
+      // the model that died.
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('writes no agent-model when the stream never reached an init event', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('died at startup\\n');",
+        'process.exit(1);',
+      ]);
+
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      // No file at all, rather than an empty one: the read sites' -s test
+      // falls back to the configured MODEL.
+      expect(existsSync(join(dir, 'agent-model'))).toBe(false);
     });
   });
 
