@@ -35,6 +35,7 @@ import {
   spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
+import { isMeshRun } from '../mesh/run-context.js';
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -291,17 +292,39 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.WORKFLOW,
 ]);
 
+/**
+ * The shared-thread tools, hidden from every agent that is not on a thread.
+ *
+ * They are registered for the whole process so there is one place that knows a
+ * tool exists, and they refuse at execution without an ambient run frame. But
+ * a refusal the model can only discover by calling is a wasted turn and a
+ * misleading schema, so an agent with no thread never sees them declared.
+ */
+const THREAD_TOOLS_WITHOUT_A_THREAD: ReadonlySet<string> = new Set([
+  'thread_post',
+  'thread_wait',
+  'thread_block',
+  'thread_review',
+  'thread_create',
+  'thread_read',
+]);
+
+function withThreadToolsHidden(base: ReadonlySet<string>): ReadonlySet<string> {
+  if (isMeshRun()) return base;
+  return new Set([...base, ...THREAD_TOOLS_WITHOUT_A_THREAD]);
+}
+
 function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
   if (!isTeammate()) {
-    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    return withThreadToolsHidden(EXCLUDED_TOOLS_FOR_SUBAGENTS);
   }
   if (!isPlanRequiredTeammateContext()) {
-    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+    return withThreadToolsHidden(EXCLUDED_TOOLS_FOR_TEAMMATES);
   }
 
   const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
   excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return excluded;
+  return withThreadToolsHidden(excluded);
 }
 
 /**

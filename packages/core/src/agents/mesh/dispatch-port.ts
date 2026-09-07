@@ -21,7 +21,9 @@
  */
 
 import type { Config } from '../../config/config.js';
+import { getAgentMetaPath, patchAgentMeta } from '../agent-transcript.js';
 import { launchMeshAgent } from './launcher.js';
+import type { MeshRunContext } from './run-context.js';
 import type {
   MeshBodyState,
   MeshDispatchPort,
@@ -58,6 +60,32 @@ export function inspectBody(config: Config, agent: MeshAgent): MeshBodyState {
       // builds one. Treating it as absent is safe because the launcher is
       // keyed on the same deterministic id.
       return { kind: 'absent' };
+  }
+}
+
+/**
+ * Records which thread the body's next turn belongs to.
+ *
+ * Best effort: a body with no meta on disk yet is one the launch path is about
+ * to create, and a failure to write here costs the turn its thread frame
+ * rather than corrupting anything — the tools refuse without a frame, which is
+ * the safe direction.
+ */
+function bindNextTurn(
+  config: Config,
+  agent: MeshAgent,
+  binding: MeshRunContext,
+): void {
+  const metaPath = getAgentMetaPath(
+    config.getProjectRoot(),
+    config.getSessionId(),
+    meshBackgroundAgentId(agent),
+  );
+  try {
+    patchAgentMeta(metaPath, { meshRun: binding });
+  } catch {
+    // The seam refuses to run mesh tools without a frame; that is the safe
+    // failure, so do not take the dispatch down for it.
   }
 }
 
@@ -119,11 +147,39 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
     async inspect(agent) {
       return inspectBody(config, agent);
     },
-    async start({ action, agent, prompt }) {
+    async start({
+      action,
+      agent,
+      prompt,
+      threadId,
+      rootThreadId,
+      runId,
+      attempt,
+    }) {
+      const binding: MeshRunContext = {
+        workspaceId: config.getProjectRoot(),
+        agentId: agent.id,
+        runId,
+        threadId,
+        rootThreadId,
+        attempt,
+      };
+      // Written before the turn starts and re-read at the turn seam, so the
+      // body is told which thread this turn is for. On the launch path the
+      // meta does not exist yet, so the binding travels with the launch
+      // options instead and lands in the first record.
+      if (action !== 'launch') {
+        bindNextTurn(config, agent, binding);
+      }
       try {
         switch (action) {
           case 'launch': {
-            const result = await launchMeshAgent(config, agent, prompt);
+            const result = await launchMeshAgent(
+              config,
+              agent,
+              prompt,
+              binding,
+            );
             if (result.status === 'started') {
               return { status: 'started', sessionId: result.sessionId };
             }

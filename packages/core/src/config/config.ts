@@ -9687,6 +9687,36 @@ export class Config {
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
 
+    // Thread tools are registered for every session but reachable only from a
+    // shared-thread run: each one refuses without the ambient run frame, and
+    // the capability boundary classifies all six so an ordinary agent's tool
+    // list cannot pick them up. Registering them lazily here rather than
+    // building a second registry keeps one place that knows a tool exists.
+    await registerLazy('thread_post', async () => {
+      const { ThreadPostTool } = await import('../tools/mesh-thread.js');
+      return new ThreadPostTool(this);
+    });
+    await registerLazy('thread_wait', async () => {
+      const { ThreadWaitTool } = await import('../tools/mesh-thread.js');
+      return new ThreadWaitTool(this);
+    });
+    await registerLazy('thread_block', async () => {
+      const { ThreadBlockTool } = await import('../tools/mesh-thread.js');
+      return new ThreadBlockTool(this);
+    });
+    await registerLazy('thread_review', async () => {
+      const { ThreadReviewTool } = await import('../tools/mesh-thread.js');
+      return new ThreadReviewTool(this);
+    });
+    await registerLazy('thread_create', async () => {
+      const { ThreadCreateTool } = await import('../tools/mesh-thread.js');
+      return new ThreadCreateTool(this);
+    });
+    await registerLazy('thread_read', async () => {
+      const { ThreadReadTool } = await import('../tools/mesh-thread.js');
+      return new ThreadReadTool(this);
+    });
+
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
       await registerLazy(ToolNames.CRON_CREATE, async () => {

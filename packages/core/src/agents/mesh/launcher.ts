@@ -15,6 +15,7 @@ import {
   buildMeshToolConfig,
   createMeshToolInvocationGuard,
 } from './capability.js';
+import type { MeshRunContext } from './run-context.js';
 import type { MeshAgent } from './types.js';
 
 export type MeshAgentLaunchResult =
@@ -32,6 +33,13 @@ export async function launchMeshAgent(
   config: Config,
   agent: MeshAgent,
   prompt: string,
+  /**
+   * Which thread the first turn is for. The meta record does not exist yet on
+   * this path, so the binding travels with the launch and lands in the first
+   * record rather than being patched in afterwards — a turn that started
+   * before the patch would have run with no thread frame at all.
+   */
+  meshRun?: MeshRunContext,
 ): Promise<MeshAgentLaunchResult> {
   if (agent.enabled === false) {
     return {
@@ -83,6 +91,7 @@ export async function launchMeshAgent(
       {
         agentId: backgroundAgentId,
         meshAgentId: agent.id,
+        ...(meshRun ? { meshRun } : {}),
         subagentConfig: definition,
         toolConfig: buildMeshToolConfig(runtimeConfig.toolConfig),
       },

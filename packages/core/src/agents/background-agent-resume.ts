@@ -90,6 +90,7 @@ import {
   buildMeshToolConfig,
   createMeshToolInvocationGuard,
 } from './mesh/capability.js';
+import { runWithMeshRunContext } from './mesh/run-context.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
@@ -1419,10 +1420,26 @@ export class BackgroundAgentResumeService {
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
+        // Re-read the binding from disk at the seam, once per turn. The
+        // dispatcher writes it just before starting this turn, so a body that
+        // worked thread A last turn and thread B this turn gets B — a frame
+        // opened around the *lifetime* would have pinned it to A forever.
+        // Reading here and letting AsyncLocalStorage carry it is what keeps
+        // concurrent turns from seeing each other's thread.
+        const meshRun = readAgentMeta(metaPath)?.meshRun;
         const framedRunBody = () =>
           runWithAgentContext(
             meta.agentId,
-            () => runBody(turnContextState, turnAbortController, fireStartHook),
+            () =>
+              meshRun
+                ? runWithMeshRunContext(meshRun, () =>
+                    runBody(
+                      turnContextState,
+                      turnAbortController,
+                      fireStartHook,
+                    ),
+                  )
+                : runBody(turnContextState, turnAbortController, fireStartHook),
             normalizeResumedAgentDepth(meta.depth),
           );
         const invocationRunBody = () =>

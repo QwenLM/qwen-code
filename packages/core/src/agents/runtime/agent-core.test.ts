@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { runWithMeshRunContext } from '../mesh/run-context.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1350,6 +1351,47 @@ describe('AgentCore.prepareTools', () => {
     const tools = await core.prepareTools();
 
     expect(tools.map((t) => t.name)).toEqual(['core_tool']);
+  });
+
+  it('hides the thread tools from an agent that is not on a thread', async () => {
+    // Registered process-wide so one place knows a tool exists, but a
+    // refusal the model can only find by calling is a wasted turn and a
+    // misleading schema. An ordinary subagent must not see them at all.
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      { name: 'thread_post', description: 'post' } as FunctionDeclaration,
+      { name: 'thread_review', description: 'review' } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(['core_tool']);
+  });
+
+  it('declares the thread tools to an agent bound to a run', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      { name: 'thread_post', description: 'post' } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    const tools = await runWithMeshRunContext(
+      {
+        workspaceId: '/w',
+        agentId: 'ag_alice',
+        runId: 'rn_1',
+        threadId: 'th_1',
+        rootThreadId: 'th_1',
+        attempt: 1,
+      },
+      () => core.prepareTools(),
+    );
+
+    expect(tools.map((tool) => tool.name).sort()).toEqual([
+      'core_tool',
+      'thread_post',
+    ]);
   });
 
   it('does not re-enable plan lifecycle tools via explicit tool names', async () => {
