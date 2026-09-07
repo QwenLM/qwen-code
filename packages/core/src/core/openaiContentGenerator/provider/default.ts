@@ -18,6 +18,7 @@ import {
   clampReasoningEffort,
 } from '../../reasoning-effort.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -127,6 +128,7 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
     });
   }
 

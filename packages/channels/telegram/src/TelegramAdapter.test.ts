@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -47,6 +49,7 @@ class TestTelegramChannel extends TelegramChannel {
     msg: TestTelegramMessage,
     text: string,
     entities?: TestTelegramEntity[],
+    allowRegisteredCommandBypass = false,
   ): Envelope {
     return (
       this as unknown as {
@@ -54,9 +57,10 @@ class TestTelegramChannel extends TelegramChannel {
           msg: TestTelegramMessage,
           text: string,
           entities?: TestTelegramEntity[],
+          allowRegisteredCommandBypass?: boolean,
         ) => Envelope;
       }
-    ).buildEnvelope(msg, text, entities);
+    ).buildEnvelope(msg, text, entities, allowRegisteredCommandBypass);
   }
 
   pushTestProactive(
@@ -374,6 +378,341 @@ describe('TelegramChannel', () => {
     expect(processOnceSpy).toHaveBeenCalled();
   });
 
+  it('does not restore a stripped prefix while preparing a document', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    expect(handler).toBeDefined();
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    preparation.envelope.text = 'inspect this';
+
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe(
+      'inspect this\n\n(User sent a file "input.txt" but download failed)',
+    );
+  });
+
+  it('keeps stripped document captions after a successful download', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'input.txt' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    preparation.envelope.text = 'inspect this';
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'input.txt',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('keeps stripped voice captions after a successful download', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    preparation.envelope.text = 'inspect this';
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('inspect this');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+      mimeType: 'audio/ogg',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('runs a captionless voice message despite a configured prefix', async () => {
+    // Standard Telegram clients cannot caption a voice message, so the
+    // envelope text is always the `(voice message)` placeholder -- there
+    // is no action the user could take to get it past the prefix gate.
+    // The bypass skips stripping entirely, so the placeholder also has to
+    // be cleared or it reaches the model as prompt text.
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    expect(preparation.envelope.syntheticText).toBe(true);
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('clears a captionless document placeholder after a successful download', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'report.pdf' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+    },
+  ])(
+    'runs a captionless $label despite a configured prefix',
+    async ({ event, message }) => {
+      // Without the synthetic marking, the `(image)` / `(file: …)`
+      // placeholder is gated like user text and the media is dropped with
+      // no action the sender could take.
+      const channel = createChannel({ messagePrefix: '/review' });
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+
+      expect(channel.inboundPreparations[0]?.envelope.syntheticText).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+      placeholder: '(image)',
+      note: '(User sent an image but download failed)',
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      placeholder: '(file: report.pdf)',
+      note: '(User sent a file "report.pdf" but download failed)',
+    },
+    {
+      label: 'voice',
+      event: 'message:voice',
+      message: { voice: { file_id: 'voice-1', mime_type: 'audio/ogg' } },
+      placeholder: '(voice message)',
+      note: '(User sent a voice message but download failed)',
+    },
+  ])(
+    'drops the $label placeholder from the prompt when the download fails',
+    async ({ event, message, placeholder, note }) => {
+      // The synthetic envelope skips stripping, so the placeholder is still
+      // in `envelope.text` at catch time -- keying on the caption keeps it
+      // out of the prompt, as the success branch already does.
+      const channel = createChannel({ messagePrefix: '/review' });
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      await preparation.prepare();
+
+      expect(preparation.envelope.text).not.toContain(placeholder);
+      expect(preparation.envelope.text).toBe(`\n\n${note}`);
+    },
+  );
+
+  it('still gates a captioned photo on the configured prefix', async () => {
+    // The narrowness control: a caption IS user-authored, so it must
+    // still carry the prefix.
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: 'no prefix here',
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(
+      channel.inboundPreparations[0]?.envelope.syntheticText,
+    ).toBeUndefined();
+  });
+
   it('continues startup when Telegram command menu registration fails', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
@@ -454,6 +793,151 @@ describe('TelegramChannel', () => {
       expect.stringContaining('Qwen Code Telegram bot'),
       { parse_mode: 'HTML' },
     );
+  });
+
+  it.each(['start', 'help', 'new', 'cancel', 'status'])(
+    'lets the Telegram command menu invoke /%s without the message prefix',
+    (command) => {
+      const channel = createChannel({ messagePrefix: '/review' });
+      const text = `/${command}`;
+
+      const built = channel.buildTestEnvelope(
+        {
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+        },
+        text,
+        [{ type: 'bot_command', offset: 0, length: text.length }],
+        true,
+      );
+
+      expect(built.bypassMessagePrefix).toBe(true);
+    },
+  );
+
+  it.each([
+    ['/cancel@qwen_bot', true, 'addressed to us'],
+    ['/cancel@OtherBot', false, 'addressed to another bot'],
+    ['/notregistered', false, 'not a registered menu command'],
+    ['please /cancel later', false, 'no bot_command entity at offset 0'],
+  ])(
+    'grants the command-menu bypass for %j only when %s',
+    (text, expected, _why) => {
+      // `parseCommand` strips the `@suffix`, so a command addressed to a
+      // different bot would otherwise skip the prefix gate and run here
+      // -- cancelling our own request on someone else's instruction.
+      const channel = createChannel({ messagePrefix: '/review' });
+      (channel as unknown as { botUsername: string }).botUsername = 'qwen_bot';
+      const entities = text.startsWith('/')
+        ? [
+            {
+              type: 'bot_command',
+              offset: 0,
+              length: text.split(' ')[0].length,
+            },
+          ]
+        : [];
+
+      const built = channel.buildTestEnvelope(
+        {
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+        },
+        text,
+        entities,
+        true,
+      );
+
+      expect(built.bypassMessagePrefix).toBe(expected ? true : undefined);
+    },
+  );
+
+  it('does not grant the bypass for a bot_command entity past offset 0', () => {
+    // Telegram attaches `bot_command` entities anywhere in a message. Only
+    // a leading one is a menu action; anything else is prose that has to
+    // stay behind the prefix gate.
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      'hi /cancel',
+      [{ type: 'bot_command', offset: 3, length: 7 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('keeps a prefix that collides with a menu command a prefix', () => {
+    // Nothing rejects `/new` as a prefix. Without the precedence rule the
+    // command-menu bypass would run the clear command on every prefixed
+    // message instead of stripping and dispatching it.
+    const channel = createChannel({ messagePrefix: '/new' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      '/new fix the bug',
+      [{ type: 'bot_command', offset: 0, length: 4 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('keeps a longer registered command eligible for the menu bypass', () => {
+    const channel = createChannel({ messagePrefix: '/ne' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      '/new',
+      [{ type: 'bot_command', offset: 0, length: 4 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBe(true);
+  });
+
+  it('handles the Telegram Start button when a prefix is configured', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:text',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        text: '/start',
+        entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+      },
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await vi.waitFor(() => expect(bot.api.sendMessage).toHaveBeenCalled());
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '1',
+      expect.stringContaining('Use /review /help'),
+      { parse_mode: 'HTML' },
+    );
+    // The greeting must not invite the very messages the gate drops.
+    const greeting = String(bot.api.sendMessage.mock.calls[0]?.[1]);
+    expect(greeting).toContain(
+      'Start each message with /review to chat with Qwen Code.',
+    );
+    expect(greeting).not.toContain('Send any message');
   });
 
   it('sends command replies back to the Telegram forum topic', async () => {

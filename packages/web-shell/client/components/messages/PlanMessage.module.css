@@ -3,7 +3,8 @@
   padding: 2px 0;
 }
 
-.header {
+.header,
+.headerStatic {
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -12,9 +13,12 @@
   margin-bottom: 4px;
   background: none;
   border: none;
-  cursor: pointer;
   text-align: left;
   font: inherit;
+}
+
+.header {
+  cursor: pointer;
 }
 
 .chevron {

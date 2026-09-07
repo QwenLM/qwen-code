@@ -3129,7 +3129,15 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     const startedAt = Date.now();
     child.stderr.emit('data', Buffer.from('a.'.repeat(33_000)));
-    expectWithinLatencyBudget(Date.now() - startedAt, 1_000);
+    // The duration is the property: 66 KB of `a.` is an adversarial input for
+    // the credential-redaction regex, and a backtracking regression shows up
+    // as time, not as a wrong value — the other assertions in this case check
+    // truncation and would stay green through one. Kept asserting on the pool
+    // at 20x, which is well clear of the ~5x contention there and still far
+    // under a quadratic blowup, and under the 60s lane timeout.
+    expectWithinLatencyBudget(Date.now() - startedAt, 1_000, {
+      poolMultiplier: 20,
+    });
     child.emit('message', {
       type: 'ready',
       pid: 12345,

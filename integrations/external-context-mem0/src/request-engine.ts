@@ -8,7 +8,7 @@ import { buildSearchUrl } from './config.js';
 import type {
   DialectV1,
   ExternalContextItem,
-  RuntimeConfiguration,
+  SearchRuntimeConfiguration,
   ScopeLocation,
   SearchProvider,
 } from './types.js';
@@ -22,7 +22,7 @@ export type FetchLike = (
 ) => Promise<Response>;
 
 export function createRequestEngine(
-  runtime: RuntimeConfiguration,
+  runtime: SearchRuntimeConfiguration,
   fetcher: FetchLike = fetch,
 ): SearchProvider {
   return async ({ query, signal }) => {
@@ -56,7 +56,7 @@ export function createRequestEngine(
 
 function applyAuthentication(
   headers: Headers,
-  runtime: RuntimeConfiguration,
+  runtime: SearchRuntimeConfiguration,
 ): void {
   switch (runtime.dialect.auth) {
     case 'authorization-token':
@@ -75,7 +75,7 @@ function applyAuthentication(
 
 function buildRequest(
   url: URL,
-  runtime: RuntimeConfiguration,
+  runtime: SearchRuntimeConfiguration,
   query: string,
 ): string | undefined {
   const body: Record<string, unknown> = {};
