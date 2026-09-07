@@ -1090,21 +1090,27 @@ fi
 # the phantom credit absorb its own removal exactly. Main's ADDITIONS are
 # never clamped: they raise the baseline whatever the merge kept, or a
 # round that drops what main added during the round gets that removal for
-# free. Presence follows main's side directly: the
-# baseline holds the file when main held it at the newest event, whatever
-# the resolution then did with it.
+# free. Presence is a running state, not a reading of the newest event:
+# main holding the file and having moved its measurable surface puts the
+# file in the baseline, and main deleting it takes it out only when the
+# merge adopted that deletion. For a file whose surface this instrument
+# cannot read -- the Python and Rust shapes -- movement is read from the
+# bytes, since "the surface did not move" is unmeasurable there.
 # What none of this can see is identity: main removing one assertion while
 # the resolution puts it back and drops a different one nets to zero, the
 # same way an assertion moved within a file always has.
 #
-# The model assumes main's side is MAIN's, which holds while origin/main
-# does not contain the round's own commits -- true here, where pull
-# requests land squashed and main's first-parent history carries no merge
-# of a PR branch. Were main ever to merge the branch mid-round, main's
-# side would carry the round's authorship and measuring the round against
-# it would cancel the round's own removals. That is a property of how this
-# repository merges, not of the measurement, so it is stated rather than
-# guarded.
+# The model assumes main's side is MAIN's. It stops being main's if the
+# round's own work reaches origin/main WHILE THE LOOP IS STILL RUNNING --
+# the PR squash-merged or cherry-picked mid-round -- because main's chain
+# then carries the round's authorship while the merge base does not, and
+# measuring the round against it cancels the round's own removals. (Main
+# MERGING the branch is self-correcting: the merge base carries the same
+# commit, so the two cancel.) A guard was written for it and removed:
+# every history these fixtures can build measures correctly without one,
+# so it was code no test could reach. The residual is bounded by the same
+# thing that bounds the flake carve-out -- a round whose work has already
+# landed has nothing left to gate.
 # Assertions are counted per file; registrations by kind and title as
 # multisets, so un-skipping one test never licenses silencing another,
 # while a brand-new todo/skip registration is the round's own and charges
@@ -1283,21 +1289,24 @@ weaken_auto_blob() {
   # DISAGREE about this file: refuse then (the caller charges it as
   # unmeasurable, which one ack entry answers) and measure normally when
   # they hold the same blob, which is the ordinary case.
-  local weaken_bases weaken_b weaken_seen=''
+  local weaken_bases weaken_b weaken_seen='' weaken_seen_set='' weaken_bi=0
   weaken_bases="$(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null)" || weaken_bases=''
   while IFS= read -r weaken_b; do
     [[ -n "${weaken_b}" ]] || continue
-    # Blob-or-absent identity, the same thing the measurement reads: a path
-    # that is a TREE at one base and missing at another is "no blob" at
-    # both, and rev-parse's tree OID would read as a disagreement.
-    if weaken_is_blob "${weaken_b}" "${f}"; then
-      weaken_b="$(git rev-parse -q --verify "${weaken_b}:${f}" 2> /dev/null || echo 'absent')"
-    else
-      weaken_b='absent'
-    fi
-    if [[ -z "${weaken_seen}" ]]; then
+    # Compared through weaken_blob, the very reader the measurement uses:
+    # a path that is a tree, a gitlink or missing is "no blob" to all of
+    # them alike, and an identity that told those apart would refuse a
+    # tie-break that cannot change the verdict.
+    weaken_bi=$(( weaken_bi + 1 ))
+    weaken_b="$(weaken_blob "${weaken_b}" "${f}" "${tag}.mb${weaken_bi}")" || return 1
+    if [[ -z "${weaken_seen_set}" ]]; then
       weaken_seen="${weaken_b}"
-    elif [[ "${weaken_seen}" != "${weaken_b}" ]]; then
+      weaken_seen_set='1'
+    elif [[ -z "${weaken_seen}" && -z "${weaken_b}" ]]; then
+      :
+    elif [[ -z "${weaken_seen}" || -z "${weaken_b}" ]]; then
+      return 1
+    elif ! cmp -s "${weaken_seen}" "${weaken_b}"; then
       return 1
     fi
   done <<< "${weaken_bases}"

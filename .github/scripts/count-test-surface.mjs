@@ -606,8 +606,12 @@ function sameContent(a, b) {
   return readFileSync(a).equals(readFileSync(b));
 }
 
-// Two counts describe the same declared surface: every total the gate
-// reads, plus the registration multisets it charges against.
+// Two counts describe the same CHARGEABLE surface: the assertion totals
+// and the enabled-registration multiset. Nothing else is compared, because
+// nothing else can be charged -- `enabled` is the count of `test:` keys in
+// that same multiset, and a side's DISABLED registrations reach no signal
+// (only the tip's do), so reading either as movement would raise the
+// baseline for a change the gate can never charge.
 function sameSurface(a, b) {
   const same = (x, y) => {
     if (x.size !== y.size) return false;
@@ -617,9 +621,7 @@ function sameSurface(a, b) {
   return (
     a.assertions === b.assertions &&
     a.declared === b.declared &&
-    a.enabled === b.enabled &&
-    same(bag(a.enabledTitles), bag(b.enabledTitles)) &&
-    same(bag(a.disabled), bag(b.disabled))
+    same(bag(a.enabledTitles), bag(b.enabledTitles))
   );
 }
 
@@ -698,16 +700,27 @@ export function measure({ path, tip, pre, events = [] }) {
       // "Moved" means the measured SURFACE moved, not the bytes: main
       // appending a comment to a file an earlier round deleted contributes
       // no coverage, and reading it as a contribution would re-charge that
-      // deletion in every round main happens to touch the file.
+      // deletion in every round main happens to touch the file. For a file
+      // whose surface this instrument cannot read at all -- the Python and
+      // Rust shapes, judged by the deletion arm alone -- "the surface did
+      // not move" is unmeasurable rather than false, so movement falls back
+      // to the bytes; otherwise main growing such a file mid-round could
+      // never put it back in the baseline and its deletion would be free.
+      const beforeCount = countFile(ev.before, path);
+      const afterCount = countFile(ev.after, path);
+      const readable =
+        beforeCount.language !== 'other' || afterCount.language !== 'other';
       const moved =
         !baseHolds ||
-        !sameSurface(countFile(ev.before, path), countFile(ev.after, path));
+        (readable
+          ? !sameSurface(beforeCount, afterCount)
+          : !sameContent(ev.before, ev.after));
       if (ev.mainHolds && moved) {
         baselinePresent = true;
+      } else if (!ev.mainHolds && baseHolds && !landedHolds) {
         // `!landedHolds` is redundant for manifests the gate produces --
         // it drops the event entirely when main holds no side and the merge
         // kept the file -- and load-bearing for any other producer.
-      } else if (!ev.mainHolds && baseHolds && !landedHolds) {
         baselinePresent = false;
       }
     }

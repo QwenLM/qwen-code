@@ -26606,28 +26606,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
-    // -- main MERGED the round's own commit, so main's side carries the
-    //    round's authorship. The model cannot separate them, and measuring
-    //    the round against it cancels exactly what the round removed, so
-    //    the file is refused rather than certified.
-    'main-absorbs-round-commit': {
-      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
-      files: {},
-      mainMoves: ['echo m1 > m1.txt && git add m1.txt && git commit -qm m1'],
-      round: [
-        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
-        'git commit -qam round-guts-x',
-        'git checkout -q main',
-        'git merge -q --no-edit feature',
-        'git push -q origin main',
-        'git checkout -q feature',
-        // The branch has to move again, or merging main fast-forwards and
-        // there is no merge event to measure at all.
-        'echo f3 > f3.txt && git add f3.txt && git commit -qm feature-moves',
-        'git merge -q --no-edit origin/main',
-        AGENT_COMMIT,
-      ],
-    },
     // -- the file was removed in an EARLIER round and main only appends a
     //    comment to its own copy. That moves no surface, so it is not a
     //    contribution and the old deletion is not re-charged.
@@ -26641,8 +26619,63 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       ],
       round: [
         'git merge -q --no-edit --no-commit origin/main || true',
-        'git rm -q --ignore-unmatch pkg/x.test.ts',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
         'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a NON-JS test file: the counter reads no surface from it, so
+    //    "the surface did not move" is unmeasurable rather than false.
+    //    An earlier round deleted it, main GROWS it during this one, and
+    //    the round keeps its deletion: the deletion arm is the only arm
+    //    these shapes have, and it must still fire.
+    'preround-absent-main-grows-python': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/test_x.py': ['def test_a():', '    assert one() == 1'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/test_x.py'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/test_x.py': [
+            'def test_a():',
+            '    assert one() == 1',
+            '',
+            'def test_b():',
+            '    assert two() == 2',
+          ],
+        }),
+        'git commit -qam main-grows-py',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/test_x.py',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS a test file with no readable surface at all during the
+    //    round, and the round discards it in the resolution. Main added a
+    //    path the baseline did not have, so the deletion is the round's
+    //    however little the file measures.
+    'main-adds-zero-surface-round-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        // No registrations and no assertions: its measured surface is
+        // indistinguishable from an absent file, so only the file's
+        // EXISTENCE tells the baseline it arrived.
+        ...fixtureWrite({
+          'pkg/e.test.ts': [WT_IMPORT, '// fixtures live here for now'],
+        }),
+        'git add pkg/e.test.ts && git commit -qm main-adds-empty',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/e.test.ts',
+        'git commit -qm drop-mains-file',
         AGENT_COMMIT,
       ],
     },
@@ -27759,19 +27792,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'main-deletes-after-moving-then-merges-again',
         'net 1 assertion(s) removed',
       );
-      // Main merging the round's own commit mid-round is outside the
-      // model's stated precondition (this repository lands PRs squashed).
-      // The one-merge spelling of it still measures correctly, because the
-      // merge base then already carries the round's commit: pinned so the
-      // shape is exercised rather than assumed.
-      const absorbed = rejectsWeakening(
-        'main-absorbs-round-commit',
-        'net 1 assertion(s) removed',
-      );
-      expect(absorbed.rejection).toContain('pkg/x.test.ts');
       // Main appending a comment moves no SURFACE, so it does not put a
-      // file an earlier round deleted back into the baseline.
+      // file an earlier round deleted back into the baseline...
       acceptsWithoutCharge('preround-absent-main-comments');
+      // ...but a file whose surface the instrument cannot read at all is
+      // judged by its bytes, or the deletion arm -- the only arm those
+      // shapes have -- could never fire again.
+      const py = rejectsWeakening(
+        'preround-absent-main-grows-python',
+        'test file deleted',
+      );
+      expect(py.rejection).toContain('pkg/test_x.py');
+      // ...and a path main ADDED is the baseline's however little it
+      // measures: the round discarding it is still the round's deletion.
+      const empty = rejectsWeakening(
+        'main-adds-zero-surface-round-drops',
+        'test file deleted',
+      );
+      expect(empty.rejection).toContain('pkg/e.test.ts');
       // Two equally valid merge bases holding the SAME blob cannot change
       // the verdict, so the file is measured...
       acceptsWithoutCharge('crisscross-bases-agree');
