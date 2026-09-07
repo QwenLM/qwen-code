@@ -409,10 +409,16 @@ export const GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED =
 /**
  * A Goal whose autonomous turns stopped producing anything to judge. The
  * next step is the user's: resume to try the same objective again, or edit
- * it into one the model can act on.
+ * it into one the model can act on and then resume it -- editing alone
+ * leaves a paused Goal paused.
+ *
+ * Runtime-emitted and headless-reachable, so it names no slash command; and
+ * it says "nothing to judge" rather than "no tool results", because
+ * `get_goal` and `update_goal` results are recorded but deliberately do not
+ * count as progress.
  */
 export const GOAL_PAUSE_REASON_NO_PROGRESS =
-  'Three Goal turns in a row recorded no tool results and no proposal. Run /goal resume to try again, or /goal edit to change course.';
+  'Three Goal turns in a row recorded nothing to judge and no proposal. Resume the Goal to try again, or edit its objective into one the model can act on and then resume it.';
 
 function truncateGoalPauseReason(reason: string): string {
   const codePoints = [...reason];
