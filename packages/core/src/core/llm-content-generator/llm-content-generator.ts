@@ -29,6 +29,10 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 import type { Config } from '../../config/config.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
+import {
+  expandDynamicHeaders,
+  hasDynamicPlaceholder,
+} from '../outbound-dynamic-headers.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -79,7 +83,18 @@ export class LlmContentGenerator implements ContentGenerator {
     contentGeneratorConfig?: ContentGeneratorConfig,
     cliConfig?: Config,
   ) {
-    const customHeaders = contentGeneratorConfig?.customHeaders;
+    // Only placeholder-free entries may be baked into the client: a
+    // placeholder value put here would be frozen at whatever the session
+    // was when the client was built, and overriding it later would rely
+    // on the SDK letting request-level headers win over client-level
+    // ones. `buildHttpOptions` supplies the placeholder-bearing entries
+    // per request instead, so the literal never reaches the client.
+    const allCustomHeaders = contentGeneratorConfig?.customHeaders;
+    const staticEntries = Object.entries(allCustomHeaders ?? {}).filter(
+      ([, value]) => typeof value !== 'string' || !hasDynamicPlaceholder(value),
+    );
+    const customHeaders =
+      staticEntries.length > 0 ? Object.fromEntries(staticEntries) : undefined;
     const finalOptions = customHeaders
       ? (() => {
           const baseHttpOptions = options.httpOptions;
@@ -108,13 +123,29 @@ export class LlmContentGenerator implements ContentGenerator {
     const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
     if (!this.cliConfig || !destination) return httpOptions;
 
+    // The placeholder-bearing entries were deliberately kept out of the
+    // client options (see the constructor), so this is the only place
+    // they are supplied — resolved fresh for each request.
+    const dynamicHeaders = expandDynamicHeaders(
+      this.contentGeneratorConfig?.customHeaders,
+      this.cliConfig,
+    );
     const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);
-    if (Object.keys(sessionHeaders).length === 0) return httpOptions;
+    if (
+      Object.keys(sessionHeaders).length === 0 &&
+      Object.keys(dynamicHeaders).length === 0
+    ) {
+      return httpOptions;
+    }
     return {
       ...httpOptions,
       headers: {
         ...httpOptions?.headers,
+        // Existing merge order for this path is
+        // customHeaders > correlation; keep it.
         ...sessionHeaders,
+        ...dynamicHeaders,
+        // (dynamicHeaders last: they are customHeaders entries.)
       },
     };
   }

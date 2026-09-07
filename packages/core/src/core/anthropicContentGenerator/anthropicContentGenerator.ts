@@ -364,6 +364,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       fetch: buildSessionAwareFetch(
         runtimeOptions.fetch,
         this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
       ) as unknown as AnthropicFetch,
     });
 

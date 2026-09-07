@@ -1458,31 +1458,11 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
-        sessionIdHeader: {
+        allowDynamicHeaderValues: {
           description:
-            'Send the qwen-code session ID as a per-request header to the listed HTTPS hosts. Default off with an empty host list — nothing is sent unless you opt in. Use for gateways that require a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session` since 2026-09-06). The value is resolved per request, so `/new` and `/resume` rotate it. Privacy: listed hosts can group every request of one conversation under a stable ID — only list hosts you already send your prompts to.',
-          type: 'object',
-          properties: {
-            enabled: {
-              description:
-                'Master switch. Default false: no user-configured session header is sent anywhere.',
-              type: 'boolean',
-              default: false,
-            },
-            headerName: {
-              description:
-                'Header name to set, e.g. `x-opencode-session`. Must be a valid HTTP header name (letters, digits, dot, underscore, hyphen); an invalid name is ignored with a warning. Default: `session_id`.',
-              type: 'string',
-            },
-            trustedHosts: {
-              description:
-                'Exact hostnames (no wildcards) allowed to receive the header, e.g. `["opencode.ai"]`. HTTPS requests only; matching is case-insensitive. Default empty — `enabled: true` with no hosts sends nothing.',
-              type: 'array',
-              items: { type: 'string' },
-              default: [],
-            },
-          },
-          additionalProperties: false,
+            'SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders — currently `${session_id}` — expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether live session state may be interpolated at all, and prevents a preset or extension from silently turning a shipped `customHeaders` entry into an identity header.',
+          type: 'boolean',
+          default: false,
         },
       },
       additionalProperties: false,

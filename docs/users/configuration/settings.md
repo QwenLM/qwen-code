@@ -663,36 +663,31 @@ Configures logging and metrics collection for Qwen Code. For more information, s
 
 #### outboundCorrelation
 
-⚠️ **Security-relevant.** Controls what client-side correlation data qwen-code writes into outbound LLM API requests — a separate consent decision from `telemetry.*` (which governs data flowing into your OWN observability backend). All values default to off.
+⚠️ **Security-relevant.** Controls what client-side correlation data Qwen Code writes into outbound LLM API requests — a separate consent decision from `telemetry.*`, which governs data flowing into your OWN observability backend. All values default to off.
 
-| Setting                                            | Type     | Description                                                                                                                                                                          | Default      |
-| -------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ |
-| `outboundCorrelation.propagateTraceContext`        | boolean  | Inject W3C `traceparent` on outbound `fetch` requests and as a `TRACEPARENT` env var in shell child processes. Requires `telemetry.enabled: true`.                                   | `false`      |
-| `outboundCorrelation.sessionIdHeader.enabled`      | boolean  | Master switch for sending the qwen-code session ID as a per-request header to the hosts you list. When off (default), nothing is sent beyond the built-in first-party allowlist.     | `false`      |
-| `outboundCorrelation.sessionIdHeader.headerName`   | string   | Header name to set. Must be a valid HTTP header name (letters, digits, `.`, `_`, `-`); an invalid name is ignored with a warning.                                                    | `session_id` |
-| `outboundCorrelation.sessionIdHeader.trustedHosts` | string[] | Exact hostnames (no wildcards) allowed to receive the header. HTTPS requests only; matching is case-insensitive and ignores the port. An empty list sends nothing even when enabled. | `[]`         |
-
-The session ID is resolved per request, so `/new` and `/resume` rotate the value without restarting. Some gateways require such a per-conversation identifier — for example OpenCode Go rejects requests without `x-opencode-session` since 2026-09-06:
+| Setting                                        | Type    | Description                                                                                                                                                     | Default |
+| ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `outboundCorrelation.propagateTraceContext`    | boolean | Inject W3C `traceparent` on outbound `fetch` requests and as a `TRACEPARENT` env var in shell child processes. Requires `telemetry.enabled: true`.              | `false` |
+| `outboundCorrelation.allowDynamicHeaderValues` | boolean | Allow `customHeaders` values to contain runtime placeholders such as `${session_id}`, expanded per request. When off, such a value is dropped rather than sent. | `false` |
 
 ```json
 {
   "outboundCorrelation": {
-    "sessionIdHeader": {
-      "enabled": true,
-      "headerName": "x-opencode-session",
-      "trustedHosts": ["opencode.ai"]
-    }
+    "allowDynamicHeaderValues": true
   }
 }
 ```
 
-**Privacy note:** the header is a stable identifier that lets every listed host group all requests of one conversation. Only list hosts you already send your prompt content to.
+`allowDynamicHeaderValues` is only the consent switch. _Which_ hosts receive the
+value and _what_ the header is called are decided where the header lives —
+`modelProviders[].generationConfig.customHeaders`, see
+[Dynamic values in `customHeaders`](model-providers.md#dynamic-values-in-customheaders).
+That scoping is why there is no host allowlist here: you already chose the
+endpoint when you wrote the provider's `baseUrl`, and providers that should not
+send the header simply do not carry it.
 
-Three things worth knowing before you list a host:
-
-- **Only the initial destination is checked.** `fetch` keeps non-authorization headers across a redirect, so a host you list can forward the session ID to one you did not by redirecting. Listing a host means trusting its redirect behavior too.
-- **Internationalized domains must be written in punycode** (`xn--…`), because the request hostname is compared as the URL parser produced it.
-- **A typo in `headerName` is only reported in the debug log.** If the gateway keeps rejecting your requests, run with `QWEN_DEBUG_LOG_FILE=1` and look for an `OUTBOUND_CORRELATION` warning in the session debug log — an invalid name is dropped rather than sent.
+**Privacy note:** an expanded value is a stable per-conversation identifier.
+Only put one on a provider you already send your prompt content to.
 
 ### Example `settings.json`
 

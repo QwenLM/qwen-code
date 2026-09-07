@@ -9385,49 +9385,6 @@ describe('Server Config (config.ts)', () => {
         );
       },
     );
-
-    // Default-to-undefined is security-relevant — controls whether the
-    // session ID is written as a header onto user-chosen hosts.
-    it('getOutboundSessionIdHeaderSettings is undefined unless enabled', () => {
-      expect(
-        new Config({
-          ...baseParams,
-          outboundCorrelation: undefined,
-        }).getOutboundSessionIdHeaderSettings(),
-      ).toBeUndefined();
-      expect(
-        new Config({
-          ...baseParams,
-          outboundCorrelation: {
-            sessionIdHeader: { enabled: false, trustedHosts: ['opencode.ai'] },
-          },
-        }).getOutboundSessionIdHeaderSettings(),
-      ).toBeUndefined();
-      expect(
-        new Config({
-          ...baseParams,
-          outboundCorrelation: { sessionIdHeader: { enabled: true } },
-        }).getOutboundSessionIdHeaderSettings(),
-      ).toEqual({ enabled: true });
-    });
-
-    it('getOutboundSessionIdHeaderSettings passes the configured shape through', () => {
-      const config = new Config({
-        ...baseParams,
-        outboundCorrelation: {
-          sessionIdHeader: {
-            enabled: true,
-            headerName: 'x-opencode-session',
-            trustedHosts: ['opencode.ai'],
-          },
-        },
-      });
-      expect(config.getOutboundSessionIdHeaderSettings()).toEqual({
-        enabled: true,
-        headerName: 'x-opencode-session',
-        trustedHosts: ['opencode.ai'],
-      });
-    });
   });
 
   describe('UseRipgrep Configuration', () => {

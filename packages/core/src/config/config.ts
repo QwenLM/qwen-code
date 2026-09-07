@@ -646,54 +646,21 @@ export interface OutboundCorrelationSettings {
    */
   propagateTraceContext?: boolean;
   /**
-   * Send the qwen-code session ID as a per-request header to
-   * user-chosen HTTPS hosts. Default: disabled with an empty host
-   * list — nothing is sent anywhere unless the operator opts in.
+   * Allow `modelProviders[].generationConfig.customHeaders` values to
+   * carry runtime placeholders such as `${session_id}`, expanded per
+   * request. Default: disabled — a value with a placeholder is dropped
+   * rather than sent.
    *
-   * Some OpenAI-compatible gateways require a stable per-conversation
-   * identifier for prompt-cache routing (e.g. OpenCode Go rejects
-   * requests without `x-opencode-session` since 2026-09-06). The value
-   * is resolved per request from `getSessionId()`, so `/new` and
-   * `/resume` rotate it without rebuilding the client.
-   *
-   * Privacy: the header is a stable identifier that lets the listed
-   * hosts group every request of one conversation. Only list hosts you
-   * already send your prompts to; see
-   * docs/design/telemetry-outbound-propagation-design.md §12.7.
+   * This is the consent decision, and it is the only part of the feature
+   * that is global: *which* hosts may receive the value, and *what* the
+   * header is called, are already answered by the provider entry the
+   * header is attached to. The gate also means a preset or extension
+   * that ships a `customHeaders` entry cannot quietly turn it into an
+   * identity header — provenance is lost once presets and user settings
+   * are merged, so the switch is what separates "I typed this" from
+   * "something shipped this".
    */
-  sessionIdHeader?: OutboundSessionIdHeaderSettings;
-}
-
-/**
- * User-configurable session-ID header for outbound LLM requests.
- * Lives under `outboundCorrelation.*` — see the parent interface for
- * why this namespace is separate from `telemetry.*`.
- */
-export interface OutboundSessionIdHeaderSettings {
-  /**
-   * Master switch. Default `false`: no user-configured header is sent,
-   * and `trustedHosts`/`headerName` are ignored.
-   */
-  enabled?: boolean;
-  /**
-   * Header name to set, e.g. `x-opencode-session`. Must match the
-   * conservative HTTP token subset accepted by
-   * `core/outbound-session-id.ts` (letters, digits, `.`, `_`, `-`,
-   * starting with a letter or digit); an invalid name is ignored with
-   * a debug warning rather than sent. Default: `session_id`.
-   */
-  headerName?: string;
-  /**
-   * Exact hostnames (no wildcards) that may receive the header, e.g.
-   * `["opencode.ai"]`. HTTPS only. Matching is case-insensitive and
-   * ignores the port; internationalized names must be listed in
-   * punycode, because the request hostname is compared as parsed.
-   * Only the initial destination is checked — a listed host that
-   * redirects elsewhere forwards the header with it.
-   * Default: empty — with `enabled: true` but no hosts, nothing is
-   * sent (fail-closed rather than "all hosts").
-   */
-  trustedHosts?: string[];
+  allowDynamicHeaderValues?: boolean;
 }
 
 export interface OutputSettings {
@@ -2666,7 +2633,8 @@ export class Config {
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
-      sessionIdHeader: params.outboundCorrelation?.sessionIdHeader,
+      allowDynamicHeaderValues:
+        params.outboundCorrelation?.allowDynamicHeaderValues ?? false,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -7561,17 +7529,12 @@ export class Config {
   }
 
   /**
-   * The user-configured session-ID header settings, or `undefined`
-   * when the feature is off (the default). Consumers treat `undefined`
-   * as "send nothing beyond the built-in first-party allowlist" — see
-   * `core/outbound-session-id.ts`.
+   * Whether `customHeaders` values may carry runtime placeholders. See
+   * {@link OutboundCorrelationSettings.allowDynamicHeaderValues}; consumed by
+   * `core/outbound-dynamic-headers.ts`.
    */
-  getOutboundSessionIdHeaderSettings():
-    | OutboundSessionIdHeaderSettings
-    | undefined {
-    const settings = this.outboundCorrelationSettings.sessionIdHeader;
-    if (!settings?.enabled) return undefined;
-    return settings;
+  getOutboundAllowDynamicHeaderValues(): boolean {
+    return this.outboundCorrelationSettings.allowDynamicHeaderValues ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {
