@@ -26451,11 +26451,122 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git add pkg/x.test.ts && git commit -qm keep-x',
         'git checkout -q main',
         ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        // One comment line, so the re-add is a real event: byte-identical
+        // content makes `git diff --quiet` skip it and the fixture would
+        // never reach the chain it exists to pin.
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
         'git add pkg/x.test.ts && git commit -qm main-readds-x',
         'git push -q origin main',
         'git checkout -q feature',
-        'git merge -q --no-edit origin/main',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        "printf '// main re-added this\\n' >> 'pkg/x.test.ts'",
+        'git add -A pkg && git commit -qm take-mains-readd',
         ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DELETES the file and the merge does not adopt the deletion:
+    //    the round keeps its own copy, gutted. Main contributed nothing
+    //    here, so recording the event would let the round's own copy stand
+    //    in for main's side and credit main with the round's removal.
+    'main-deletes-round-keeps-weakened': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/x.test.ts', 'git commit -qm main-deletes-x'],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam round-guts-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git add -A pkg && git commit -qm keep-our-copy',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the file was removed in an EARLIER round, main GROWS it during
+    //    this one, and the round restores main's file and then guts it.
+    //    Main contributed content this round, so the baseline holds the
+    //    file however the pre-round ref stood.
+    'preround-absent-main-grows-round-guts': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows-x',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm restore-mains-file',
+        ...fixtureWrite({
+          'pkg/x.test.ts': testA("it('a', () => {", '  noop();'),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a pre-existing file MAIN never held, deleted inside the merge
+    //    commit itself. Main moved nothing, so nothing may take it out of
+    //    the baseline the pre-round ref established.
+    'preround-own-file-merge-drops': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/n.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q pkg/n.test.ts',
+        'git commit -qm merge-drops-n',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a real criss-cross: the round merged a main commit and main
+    //    merged the round's, so the merge of main has TWO equally valid
+    //    bases. They hold the same blob for this file, so git's pick
+    //    cannot change the verdict and it is measured normally.
+    'crisscross-bases-agree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['echo m1 > m1.txt', 'git add m1.txt', 'git commit -qm m1'],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git checkout -q main',
+        'git merge -q --no-edit origin/feature',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same criss-cross, but the two bases DISAGREE about the file,
+    //    so git's pick would decide the verdict. Refused rather than
+    //    measured on a tie-break git does not promise.
+    'crisscross-bases-disagree': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam m1-weakens',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add -A pkg && git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-grows',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
         AGENT_COMMIT,
       ],
     },
@@ -27541,11 +27652,40 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       acceptsWithoutCharge('deleted-earlier-round-then-merge');
       acceptsWithoutCharge('renamed-earlier-round-then-merge');
       // Main's contribution is counted once across add / delete / re-add,
-      // not once per merge that sees it.
+      // not once per merge that sees it: the events CHAIN, so each is
+      // measured against main's side at the previous one.
       rejectsWeakening(
         'main-adds-deletes-readds',
         'net 1 assertion(s) removed',
       );
+      // Main's deletion that the merge did NOT adopt contributes nothing:
+      // the round kept its own copy and answers for gutting it.
+      rejectsWeakening(
+        'main-deletes-round-keeps-weakened',
+        'net 1 assertion(s) removed',
+      );
+      // ...while main GROWING a path the pre-round ref lacks does put it
+      // back in the baseline, whatever an earlier round did to it.
+      rejectsWeakening(
+        'preround-absent-main-grows-round-guts',
+        'net 1 assertion(s) removed',
+      );
+      // ...and a pre-existing file main never held is still the baseline's,
+      // however the merge commit disposes of it.
+      const ownDropped = rejectsWeakening(
+        'preround-own-file-merge-drops',
+        'test file deleted',
+      );
+      expect(ownDropped.rejection).toContain('pkg/n.test.ts');
+      // Two equally valid merge bases holding the SAME blob cannot change
+      // the verdict, so the file is measured...
+      acceptsWithoutCharge('crisscross-bases-agree');
+      // ...and two that disagree about it are refused rather than resolved
+      // by a tie-break git does not promise.
+      const crossed = runGate({ weaken: 'crisscross-bases-disagree' });
+      expect(crossed.status).toBe(1);
+      expect(crossed.rejection).toContain('test surface could not be measured');
+      expect(crossed.rejection).toContain('pkg/a.test.ts');
       // ...but a path MAIN also added during the round is the baseline's,
       // and dropping it after the merge is the round's deletion.
       const addAdd = rejectsWeakening(

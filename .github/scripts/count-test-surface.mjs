@@ -665,25 +665,20 @@ export function measure({ path, tip, pre, events = [] }) {
     return out;
   };
   for (const ev of events) {
-    // PRESENCE follows main's own side, not the model's endpoint and not
-    // the merge result: the baseline holds the file when main held it at
-    // this event, whatever the resolution then did with it. Reading it off
-    // a blob main never held is how a file the round authored itself comes
-    // to read as baseline coverage; reading it off the merge result is how
-    // a round discards a test main added and answers for nothing.
     const landedRef = ev.landed !== undefined ? ev.landed : ev.after;
-    // PRESENCE moves only when main's side and the merge base DISAGREE
-    // about the file existing. Main adding it during the round puts it in
-    // the baseline, and the round answers for dropping it afterwards. Main
-    // deleting it takes it out only when the merge adopted that deletion;
-    // a resolution that kept the file leaves it in the round's hands.
-    // Main merely still HOLDING a file it has always held says nothing:
-    // the baseline there is the pre-round ref's, which is where a file the
-    // round removed in an EARLIER round already stands removed.
+    // PRESENCE follows what main CONTRIBUTED to the path. Main holding the
+    // file and having moved it puts the file in the baseline, whatever the
+    // resolution then did with it -- a round that discards what main landed
+    // still answers for it. Main deleting it takes it out only when the
+    // merge adopted that deletion; a resolution that kept the file leaves
+    // it in the round's hands. Main merely still HOLDING a file it has
+    // always held contributes nothing and says nothing: the baseline there
+    // is the pre-round ref's, which is where a file the round removed in an
+    // EARLIER round already stands removed.
     if (ev.mainHolds !== undefined) {
       const baseHolds = ev.before !== null && ev.before !== undefined;
       const landedHolds = landedRef !== null && landedRef !== undefined;
-      if (ev.mainHolds && !baseHolds) {
+      if (ev.mainHolds && !sameContent(ev.before, ev.after)) {
         baselinePresent = true;
       } else if (!ev.mainHolds && baseHolds && !landedHolds) {
         baselinePresent = false;

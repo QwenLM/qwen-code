@@ -1269,19 +1269,36 @@ weaken_auto_blob() {
   local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p2 base res holds='0'
   # A criss-cross history has more than one equally valid merge base, and
   # git picks one without promising which. Main's delta is measured against
-  # that base, so the pick would decide the verdict -- and one of them can
-  # credit main with the ROUND's own removal. Refuse to measure the file
-  # instead: the caller charges it as unmeasurable, which one ack entry
-  # answers, rather than certifying a verdict a tie-break chose.
-  if (( $(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null | wc -l) > 1 )); then
-    return 1
-  fi
+  # that base, so a pick can decide the verdict -- one candidate can credit
+  # main with the ROUND's own removal. It only matters when the candidates
+  # DISAGREE about this file: refuse then (the caller charges it as
+  # unmeasurable, which one ack entry answers) and measure normally when
+  # they hold the same blob, which is the ordinary case.
+  local weaken_bases weaken_b weaken_seen=''
+  weaken_bases="$(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null)" || weaken_bases=''
+  while IFS= read -r weaken_b; do
+    [[ -n "${weaken_b}" ]] || continue
+    weaken_b="$(git rev-parse -q --verify "${weaken_b}:${f}" 2> /dev/null || echo 'absent')"
+    if [[ -z "${weaken_seen}" ]]; then
+      weaken_seen="${weaken_b}"
+    elif [[ "${weaken_seen}" != "${weaken_b}" ]]; then
+      return 1
+    fi
+  done <<< "${weaken_bases}"
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
   res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
   base=''
   if [[ -n "${mb}" ]]; then
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
+  fi
+  if [[ -z "${p2}" && -n "${base}" ]] && weaken_is_blob "${c}" "${f}"; then
+    # Main deleted the file and the merge did NOT adopt the deletion: the
+    # round kept its own copy, so main contributed nothing here and the
+    # file stays in the round's hands. Not an event -- recording it would
+    # let the round's own copy stand in for main's side, and a copy weaker
+    # than the merge base would credit main with the round's removal.
+    return 0
   fi
   [[ -z "${p2}" ]] || holds='1'
   weaken_emit "${p2}" "${base}" "${res}" "${holds}"
@@ -1292,7 +1309,7 @@ weaken_auto_blob() {
 # deletion of the old path and a new file at the new one.
 weaken_measure() {
   local f="${1}" tag="${2}" tip pre before after landed holds events='' weaken_i c kind mp j=0
-  local weaken_pair
+  local weaken_pair weaken_prev='' weaken_prev_set=''
   tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
   pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
   for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
@@ -1317,6 +1334,10 @@ weaken_measure() {
       [[ -z "${after}" ]] || holds='1'
     else
       weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
+      if [[ -z "${weaken_pair}" ]]; then
+        j=$(( j - 1 ))
+        continue
+      fi
       # Main's own side, measured against the MERGE BASE -- not against the
       # branch's side, which is the round's own authorship and already
       # inside tip - pre-round.
@@ -1326,6 +1347,14 @@ weaken_measure() {
       holds="$(sed -n 4p <<< "${weaken_pair}")"
       [[ "${holds}" == '1' ]] || holds='0'
     fi
+    # Main's contributions CHAIN: after the first event, main's side is
+    # measured against main's side at the PREVIOUS event, not against a
+    # fresh merge base that already reflects it. Chained, the events
+    # telescope to main's own net for the round; unchained, main deleting
+    # and re-adding a file is credited for the re-add twice.
+    [[ -z "${weaken_prev_set}" ]] || before="${weaken_prev}"
+    weaken_prev="${after}"
+    weaken_prev_set='1'
     events+="$(jq -cn --arg b "${before}" --arg a "${after}" --arg l "${landed}" \
       --argjson h "${holds}" \
       '{before: (if $b == "" then null else $b end),
@@ -1404,9 +1433,11 @@ weaken_tip_mode() {
   git ls-tree "${BRANCH}" -- ":(literal)${1}" 2> /dev/null | awk '{print $1; exit}'
 }
 # Success when the round's BASELINE holds ${1} -- the pre-round ref, or any
-# main-derived event that landed it during the round. This is the baseline
-# `baselinePresent` reports, so the fail-closed arm below can never stand
-# in for the measured one on a narrower definition than it uses.
+# main-derived event that carried it during the round. Deliberately WIDER
+# than the measured arm's `baselinePresent`, which also asks whether main
+# contributed anything and whether the merge adopted its deletion: the
+# fail-closed arm must never be the narrower of the two, so a file it
+# cannot measure is charged rather than waived.
 weaken_baseline_holds() {
   local weaken_bi
   weaken_is_blob "origin/${BRANCH}" "${1}" && return 0
