@@ -2348,14 +2348,21 @@ export class ShellExecutionService {
             // resolves even if taskkill couldn't kill the tree. Harmless once
             // the tree is already dead. Mirrors the POSIX branch's kill fallback.
             //
-            // kill() is right *here* — unlike on the healthy path — because we
-            // only get here while the shell is still running (see the `exited`
-            // early return above), so node-pty's console-process-list lookup
-            // resolves for real and killing it is the intended fallback for a
-            // taskkill that never launched. Record it so the finalizer's
-            // releaseConPtyHost does not close the same pseudo-console twice:
-            // node-pty's native PtyKill does not drop the handle, so a second
-            // close is a double-free. See #11303.
+            // kill() is right *here* — unlike on the healthy path — as the
+            // fallback for a taskkill that never launched: the shell is then
+            // genuinely still running, so node-pty's console-process-list
+            // lookup resolves for real. When the taskkill above did land, the
+            // shell is already dead by the time kill() runs and the lookup
+            // takes node-pty's 5 s `[innerPid]` fallback instead
+            // (windowsPtyAgent._getConsoleProcessList has only a message
+            // listener plus that timeout), so the #6067 collateral-kill mode is
+            // still reachable on this path. That is tracked separately and
+            // deliberately out of scope here — do not read this call as
+            // evidence the shell is alive. Record the release either way so the
+            // finalizer's releaseConPtyHost does not close the same
+            // pseudo-console twice: while the shell is alive, native PtyKill
+            // closes the HPCON but leaves the baton in its handle list, so a
+            // second close is a double-free. See #11303.
             try {
               ptyProcess.kill();
             } catch {
