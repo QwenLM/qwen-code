@@ -98,7 +98,6 @@ describe('e2e workflow', () => {
       );
 
       expect(yml.jobs['e2e-test-linux'].env.E2E_CONTAINER_OWNER).toBe(owner);
-      expect(runStep.env.SANDBOX_FLAGS).toContain('org.qwen-code.ci.kind=e2e');
       expect(runStep.env.SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}',
       );
@@ -111,7 +110,7 @@ describe('e2e workflow', () => {
       expect(cleanupStep.run).toContain(
         '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
       );
-      expect(cleanupStep.run).toContain('docker rm -f');
+      expect(cleanupStep.run).toContain('docker rm -f > /dev/null || true');
       expect(cleanupStep.run.match(/docker ps -aq/g)).toHaveLength(2);
       expect(cleanupStep.run).toContain('E2E containers remain');
     });

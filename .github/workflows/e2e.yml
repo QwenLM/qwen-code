@@ -258,7 +258,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
-          SANDBOX_FLAGS: '--label org.qwen-code.ci.kind=e2e --label org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}'
+          SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}'
         run: |-
           set -euo pipefail
 
@@ -403,7 +403,7 @@ jobs:
           set -euo pipefail
           container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}")"
           if [ -n "$container_ids" ]; then
-            printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null
+            printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null || true
           fi
           remaining="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}")"
           if [ -n "$remaining" ]; then
