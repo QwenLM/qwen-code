@@ -331,11 +331,12 @@ AgentWorkspaceState  schemaVersion, workspaceId, hostSessionId,
 AgentAgentsFile      schemaVersion, agents[]
 
 WorkspaceAgent           id, name, description, color, agentType, model,
-                    queueLimit, enabled, createdAt,
-                    backgroundAgentId, runtimeId              ← execution binding
+                    instructions, queueLimit, maxConcurrentRuns,
+                    enabled, createdAt, retiredAt,
+                    runtimeId                                ← execution binding
 
-Thread              schemaVersion, id, title, body, status,
-                    assigneeAgentId, createdAt,
+Thread              schemaVersion, id, title, body, acceptanceCriteria,
+                    status, priority, assigneeAgentId, createdAt,
                     createdBy, messages[], runs[],
                     parentThreadId, rootThreadId,
                     autoTurnsUsed, tokensUsed,
@@ -368,8 +369,10 @@ V1 declares and validates this whole shape in one storage version. The owner
 chose one migration rather than serial schema bumps for fields already designed
 for steps 5-8. Fields whose producers do not exist yet remain optional and do
 not claim that delivery, provenance, recovery, or transcript slicing is
-implemented. `hostSessionId` is a workspace singleton; `runtimeId` is the
-generic execution binding beside the local `backgroundAgentId`.
+implemented. `hostSessionId` is a workspace singleton. `runtimeId` is the
+generic execution binding, reserved and not yet produced: a local agent is
+reached through its own session, whose id is derived from the agent id, so
+nothing needs a stored handle today.
 
 `authorKind` is `human | agent | system`. Until the ambient producer lands in
 step 5, migrated and rule-layer posts may omit `sourceRunId` and `triggerKind`.

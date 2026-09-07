@@ -154,7 +154,7 @@ function readAgentConfigPatch(payload: {
       return undefined;
     }
     if (typeof raw !== 'string') return `${key}_invalid`;
-    const value = key === 'instructions' ? raw.trim() : raw.trim();
+    const value = raw.trim();
     if (check && !check(value)) return `${key}_invalid`;
     steps.push((agent) => ({ ...agent, [key]: value }));
     return undefined;
@@ -1203,6 +1203,10 @@ export function registerWorkspaceAgentRoutes(
           }
           if (result === 'has_live_work') {
             res.status(409).json({ error: 'agent_has_live_work' });
+            return;
+          }
+          if (result === 'retired') {
+            res.status(409).json({ error: 'agent_retired' });
             return;
           }
         }

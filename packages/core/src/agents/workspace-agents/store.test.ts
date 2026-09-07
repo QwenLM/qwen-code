@@ -59,6 +59,7 @@ import {
   readThread,
   reconcileThreadOutbox,
   retireWorkspaceAgent,
+  setWorkspaceAgentEnabled,
   isAgentAddressable,
   updateWorkspaceAgents,
   updateThread,
@@ -618,6 +619,20 @@ describe('retiring an agent', () => {
     await expect(retireWorkspaceAgent(PROJECT_ROOT, BOB.id)).resolves.toBe(
       'updated',
     );
+  });
+
+  it('refuses to enable a retired identity instead of reporting success', async () => {
+    // Enabling one would change nothing a caller can observe, since
+    // `isAgentAddressable` still refuses it. Saying so beats a hollow 200.
+    await seed([ALICE]);
+    await retireWorkspaceAgent(PROJECT_ROOT, ALICE.id);
+
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, true),
+    ).resolves.toBe('retired');
+
+    const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(isAgentAddressable(alice)).toBe(false);
   });
 
   it('reports an unknown id rather than inventing an entry', async () => {

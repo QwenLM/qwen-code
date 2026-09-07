@@ -1157,7 +1157,11 @@ export async function updateWorkspaceAgents(
   });
 }
 
-type WorkspaceAgentRosterChange = 'updated' | 'not_found' | 'has_live_work';
+type WorkspaceAgentRosterChange =
+  | 'updated'
+  | 'not_found'
+  | 'has_live_work'
+  | 'retired';
 
 async function agentHasLiveWork(
   transaction: AgentStoreTransaction,
@@ -1190,6 +1194,10 @@ export async function setWorkspaceAgentEnabled(
     const agents = await transaction.readAgents();
     const agent = agents.find((candidate) => candidate.id === agentId);
     if (!agent) return 'not_found';
+    // A retired identity is a record, not a switch. Enabling one would report
+    // success and change nothing a caller can observe — `isAgentAddressable`
+    // still refuses it — which is worse than saying no.
+    if (agent.retiredAt !== undefined) return 'retired';
     if ((agent.enabled !== false) === enabled) return 'updated';
     await transaction.writeAgents(
       agents.map((candidate) =>

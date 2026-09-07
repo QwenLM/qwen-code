@@ -143,4 +143,45 @@ if field_orphans:
 else:
     print('OK: no orphan record field.')
 
+
+
+
+# --- third sweep: the design doc's record diagrams vs the real types --------
+# The plan is the authoritative description of these records, and a diagram
+# that has drifted is worse than none: it is read as current. This caught a
+# `backgroundAgentId` that no longer existed and three fields that did.
+
+DOC = 'docs/plans/2026-09-06-multi-agent-board-collaboration.md'
+DIAGRAMS = {  # interface name -> (start marker, end marker) in the diagram
+    'WorkspaceAgent': ('WorkspaceAgent ', '\n\nThread'),
+    'Thread': ('Thread    ', '\n\nThreadMessage'),
+}
+# Words in the diagram that annotate rather than name a field.
+ANNOTATIONS = {'execution', 'binding'}
+
+doc_path = ROOT / DOC
+if doc_path.exists():
+    types_src = (ROOT / 'packages/core/src/agents/workspace-agents/types.ts').read_text()
+    doc_text = doc_path.read_text()
+    drift = []
+    for iface, (head, tail) in DIAGRAMS.items():
+        m = re.search(r'export interface ' + iface + r'\s*\{(.*?)\n\}',
+                      types_src, re.S)
+        if not m or head not in doc_text or tail not in doc_text:
+            continue
+        code = set(re.findall(r'^  (\w+)\??:', m.group(1), re.M))
+        block = doc_text.split(head, 1)[1].split(tail, 1)[0]
+        listed = set(re.findall(r'\b([a-z][A-Za-z]+)\b', block)) - ANNOTATIONS
+        for name in sorted(listed - code):
+            drift.append((iface, name, 'in the diagram, not in the type'))
+        for name in sorted(code - listed):
+            drift.append((iface, name, 'in the type, not in the diagram'))
+    if drift:
+        failed = True
+        print(f'\n{len(drift)} record diagram drift(s) in {DOC}:\n')
+        for iface, name, why in drift:
+            print(f'  {iface}.{name:<26} {why}')
+    else:
+        print('OK: the design doc\'s record diagrams match the types.')
+
 sys.exit(1 if failed else 0)
