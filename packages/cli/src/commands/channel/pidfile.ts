@@ -479,49 +479,58 @@ export function reserveServeServiceInfo({
 
 /** Delete the PID file. */
 export function removeServiceInfo(expected?: ServiceInfo): void {
-  withPidFileLock((filePath) => {
-    if (!expected) {
-      if (existsSync(filePath)) unlinkPidFile(filePath);
-      return;
-    }
-
-    try {
-      const current = parseServiceInfo(
-        JSON.parse(readFileSync(filePath, 'utf-8')),
-      );
-      if (
-        current?.owner === expected.owner &&
-        current.pid === expected.pid &&
-        current.procStart === expected.procStart &&
-        current.startedAt === expected.startedAt
-      ) {
-        unlinkPidFile(filePath);
+  try {
+    withPidFileLock((filePath) => {
+      if (!expected) {
+        if (existsSync(filePath)) unlinkPidFile(filePath);
+        return;
       }
-    } catch {
-      // The original service already removed its pidfile.
-    }
-  });
+
+      try {
+        const current = parseServiceInfo(
+          JSON.parse(readFileSync(filePath, 'utf-8')),
+        );
+        if (
+          current?.owner === expected.owner &&
+          current.pid === expected.pid &&
+          current.procStart === expected.procStart &&
+          current.startedAt === expected.startedAt
+        ) {
+          unlinkPidFile(filePath);
+        }
+      } catch {
+        // The original service already removed its pidfile.
+      }
+    });
+  } catch {
+    // Fire-and-forget cleanup must not abort its caller's exit path; a record
+    // left behind is swept on the next read that can take the lock.
+  }
 }
 
 export function removeServeServiceInfo(
   servePid: number = process.pid,
 ): boolean {
-  return withPidFileLock((filePath) => {
-    if (!existsSync(filePath)) return false;
+  try {
+    return withPidFileLock((filePath) => {
+      if (!existsSync(filePath)) return false;
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
-    } catch {
-      return false;
-    }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+      } catch {
+        return false;
+      }
 
-    if (!isOwnServeReservation(parseServiceInfo(parsed), servePid)) {
-      return false;
-    }
+      if (!isOwnServeReservation(parseServiceInfo(parsed), servePid)) {
+        return false;
+      }
 
-    return unlinkPidFile(filePath);
-  });
+      return unlinkPidFile(filePath);
+    });
+  } catch {
+    return false;
+  }
 }
 
 export type SignalServiceOutcome = 'sent' | 'refused' | 'not-permitted';

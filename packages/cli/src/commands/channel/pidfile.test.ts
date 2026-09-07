@@ -1077,6 +1077,23 @@ describe('removeServiceInfo', () => {
     removeServiceInfo(legacy);
     expect(filePath in fsStore).toBe(true);
   });
+
+  it('skips the removal without throwing when the lock cannot be taken', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    writeServeServiceInfo({ channels: ['dingtalk'], servePid: 4321 });
+    const info = readServiceInfo()!;
+
+    pidfileLock.failures = 1;
+    pidfileLock.failureCode = 'EACCES';
+
+    expect(() => removeServiceInfo(info)).not.toThrow();
+    expect(getPidFilePath() in fsStore).toBe(true);
+
+    pidfileLock.failures = 1;
+    expect(removeServeServiceInfo(4321)).toBe(false);
+    expect(getPidFilePath() in fsStore).toBe(true);
+  });
 });
 
 describe('removeServeServiceInfo', () => {
