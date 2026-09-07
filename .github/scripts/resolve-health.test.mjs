@@ -1645,6 +1645,230 @@ describe('resolve-health: decisions', () => {
     );
   });
 
+  it('keeps a request edited out of shape paired with its own result', () => {
+    // The third way a request leaves the live arm, after ageing out and being
+    // deleted: an edit that stops the body reading as a request — retracting
+    // it, prepending a note, leading whitespace from a mobile edit. Excluding
+    // the vanished arm by comment id instead of by request-shaped id puts
+    // such a comment in neither arm, and its result goes to the next request.
+    const r2 = request('2026-09-07T10:05:00Z', 100);
+    const report = result('2026-09-07T10:20:00Z', PUSHED, 100);
+    const recorded = [
+      [901, '2026-09-07T10:00:00Z', 'COLLABORATOR', 100],
+      [r2.id, r2.created_at, 'COLLABORATOR', 100],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    const withFirst = (first) =>
+      assess(
+        [
+          {
+            number: 100,
+            state: 'open',
+            comments: [...first, r2, report],
+          },
+        ],
+        { now: new Date('2026-09-07T18:00:00Z'), recorded },
+      );
+    const intact = {
+      ...comment(
+        'maintainer',
+        '2026-09-07T10:00:00Z',
+        '@qwen-code /resolve',
+        100,
+      ),
+      id: 901,
+    };
+    const editedAway = {
+      ...intact,
+      body: '(retracted, ignore this)',
+      updated_at: '2026-09-07T11:00:00Z',
+    };
+    for (const [label, first] of [
+      ['intact', [intact]],
+      ['deleted', []],
+      ['edited out of shape', [editedAway]],
+    ]) {
+      const lane = withFirst(first);
+      assert.equal(lane.unserved, r2.created_at, label);
+      assert.deepEqual(decide(lane, existing), [], label);
+    }
+  });
+
+  it('does not re-inject a recorded request no result could be donated to', () => {
+    // The vanished arm exists to stop a result being donated. Where the PR has
+    // no result to donate, re-injecting the request only holds the gate — and
+    // the refusal writes nothing, so the prune that would drop the entry never
+    // runs and the tracking issue could never close again.
+    const asks = [0, 1, 2].map((i) => request(`2026-08-27T0${i}:00:00Z`, 22));
+    const recorded = asks.map((r) => [r.id, r.created_at, 'COLLABORATOR', 22]);
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 0,
+          unanswered: asks.map((r) => r.id),
+          newestRequest: '2026-08-27T02:00:00Z',
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // A week on: the requests have aged out of the comment window, PR 22 never
+    // produced a result at all, and the lane has since pushed on PR 23.
+    const healed = assess(
+      [
+        { number: 22, state: 'open', comments: [] },
+        {
+          number: 23,
+          state: 'open',
+          comments: [result('2026-09-01T00:00:00Z', PUSHED, 23)],
+        },
+      ],
+      { now: new Date('2026-09-05T12:00:00Z'), recorded },
+    );
+    assert.equal(healed.unserved, null);
+    assert.deepEqual(
+      decide(healed, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('will not let the PR closing switch the lag check off', () => {
+    // Merging the PR is the ORDINARY end of a successful `/resolve`, and the
+    // pairing used to be skipped for a closed one — so the barrier and the
+    // recovery evidence still came from that PR while the check that
+    // qualifies them did not. A retry typed inside the previous run's
+    // push→comment lag then had nothing holding the gate.
+    const r1 = request('2026-09-06T00:00:00Z', 100);
+    const r2 = request('2026-09-06T00:03:00Z', 100);
+    const report = result('2026-09-06T00:05:00Z', PUSHED, 100);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 100],
+      [r2.id, r2.created_at, 'COLLABORATOR', 100],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    for (const state of ['open', 'closed']) {
+      const lane = assess(
+        [{ number: 100, state, comments: [r1, r2, report] }],
+        {
+          now: new Date('2026-09-06T12:00:00Z'),
+          recorded,
+        },
+      );
+      assert.equal(lane.unserved, r2.created_at, state);
+      assert.deepEqual(decide(lane, existing), [], state);
+    }
+  });
+
+  it('does not hold a recovery over requests on PRs that were closed', () => {
+    // The mirror of the case above, and the ordinary end of an incident: the
+    // requests went unanswered, their PRs were closed or merged, and the lane
+    // later worked on a different PR. Only the evidence's OWN PR can veto it.
+    const asks = [0, 1].map((i) => request(`2026-08-26T0${i}:00:00Z`, 70 + i));
+    const lane = assess(
+      [
+        ...asks.map((r, i) => ({
+          number: 70 + i,
+          state: 'closed',
+          comments: [r],
+        })),
+        {
+          number: 72,
+          state: 'open',
+          comments: [result('2026-08-26T09:00:00Z', PUSHED, 72)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, null, 'a closed PR does not veto on its own');
+    assert.equal(lane.latestAttempt.kind, 'pushed');
+    assert.deepEqual(
+      decide(lane, { number: 42, createdAt: FILED_AT, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it('keeps a vanished request whose own result was a benign skip', () => {
+    // The record's prune and the pairing have to read the same results. A
+    // skip is not an attempt, so pruning on attempts alone drops the entry
+    // whose own result is a skip — and the next tick donates that skip to the
+    // request behind it.
+    const r1 = request('2026-08-27T00:00:00Z', 31);
+    const r2 = request('2026-08-27T04:00:00Z', 31);
+    const skip = result('2026-08-27T05:00:00Z', SKIPPED, 31);
+    const recorded = [
+      [r1.id, r1.created_at, 'COLLABORATOR', 31],
+      [r2.id, r2.created_at, 'COLLABORATOR', 31],
+    ];
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [
+        `<!-- qwen-resolve-health-state ${JSON.stringify({
+          streak: 5,
+          unanswered: [],
+          newestRequest: r2.created_at,
+          requests: recorded,
+          latest: null,
+        })} -->`,
+      ],
+    };
+    // r1 has aged out of the comment window; its skip has not.
+    const aged = assess(
+      [
+        { number: 31, state: 'open', comments: [r2, skip] },
+        {
+          // Served, so it only raises the barrier — which is what makes this
+          // tick write — without standing in for the request under test.
+          number: 32,
+          state: 'open',
+          comments: [
+            request('2026-09-03T02:00:00Z', 32),
+            result('2026-09-03T02:10:00Z', SKIPPED, 32),
+          ],
+        },
+      ],
+      { now: new Date('2026-09-03T02:30:00Z'), recorded },
+    );
+    assert.equal(aged.unserved, r2.created_at);
+    const written = decide(aged, existing);
+    assert.deepEqual(
+      written.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      readState([written[0].body]).requests.some((e) => e[0] === r1.id),
+      'the entry survives the prune while its skip can still be donated',
+    );
+  });
+
   it('keeps a vanished request paired with its own result', () => {
     // The pairing set is built from the live comment view, while the barrier
     // is carried forward. When the older request leaves that view its result

@@ -254,6 +254,9 @@ export function assess(prs, options = {}) {
   // the opposite reading, since a run in flight is precisely a reason not to
   // certify that the lane works again. Read by decide(), never by the alarm.
   let unserved = null;
+  // Newest unserved request per PR, whatever the PR's state — read after the
+  // loop to qualify the recovery evidence on its own PR.
+  const unservedByPr = new Map();
   // The judgments the first tick to see each request recorded in the
   // tracking issue's state, keyed by comment id. A comment with no record
   // yet is judged live, and this tick's sightings record it for the next.
@@ -318,14 +321,18 @@ export function assess(prs, options = {}) {
       }
     }
     results.push(...prResults);
-    // A request on a closed or merged PR can never be answered — the producer
-    // only runs on open PRs — so it must not count as unanswered. Results on
-    // such PRs keep counting: attempts that finished before the PR closed
-    // still feed the streak and the recovery evidence.
-    if (pr.state !== 'open') {
-      continue;
-    }
-    // The roster and the close gate read different edit predicates, on
+    // The close gate's pairing runs for EVERY PR, open or not. The roster
+    // below skips a closed one because the producer only runs on open PRs, so
+    // a request there can never be answered and must not alarm; the gate
+    // needs the opposite reading of the same fact — a request that can never
+    // be served is the strongest reason not to certify that the lane serves
+    // people. Barrier and recovery evidence already come from closed PRs
+    // (above, and `results.push` here), so skipping only the pairing would
+    // read the evidence while dropping the check that qualifies it: merging
+    // the PR a lagged retry sits on, the ORDINARY end of a successful
+    // `/resolve`, would silently switch the guard off.
+    //
+    // The roster and the close gate also read different edit predicates, on
     // purpose. The roster stays strict (unedited only): the producer fires
     // on comment creation only, so a comment edited into request shape never
     // ran a lane, and a trusted account must not manufacture an unanswered
@@ -336,16 +343,28 @@ export function assess(prs, options = {}) {
     // predates the request. Under the loose predicate an edited request can
     // only REFUSE a close — by claiming a result of its own or holding the
     // gate as unserved — never certify one.
-    const requests = comments.filter(isAnswerableRequest);
+    //
     // The pairing set is the live requests plus the ones the record still
-    // holds for this PR that have left the comment filter: a request that
-    // vanished — aged out, or deleted by its own author — keeps its claim on
-    // its own result, so the result is not donated to the next request in
-    // line. Recorded entries are already judged answerable-or-not; only their
-    // identity and time matter here.
-    const liveIds = new Set(comments.map((c) => c.id));
+    // holds for this PR that the live arm cannot see: aged out of the comment
+    // window, deleted by its author, or edited into something that no longer
+    // reads as a request. Each keeps its claim on its own result, so the
+    // result is not donated to the next request in line. Excluded by
+    // REQUEST-shaped id, not by comment id, or an edited-away request would
+    // fall into neither arm. Injected only where a result on this PR could
+    // actually be donated: without that an aged-out request on a PR with no
+    // results at all would hold the gate for the rest of the window, and the
+    // refusal writes nothing, so the prune that would drop it never runs.
+    const liveRequestIds = new Set(
+      comments.filter(isRequestShaped).map((c) => c.id),
+    );
     const vanished = (opts.recorded ?? [])
-      .filter((e) => e.length > 3 && e[3] === pr.number && !liveIds.has(e[0]))
+      .filter(
+        (e) =>
+          e.length > 3 &&
+          e[3] === pr.number &&
+          !liveRequestIds.has(e[0]) &&
+          prResults.some((r) => r.at > e[1]),
+      )
       .map((e) => ({ id: e[0], created_at: e[1] }));
     const gateRequests = [
       ...comments.filter(isRequestShaped),
@@ -361,6 +380,7 @@ export function assess(prs, options = {}) {
     // result" reading would otherwise spend twice: once as proof the lane
     // recovered, and again as proof this request was served.
     let cursor = 0;
+    let prUnserved = null;
     for (const req of gateRequests) {
       while (
         cursor < prResults.length &&
@@ -370,10 +390,31 @@ export function assess(prs, options = {}) {
       }
       if (cursor < prResults.length) {
         cursor += 1;
-      } else if (!unserved || req.created_at > unserved) {
-        unserved = req.created_at;
+      } else if (!prUnserved || req.created_at > prUnserved) {
+        prUnserved = req.created_at;
       }
     }
+    if (prUnserved) {
+      unservedByPr.set(pr.number, prUnserved);
+      // Only an OPEN PR feeds the global signal. A request on a closed one
+      // can never be served now, and holding every recovery for the rest of
+      // the window over it would refuse the ordinary end of an incident:
+      // requests go unanswered, the PRs carrying them are closed or merged,
+      // and the lane later demonstrably works. The one place a closed PR
+      // still has to count is the evidence's OWN PR, folded in after the loop.
+      if (pr.state === 'open' && (!unserved || prUnserved > unserved)) {
+        unserved = prUnserved;
+      }
+    }
+    // A request on a closed or merged PR can never be answered — the producer
+    // only runs on open PRs — so it must not count as unanswered. Results on
+    // such PRs keep counting: attempts that finished before the PR closed
+    // still feed the streak and the recovery evidence, and the gate's pairing
+    // above has already run.
+    if (pr.state !== 'open') {
+      continue;
+    }
+    const requests = comments.filter(isAnswerableRequest);
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
       // serialised by the workflow's concurrency group, so a later result
@@ -401,6 +442,21 @@ export function assess(prs, options = {}) {
   results.sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
   unanswered.sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
   const attempts = results.filter((r) => FAILED.has(r.kind) || OK.has(r.kind));
+  // The recovery evidence is a result COMMENT, and the producer pushes before
+  // it posts one: a request typed inside that lag, on the SAME PR, is one that
+  // comment's run cannot have served, and the per-PR pairing proves it took no
+  // result of its own. Merging or closing that PR is the ordinary end of a
+  // successful `/resolve` and must not switch the check off, so this is the
+  // one place a closed PR's unserved request still counts.
+  const evidence = attempts.at(-1) ?? null;
+  const behindEvidence = evidence ? unservedByPr.get(evidence.pr) : null;
+  if (
+    behindEvidence &&
+    behindEvidence < evidence.at &&
+    (!unserved || behindEvidence > unserved)
+  ) {
+    unserved = behindEvidence;
+  }
   let streak = 0;
   for (let i = attempts.length - 1; i >= 0; i -= 1) {
     if (!FAILED.has(attempts[i].kind)) {
@@ -490,9 +546,13 @@ function stateOf(assessment, previous = null) {
   // twice, as proof the lane recovered and again as proof the later request
   // was served. Once no in-window result can be claimed by it, the entry can
   // never change a decision again and goes.
+  // Read over every classified result, not just `attempts`: the pairing spends
+  // skips, no-ops and dry runs too, so pruning on the narrower set would drop
+  // an entry whose own result is a benign skip and hand that skip to the next
+  // request on the PR one tick later.
   const claimable = (entry) =>
     entry.length > 3 &&
-    assessment.attempts.some((a) => a.pr === entry[3] && a.at > entry[1]);
+    assessment.results.some((r) => r.pr === entry[3] && r.at > entry[1]);
   for (const entry of previous?.requests ?? []) {
     if (entry[1] >= assessment.windowStart || claimable(entry)) {
       judgments.set(entry[0], entry);
