@@ -13,21 +13,20 @@ const skipPrepare = ['1', 'true'].includes(
 );
 
 if (skipPrepare) {
-  // The heavy build/bundle/husky are skipped, but git-commit.ts (gitignored,
-  // imported by e.g. cli's systemInfo) is still required to build or typecheck
-  // the packages that import it. Generate it here so a later per-workspace
-  // build/typecheck — such as the review tooling's — doesn't fail on the
-  // missing module. The non-skip path generates it via `npm run build`.
+  // Husky is skipped, but git-commit.ts (gitignored, imported by e.g.
+  // cli's systemInfo) is still required to build or typecheck the packages
+  // that import it. Generate it here so a later per-workspace build/typecheck
+  // — such as the review tooling's — doesn't fail on the missing module. The
+  // non-skip path also generates it via `npm run generate`.
   run('npm', ['run', 'generate']);
   console.log(
-    'Skipping prepare build/bundle/husky because QWEN_SKIP_PREPARE is set.',
+    'Skipping prepare husky because QWEN_SKIP_PREPARE is set (generate still runs).',
   );
   process.exit(0);
 }
 
 run('husky');
-run('npm', ['run', 'build']);
-run('npm', ['run', 'bundle']);
+run('npm', ['run', 'generate']);
 
 function run(command, args = []) {
   const result = spawnSync(command, args, {
