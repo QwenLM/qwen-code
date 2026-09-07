@@ -140,6 +140,10 @@ persisted as `cancelling`, the dispatcher verifies the ambient runtime binding,
 then stops the body and records terminal `cancelled`; queued cancellation also
 wakes the dispatcher so the next FIFO item is not stranded. A racing runtime
 completion observes `cancelling` and also settles as `cancelled`.
+Undelivered triggers are rebooked only from a running, finishing, or completed
+attempt where delivery can genuinely have raced completion. Failed and
+cancelled runs remain terminal, so a later dispatcher pass cannot undo an
+explicit cancellation or retry a definition/start failure forever.
 The hidden host owner is also bound to the selected workspace runtime
 generation. A replaced or drained generation stops its keepalive loop and is
 rejected before later launch or dispatch; generation checks bracket host claims

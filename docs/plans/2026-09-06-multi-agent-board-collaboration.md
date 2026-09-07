@@ -787,6 +787,11 @@ host-session claims and releases, with raced stale spawns cleaned up. This
 prevents an old owner from continuing to act through a reused bridge after the
 workspace trust/runtime boundary has moved.
 
+Delivery-race rebooking applies only while an attempt is running, finishing, or
+has just completed. `failed` and `cancelled` are true terminal states: their
+unaccepted trigger ids remain audit evidence and are never turned into a new run
+by a later dispatcher sweep.
+
 ## 6. What an agent actually receives
 
 The thread frame is necessary but not a security boundary. A long-lived body may

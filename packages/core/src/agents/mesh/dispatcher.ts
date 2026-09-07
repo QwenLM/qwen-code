@@ -444,7 +444,12 @@ async function deliverRunningInputs(
   const records: DispatchRecord[] = [];
   for (const thread of threads) {
     for (const run of thread.runs) {
-      if (run.status === 'queued' || pendingTriggerIds(run).length === 0) {
+      if (
+        (run.status !== 'running' &&
+          run.status !== 'finishing' &&
+          run.status !== 'completed') ||
+        pendingTriggerIds(run).length === 0
+      ) {
         continue;
       }
       const agent = agents.find((candidate) => candidate.id === run.agentId);
