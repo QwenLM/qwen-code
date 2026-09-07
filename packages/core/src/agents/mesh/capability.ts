@@ -15,12 +15,12 @@ import { classifyShellCommandSafetyInDirectory } from '../../utils/shellAstParse
 export type MeshToolClassification = 'allow' | 'deny' | 'thread';
 
 export const MESH_THREAD_TOOL_NAMES = [
-  'thread_post',
-  'thread_wait',
-  'thread_block',
-  'thread_review',
-  'thread_create',
-  'thread_read',
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
 ] as const;
 
 type CoreToolName = (typeof ToolNames)[keyof typeof ToolNames];
@@ -76,12 +76,12 @@ export const MESH_TOOL_CLASSIFICATION = {
   [ToolNames.UPDATE_GOAL]: 'deny',
   [ToolNames.PROPOSE_GOAL]: 'deny',
   [ToolNames.DISPLAY_IMAGE]: 'allow',
-  thread_post: 'thread',
-  thread_wait: 'thread',
-  thread_block: 'thread',
-  thread_review: 'thread',
-  thread_create: 'thread',
-  thread_read: 'thread',
+  [ToolNames.THREAD_POST]: 'thread',
+  [ToolNames.THREAD_WAIT]: 'thread',
+  [ToolNames.THREAD_BLOCK]: 'thread',
+  [ToolNames.THREAD_REVIEW]: 'thread',
+  [ToolNames.THREAD_CREATE]: 'thread',
+  [ToolNames.THREAD_READ]: 'thread',
 } as const satisfies Record<
   CoreToolName | MeshThreadToolName,
   MeshToolClassification

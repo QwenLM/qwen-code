@@ -16,6 +16,7 @@ import {
   finishRunInTransaction,
 } from './run-lifecycle.js';
 import { acknowledgeCloseObligations } from './thread-status.js';
+import type { MeshRunContext } from './run-context.js';
 import {
   decideDispatch,
   resolveTargets,
@@ -432,6 +433,8 @@ export interface BindRunSessionInput {
    * reports draining it.
    */
   contextThroughSequence?: number;
+  /** Launch/revive input is already in history when start returns. */
+  consumedOnStart?: boolean;
   /** Content hash of the agent definition in force, for drift audit (§9.4). */
   definitionVersion?: string;
   /** Byte offset into the agent's transcript where this run's slice begins. */
@@ -455,8 +458,21 @@ export async function bindRunSession(
         `Run "${input.runId}" is not the claimed attempt on thread "${input.threadId}".`,
       );
     }
+    const previousCommitted =
+      thread.deliveryByAgent[target.agentId]?.committedThroughSequence ?? 0;
+    const through = input.contextThroughSequence;
+    const deliveredMessageIds =
+      through === undefined
+        ? []
+        : thread.messages
+            .filter(
+              (message) =>
+                message.sequence > previousCommitted &&
+                message.sequence <= through,
+            )
+            .map((message) => message.id);
     const delivery =
-      input.contextThroughSequence === undefined
+      !input.consumedOnStart || input.contextThroughSequence === undefined
         ? thread.deliveryByAgent
         : {
             ...thread.deliveryByAgent,
@@ -476,6 +492,17 @@ export async function bindRunSession(
           ? {
               ...run,
               sessionId: input.sessionId,
+              acceptedMessageIds: Array.from(
+                new Set([...run.acceptedMessageIds, ...deliveredMessageIds]),
+              ),
+              consumedMessageIds: input.consumedOnStart
+                ? Array.from(
+                    new Set([
+                      ...run.consumedMessageIds,
+                      ...deliveredMessageIds,
+                    ]),
+                  )
+                : run.consumedMessageIds,
               ...(input.contextThroughSequence !== undefined
                 ? { contextThroughSequence: input.contextThroughSequence }
                 : {}),
@@ -487,6 +514,65 @@ export async function bindRunSession(
                 : {}),
             }
           : run,
+      ),
+    });
+  });
+}
+
+export async function consumeRunDelivery(
+  projectRoot: string,
+  context: MeshRunContext,
+): Promise<Thread> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(context.threadId);
+    const run = thread?.runs.find((entry) => entry.id === context.runId);
+    if (
+      transaction.workspaceId !== context.workspaceId ||
+      thread?.rootThreadId !== context.rootThreadId ||
+      !run ||
+      run.agentId !== context.agentId ||
+      run.attempts !== context.attempt ||
+      (run.status !== 'running' && run.status !== 'finishing')
+    ) {
+      throw new Error(
+        `Run "${context.runId}" is no longer the active delivery attempt.`,
+      );
+    }
+
+    const through =
+      context.contextThroughSequence ?? run.contextThroughSequence;
+    if (through === undefined) return thread;
+    const previousCommitted =
+      thread.deliveryByAgent[run.agentId]?.committedThroughSequence ?? 0;
+    const deliveredMessageIds = thread.messages
+      .filter(
+        (message) =>
+          message.sequence > previousCommitted && message.sequence <= through,
+      )
+      .map((message) => message.id);
+    const acceptedMessageIds = Array.from(
+      new Set([...run.acceptedMessageIds, ...deliveredMessageIds]),
+    );
+
+    return transaction.writeThread({
+      ...thread,
+      deliveryByAgent: {
+        ...thread.deliveryByAgent,
+        [run.agentId]: {
+          committedThroughSequence: Math.max(previousCommitted, through),
+        },
+      },
+      runs: thread.runs.map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              acceptedMessageIds,
+              consumedMessageIds: Array.from(
+                new Set([...entry.consumedMessageIds, ...acceptedMessageIds]),
+              ),
+              contextThroughSequence: through,
+            }
+          : entry,
       ),
     });
   });

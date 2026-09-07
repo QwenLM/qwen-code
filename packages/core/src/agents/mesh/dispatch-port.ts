@@ -21,7 +21,13 @@
  */
 
 import type { Config } from '../../config/config.js';
+import {
+  getAgentMetaPath,
+  patchAgentMeta,
+  readAgentMeta,
+} from '../agent-transcript.js';
 import { launchMeshAgent } from './launcher.js';
+import type { MeshRunContext } from './run-context.js';
 import type {
   MeshBodyState,
   MeshDispatchPort,
@@ -81,12 +87,21 @@ async function continueCompleted(
   config: Config,
   agent: MeshAgent,
   prompt: string,
+  deliveryId: string,
 ): Promise<MeshStartResult> {
   const registry = config.getBackgroundTaskRegistry();
   const agentId = meshBackgroundAgentId(agent);
-  const outcome = registry.continueResidentAgent(agentId, prompt);
+  const outcome = registry.continueResidentAgent(
+    agentId,
+    prompt,
+    deliveryId,
+  );
   if (outcome === 'continued') {
-    return { status: 'started', sessionId: config.getSessionId() };
+    return {
+      status: 'started',
+      sessionId: config.getSessionId(),
+      consumedOnStart: false,
+    };
   }
   if (outcome === 'capacity_wait') return { status: 'capacity_wait' };
   if (outcome === 'not_completed') {
@@ -104,7 +119,33 @@ async function continueCompleted(
       failureStage: 'revive',
     };
   }
-  return { status: 'started', sessionId: config.getSessionId() };
+  return {
+    status: 'started',
+    sessionId: config.getSessionId(),
+    consumedOnStart: true,
+  };
+}
+
+function bindNextTurn(
+  config: Config,
+  agent: MeshAgent,
+  binding: MeshRunContext,
+): void {
+  const metaPath = getAgentMetaPath(
+    config.getProjectRoot(),
+    config.getSessionId(),
+    meshBackgroundAgentId(agent),
+  );
+  patchAgentMeta(metaPath, { meshRun: binding });
+  const stored = readAgentMeta(metaPath)?.meshRun;
+  if (
+    stored?.workspaceId !== binding.workspaceId ||
+    stored.threadId !== binding.threadId ||
+    stored.runId !== binding.runId ||
+    stored.attempt !== binding.attempt
+  ) {
+    throw new Error(`Could not bind mesh run "${binding.runId}" to its body.`);
+  }
 }
 
 /**
@@ -119,13 +160,42 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
     async inspect(agent) {
       return inspectBody(config, agent);
     },
-    async start({ action, agent, prompt }) {
+    async start({
+      action,
+      agent,
+      prompt,
+      workspaceId,
+      threadId,
+      rootThreadId,
+      runId,
+      attempt,
+      contextThroughSequence,
+    }) {
       try {
+        const binding: MeshRunContext = {
+          workspaceId,
+          agentId: agent.id,
+          runId,
+          threadId,
+          rootThreadId,
+          attempt,
+          contextThroughSequence,
+        };
+        if (action !== 'launch') bindNextTurn(config, agent, binding);
         switch (action) {
           case 'launch': {
-            const result = await launchMeshAgent(config, agent, prompt);
+            const result = await launchMeshAgent(
+              config,
+              agent,
+              prompt,
+              binding,
+            );
             if (result.status === 'started') {
-              return { status: 'started', sessionId: result.sessionId };
+              return {
+                status: 'started',
+                sessionId: result.sessionId,
+                consumedOnStart: true,
+              };
             }
             if (result.status === 'capacity_wait') {
               return { status: 'capacity_wait' };
@@ -151,10 +221,14 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
                 failureStage: 'resume',
               };
             }
-            return { status: 'started', sessionId: config.getSessionId() };
+            return {
+              status: 'started',
+              sessionId: config.getSessionId(),
+              consumedOnStart: true,
+            };
           }
           case 'continue_completed':
-            return await continueCompleted(config, agent, prompt);
+            return await continueCompleted(config, agent, prompt, runId);
           default: {
             const exhaustive: never = action;
             return failure(

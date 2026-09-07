@@ -24,6 +24,7 @@ import {
   subagentNameContext,
 } from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
+import { isMeshRun } from '../mesh/run-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -228,6 +229,12 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
 ]);
 
 /**
@@ -289,19 +296,43 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
 ]);
+
+const MESH_THREAD_TOOLS = [
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
+] as const;
+
+function exposeMeshThreadTools(
+  excluded: ReadonlySet<string>,
+): ReadonlySet<string> {
+  if (!isMeshRun()) return excluded;
+  const current = new Set(excluded);
+  for (const name of MESH_THREAD_TOOLS) current.delete(name);
+  return current;
+}
 
 function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
   if (!isTeammate()) {
-    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    return exposeMeshThreadTools(EXCLUDED_TOOLS_FOR_SUBAGENTS);
   }
   if (!isPlanRequiredTeammateContext()) {
-    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+    return exposeMeshThreadTools(EXCLUDED_TOOLS_FOR_TEAMMATES);
   }
 
   const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
   excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return excluded;
+  return exposeMeshThreadTools(excluded);
 }
 
 /**

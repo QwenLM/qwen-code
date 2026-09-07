@@ -9687,6 +9687,33 @@ export class Config {
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
 
+    if (options?.forSubAgent) {
+      await registerLazy(ToolNames.THREAD_POST, async () => {
+        const { ThreadPostTool } = await import('../tools/mesh-thread.js');
+        return new ThreadPostTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_WAIT, async () => {
+        const { ThreadWaitTool } = await import('../tools/mesh-thread.js');
+        return new ThreadWaitTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_BLOCK, async () => {
+        const { ThreadBlockTool } = await import('../tools/mesh-thread.js');
+        return new ThreadBlockTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_REVIEW, async () => {
+        const { ThreadReviewTool } = await import('../tools/mesh-thread.js');
+        return new ThreadReviewTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_CREATE, async () => {
+        const { ThreadCreateTool } = await import('../tools/mesh-thread.js');
+        return new ThreadCreateTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_READ, async () => {
+        const { ThreadReadTool } = await import('../tools/mesh-thread.js');
+        return new ThreadReadTool(this);
+      });
+    }
+
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
       await registerLazy(ToolNames.CRON_CREATE, async () => {

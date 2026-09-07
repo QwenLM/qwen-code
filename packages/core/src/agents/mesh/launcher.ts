@@ -15,6 +15,7 @@ import {
   buildMeshToolConfig,
   createMeshToolInvocationGuard,
 } from './capability.js';
+import type { MeshRunContext } from './run-context.js';
 import type { MeshAgent } from './types.js';
 
 export type MeshAgentLaunchResult =
@@ -32,6 +33,7 @@ export async function launchMeshAgent(
   config: Config,
   agent: MeshAgent,
   prompt: string,
+  meshRun?: MeshRunContext,
 ): Promise<MeshAgentLaunchResult> {
   if (agent.enabled === false) {
     return {
@@ -83,6 +85,7 @@ export async function launchMeshAgent(
       {
         agentId: backgroundAgentId,
         meshAgentId: agent.id,
+        ...(meshRun ? { meshRun } : {}),
         subagentConfig: definition,
         toolConfig: buildMeshToolConfig(runtimeConfig.toolConfig),
       },

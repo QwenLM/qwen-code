@@ -1,9 +1,7 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: Revised after source-backed review. Admission, runtime preparation,
-> capability, and versioned storage are committed on #11206. The hidden-host
-> launcher is locally implemented on its stacked step branch; dispatch remains
-> unbuilt.
+> Status: Implemented through the runtime wiring needed for the live slice;
+> the end-to-end model run remains unverified.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: targeted tests, build, typecheck, and lint are recorded in §0.2;
 > no agent has run this design end to end
@@ -610,10 +608,11 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    failure it exists to catch, so it must fail loudly rather than shadow.
 6. **Minimal in-process dispatcher, no recovery** — pick and atomically claim
    one queued run per agent by `queueSequence`; launch, continue resident,
-   resume `paused`, or cold revive; bind the session on success; and consume the
-   parent-report outbox. Handle `capacity_wait` by releasing the claim without
-   spending the attempt. This is intentionally the smallest dispatcher that
-   can make the next step executable.
+   resume `paused`, or cold revive; bind the session on success; record runtime
+   delivery and usage events; finish the mesh run when the body returns; and
+   consume the parent-report outbox. Handle `capacity_wait` by releasing the
+   claim without spending the attempt. This is intentionally the smallest
+   dispatcher that can make the next step executable.
 7. **Minimal live vertical slice** — assigned parent → launch → assigned child →
    parent wait → child review → parent dependency wake → parent review. Run it
    against two live agents before building the full daemon; this is the first

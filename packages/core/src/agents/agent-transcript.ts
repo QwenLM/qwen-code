@@ -23,6 +23,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { MeshRunContext } from './mesh/run-context.js';
 import {
   AgentEventType,
   type AgentEventEmitter,
@@ -112,6 +113,8 @@ export interface AgentMeta {
   agentId: string;
   /** Durable mesh identity when this runtime belongs to the shared-thread mesh. */
   meshAgentId?: string;
+  /** The mesh run this body's next turn executes. */
+  meshRun?: MeshRunContext;
   agentType: string;
   description: string;
   /** SessionId of the user session that launched this agent. */
