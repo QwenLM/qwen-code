@@ -35,6 +35,10 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
+import {
+  attachAgentProgressWatchdog,
+  getAgentProgressTimeout,
+} from '../../agents/runtime/agent-progress-watchdog.js';
 import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
@@ -1816,8 +1820,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          | string
-          | Content,
+          string | Content,
         initialMessages,
       };
       toolConfig = {
@@ -3002,8 +3005,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const shouldBubble = Boolean(
         shouldRunInBackground &&
-          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-          this.config.isInteractive(),
+        subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
+        this.config.isInteractive(),
       );
       if (shouldRunInBackground) {
         stampBackgroundPromptPolicy(agentConfig, shouldBubble);
@@ -3532,7 +3535,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 recordSpanOutcome(
                   deriveSubagentOutcomeMetadata({
                     terminateMode,
-                    signalAborted: turnAbortController.signal.aborted,
+                    signalAborted:
+                      turnAbortController.signal.aborted &&
+                      terminateMode !== AgentTerminateMode.TIMEOUT,
                     resultSummaryPresent: Boolean(
                       subagentRawText && subagentRawText.length > 0,
                     ),
@@ -3662,15 +3667,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // so release keepResident here to let the finally block dispose the
             // runtime instead of leaking a zombie resident.
             keepResident = false;
+            const progressTimeout = getAgentProgressTimeout(
+              turnAbortController.signal,
+            );
             // Publish first — same reason as the success path.
             recordSpanOutcome(
-              deriveSubagentExceptionMetadata(
-                error,
-                turnAbortController.signal.aborted,
-              ),
+              progressTimeout
+                ? deriveSubagentOutcomeMetadata({
+                    terminateMode: AgentTerminateMode.TIMEOUT,
+                    signalAborted: false,
+                    resultSummaryPresent: false,
+                  })
+                : deriveSubagentExceptionMetadata(
+                    error,
+                    turnAbortController.signal.aborted,
+                  ),
             );
             const baseErrorMsg =
-              error instanceof Error ? error.message : String(error);
+              progressTimeout?.message ??
+              (error instanceof Error ? error.message : String(error));
             debugLogger.error(
               `[Agent] Background agent failed: ${baseErrorMsg}`,
             );
@@ -3693,7 +3708,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
-            if (turnAbortController.signal.aborted) {
+            if (turnAbortController.signal.aborted && !progressTimeout) {
               const completionStats = getCompletionStats();
               registry.finalizeCancelled(
                 hookOpts.agentId,
@@ -3740,6 +3755,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           turnAbortController: AbortController,
           fireStartHook: boolean,
         ) => {
+          const disposeWatchdog = attachAgentProgressWatchdog(
+            bgEmitter,
+            turnAbortController,
+            () =>
+              this.config
+                .getMonitorRegistry()
+                .hasRunningForOwner(hookOpts.agentId),
+          );
           const framedBgBody = () =>
             this.runWithSubagentSpan(
               this.buildSubagentSpanSpec(
@@ -3761,7 +3784,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   launchDepth,
                 ),
             );
-          return isFork ? runInForkContext(framedBgBody) : framedBgBody();
+          return (
+            isFork ? runInForkContext(framedBgBody) : framedBgBody()
+          ).finally(disposeWatchdog);
         };
 
         const reportUnexpectedBackgroundError = (err: unknown) => {

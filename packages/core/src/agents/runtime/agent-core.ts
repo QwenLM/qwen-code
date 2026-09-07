@@ -96,12 +96,14 @@ import type {
   AgentExternalInput,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { getAgentProgressTimeout } from './agent-progress-watchdog.js';
 import type {
   AgentRoundEvent,
   AgentRoundTextEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
+  AgentToolProgressEvent,
   AgentUsageEvent,
   AgentHooks,
   AgentExternalMessageEvent,
@@ -246,8 +248,7 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
-          | undefined
+          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -947,7 +948,9 @@ export class AgentCore {
       // Check abort before starting a new round — prevents unnecessary API
       // calls after processFunctionCalls was unblocked by an abort signal.
       if (abortController.signal.aborted) {
-        terminateMode = AgentTerminateMode.CANCELLED;
+        terminateMode = getAgentProgressTimeout(abortController.signal)
+          ? AgentTerminateMode.TIMEOUT
+          : AgentTerminateMode.CANCELLED;
         break;
       }
 
@@ -1019,7 +1022,11 @@ export class AgentCore {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
+              terminateMode: getAgentProgressTimeout(
+                roundAbortController.signal,
+              )
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
               turnsUsed: turnCounter,
             };
           }
@@ -1444,7 +1451,12 @@ export class AgentCore {
       }
 
       if (abortController.signal.aborted) {
-        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+        return {
+          inputs: [],
+          terminateMode: getAgentProgressTimeout(abortController.signal)
+            ? AgentTerminateMode.TIMEOUT
+            : AgentTerminateMode.CANCELLED,
+        };
       }
 
       if (!this.hasTurnBudgetForAnotherRound(options, turnCounter)) {
@@ -1480,7 +1492,12 @@ export class AgentCore {
           waitAbortController.signal,
         );
         if (abortController.signal.aborted) {
-          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+          return {
+            inputs: [],
+            terminateMode: getAgentProgressTimeout(abortController.signal)
+              ? AgentTerminateMode.TIMEOUT
+              : AgentTerminateMode.CANCELLED,
+          };
         }
         if (timedOut) {
           return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
@@ -1493,7 +1510,12 @@ export class AgentCore {
         }
       } catch (error) {
         if (abortController.signal.aborted) {
-          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+          return {
+            inputs: [],
+            terminateMode: getAgentProgressTimeout(abortController.signal)
+              ? AgentTerminateMode.TIMEOUT
+              : AgentTerminateMode.CANCELLED,
+          };
         }
         if (timedOut) {
           return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
@@ -1612,8 +1634,7 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      | { serverName?: unknown; serverToolName?: unknown }
-      | undefined;
+      { serverName?: unknown; serverToolName?: unknown } | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'
@@ -1931,8 +1952,13 @@ export class AgentCore {
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
-        // Shell liveness heartbeats have no subagent consumer; broadcasting
-        // one would overwrite the live output view kept in liveOutputs.
+        this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+          subagentId: this.subagentId,
+          round: currentRound,
+          callId,
+          timestamp: Date.now(),
+        } as AgentToolProgressEvent);
+        // Keep Shell liveness heartbeats out of the live output view.
         if (isShellProgressData(outputChunk)) {
           return;
         }

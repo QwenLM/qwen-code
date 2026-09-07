@@ -42,6 +42,7 @@ export type AgentEvent =
   | 'tool_result'
   | 'tool_responses_finalized'
   | 'tool_output_update'
+  | 'tool_progress'
   | 'tool_waiting_approval'
   | 'usage_metadata'
   | 'external_message'
@@ -60,6 +61,7 @@ export enum AgentEventType {
   TOOL_RESULT = 'tool_result',
   TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
+  TOOL_PROGRESS = 'tool_progress',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
   /** External user message injected mid-run (e.g. via send_message). */
@@ -171,6 +173,13 @@ export interface AgentToolOutputUpdateEvent {
   timestamp: number;
 }
 
+export interface AgentToolProgressEvent {
+  subagentId: string;
+  round: number;
+  callId: string;
+  timestamp: number;
+}
+
 export interface AgentApprovalRequestEvent {
   subagentId: string;
   round: number;
@@ -251,6 +260,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
   [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
+  [AgentEventType.TOOL_PROGRESS]: AgentToolProgressEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;

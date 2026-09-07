@@ -18,6 +18,10 @@ import {
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
+  attachAgentProgressWatchdog,
+  getAgentProgressTimeout,
+} from './runtime/agent-progress-watchdog.js';
+import {
   buildAgentTranscriptAttach,
   getAgentJsonlPath,
   getAgentMetaPath,
@@ -365,8 +369,7 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
         'fork' &&
       typeof (
         launchPromptRecord?.systemPayload as
-          | NotificationRecordPayload
-          | undefined
+          NotificationRecordPayload | undefined
       )?.displayText === 'string'
         ? {
             history: structuredClone(
@@ -932,7 +935,7 @@ export class BackgroundAgentResumeService {
       // definition would silently auto-deny calls the fresh launch bubbles.
       const shouldBubble = Boolean(
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
-          this.config.isInteractive(),
+        this.config.isInteractive(),
       );
       stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
 
@@ -1346,12 +1349,16 @@ export class BackgroundAgentResumeService {
             break;
           }
         } catch (error) {
+          const progressTimeout = getAgentProgressTimeout(
+            turnAbortController.signal,
+          );
           const errorMessage =
-            error instanceof Error ? error.message : String(error);
+            progressTimeout?.message ??
+            (error instanceof Error ? error.message : String(error));
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
-          if (turnAbortController.signal.aborted) {
+          if (turnAbortController.signal.aborted && !progressTimeout) {
             const stats = getCompletionStats(subagent, liveToolCallCount);
             registry.finalizeCancelled(meta.agentId, errorMessage, stats);
             persistBackgroundCancellation(
@@ -1391,6 +1398,11 @@ export class BackgroundAgentResumeService {
         turnAbortController: AbortController,
         fireStartHook: boolean,
       ) => {
+        const disposeWatchdog = attachAgentProgressWatchdog(
+          bgEmitter,
+          turnAbortController,
+          () => monitorRegistry.hasRunningForOwner(meta.agentId),
+        );
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
@@ -1402,9 +1414,11 @@ export class BackgroundAgentResumeService {
           );
         const invocationRunBody = () =>
           runWithInvocationContext(undefined, framedRunBody);
-        return target.isFork
-          ? runInForkContext(invocationRunBody)
-          : invocationRunBody();
+        return (
+          target.isFork
+            ? runInForkContext(invocationRunBody)
+            : invocationRunBody()
+        ).finally(disposeWatchdog);
       };
 
       const reportUnexpectedBackgroundError = (error: unknown) => {
