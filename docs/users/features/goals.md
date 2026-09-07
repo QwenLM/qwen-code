@@ -18,6 +18,8 @@ Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). H
 
 Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls the Goal makes in its own turns; subagents and the verifier's own checks are not included. The window is set by [`model.goalTokenBudget`](../configuration/settings.md); resuming a Goal that has spent its window grants another one on top of what it has already spent, so the figure reads `30.0m/60.0m` rather than starting over. A Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
 
+A long Goal periodically compresses the evidence it has recorded into checkpoint claims with a side model call, so later turns and the verifier still have it to cite. That call is bounded by [`model.goalCheckpointTimeoutSeconds`](../configuration/settings.md), 180 seconds by default; a checkpoint that does not finish in time is abandoned, and three in a row on an overflowing evidence window stop the Goal with a reason that says so.
+
 ## Interrupting a Goal
 
 Cancelling a Goal turn pauses the Goal. Press Esc while the model is answering or while its tools are still running, and the turn stops, the Goal moves to `paused`, and the card and `/goal` both say why it stopped. Nothing continues until you run `/goal resume`.

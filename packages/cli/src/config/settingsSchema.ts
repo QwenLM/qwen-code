@@ -1635,6 +1635,16 @@ const SETTINGS_SCHEMA = {
           'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
         showInDialog: false,
       },
+      goalCheckpointTimeoutSeconds: {
+        type: 'integer',
+        label: 'Goal Checkpoint Timeout (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; the call is abandoned at this ceiling and counts as a stalled checkpoint when the evidence window had overflowed. Unset uses the built-in default of 180. Must be an integer between 1 and 3,600 (one hour, a typo guard); other values are rejected at startup.',
+        showInDialog: false,
+      },
       maxToolCalls: {
         type: 'number',
         label: 'Max Tool Calls',

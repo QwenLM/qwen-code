@@ -1322,6 +1322,46 @@ describe('loadCliConfig', () => {
     });
   });
 
+  describe('model.goalCheckpointTimeoutSeconds', () => {
+    it('carries the setting into the checkpoint verifier timeout', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalCheckpointTimeoutSeconds: 45 } },
+        argv,
+      );
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+    });
+
+    it.each([0, -1, 1.5, 3_601, '30' as unknown as number])(
+      'rejects invalid settings value %s at startup',
+      async (value) => {
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await expect(
+          loadCliConfig(
+            { model: { goalCheckpointTimeoutSeconds: value } },
+            argv,
+          ),
+        ).rejects.toThrow(
+          /settings\.json: model\.goalCheckpointTimeoutSeconds/,
+        );
+      },
+    );
+
+    it('uses the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
+    });
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

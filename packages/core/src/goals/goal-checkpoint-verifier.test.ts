@@ -17,6 +17,7 @@ import {
 } from './goal-protocol.js';
 import {
   createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
   GoalCheckpointVerifierInputTooLargeError,
   parseGoalCheckpointVerifierText,
 } from './goal-checkpoint-verifier.js';
@@ -172,6 +173,12 @@ describe('createGoalCheckpointVerifier', () => {
       createGoalCheckpointVerifier(config)(oversized),
     ).rejects.toBeInstanceOf(GoalCheckpointVerifierInputTooLargeError);
     expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('defaults to a timeout sized for a full claim list, not a short reply', () => {
+    // The previous 30 s default timed out on every checkpoint of an
+    // overflowing window and never wrote one; the floor is minutes.
+    expect(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS).toBe(180_000);
   });
 
   it('aborts the side query when the verifier timeout fires', async () => {

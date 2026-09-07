@@ -24,9 +24,13 @@ import {
   GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  normalizeGoalCheckpointTimeoutSeconds,
+  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import { GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS } from '../goals/goal-checkpoint-verifier.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -3568,6 +3572,56 @@ describe('Server Config (config.ts)', () => {
       }
       expect(isValidGoalTokenBudget(0)).toBe(true);
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
+    });
+
+    it('arms the checkpoint verifier with the configured timeout', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 45,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+    });
+
+    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
+      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
+      // The cap is a typo guard, accepted itself and refused one past.
+      expect(
+        normalizeGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ),
+      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
+      expect(
+        isValidGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+        ),
+      ).toBe(false);
+      for (const invalid of [
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        '30',
+        null,
+        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      ]) {
+        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
+        expect(
+          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
+        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
+      }
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 0,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
     });
 
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {

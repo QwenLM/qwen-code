@@ -182,7 +182,10 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
+import {
+  createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+} from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
@@ -1045,6 +1048,13 @@ export interface ConfigParameters {
    */
   goalTokenBudget?: number;
   /**
+   * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
+   * Absent or invalid falls back to
+   * `GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS`. See
+   * `normalizeGoalCheckpointTimeoutSeconds`.
+   */
+  goalCheckpointTimeoutSeconds?: number;
+  /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
    * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
@@ -1508,6 +1518,42 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
     Number.isInteger(value) &&
     (value === -1 || (value >= 0 && value <= GOAL_TOKEN_BUDGET_CAP))
   );
+}
+
+/**
+ * Largest accepted `model.goalCheckpointTimeoutSeconds`: one hour.
+ *
+ * A typo guard like `GOAL_TOKEN_BUDGET_CAP`. A checkpoint blocks the Goal's
+ * next turn while it runs, so a value past this is a Goal that sits for an
+ * hour on one stuck call; nobody types that on purpose.
+ */
+export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP = 3_600;
+
+/**
+ * True for the values `normalizeGoalCheckpointTimeoutSeconds` honours: a
+ * positive integer number of seconds up to the cap.
+ */
+export function isValidGoalCheckpointTimeoutSeconds(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP
+  );
+}
+
+/**
+ * The checkpoint verifier timeout to arm, in milliseconds: the setting when
+ * it is valid, else the built-in default.
+ */
+export function normalizeGoalCheckpointTimeoutSeconds(
+  value: number | undefined,
+): number {
+  return isValidGoalCheckpointTimeoutSeconds(value)
+    ? value * 1000
+    : GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
@@ -2338,6 +2384,7 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly goalTokenBudgetGrant: number;
+  private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2654,6 +2701,17 @@ export class Config {
     ) {
       this.debugLogger.warn(
         `Ignoring invalid goalTokenBudget ${String(params.goalTokenBudget)}: expected a non-negative integer or -1 (no budget); using the default of ${GOAL_DEFAULT_TOKEN_BUDGET}.`,
+      );
+    }
+    this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
+      params.goalCheckpointTimeoutSeconds,
+    );
+    if (
+      params.goalCheckpointTimeoutSeconds !== undefined &&
+      !isValidGoalCheckpointTimeoutSeconds(params.goalCheckpointTimeoutSeconds)
+    ) {
+      this.debugLogger.warn(
+        `Ignoring invalid goalCheckpointTimeoutSeconds ${String(params.goalCheckpointTimeoutSeconds)}: expected an integer between 1 and ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}; using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}.`,
       );
     }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
@@ -5602,6 +5660,15 @@ export class Config {
    */
   getGoalTokenBudgetGrant(): number {
     return this.goalTokenBudgetGrant;
+  }
+
+  /**
+   * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
+   * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
+   * default.
+   */
+  getGoalCheckpointTimeoutMs(): number {
+    return this.goalCheckpointTimeoutMs;
   }
 
   getMaxSubagentDepth(): number {
@@ -8781,7 +8848,9 @@ export class Config {
       // point it is recorded rather than reconstructed from session totals.
       tokenLedger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this, {
+        timeoutMs: this.goalCheckpointTimeoutMs,
+      }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
     });
     this.goalRuntime = runtime;

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   RunBudgetEnforcer,
   parseDurationSeconds,
+  validateGoalCheckpointTimeoutSeconds,
   validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
@@ -103,6 +104,23 @@ describe('validateGoalTokenBudget', () => {
 
   it('rejects non-number settings values', () => {
     expect(() => validateGoalTokenBudget('5000')).toThrow();
+  });
+});
+
+describe('validateGoalCheckpointTimeoutSeconds', () => {
+  it.each([1, 180, 3_600])('accepts supported value %s', (value) => {
+    expect(validateGoalCheckpointTimeoutSeconds(value)).toBe(value);
+  });
+
+  it.each([0, -1, 1.5, 3_601, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid value %s',
+    (value) => {
+      expect(() => validateGoalCheckpointTimeoutSeconds(value)).toThrow();
+    },
+  );
+
+  it('rejects non-number settings values', () => {
+    expect(() => validateGoalCheckpointTimeoutSeconds('30')).toThrow();
   });
 });
 
