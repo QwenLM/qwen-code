@@ -216,7 +216,11 @@ describe('runThrottledOnce', () => {
     expect(stat.isDirectory()).toBe(true);
     // No group/other access, per the ~/.qwen/ convention. Asserting the
     // absence of those bits rather than an exact mode keeps this umask-proof.
-    expect(stat.mode & 0o077).toBe(0);
+    // On Windows mkdir's mode is a no-op and libuv duplicates owner bits to
+    // group/other, so only POSIX platforms can pin the 0o700 convention.
+    if (process.platform !== 'win32') {
+      expect(stat.mode & 0o077).toBe(0);
+    }
   });
 
   // Regression: this mkdir used to pass `recursive: true`. On a bind mount
@@ -233,5 +237,27 @@ describe('runThrottledOnce', () => {
     for (const [, options] of vi.mocked(fsPromises.mkdir).mock.calls) {
       expect(options).not.toMatchObject({ recursive: true });
     }
+  });
+
+  // Effect-shaped companion to the option-shape regression above: pin what
+  // the deleted-mount state actually does. The non-recursive mkdir cannot
+  // create a directory whose own parent is missing, and the lock open must
+  // surface that ENOENT on the first attempt — not settle as 'locked'
+  // (misread as contention by the scheduler), and never bootstrap the parent.
+  it('surfaces ENOENT instead of bootstrapping a missing parent', async () => {
+    const missingDir = path.join(tempDir, 'nope', 'nested');
+    const task = vi.fn(async () => {});
+
+    await expect(
+      runThrottledOnce(
+        {
+          name: 'test',
+          markerPath: path.join(missingDir, '.marker'),
+          lockPath: path.join(missingDir, '.marker.lock'),
+        },
+        task,
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(task).not.toHaveBeenCalled();
   });
 });
