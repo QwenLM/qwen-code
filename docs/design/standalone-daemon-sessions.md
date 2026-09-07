@@ -133,7 +133,7 @@ The entry-point behavior is fixed:
 > project navigation rather than a global entry point, so it inherits the
 > current explicit context: a workspace chat stays in its workspace and a cold
 > draft lands on the primary workspace. Standalone creation is an option of the
-> composer's workspace picker ("No workspace (standalone)"), offered while the
+> composer's workspace picker ("No workspace"), offered while the
 > daemon advertises the capability, no workspace is locked and no projectless
 > session is attached; the picker stays enabled for projectless drafts so the
 > target can be changed before the first prompt. The workspace navigation tree
@@ -141,11 +141,14 @@ The entry-point behavior is fixed:
 > to the chat surface and to project-only controls, and dropping the tree left
 > a standalone chat with no way back to a workspace.
 
-Standalone sessions appear in a top-level **Recents** group separate from Live
-and project groups. Their chat surface hides workspace selection, Git status,
-branch and worktree controls, project files, project settings, pin/group
-controls, and attachments/uploads. Normal model, approval, tool, permission,
-transcript, and supported session metadata controls remain available.
+Standalone sessions appear under **No workspace sessions** inside the Projects
+tree, with archived entries in the shared Archived section. Their chat surface
+hides workspace selection, Git status, branch and worktree controls, project
+files, and pin/group controls. Project navigation and management stay available
+against the registered primary workspace. Attachments are available only when
+the standalone session advertises `session_attachments`. Normal model,
+approval, tool, permission, transcript, and supported session metadata controls
+remain available.
 Approval-mode changes are session-local: the generic `persist: true` form is
 rejected because it would write the shared Conversations root as a workspace
 setting and affect unrelated standalone and Live sessions. User-global settings
@@ -190,7 +193,8 @@ reclassified.
 
 `create_sub_session` invoked by a standalone session explicitly persists
 `sourceType: "standalone"` together with `parentSessionId`. Children remain
-loadable by identity but are excluded from top-level Recents. Parent and child
+loadable by identity but are excluded from the No workspace sessions
+group. Parent and child
 archive or deletion operations do not cascade; each transcript and private
 directory has an independent lifecycle.
 
@@ -1300,14 +1304,16 @@ Suggested title: `feat(web-shell): Add standalone chats`
   failure preserves standalone intent and displays the error.
 - Store explicit pending context for deferred creation; undefined cwd is never
   standalone semantics.
-- Add top-level Recents with rename, export, archive, unarchive, and delete.
-- Hide project-only selectors, browsers, controls, settings, and uploads.
+- Add No workspace sessions under Projects with rename, export, archive,
+  unarchive, and delete.
+- Hide session-bound project selectors, browsers, and controls; keep registered
+  project management available and capability-gate standalone attachments.
 - Resolve deep links only after standalone/Live/workspace catalogs are ready and
   use exact lookup; never guess primary.
 - Surface directory recovery/compromise, outcome-unknown, and deferred-cleanup
   state.
-- Retain second delete confirmation and remove the session from Recents once the
-  transcript is deleted, even if cleanup is pending.
+- Retain second delete confirmation and remove the session from No workspace
+  sessions once the transcript is deleted, even if cleanup is pending.
 
 Verification covers every entry point, old/capable daemons, capable failure,
 deferred creation, deep links and restart, context switching, directory states,
@@ -1317,7 +1323,7 @@ coexistence, and platform differences.
 Estimated size: 450-800 production lines and 800-1,400 test lines.
 
 Exit criterion: the end-to-end product matches this contract and keeps
-project-only controls and uploads out of standalone chats.
+session-bound project controls out of standalone chats.
 
 ### Dependencies and merge order
 
@@ -1360,8 +1366,8 @@ the daemon contract.
   downgrade to primary.
 - Workspace selectors and project controls never display or target the internal
   Conversations runtime.
-- Attachments/uploads and other project-only controls are unavailable in the
-  standalone MVP.
+- Attachments/uploads require the standalone session attachment capability;
+  session-bound project controls remain unavailable.
 
 ### Runtime and source
 
@@ -1404,7 +1410,7 @@ the daemon contract.
 - Explicit standalone, compatible legacy, Live, unrelated source, top-level, and
   child classification are covered.
 - Standalone children persist source, remain independently loadable, and stay
-  out of top-level Recents.
+  out of the No workspace sessions group.
 - Standalone cannot load or create durable cron tasks from the Conversations
   root.
 
