@@ -150,6 +150,7 @@ import {
   createMeshDispatchPort,
   dispatchOnce,
   launchMeshAgent,
+  readAgentMeta,
   readMeshAgents,
   readMeshWorkspace,
   type MeshAgent,
@@ -12281,6 +12282,17 @@ class QwenAgent implements Agent {
             undefined,
             'Mesh dispatch requires the claimed mesh host session',
           );
+        }
+        const agents = await readMeshAgents(config.getProjectRoot());
+        const agentIds = new Set(agents.map((agent) => agent.id));
+        const registry = config.getBackgroundTaskRegistry();
+        for (const entry of registry.getAll()) {
+          const meshAgentId = entry.metaPath
+            ? readAgentMeta(entry.metaPath)?.meshAgentId
+            : undefined;
+          if (meshAgentId && !agentIds.has(meshAgentId)) {
+            registry.forget(entry.agentId);
+          }
         }
         return {
           records: await dispatchOnce(

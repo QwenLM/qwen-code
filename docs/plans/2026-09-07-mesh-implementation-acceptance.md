@@ -220,6 +220,9 @@ identity.
 Agent creation reuses the storage protocol's mention-name validator at the REST
 boundary and reports case-insensitive duplicates as a conflict instead of a
 generic server failure.
+Deleting an idle identity now makes the hidden host forget its resident body
+and removes that deterministic body's transcript and sidecar from every host
+session directory; historical thread posts keep their name snapshot.
 The thread header also supports atomic human reassignment: changing the default
 assignee writes a structured assignment through admission without cancelling
 work already booked for another agent; choosing no assignee only clears the
@@ -227,9 +230,10 @@ future fallback. Marking a thread done now scans its complete descendant tree,
 refuses live children, cancels its own work, and writes the terminal state in
 one workspace transaction, so a racing agent cannot create an open child after
 the check. Repeating the command does not enqueue another `child_done` report.
-The Web Shell also surfaces the dispatcher's typed failure after a mutation as
-"saved, but the agent could not start"; periodic refreshes no longer erase that
-action error a second later. These paths were source-inspected only.
+The Web Shell also surfaces a background-processing failure after a durable
+mutation as "saved, but background processing failed"; periodic refreshes no
+longer erase that action error a second later. These paths were source-inspected
+only.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.

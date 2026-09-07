@@ -24,7 +24,8 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
-import { open } from 'node:fs/promises';
+import { open, readdir, rm } from 'node:fs/promises';
+import path from 'node:path';
 
 import type {
   Application,
@@ -58,6 +59,8 @@ import {
   DEFAULT_THREAD_TOKEN_BUDGET,
   Storage,
   getAgentJsonlPath,
+  getSubagentsRootDir,
+  sanitizeFilenameComponent,
   meshBackgroundAgentId,
   type MeshAgent,
   type Thread,
@@ -99,6 +102,30 @@ function lastActivity(thread: Thread): number {
   return Math.max(lastPost, lastRun);
 }
 
+async function deleteMeshAgentTranscripts(
+  workspaceCwd: string,
+  agentId: string,
+): Promise<void> {
+  const root = getSubagentsRootDir(new Storage(workspaceCwd).getProjectDir());
+  const sessions = await readdir(root, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    },
+  );
+  const stem = `agent-${sanitizeFilenameComponent(
+    meshBackgroundAgentId({ id: agentId }),
+  )}`;
+  await Promise.all(
+    sessions
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) => [
+        rm(path.join(root, entry.name, `${stem}.jsonl`), { force: true }),
+        rm(path.join(root, entry.name, `${stem}.meta.json`), { force: true }),
+      ]),
+  );
+}
+
 /** Why a run exists, in the words a reader asks the question in. */
 function triggerText(thread: Thread, run: ThreadRun): string {
   const first = thread.messages.find((message) =>
@@ -133,6 +160,7 @@ function runView(thread: Thread, run: ThreadRun, agents: readonly MeshAgent[]) {
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
     hasTranscriptSlice:
+      agent !== undefined &&
       run.transcriptStartOffset !== undefined &&
       run.transcriptEndOffset !== undefined &&
       run.sessionId !== undefined,
@@ -795,7 +823,13 @@ export function registerMeshRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        res.json({ id: agentId, deleted: true });
+        const dispatchError = await startBookedRuns(runtime);
+        await deleteMeshAgentTranscripts(runtime.workspaceCwd, agentId);
+        res.json({
+          id: agentId,
+          deleted: true,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
       } catch (error) {
         fail(res, error);
       }

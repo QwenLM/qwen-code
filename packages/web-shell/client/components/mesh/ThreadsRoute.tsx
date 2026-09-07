@@ -202,7 +202,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
           typeof result.dispatchError === 'string'
         ) {
           setActionError(
-            `The change was saved, but the agent could not start: ${result.dispatchError}`,
+            `The change was saved, but background processing failed: ${result.dispatchError}`,
           );
         }
       } catch (cause) {
