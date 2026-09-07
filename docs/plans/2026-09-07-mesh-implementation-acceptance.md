@@ -140,6 +140,12 @@ persisted as `cancelling`, the dispatcher verifies the ambient runtime binding,
 then stops the body and records terminal `cancelled`; queued cancellation also
 wakes the dispatcher so the next FIFO item is not stranded. A racing runtime
 completion observes `cancelling` and also settles as `cancelled`.
+The hidden host owner is also bound to the selected workspace runtime
+generation. A replaced or drained generation stops its keepalive loop and is
+rejected before later launch or dispatch; generation checks bracket host claims
+and releases, and a raced stale spawn is cleaned up. Reusing the same bridge
+object cannot keep the old owner alive. This path was source-inspected only
+under the same demo-first constraint.
 
 ### Step 9 — REST and Web Shell
 

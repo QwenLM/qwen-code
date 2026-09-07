@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
+import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import { MESH_HOST_SESSION_SOURCE_TYPE } from '../../runtime/mesh-session-source.js';
 
 const DEFAULT_MESH_KEEPALIVE_INTERVAL_MS = 1_000;
@@ -42,10 +43,12 @@ export interface MeshHostSessionOwner {
 export function startMeshHostSessionOwner(options: {
   bridge: MeshHostBridge;
   workspaceCwd: string;
+  generationGuard?: WorkspaceGenerationGuard;
   intervalMs?: number;
   resumeTimeoutMs?: number;
 }): MeshHostSessionOwner {
   const { bridge, workspaceCwd } = options;
+  const assertGenerationOpen = () => options.generationGuard?.assertOpen();
   const intervalMs = options.intervalMs ?? DEFAULT_MESH_KEEPALIVE_INTERVAL_MS;
   const resumeTimeoutMs =
     options.resumeTimeoutMs ?? DEFAULT_MESH_RESUME_TIMEOUT_MS;
@@ -59,11 +62,14 @@ export function startMeshHostSessionOwner(options: {
     | undefined;
 
   const ensure = async (): Promise<string> => {
+    assertGenerationOpen();
     const workspace = await readMeshWorkspace(workspaceCwd);
+    assertGenerationOpen();
     if (workspace.hostSessionId) {
       try {
         bridge.recordHeartbeat(workspace.hostSessionId);
       } catch {
+        assertGenerationOpen();
         if (!reviving) {
           const started = beginKeepaliveSessionResume(
             bridge,
@@ -93,9 +99,11 @@ export function startMeshHostSessionOwner(options: {
         const current = reviving;
         try {
           await current.deadline;
+          assertGenerationOpen();
         } catch (error) {
           await Promise.resolve();
           if (!current.definitivelyFailed) throw error;
+          assertGenerationOpen();
           await releaseMeshHostSession(
             workspaceCwd,
             workspace.hostSessionId,
@@ -114,8 +122,13 @@ export function startMeshHostSessionOwner(options: {
     });
     let winner: string;
     try {
+      assertGenerationOpen();
       winner = await claimMeshHostSession(workspaceCwd, spawned.sessionId);
+      assertGenerationOpen();
     } catch (error) {
+      await releaseMeshHostSession(workspaceCwd, spawned.sessionId).catch(
+        () => false,
+      );
       await bridge.closeSession(spawned.sessionId).catch(() => {});
       throw error;
     }
@@ -134,14 +147,28 @@ export function startMeshHostSessionOwner(options: {
   };
 
   const tick = async (): Promise<void> => {
+    assertGenerationOpen();
     const workspace = await readMeshWorkspace(workspaceCwd);
+    assertGenerationOpen();
     if (!workspace.hostSessionId) return;
     const sessionId = await ensureResident();
+    assertGenerationOpen();
     await bridge.dispatchMeshRuns?.(sessionId);
   };
 
   let running = false;
-  const timer = setInterval(() => {
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) clearInterval(timer);
+  };
+  timer = setInterval(() => {
+    if (options.generationGuard?.closed) {
+      stop();
+      return;
+    }
     if (running) return;
     running = true;
     void tick()
@@ -152,24 +179,22 @@ export function startMeshHostSessionOwner(options: {
   }, intervalMs);
   timer.unref?.();
 
-  let stopped = false;
   return {
     ensureResident,
     async launch(agent, prompt) {
       const sessionId = await ensureResident();
+      assertGenerationOpen();
       return bridge.launchMeshAgent(sessionId, agent.id, prompt);
     },
     async dispatch() {
       if (!bridge.dispatchMeshRuns) {
         throw new Error('Mesh dispatch is unavailable in this runtime.');
       }
-      return bridge.dispatchMeshRuns(await ensureResident());
+      const sessionId = await ensureResident();
+      assertGenerationOpen();
+      return bridge.dispatchMeshRuns(sessionId);
     },
     tick,
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(timer);
-    },
+    stop,
   };
 }

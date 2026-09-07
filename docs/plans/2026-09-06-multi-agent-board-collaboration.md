@@ -780,6 +780,13 @@ Production surface status:
 | Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay |
 | Not implemented pending product decision | channel delivery for the four notification events (§9.12) |
 
+The daemon owner is scoped to one workspace runtime generation, not merely its
+bridge object. Once that generation drains or is replaced, its keepalive stops
+and later launches and dispatches fail closed. Generation assertions bracket
+host-session claims and releases, with raced stale spawns cleaned up. This
+prevents an old owner from continuing to act through a reused bridge after the
+workspace trust/runtime boundary has moved.
+
 ## 6. What an agent actually receives
 
 The thread frame is necessary but not a security boundary. A long-lived body may

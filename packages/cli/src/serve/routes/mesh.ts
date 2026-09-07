@@ -183,6 +183,7 @@ export function registerMeshRoutes(
     string,
     {
       bridge: WorkspaceRuntime['bridge'];
+      generationGuard: WorkspaceRuntime['generationGuard'];
       owner: ReturnType<typeof startMeshHostSessionOwner>;
     }
   >();
@@ -201,14 +202,26 @@ export function registerMeshRoutes(
   };
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
+    runtime.generationGuard?.assertOpen();
     let current = owners.get(runtime.workspaceCwd);
-    if (!current || current.bridge !== runtime.bridge) {
+    if (
+      !current ||
+      current.bridge !== runtime.bridge ||
+      current.generationGuard !== runtime.generationGuard
+    ) {
       current?.owner.stop();
       const owner = startMeshHostSessionOwner({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
+        ...(runtime.generationGuard
+          ? { generationGuard: runtime.generationGuard }
+          : {}),
       });
-      current = { bridge: runtime.bridge, owner };
+      current = {
+        bridge: runtime.bridge,
+        generationGuard: runtime.generationGuard,
+        owner,
+      };
       owners.set(runtime.workspaceCwd, current);
     }
     await current.owner.dispatch();
