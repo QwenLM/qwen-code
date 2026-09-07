@@ -10,7 +10,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { gitEnv } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
@@ -25,8 +26,18 @@ const passthroughMutate = () =>
 
 const tmpRoots: string[] = [];
 
+// Hermetic global scope: git's duplicate and no-such-remote checks resolve
+// across every scope, so a host carrying a global [remote …] section or an
+// org-wide insteadOf rewrite would otherwise decide these assertions.
+// HOME/XDG reach the fixtures and the code under test through this env;
+// its GIT_CONFIG_NOSYSTEM reaches only the fixtures, because gitEnv strips
+// that key — the listing's scope filter is what keeps host system/global
+// remotes out of the read-side assertions.
+let fixtureEnv: NodeJS.ProcessEnv;
+let tmpHome: string;
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: fixtureEnv });
 }
 
 function makeRepo(): string {
@@ -47,6 +58,18 @@ function makeRepo(): string {
   return dir;
 }
 
+beforeEach(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremotes-home-'));
+  tmpRoots.push(tmpHome);
+  // Built through the same scrubber the code under test uses, so a host
+  // that redirects config by env cannot split the fixtures from the code
+  // they assert on.
+  fixtureEnv = {
+    ...gitEnv({ ...process.env, HOME: tmpHome, XDG_CONFIG_HOME: tmpHome }),
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+});
+
 afterEach(() => {
   for (const dir of tmpRoots.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -59,7 +82,11 @@ function trustedRuntime(workspaceCwd: string): WorkspaceRuntime {
     workspaceCwd,
     primary: true,
     trusted: true,
-    env: { mode: 'parent-process', overlayKeys: [] },
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: fixtureEnv,
+    },
     bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
   } as unknown as WorkspaceRuntime;
 }
@@ -200,7 +227,7 @@ describe('workspace qualified Git remotes routes (input validation)', () => {
     expect(response.body.error).toBe('invalid_remote_url');
   });
 
-  it.each(['-evil', ''])(
+  it.each(['', 'a\0b'])(
     'rejects remote name %j on remove with 400 invalid_remote_name',
     async (name) => {
       const response = await request(validatedApp())
@@ -237,11 +264,21 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
         name: 'origin',
         fetchUrl: 'https://example.com/o/r.git',
         pushUrl: 'https://example.com/o/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
       },
       {
         name: 'upstream',
         fetchUrl: 'https://example.com/u/r.git',
         pushUrl: 'git@example.com:u/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
       },
     ]);
   });
@@ -260,9 +297,27 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
         name: 'origin',
         fetchUrl: 'https://example.com/o/r.git',
         pushUrl: 'https://example.com/o/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
       },
     ]);
     expect(git(dir, 'remote')).toBe('origin\n');
+  });
+
+  it('rejects a command-executing helper url with 400 invalid_remote_url', async () => {
+    const dir = makeRepo();
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote')
+      .send({ name: 'mirror', url: 'ext::sh -c touch /tmp/pwned' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_remote_url');
+    expect(git(dir, 'remote')).toBe('');
   });
 
   it('answers 409 remote_already_exists on a duplicate add', async () => {
@@ -295,9 +350,60 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
         name: 'upstream',
         fetchUrl: 'https://example.com/u/r.git',
         pushUrl: 'https://example.com/u/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
       },
     ]);
     expect(git(dir, 'remote')).toBe('upstream\n');
+  });
+
+  it('classifies a config-write lock contention as git_config_write_failed', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'dirty-cache', 'https://example.com/d/r.git');
+    // A stale or concurrent lock makes git's remove fail with a message that
+    // echoes the name as `remote.dirty-cache` and must not be read as a
+    // dirty working tree.
+    fs.writeFileSync(path.join(dir, '.git', 'config.lock'), '');
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote/remove')
+      .send({ name: 'dirty-cache' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('git_config_write_failed');
+    expect(
+      git(dir, 'config', '--local', '--get', 'remote.dirty-cache.url').trim(),
+    ).toBe('https://example.com/d/r.git');
+  });
+
+  it('classifies removing a remote named like an earlier branch as no_such_remote', async () => {
+    const dir = makeRepo();
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote/remove')
+      .send({ name: 'not a git repository' });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('no_such_remote');
+  });
+
+  // Removal accepts any name git itself lists (the argv is `--`-terminated),
+  // so a dash-leading name is a lookup miss, not a validation refusal.
+  it('answers 404 no_such_remote when removing a dash-leading name', async () => {
+    const dir = makeRepo();
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote/remove')
+      .send({ name: '-evil' });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('no_such_remote');
   });
 
   it('answers 404 no_such_remote when removing an unknown remote', async () => {

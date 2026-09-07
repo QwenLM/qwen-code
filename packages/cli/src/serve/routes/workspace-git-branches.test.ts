@@ -21,6 +21,7 @@ import {
 import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
+  sendGitError,
 } from './workspace-git-branches.js';
 
 const passthroughMutate = () =>
@@ -329,6 +330,100 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.status).toBe(409);
     expect(response.body.error).toBe('dirty_working_tree');
     expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
+  // The classifier is shared by every workspace git route, so the file that
+  // owns it must be able to go red when the table changes — including the
+  // remote-specific branches the remotes routes depend on.
+  describe('sendGitError classification table', () => {
+    function classify(stderr: string): {
+      status: number;
+      body: Record<string, unknown>;
+    } {
+      const out: { status: number; body: Record<string, unknown> } = {
+        status: 0,
+        body: {},
+      };
+      const res = {
+        status(code: number) {
+          out.status = code;
+          return res;
+        },
+        json(body: Record<string, unknown>) {
+          out.body = body;
+          return res;
+        },
+      };
+      sendGitError(
+        res as never,
+        { stderr, stdout: '' },
+        'test-route',
+        sendBridgeError,
+        '/work/main',
+      );
+      return out;
+    }
+
+    it.each([
+      [
+        'error: remote dirty-cache already exists.',
+        409,
+        'remote_already_exists',
+      ],
+      ["error: No such remote: 'dirty-cache'", 404, 'no_such_remote'],
+      // A remote whose NAME matches an earlier keyword branch must still
+      // classify by the remote-specific shape.
+      ["error: No such remote: 'not a git repository'", 404, 'no_such_remote'],
+      [
+        "error: could not lock config file .git/config\nerror: Could not remove config section 'remote.dirty-cache'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: could not unset 'branch.main.remote'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "error: could not lock config file .git/config\nfatal: Could not set 'remote.origin.url' to 'https://example.com/o/r.git'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: Could not set 'remote.dirty-cache.url' to 'https://example.com/o/r.git'",
+        409,
+        'git_config_write_failed',
+      ],
+      // The echoed name/URL inside a config-write message must not be
+      // claimed by the loose remote shapes that run after it.
+      [
+        "error: could not lock config file .git/config\nerror: Could not remove config section 'remote.no such remote'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "error: could not lock config file .git/config\nfatal: Could not set 'remote.foo.url' to '/tmp/no such remote/x'",
+        409,
+        'git_config_write_failed',
+      ],
+      [
+        "fatal: invalid refspec '+refs/heads/*'",
+        409,
+        'remote_config_unparsable',
+      ],
+      ['fatal: not a git repository', 404, 'not_a_git_repository'],
+      [
+        'error: Your local changes to the following files would be overwritten by merge',
+        409,
+        'dirty_working_tree',
+      ],
+      ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
+      ['remote still configured after removal', 409, 'remote_still_configured'],
+    ])('maps %j to %i %s', (stderr, status, code) => {
+      const out = classify(stderr);
+      expect(out.status).toBe(status);
+      expect(out.body['error']).toBe(code);
+    });
   });
 
   it('updates a dirty tree and restores the local changes with stash', async () => {

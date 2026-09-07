@@ -92,6 +92,13 @@ const GIT_ENV_VARS_TO_CLEAR = [
 // a clone/push). The index count is unbounded, so strip them by prefix.
 const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 
+// Transport names git ships helpers for: `ext` is deny-by-default but
+// re-enableable from config files, `fd` is allowed by default and needs no
+// installed binary. The open `git-remote-<name>` space is closed at the
+// write gate (EXECUTING_HELPER_URL in git-remotes.ts), not here — an
+// operator-listed helper name is a deliberate allow and is preserved.
+const HELPER_PROTOCOLS = new Set(['ext', 'fd']);
+
 export function gitEnv(
   base?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> {
@@ -103,6 +110,21 @@ export function gitEnv(
     if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
       delete env[key];
     }
+  }
+  // GIT_ALLOW_PROTOCOL is git's only protocol control that OVERRIDES
+  // config-file policy, so deleting it outright would hand a
+  // workspace-controlled `protocol.<name>.allow` the final say: a repo the
+  // user did not author can pair `url = ext::…` with
+  // `protocol.ext.allow = always`, and an operator's restrictive inherited
+  // list is the deny that stops it. Keep an inherited list but strip the
+  // helper-executing entries; a list that filters to empty stays set
+  // (deny-all) rather than becoming undefined (config decides).
+  const inheritedAllow = env['GIT_ALLOW_PROTOCOL'];
+  if (inheritedAllow !== undefined) {
+    env['GIT_ALLOW_PROTOCOL'] = inheritedAllow
+      .split(':')
+      .filter((p) => !HELPER_PROTOCOLS.has(p.trim().toLowerCase()))
+      .join(':');
   }
   env['LC_ALL'] = 'C';
   env['LANG'] = 'C';

@@ -43,9 +43,9 @@ async function handleRemotes(
   }
 }
 
-// Both mutations answer with the fresh remote list: `git remote -v` costs
-// milliseconds server-side and saves the client a second round trip before
-// it can re-render.
+// Both mutations answer with the fresh remote list: the scoped config read
+// costs milliseconds server-side and saves the client a second round trip
+// before it can re-render.
 async function handleRemoteAdd(
   req: Request,
   res: Response,

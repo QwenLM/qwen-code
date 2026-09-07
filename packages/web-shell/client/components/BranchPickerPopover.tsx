@@ -78,27 +78,29 @@ function pullErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Display-side counterpart of the core add-predicate's invisible-character
-// rejection: a `.git/config` the user did not author (downloaded zip, cloned
-// repo) can carry C1/Default_Ignorable characters (zero-width marks,
-// separators, bidi marks and embeddings, soft hyphen, variation selectors)
-// in remote names and URLs, and those are rendered verbatim here — the same
-// spoofing surface gitDirect's INVALID_REF_CHARS policy covers for displayed
-// branch names, extended to the full ignorable set for this HTML surface.
-// Keep in lockstep with core git-remotes.ts's INVISIBLE_CHARS.
+// Display-side counterpart of the core write-gate's invisible-character
+// policy, derived from Unicode properties (the set grows with Unicode, so a
+// hand list always has an unlisted corner). \p{Cc} covers C0/C1 controls,
+// \p{Cf} the format characters, plus the line/paragraph separators.
 // Strip for RENDERING only; mutation requests must carry the raw name (git
 // knows the remote by its exact configured name), and filteredRemotes must
 // match these same stripped values so search finds what the row displays.
-// The class must stay on one line so the eslint-disable applies
-// (gitDirect.ts precedent). It intentionally matches combining marks
-// (CGJ, Mongolian FVS, variation selectors) as individual code points —
-// stripping them is the point, not matching a whole grapheme.
-// prettier-ignore
-// eslint-disable-next-line no-control-regex, no-misleading-character-class
-const DISPLAY_INVISIBLE_CHARS = /[\x00-\x1f\x7f-\x9f\u00ad\u034f\u061c\u180b-\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufe00-\ufe0f]/g;
+const DISPLAY_INVISIBLE_CHARS =
+  /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu;
 
 function sanitizeRemoteDisplay(value: string): string {
   return value.replace(DISPLAY_INVISIBLE_CHARS, '');
+}
+
+// Tooltip/aria rendering of a raw configured name: the characters the
+// sanitizer strips become visible codepoint escapes, so rows that would
+// otherwise render identically (origin vs ori\u200bgin) stay tellable
+// apart for sighted and screen-reader users alike.
+function escapeInvisibleChars(value: string): string {
+  return value.replace(
+    DISPLAY_INVISIBLE_CHARS,
+    (ch) => `\\u{${ch.codePointAt(0)?.toString(16)}}`,
+  );
 }
 
 interface BranchPickerPopoverProps {
@@ -401,6 +403,16 @@ export function BranchPickerPopover({
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  // Focus target when leaving the remotes view, so the view switch does not
+  // drop keyboard focus to document.body.
+  const manageRemotesRef = useRef<HTMLButtonElement>(null);
+  // Set by closeRemotes and consumed once the branches view commits (the
+  // target row is unmounted while the remotes view is up).
+  const pendingManageFocusRef = useRef(false);
+  // The add-form input that held focus when a mutation started: disabling
+  // the inputs blurs them in real browsers, so focus is restored once the
+  // mutation settles (see the busyAction effect below).
+  const addFocusRestoreRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
   // Separate from requestIdRef: handleRemoteRemove calls fetchBranches,
   // which would otherwise invalidate the remotes request it is paired with.
@@ -713,23 +725,43 @@ export function BranchPickerPopover({
     ],
   );
 
-  const fetchRemotes = useCallback(async () => {
-    const requestId = ++remotesRequestIdRef.current;
-    setRemotesLoading(true);
-    setRemotesError(null);
-    try {
-      const result = await ws.workspaceGitRemotes(gitCwd);
-      if (requestId !== remotesRequestIdRef.current) return;
-      setRemotes(result.remotes);
-    } catch (err) {
-      if (requestId !== remotesRequestIdRef.current) return;
-      setRemotesError(sanitizeRemoteDisplay(pullErrorMessage(err)));
-    } finally {
-      if (requestId === remotesRequestIdRef.current) {
-        setRemotesLoading(false);
+  // `silent` is the post-refusal re-read: the list on screen is stale but
+  // usable, so the refresh must neither raise the placeholder the render
+  // gate swaps those rows for nor replace them with its own error (same
+  // contract fetchBranches states for its silent refresh).
+  const fetchRemotes = useCallback(
+    async (silent = false) => {
+      const requestId = ++remotesRequestIdRef.current;
+      if (!silent) setRemotesLoading(true);
+      setRemotesError(null);
+      try {
+        const result = await ws.workspaceGitRemotes(gitCwd);
+        if (requestId !== remotesRequestIdRef.current) return;
+        setRemotes(result.remotes);
+      } catch (err) {
+        if (requestId !== remotesRequestIdRef.current) return;
+        if (silent) return;
+        setRemotesError(sanitizeRemoteDisplay(pullErrorMessage(err)));
+      } finally {
+        if (requestId === remotesRequestIdRef.current && !silent) {
+          setRemotesLoading(false);
+        }
       }
-    }
-  }, [ws, gitCwd]);
+    },
+    [ws, gitCwd],
+  );
+
+  // Only these daemon answers mean the displayed list is stale; every other
+  // refusal (400 validation, 503 draining, transport failure) leaves the
+  // usable list on screen and speaks through the footer alone.
+  const mutationMeansStaleList = useCallback((err: unknown): boolean => {
+    const code = daemonErrorBody(err)?.['error'];
+    return (
+      code === 'remote_already_exists' ||
+      code === 'no_such_remote' ||
+      code === 'remote_still_configured'
+    );
+  }, []);
 
   const openRemotes = useCallback(() => {
     // Only a standing pull-resolution panel competes with the remotes view;
@@ -751,7 +783,35 @@ export function BranchPickerPopover({
     setView('branches');
     setConfirmRemove(null);
     setSearch('');
+    // The row that opens the panel is unmounted while the remotes view is
+    // up, so focus can only be restored after the branches view commits.
+    pendingManageFocusRef.current = true;
   }, []);
+
+  useEffect(() => {
+    if (view !== 'branches' || !pendingManageFocusRef.current) return;
+    pendingManageFocusRef.current = false;
+    // The row renders only when the listing and the action filter allow it;
+    // fall back to the search box rather than leaving focus on the body.
+    // A disabled button swallows focus(), and the row is disabled while a
+    // mutation is in flight, so test focusability rather than presence.
+    const target = manageRemotesRef.current;
+    if (target && !target.disabled) target.focus();
+    else searchRef.current?.focus();
+  }, [view]);
+
+  useEffect(() => {
+    if (busyAction !== null || view !== 'remotes') return;
+    const testId = addFocusRestoreRef.current;
+    if (!testId) return;
+    addFocusRestoreRef.current = null;
+    // Disabling the add inputs while the mutation ran blurred them; put
+    // focus back once they are enabled again.
+    const input = document.body.querySelector<HTMLInputElement>(
+      `input[data-testid="${testId}"]`,
+    );
+    if (input && !input.disabled) input.focus();
+  }, [busyAction, view]);
 
   const handleRemoteAdd = useCallback(async () => {
     if (busyAction) return;
@@ -766,13 +826,24 @@ export function BranchPickerPopover({
     }
     const requestId = remotesRequestIdRef.current;
     setConfirmRemove(null);
+    const active = document.activeElement;
+    addFocusRestoreRef.current =
+      active instanceof HTMLInputElement &&
+      (active.dataset.testid === 'remote-add-name' ||
+        active.dataset.testid === 'remote-add-url')
+        ? active.dataset.testid
+        : null;
     setBusyAction('remoteAdd');
     try {
       const result = await ws.workspaceGitRemoteAdd(name, url, gitCwd);
       if (requestId !== remotesRequestIdRef.current) return;
       setRemotes(result.remotes);
+      // A silent re-read issued before this mutation must not overwrite
+      // the post-write list when it lands.
+      remotesRequestIdRef.current++;
       setRemoteName('');
       setRemoteUrl('');
+      addFocusRestoreRef.current = 'remote-add-name';
       showStatus(
         t('branchPicker.remotes.added', {
           name: sanitizeRemoteDisplay(name),
@@ -785,8 +856,9 @@ export function BranchPickerPopover({
       // verbatim, so sanitize at this display boundary too.
       showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
       // A refused add can mean the list is stale (409 already-exists for a
-      // remote the panel does not show); re-read so the panel converges.
-      void fetchRemotes();
+      // remote the panel does not show); re-read silently so the panel
+      // converges without tearing down the rows and the typed draft.
+      if (mutationMeansStaleList(err)) void fetchRemotes(true);
     } finally {
       setBusyAction(null);
     }
@@ -797,6 +869,7 @@ export function BranchPickerPopover({
     remoteName,
     remoteUrl,
     fetchRemotes,
+    mutationMeansStaleList,
     showStatus,
     t,
   ]);
@@ -811,6 +884,9 @@ export function BranchPickerPopover({
         const result = await ws.workspaceGitRemoteRemove(name, gitCwd);
         if (requestId !== remotesRequestIdRef.current) return;
         setRemotes(result.remotes);
+        // A silent re-read issued before this mutation must not overwrite
+        // the post-write list when it lands.
+        remotesRequestIdRef.current++;
         showStatus(
           t('branchPicker.remotes.removed', {
             name: sanitizeRemoteDisplay(name),
@@ -828,9 +904,23 @@ export function BranchPickerPopover({
         showStatus(sanitizeRemoteDisplay(pullErrorMessage(err)), 'error');
         // A refused remove usually means the list is stale (git answered
         // "No such remote" for a row still on screen — a terminal removed
-        // it first); re-read so the panel converges instead of offering the
-        // same doomed click forever.
-        void fetchRemotes();
+        // it first); re-read silently so the panel converges instead of
+        // offering the same doomed click forever.
+        if (mutationMeansStaleList(err)) void fetchRemotes(true);
+        // git deletes refs/remotes/<name>/* and the pointing branches'
+        // upstream config BEFORE the section write, so every refusal that
+        // leaves a surviving section — a lock-failed write, or a split
+        // section whose other half survives the verification — leaves the
+        // refs gone while the row survives: refresh the branch list and
+        // the upstream chip as well.
+        const code = daemonErrorBody(err)?.['error'];
+        if (
+          code === 'git_config_write_failed' ||
+          code === 'remote_still_configured'
+        ) {
+          void fetchBranches(true);
+          void fetchStatus();
+        }
       } finally {
         setBusyAction(null);
       }
@@ -842,6 +932,7 @@ export function BranchPickerPopover({
       fetchBranches,
       fetchStatus,
       fetchRemotes,
+      mutationMeansStaleList,
       onBranchChanged,
       showStatus,
       t,
@@ -895,14 +986,15 @@ export function BranchPickerPopover({
   const filteredRemotes = useMemo(() => {
     if (!remotes) return [];
     if (!q) return remotes;
-    // Match the values the row actually renders (sanitized), not the raw
-    // config strings — otherwise a remote whose name/URL carries invisible
-    // characters displays as "origin" yet cannot be found by typing it.
+    // Match the values the row actually renders (sanitized), on both sides:
+    // a needle copied from a raw config string carries the same invisible
+    // characters the row strips, so sanitize it too.
+    const needle = sanitizeRemoteDisplay(q).toLowerCase();
     return remotes.filter(
       (r) =>
-        sanitizeRemoteDisplay(r.name).toLowerCase().includes(q) ||
-        sanitizeRemoteDisplay(r.fetchUrl).toLowerCase().includes(q) ||
-        sanitizeRemoteDisplay(r.pushUrl).toLowerCase().includes(q),
+        sanitizeRemoteDisplay(r.name).toLowerCase().includes(needle) ||
+        sanitizeRemoteDisplay(r.fetchUrl).toLowerCase().includes(needle) ||
+        sanitizeRemoteDisplay(r.pushUrl).toLowerCase().includes(needle),
     );
   }, [remotes, q]);
 
@@ -955,13 +1047,26 @@ export function BranchPickerPopover({
             e.preventDefault();
           }
         }}
+        // Escape leaves the nested remotes view first; only a second Escape
+        // (from the branches view) dismisses the whole popover, so the typed
+        // add draft is not destroyed by the key that means "go back".
+        onEscapeKeyDown={(e) => {
+          if (view === 'remotes') {
+            e.preventDefault();
+            closeRemotes();
+          }
+        }}
       >
         <div className={styles.searchWrap}>
           <SearchIcon size={14} className={styles.searchIcon} />
           <input
             ref={searchRef}
             className={styles.searchInput}
-            placeholder={t('branchPicker.search')}
+            placeholder={
+              view === 'remotes'
+                ? t('branchPicker.remotes.searchPlaceholder')
+                : t('branchPicker.search')
+            }
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -1155,6 +1260,7 @@ export function BranchPickerPopover({
 
                       <button
                         type="button"
+                        ref={manageRemotesRef}
                         className={styles.actionItem}
                         disabled={!!busyAction}
                         onClick={openRemotes}
@@ -1496,11 +1602,18 @@ function RemotesView({
   onBack: () => void;
 }) {
   const { t } = useI18n();
+  const backRef = useRef<HTMLButtonElement>(null);
+  // The view replaces the branch list, so focus must land inside it rather
+  // than on the unmounted rows' former position (document.body).
+  useEffect(() => {
+    backRef.current?.focus();
+  }, []);
   return (
     <>
       <div className={styles.remotesHeader}>
         <button
           type="button"
+          ref={backRef}
           className={styles.backButton}
           onClick={onBack}
           aria-label={t('branchPicker.remotes.back')}
@@ -1527,56 +1640,100 @@ function RemotesView({
                 : t('branchPicker.remotes.noMatches')}
             </div>
           ) : (
-            remotes.map((r) => (
-              <div key={r.name} className={styles.remoteRow}>
-                <GlobeIcon size={13} className={styles.itemIcon} />
-                <span className={styles.remoteName}>
-                  {sanitizeRemoteDisplay(r.name)}
-                </span>
-                <span
-                  className={styles.remoteUrl}
-                  title={
-                    r.pushUrl !== r.fetchUrl
-                      ? `fetch: ${sanitizeRemoteDisplay(r.fetchUrl)}\npush: ${sanitizeRemoteDisplay(r.pushUrl)}`
-                      : sanitizeRemoteDisplay(r.fetchUrl)
-                  }
-                >
-                  {sanitizeRemoteDisplay(r.fetchUrl)}
-                </span>
-                <button
-                  type="button"
-                  className={`${styles.remoteRemove} ${
-                    confirmRemove === r.name ? styles.remoteRemoveConfirm : ''
-                  }`}
-                  disabled={!!busyAction}
-                  onClick={() =>
-                    confirmRemove === r.name
-                      ? onRemove(r.name)
-                      : onConfirmRemove(r.name)
-                  }
-                  aria-label={
-                    confirmRemove === r.name
-                      ? t('branchPicker.remotes.removeConfirm')
-                      : t('branchPicker.remotes.remove', {
-                          name: sanitizeRemoteDisplay(r.name),
-                        })
-                  }
-                  data-testid={`remote-remove-${r.name}`}
-                >
-                  {confirmRemove === r.name ? (
-                    t('branchPicker.remotes.removeConfirm')
-                  ) : (
-                    <Trash2Icon size={13} />
+            remotes.map((r) => {
+              const displayName = sanitizeRemoteDisplay(r.name);
+              // A config-held name can sanitize to the same text as a
+              // sibling row (origin vs ori\u200bgin): flag every row whose
+              // rendered text differs from its raw name, and carry the
+              // escaped raw name into the tooltip and the aria-labels so
+              // two lookalikes never present one identity.
+              const hiddenChars = displayName !== r.name;
+              const rowName = hiddenChars
+                ? displayName
+                  ? `${displayName} ${t('branchPicker.remotes.hiddenChars')}`
+                  : t('branchPicker.remotes.invisibleName')
+                : displayName;
+              const escapedName = hiddenChars
+                ? escapeInvisibleChars(r.name)
+                : undefined;
+              const ariaName = escapedName
+                ? `${rowName} ${escapedName}`
+                : rowName;
+              const fetchDisplay = sanitizeRemoteDisplay(r.fetchUrl);
+              const pushDisplay = sanitizeRemoteDisplay(r.pushUrl);
+              // Same lookalike treatment as the name: two URLs that differ
+              // only by invisible characters must not tooltip identically.
+              const fetchTitle =
+                fetchDisplay === r.fetchUrl
+                  ? fetchDisplay
+                  : escapeInvisibleChars(r.fetchUrl);
+              const pushTitle =
+                pushDisplay === r.pushUrl
+                  ? pushDisplay
+                  : escapeInvisibleChars(r.pushUrl);
+              const extras = remoteExtras(r, t);
+              return (
+                <div key={r.name} className={styles.remoteRow}>
+                  <GlobeIcon size={13} className={styles.itemIcon} />
+                  <span
+                    className={styles.remoteName}
+                    title={escapedName ?? displayName}
+                  >
+                    {rowName}
+                  </span>
+                  {extras && (
+                    <span className={styles.remoteBadge} title={extras}>
+                      {extras}
+                    </span>
                   )}
-                </button>
-              </div>
-            ))
+                  <span
+                    className={styles.remoteUrl}
+                    title={
+                      r.pushUrl !== r.fetchUrl
+                        ? `fetch: ${fetchTitle}\npush: ${pushTitle}`
+                        : fetchTitle
+                    }
+                  >
+                    {fetchDisplay}
+                  </span>
+                  <button
+                    type="button"
+                    className={`${styles.remoteRemove} ${
+                      confirmRemove === r.name ? styles.remoteRemoveConfirm : ''
+                    }`}
+                    disabled={!!busyAction}
+                    onClick={() =>
+                      confirmRemove === r.name
+                        ? onRemove(r.name)
+                        : onConfirmRemove(r.name)
+                    }
+                    aria-label={
+                      confirmRemove === r.name
+                        ? t('branchPicker.remotes.removeConfirmFor', {
+                            name: ariaName,
+                          })
+                        : t('branchPicker.remotes.remove', {
+                            name: ariaName,
+                          })
+                    }
+                    data-testid={`remote-remove-${r.name}`}
+                  >
+                    {confirmRemove === r.name ? (
+                      t('branchPicker.remotes.removeConfirm')
+                    ) : (
+                      <Trash2Icon size={13} />
+                    )}
+                  </button>
+                </div>
+              );
+            })
           )}
           <div className={styles.addRemoteForm}>
             <input
               className={styles.inlineInputField}
               placeholder={t('branchPicker.remotes.namePlaceholder')}
               value={name}
+              disabled={!!busyAction}
               onChange={(e) => onNameChange(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
@@ -1589,6 +1746,7 @@ function RemotesView({
               className={styles.inlineInputField}
               placeholder={t('branchPicker.remotes.urlPlaceholder')}
               value={url}
+              disabled={!!busyAction}
               onChange={(e) => onUrlChange(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
@@ -1616,4 +1774,44 @@ function RemotesView({
       )}
     </>
   );
+}
+
+/**
+ * What removal would destroy beyond the URL the row shows: git deletes the
+ * whole `remote.<name>` section, and re-adding restores only the URL and
+ * git's default refspec. Surfaced on the row so the two-click confirm names
+ * the consequence instead of certifying a lossless round trip.
+ */
+function remoteExtras(
+  r: DaemonGitRemoteInfo,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  const parts: string[] = [];
+  // The filter is destroyed by removal even when the promisor flag itself
+  // is unset, so the badge gates on either half of the pair.
+  if (r.promisor || r.partialCloneFilter) {
+    parts.push(
+      r.partialCloneFilter
+        ? t('branchPicker.remotes.partialClone', {
+            // Config-sourced string: sanitize at the render boundary like
+            // every other value on the row.
+            filter: sanitizeRemoteDisplay(r.partialCloneFilter),
+          })
+        : t('branchPicker.remotes.promisor'),
+    );
+  }
+  if (r.customRefspec) parts.push(t('branchPicker.remotes.customRefspec'));
+  if (r.extraFetchUrls > 0 || r.extraPushUrls > 0) {
+    parts.push(
+      t('branchPicker.remotes.extraUrls', {
+        count: r.extraFetchUrls + r.extraPushUrls,
+      }),
+    );
+  }
+  if (r.otherSettings > 0) {
+    parts.push(
+      t('branchPicker.remotes.otherSettings', { count: r.otherSettings }),
+    );
+  }
+  return parts.join(' · ');
 }

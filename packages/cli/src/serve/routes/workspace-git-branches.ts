@@ -70,23 +70,53 @@ export function sendGitError(
 
   const message = redactGitMessage(detail, cwd);
 
+  // git's remote config-write failures echo the name as `remote.<name>`
+  // (no space) and the URL verbatim — including inside quotes, so an echoed
+  // name or URL can itself contain "no such remote" or "already exists".
+  // These anchored git message prefixes therefore run FIRST: every message
+  // carrying them is a config-write failure regardless of the echo, while no
+  // genuine duplicate/no-such message carries them. `git remote remove`
+  // unsets the pointing branches' `branch.*.remote` keys before it deletes
+  // refs and removes the section, so a lock can also surface as a failed
+  // `could not unset 'branch.<x>.remote'` — the same config-write failure.
   if (
-    /not a git repository/i.test(message) ||
-    /invalid reference/i.test(message)
+    /could not remove config section|could not set 'remote\.|could not unset 'branch\./i.test(
+      message,
+    )
   ) {
-    res.status(404).json({ error: 'not_a_git_repository', message });
+    res.status(409).json({ error: 'git_config_write_failed', message });
     return;
   }
-  // Remote-specific shapes ahead of everything that matches a substring:
-  // git echoes the user-chosen remote name in both messages, so a remote
-  // named e.g. `dirty-cache` would otherwise be claimed by the dirty-tree
-  // branch below (wrong code, and for `no such remote` a wrong status too).
+  // Remote-specific shapes next: git echoes the user-chosen remote name in
+  // these messages, so a remote named e.g. `not a git repository` or
+  // `dirty-cache` would otherwise be claimed by an earlier keyword branch
+  // (wrong code, and for `no such remote` a wrong status too).
   if (/remote .* already exists/i.test(message)) {
     res.status(409).json({ error: 'remote_already_exists', message });
     return;
   }
   if (/no such remote/i.test(message)) {
     res.status(404).json({ error: 'no_such_remote', message });
+    return;
+  }
+  // The removal verification re-read the config and found the section
+  // still there (an included config file, or a concurrent re-add). The
+  // message carries no name, so no keyword branch can claim it.
+  if (/remote still configured after removal/i.test(message)) {
+    res.status(409).json({ error: 'remote_still_configured', message });
+    return;
+  }
+  // git dies parsing a configured fetch refspec before mutating anything:
+  // the row stays, nothing was destroyed, and the cause is nameable.
+  if (/invalid refspec/i.test(message)) {
+    res.status(409).json({ error: 'remote_config_unparsable', message });
+    return;
+  }
+  if (
+    /not a git repository/i.test(message) ||
+    /invalid reference/i.test(message)
+  ) {
+    res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
   if (/dirty|uncommitted|would be overwritten/i.test(message)) {

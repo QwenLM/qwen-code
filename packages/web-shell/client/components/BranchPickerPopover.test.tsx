@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonGitBranchesResult,
+  DaemonGitRemotesResult,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 
@@ -23,8 +24,25 @@ vi.mock('./ui/popover', async () => {
       createElement('div', null, children),
     PopoverTrigger: ({ children }: { children?: unknown }) =>
       createElement('div', null, children),
-    PopoverContent: ({ children }: { children?: unknown }) =>
-      createElement('div', { 'data-test-popover-content': '' }, children),
+    // Forward onEscapeKeyDown the way Radix's DismissableLayer does, so the
+    // component's Escape handling is exercised without the real dependency.
+    PopoverContent: ({
+      children,
+      onEscapeKeyDown,
+    }: {
+      children?: unknown;
+      onEscapeKeyDown?: (e: KeyboardEvent) => void;
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-test-popover-content': '',
+          onKeyDown: (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onEscapeKeyDown?.(e);
+          },
+        },
+        children,
+      ),
   };
 });
 
@@ -182,7 +200,7 @@ function mount(
   });
 }
 
-function defaultRemotesResult() {
+function defaultRemotesResult(): DaemonGitRemotesResult {
   return {
     v: 1,
     workspaceCwd: '/repo',
@@ -192,6 +210,11 @@ function defaultRemotesResult() {
         name: 'origin',
         fetchUrl: 'https://example.com/o/r.git',
         pushUrl: 'https://example.com/o/r.git',
+        extraFetchUrls: 0,
+        extraPushUrls: 0,
+        promisor: false,
+        customRefspec: false,
+        otherSettings: 0,
       },
     ],
   };
@@ -1902,7 +1925,7 @@ describe('BranchPickerPopover remotes view', () => {
     await openRemotesView();
 
     const search = document.body.querySelector<HTMLInputElement>(
-      'input[placeholder="Search for branches and actions"]',
+      'input[placeholder="Search remotes"]',
     );
     expect(search).toBeTruthy();
     const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -1946,7 +1969,7 @@ describe('BranchPickerPopover remotes view', () => {
     await openRemotesView();
 
     const search = document.body.querySelector<HTMLInputElement>(
-      'input[placeholder="Search for branches and actions"]',
+      'input[placeholder="Search remotes"]',
     );
     expect(search).toBeTruthy();
     const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -2063,7 +2086,7 @@ describe('BranchPickerPopover remotes view', () => {
     // The search filter matches what the row renders, so typing the
     // displayed name still finds it — for both character classes.
     const search = document.body.querySelector<HTMLInputElement>(
-      'input[placeholder="Search for branches and actions"]',
+      'input[placeholder="Search remotes"]',
     );
     expect(search).toBeTruthy();
     const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -2135,5 +2158,594 @@ describe('BranchPickerPopover remotes view', () => {
       document.body.querySelector('[data-testid="remote-remove-origin"]'),
     ).toBeTruthy();
     expect(search?.value).toBe('');
+  });
+
+  it('re-reads only when the refusal says the list is stale', async () => {
+    // 404 no_such_remote means a row on screen no longer exists: re-read.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    let calls = workspaceGitRemotes.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+    // A refused removal disarms the two-click confirm on the surviving
+    // row: the next single click must re-arm, not execute.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+    const removeCalls = workspaceGitRemoteRemove.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    expect(workspaceGitRemoteRemove.mock.calls.length).toBe(removeCalls);
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+
+    // A 400 validation refusal leaves the usable list and the typed draft
+    // on screen: no re-read, no teardown.
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        400,
+        { error: 'invalid_remote_name', message: 'Invalid remote name' },
+        'POST /workspaces/:workspace/git/remote: invalid_remote_name',
+      ),
+    );
+    calls = workspaceGitRemotes.mock.calls.length;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    expect(nameInput).toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setter?.call(nameInput, 'origin/main');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      setter?.call(urlInput, 'https://example.com/o/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBe(calls);
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeTruthy();
+    // The typed draft and the usable list survive the refusal.
+    expect(nameInput?.value).toBe('origin/main');
+    expect(urlInput?.value).toBe('https://example.com/o/r.git');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(footerText()).toContain('Invalid remote name');
+
+    // 409 remote_already_exists on ADD means a remote the panel does not
+    // show already exists: silent re-read, rows retained.
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote fork already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    calls = workspaceGitRemotes.mock.calls.length;
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('keeps rows on screen while a stale-list re-read is in flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The silent re-read must not swap the rows for the loading placeholder.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Loading remotes');
+
+    // A mutation that completes while the silent re-read is in flight has
+    // precedence: the older read must not repaint its stale snapshot.
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+    await act(async () => {
+      release?.(defaultRemotesResult());
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+  });
+
+  it('Escape leaves the remotes view instead of dismissing the popover', async () => {
+    await openRemotesView();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content).toBeTruthy();
+    // Radix dismisses on Escape unless the handler prevents default, and
+    // the cancelable event is the only carrier of that witness here (the
+    // mock renders content unconditionally).
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      content?.dispatchEvent(escape);
+    });
+    expect(escape.defaultPrevented).toBe(true);
+    await flush();
+    // Back on the branches view: the manage-remotes row is visible again and
+    // the panel header is gone.
+    expect(
+      document.body.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+  });
+
+  it('renders a visible label for a name that strips to empty', async () => {
+    const result: DaemonGitRemotesResult = {
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: '\u200b\u200c',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    };
+    workspaceGitRemotes.mockResolvedValue(result);
+    await openRemotesView();
+    const row = document.body.querySelector(
+      '[data-testid="remote-remove-\u200b\u200c"]',
+    )?.parentElement;
+    expect(row?.textContent).toContain('(invisible name)');
+    // The armed confirm names the object it destroys.
+    clickTestId('remote-remove-\u200b\u200c');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-\u200b\u200c"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    // ...through the escaped raw name, so two lookalike rows cannot
+    // announce the same destructive step.
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-\u200b\u200c"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Confirm removing (invisible name) \\u{200b}\\u{200c}');
+  });
+
+  it('renders the removal-consequence badge and sanitizes the filter value', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 1,
+          extraPushUrls: 0,
+          promisor: true,
+          partialCloneFilter: 'blob:none\u202eevil',
+          customRefspec: true,
+          otherSettings: 2,
+        },
+        {
+          // The filter is destroyed by removal even with the promisor
+          // flag unset, so the badge must fire on the filter alone; the
+          // single other setting pins the singular badge copy.
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          partialCloneFilter: 'blob:none',
+          customRefspec: false,
+          otherSettings: 1,
+        },
+      ],
+    });
+    await openRemotesView();
+    const badge = document.body.querySelector('[class*="remoteBadge"]');
+    expect(badge).toBeTruthy();
+    const text = badge?.textContent ?? '';
+    expect(text).toContain('partial clone');
+    expect(text).toContain('blob:none');
+    expect(text).not.toContain('\u202e');
+    expect(badge?.getAttribute('title')).not.toContain('\u202e');
+    expect(text).toContain('custom refspec');
+    expect(text).toContain('+1 URL');
+    expect(text).toContain('2 other settings');
+    const badges = document.body.querySelectorAll('[class*="remoteBadge"]');
+    expect(badges).toHaveLength(2);
+    expect(badges[1]?.textContent).toContain('partial clone (blob:none)');
+    expect(badges[1]?.textContent).toContain('1 other setting');
+  });
+
+  it('restores focus to the manage-remotes row when leaving the view', async () => {
+    await openRemotesView();
+    clickTestId('remotes-back');
+    await flush();
+    expect(document.activeElement).toBe(
+      document.body.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      ),
+    );
+  });
+
+  it('re-reads when the removal verification reports the section survived', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_still_configured',
+          message: 'remote still configured after removal',
+        },
+        'POST /workspaces/:workspace/git/remote/remove: remote_still_configured',
+      ),
+    );
+    await openRemotesView();
+    const calls = workspaceGitRemotes.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('tells apart rows whose sanitized names collide', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // A ZWSP lookalike of the row above: both sanitize to "origin",
+          // so the marker, the tooltip and the aria-label must carry what
+          // distinguishes the two identities.
+          name: 'ori\u200bgin',
+          fetchUrl: 'https://example.com/evil/r.git',
+          pushUrl: 'https://example.com/evil/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // Same URL as mirror modulo a ZWSP: the name marker cannot fire,
+          // so the URL tooltip must carry the distinction.
+          name: 'mirror2',
+          fetchUrl: 'https://example.com/m/\u200br.git',
+          pushUrl: 'https://example.com/m/\u200br.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const plain = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    )?.parentElement;
+    const lookalike = document.body.querySelector(
+      '[data-testid="remote-remove-ori\u200bgin"]',
+    )?.parentElement;
+    expect(plain?.textContent).toContain('origin');
+    expect(plain?.textContent).not.toContain('(hidden characters)');
+    expect(lookalike?.textContent).toContain('origin (hidden characters)');
+    // The tooltip names the raw name with its invisible character as a
+    // visible codepoint escape; an ordinary name tooltips as itself so a
+    // truncated name stays readable.
+    expect(
+      lookalike?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('ori\\u{200b}gin');
+    expect(
+      plain?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin');
+    // URLs that differ only by invisible characters tooltip differently.
+    const mirrorUrl = document.body
+      .querySelector('[data-testid="remote-remove-mirror"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    const mirror2Url = document.body
+      .querySelector('[data-testid="remote-remove-mirror2"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(mirrorUrl?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git',
+    );
+    expect(mirror2Url?.getAttribute('title')).toContain('\\u{200b}');
+    expect(mirror2Url?.getAttribute('title')).not.toBe(
+      mirrorUrl?.getAttribute('title'),
+    );
+
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-ori\u200bgin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters) ori\\u{200b}gin');
+
+    // Removal still targets the raw configured name.
+    clickTestId('remote-remove-ori\u200bgin');
+    clickTestId('remote-remove-ori\u200bgin');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'ori\u200bgin',
+      undefined,
+    );
+  });
+
+  it('refreshes the branch list when a remove fails on the config write', async () => {
+    // git deletes refs/remotes/<name>/* before removing the config
+    // section, so a lock-failed section write leaves the branch list
+    // stale even though the remote row itself survives.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'git_config_write_failed',
+          message: "error: Could not remove config section 'remote.origin'",
+        },
+        'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
+      ),
+    );
+    await openRemotesView();
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const remoteCalls = workspaceGitRemotes.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
+    // The remote list is not stale here (the section survived): no re-read.
+    expect(workspaceGitRemotes.mock.calls.length).toBe(remoteCalls);
+  });
+
+  it('refreshes the branch list when the removal verification survives', async () => {
+    // git exits 0 over a split section after deleting the tracking refs:
+    // the row survives (silent re-read) AND the branch list is stale.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_still_configured',
+          message: 'remote still configured after removal',
+        },
+        'POST /workspaces/:workspace/git/remote/remove: remote_still_configured',
+      ),
+    );
+    await openRemotesView();
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const remoteCalls = workspaceGitRemotes.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
+    expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(remoteCalls);
+  });
+
+  it('keeps rows and draft when the silent re-read itself fails', async () => {
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    // The background re-read the refusal triggers fails (draining daemon):
+    // a silent read must neither raise the placeholder nor replace the
+    // usable rows and the typed draft with its own error.
+    workspaceGitRemotes.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'workspace_runtime_unavailable',
+          message: 'runtime unavailable',
+        },
+        'GET /workspaces/:workspace/git/remotes: workspace_runtime_unavailable',
+      ),
+    );
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('runtime unavailable');
+  });
+
+  it('disables the add inputs while a mutation is in flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    expect(nameInput).toBeTruthy();
+    expect(urlInput).toBeTruthy();
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(nameInput?.disabled).toBe(true);
+    expect(urlInput?.disabled).toBe(true);
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('restores add-form focus after a mutation settles', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    expect(nameInput).toBeTruthy();
+    expect(urlInput).toBeTruthy();
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      urlInput?.focus();
+    });
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+    // The success path clears the draft and puts focus on the name input
+    // for the next remote, instead of leaving it on document.body.
+    expect(document.activeElement).toBe(nameInput);
+  });
+
+  it('falls back to the search box when the manage row is busy', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The mutation is still in flight, so the manage row is disabled and
+    // cannot take focus: the search box must.
+    clickTestId('remotes-back');
+    await flush();
+    expect(document.activeElement).toBe(
+      document.body.querySelector(
+        'input[placeholder="Search for branches and actions"]',
+      ),
+    );
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
   });
 });

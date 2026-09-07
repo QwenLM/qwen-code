@@ -89,6 +89,18 @@ const EN: Messages = {
   'branchPicker.remotes.add': 'Add',
   'branchPicker.remotes.remove': (v) => `Remove ${v?.name ?? ''}`,
   'branchPicker.remotes.removeConfirm': 'Confirm',
+  'branchPicker.remotes.removeConfirmFor': (v) =>
+    `Confirm removing ${v?.name ?? ''}`,
+  'branchPicker.remotes.invisibleName': '(invisible name)',
+  'branchPicker.remotes.hiddenChars': '(hidden characters)',
+  'branchPicker.remotes.searchPlaceholder': 'Search remotes',
+  'branchPicker.remotes.promisor': 'partial clone',
+  'branchPicker.remotes.partialClone': (v) => `partial clone (${v?.filter})`,
+  'branchPicker.remotes.customRefspec': 'custom refspec',
+  'branchPicker.remotes.extraUrls': (v) =>
+    `+${v?.count ?? 0} ${v?.count === 1 ? 'URL' : 'URLs'}`,
+  'branchPicker.remotes.otherSettings': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'other setting' : 'other settings'}`,
   'branchPicker.remotes.added': (v) => `Added remote ${v?.name ?? ''}`,
   'branchPicker.remotes.removed': (v) => `Removed remote ${v?.name ?? ''}`,
   'branchPicker.remotes.invalidInput':
@@ -3591,6 +3603,15 @@ const ZH: Messages = {
   'branchPicker.remotes.add': '添加',
   'branchPicker.remotes.remove': (v) => `移除 ${v?.name ?? ''}`,
   'branchPicker.remotes.removeConfirm': '确认',
+  'branchPicker.remotes.removeConfirmFor': (v) => `确认移除 ${v?.name ?? ''}`,
+  'branchPicker.remotes.invisibleName': '（不可见名称）',
+  'branchPicker.remotes.hiddenChars': '（隐藏字符）',
+  'branchPicker.remotes.searchPlaceholder': '搜索远程仓库',
+  'branchPicker.remotes.promisor': '部分克隆',
+  'branchPicker.remotes.partialClone': (v) => `部分克隆（${v?.filter}）`,
+  'branchPicker.remotes.customRefspec': '自定义 refspec',
+  'branchPicker.remotes.extraUrls': (v) => `+${v?.count ?? 0} 个 URL`,
+  'branchPicker.remotes.otherSettings': (v) => `其他 ${v?.count ?? 0} 项设置`,
   'branchPicker.remotes.added': (v) => `已添加远程仓库 ${v?.name ?? ''}`,
   'branchPicker.remotes.removed': (v) => `已移除远程仓库 ${v?.name ?? ''}`,
   'branchPicker.remotes.invalidInput':

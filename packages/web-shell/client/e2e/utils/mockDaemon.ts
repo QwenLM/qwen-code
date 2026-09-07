@@ -1030,9 +1030,27 @@ function materializeRemotes(
       name: 'origin',
       fetchUrl: 'https://example.com/o/r.git',
       pushUrl: 'https://example.com/o/r.git',
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
     },
   ];
   return scenario.gitRemotes;
+}
+
+function plainRemote(name: string, url: string): DaemonGitRemoteInfo {
+  return {
+    name,
+    fetchUrl: url,
+    pushUrl: url,
+    extraFetchUrls: 0,
+    extraPushUrls: 0,
+    promisor: false,
+    customRefspec: false,
+    otherSettings: 0,
+  };
 }
 
 async function handleDaemonRoute(
@@ -1650,7 +1668,7 @@ async function handleDaemonRoute(
         );
         return;
       }
-      remotes.push({ name, fetchUrl: url, pushUrl: url });
+      remotes.push(plainRemote(name, url));
     }
     await json(route, {
       v: 1,
