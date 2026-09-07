@@ -2241,18 +2241,21 @@ describe('useComposerCore attachment chip deletion keys', () => {
     });
   }
 
-  function pressChipKey(key: string, init?: KeyboardEventInit) {
+  function pressChipKey(key: string, init?: KeyboardEventInit): KeyboardEvent {
     const view = latest!.viewRef.current!;
-    act(() => {
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key,
-          code: key,
-          bubbles: true,
-          ...init,
-        }),
-      );
+    // Real keydowns are cancelable; tests observe `defaultPrevented` to tell
+    // "handled (swallowed)" from "fell through".
+    const event = new KeyboardEvent('keydown', {
+      key,
+      code: key,
+      bubbles: true,
+      cancelable: true,
+      ...init,
     });
+    act(() => {
+      view.contentDOM.dispatchEvent(event);
+    });
+    return event;
   }
   it('removes the last pasted image with Backspace when the composer has no text or tags', async () => {
     // Regression for issue #10794: Backspace used to return false when no
@@ -2490,8 +2493,10 @@ describe('useComposerCore attachment chip deletion keys', () => {
   });
 
   it('ignores modified Backspace/Delete so editing chords cannot destroy attachment chips', async () => {
-    // Ctrl+Backspace (delete-to-line-start) and Shift+Delete (cut) are
-    // ordinary editing chords; the fallback must never fire for them.
+    // Every modifier disjunct in the fallback's guard is witnessed here:
+    // Ctrl/Cmd+Backspace (delete-to-line-start), Shift+Delete (cut), and
+    // Alt+Backspace (delete-word) are ordinary editing chords that must
+    // reach their own bindings, not destroy the chip.
     await mount();
     const file = new File(['png'], 'photo.png', { type: 'image/png' });
 
@@ -2499,6 +2504,10 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     pressChipKey('Backspace', { ctrlKey: true });
     pressChipKey('Delete', { metaKey: true });
+    pressChipKey('Backspace', { shiftKey: true });
+    pressChipKey('Delete', { shiftKey: true });
+    pressChipKey('Backspace', { altKey: true });
+    pressChipKey('Delete', { altKey: true });
 
     expect(latest!.pastedImages).toHaveLength(1);
   });
@@ -2511,8 +2520,11 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     await ingestAttachmentsAndWait([file], { images: 1, files: 0 });
 
-    pressChipKey('x');
+    const event = pressChipKey('x');
 
+    // The fallback must neither remove the chip nor consume the keystroke:
+    // a swallowing handler would silently block typing into the composer.
+    expect(event.defaultPrevented).toBe(false);
     expect(latest!.pastedImages).toHaveLength(1);
   });
 });
