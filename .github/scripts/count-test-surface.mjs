@@ -629,19 +629,28 @@ export function measure({ path, tip, pre, events = [] }) {
     for (const [k, n] of b)
       bagAdd(target, k, -Math.max(0, n - (a.get(k) ?? 0)));
   };
-  // What the event MODELLED, clamped by what it actually LANDED. The two
-  // disagree whenever a merge resolution took neither side whole: the
-  // model is what git's auto-merge would have produced, the landed blob is
-  // what the merge commit holds. Credit is the part they agree on, and
-  // only when they agree in sign -- so a resolution that discarded main's
-  // side credits the round with nothing (it would otherwise absorb the
-  // round's own removal exactly), and a resolution that weakened the file
-  // itself is not main's contribution either. Equal, and the clamp is the
-  // identity: the ordinary merge measures as it always did.
+  // What the event MODELLED, clamped by what it actually LANDED -- in ONE
+  // direction. The two disagree whenever a merge resolution took neither
+  // side whole: the model is what git's auto-merge would have produced,
+  // the landed blob is what the merge commit holds.
+  //
+  // Main's ADDITIONS are never clamped. They raise the baseline whatever
+  // the merge kept, for the same reason presence is not clamped below: a
+  // round that drops what main added during the round removed coverage,
+  // and clamping here would hand it that removal for free.
+  //
+  // Main's REMOVALS are credited only as far as they landed. Without that
+  // a round could merge main, discard its side, and let the phantom credit
+  // absorb its own removal exactly.
+  //
+  // Equal, and the clamp is the identity: the ordinary merge measures as
+  // it always did. What it cannot see is identity -- main removing one
+  // assertion while the resolution restores it and drops another nets to
+  // zero, the way an assertion moved within a file always has.
   const clamp = (modelled, landed) => {
-    if (modelled > 0 && landed > 0) return Math.min(modelled, landed);
-    if (modelled < 0 && landed < 0) return Math.max(modelled, landed);
-    return 0;
+    if (modelled >= 0) return modelled;
+    if (landed >= 0) return 0;
+    return Math.max(modelled, landed);
   };
   const clampBag = (modelled, landed) => {
     const out = new Map();
@@ -652,11 +661,13 @@ export function measure({ path, tip, pre, events = [] }) {
     return out;
   };
   for (const ev of events) {
-    const hasLanded = ev.landed !== undefined;
-    const landedRef = hasLanded ? ev.landed : ev.after;
-    if (sameContent(ev.before, ev.after) && sameContent(ev.before, landedRef)) {
-      continue;
-    }
+    // An event whose MODEL moved nothing contributed nothing: the clamp
+    // returns 0 for it whatever landed, so the only thing processing it
+    // could still do is latch `baselinePresent` off a side main never
+    // held -- which is how a file the round authored itself would come to
+    // read as baseline coverage.
+    if (sameContent(ev.before, ev.after)) continue;
+    const landedRef = ev.landed !== undefined ? ev.landed : ev.after;
     const before = countFile(ev.before, path);
     const after = countFile(ev.after, path);
     const landed = sameContent(ev.after, landedRef)

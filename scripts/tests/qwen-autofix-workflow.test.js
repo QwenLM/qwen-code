@@ -24900,6 +24900,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       : ['  expect(one()).toBe(1);', '  expect(two()).toBe(2);']),
     '});',
   ];
+  // A second registration appended to WT_BASE, enabled or not.
+  const testB = (kind = 'it') => [
+    `${kind}('b', () => {`,
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
   const WEAKEN_REASON =
     'coverage moved to pkg/b.test.ts, which pins the same behaviour end to end';
   const roundWrites = (files, ...extra) => [
@@ -25334,6 +25340,133 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git merge -q --no-edit origin/main',
         'git rm -q pkg/own.test.ts',
         'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round's OWN new test file, touched while resolving a merge and
+    //    dropped afterwards. Main never held it, so no event may latch it
+    //    into the baseline: an event whose model moved nothing contributed
+    //    nothing, however the merge commit touched the file.
+    'own-file-merge-edit-delete': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        'echo m > m.txt && git add m.txt && git commit -qm main-moves',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE }),
+        'git add pkg/own.test.ts && git commit -qm own',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/own.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/own.test.ts && git commit -qm merge-and-grow-own',
+        'git rm -q pkg/own.test.ts',
+        'git commit -qm drop-own',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main ADDS an assertion during the round and the merge resolution
+    //    drops it. Main's additions raise the baseline whatever the merge
+    //    kept, so the round removed coverage and is charged: clamping this
+    //    direction would hand it the removal for free.
+    'merge-drops-mains-add': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        "printf '// merge note\\n' >> 'pkg/a.test.ts'",
+        'git add pkg/a.test.ts && git commit -qm merge-drops-add',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the same discard through the modify/delete arm: main appends a
+    //    whole test, the round deleted the file, and the resolution puts
+    //    back the PRE-ROUND bytes -- so main's added test is gone.
+    'delete-merge-drops-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- and the same discard spelled as a disable: the resolution keeps
+    //    main's new test but registers it skipped.
+    'delete-merge-skips-mains-test': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': [...WT_BASE, ...testB()] }),
+        'git commit -qam main-adds-test',
+      ],
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm round-deletes',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main removes TWO assertions, the resolution keeps one of them, and
+    //    the round then removes a third of its own. Credit is what LANDED
+    //    (one), not what the model says main removed (two): crediting the
+    //    model would swallow the round's own removal.
+    'merge-keeps-one-then-round-removes': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-two',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-one',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main DISABLES a pre-existing test, the resolution keeps it
+    //    enabled, and the round disables it afterwards. Main's disable
+    //    never landed, so the title stays in the baseline and the round
+    //    answers for it.
+    'merge-keeps-enabled-then-round-disables': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
+        'git commit -qam main-disables',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add pkg/a.test.ts && git commit -qm keeps-enabled',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) =>
+            l.replace("it('a'", "it.skip('a'"),
+          ),
+        }),
         AGENT_COMMIT,
       ],
     },
@@ -26334,6 +26467,28 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'net 2 assertion(s) removed',
       );
       expect(tookMain.rejection).toContain('pkg/a.test.ts');
+      // Main's ADDITIONS are never clamped by what the merge kept: a round
+      // that drops what main landed during the round removed coverage, in
+      // every spelling of "drops".
+      rejectsWeakening('merge-drops-mains-add', 'net 1 assertion(s) removed');
+      rejectsWeakening(
+        'delete-merge-drops-mains-test',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'delete-merge-skips-mains-test',
+        '1 pre-existing test registration(s) disabled',
+      );
+      // Main's REMOVALS are credited only as far as they landed: crediting
+      // the model here would swallow the round's own removal.
+      rejectsWeakening(
+        'merge-keeps-one-then-round-removes',
+        'net 1 assertion(s) removed',
+      );
+      rejectsWeakening(
+        'merge-keeps-enabled-then-round-disables',
+        '1 pre-existing test registration(s) disabled',
+      );
       // A merge that DISCARDED main's side adopted nothing from it, so
       // nothing is subtracted: the round's own removal stands charged. Both
       // lanes, because the model is what the tip took, not what an
@@ -26388,6 +26543,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // A file the round created, carried across a merge of main that
       // never held it, then deleted: its own.
       acceptsWithoutCharge('own-file-merge-delete');
+      // ...including when the merge commit TOUCHED that own file: main
+      // never held it, so no event may latch it into the baseline.
+      acceptsWithoutCharge('own-file-merge-edit-delete');
       // Main emptied the file: a legitimately empty auto-merge, not a
       // merge-file failure, so main's delta is main's.
       acceptsWithoutCharge('merge-main-empties');
