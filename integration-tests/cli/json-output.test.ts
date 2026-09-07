@@ -34,7 +34,7 @@ describe('JSON output', () => {
   });
 
   afterEach(async () => {
-    await fakeServer.close();
+    await fakeServer?.close();
     restoreNoProxy();
     await rig.cleanup();
   });
