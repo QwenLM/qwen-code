@@ -331,9 +331,9 @@ easy surface is gone — the remaining work is design, not sweeping).
   delete a colleague's. Removing the doc comment attached to a symbol you are
   deleting in the same commit is not comment deletion; anything else is out of
   scope.
-- No formatting sweeps, no dependency bumps, no drive-by renames. CI's
-  Prettier step runs `--write`, not `--check`, so a formatting diff carries
-  zero signal.
+- No formatting sweeps, no dependency bumps, no drive-by renames. But CI's
+  Prettier step runs `--check` and exits non-zero, so any deletion that
+  changes line shape must be accompanied by `npm run format`.
 - Never file a candidate whose evidence is a line count, a complexity score,
   or "this looks complex." It names no consumer and proves no deletion.
 
