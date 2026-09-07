@@ -11198,9 +11198,13 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       'awaiting_approval',
     )) as WaitingToolCall;
 
-    // Simulate user cancelling
+    const cancellationReason =
+      'The host could not present the required approval for "ask_user_question".';
+
+    // Simulate the host cancelling before the tool can execute.
     await awaitingCall.confirmationDetails.onConfirm(
       ToolConfirmationOutcome.Cancel,
+      { cancelMessage: cancellationReason },
     );
 
     await vi.waitFor(() => {
@@ -11210,6 +11214,12 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    const functionResponse =
+      completedCall.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['error']).toBe(
+      `[Operation Cancelled] Reason: ${cancellationReason}`,
+    );
   });
 });
 
@@ -13363,7 +13373,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.status).toBe('cancelled');
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
-    expect(responseText).toContain('User cancelled tool execution.');
+    expect(responseText).toContain('User intentionally cancelled this tool call.');
     expect(responseText).not.toContain('had already completed');
   });
 
@@ -13382,7 +13392,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain('The tool had already completed');
-    expect(responseText).not.toContain('User cancelled tool execution.');
+    expect(responseText).not.toContain('User intentionally cancelled this tool call. Stop');
   });
 
   // A post-execution cancellation drops the model-visible output, but the
