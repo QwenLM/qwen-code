@@ -711,11 +711,11 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command                     | Description                                 | Usage Examples                                                                   |
-| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
-| `qwen sessions list`        | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
-| `qwen sessions ps`          | List the sessions running right now         | `qwen sessions ps`, `qwen sessions ps --json`                                    |
-| `qwen sessions controllers` | Manage trusted controller tokens            | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
+| Command                     | Description                         | Usage Examples                                                                   |
+| --------------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
+| `qwen sessions list`        | List recent conversation sessions   | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
+| `qwen sessions ps`          | List the sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                                    |
+| `qwen sessions controllers` | Manage trusted controller tokens    | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
 
 #### `qwen sessions list`
 
