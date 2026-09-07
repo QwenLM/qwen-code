@@ -207,6 +207,15 @@ it('uses concrete TLS IPv6 authorities and the actual bound port', () => {
   ).toEqual([{ label: 'Address', url: 'https://[2001:db8::2]:43210' }]);
 });
 
+it('prints the operator spelling for an explicit non-loopback bind', () => {
+  // Classification keys off the bound address (not a wildcard here) while the
+  // printed URL keeps the operator's own name — a DNS name that resolves
+  // public is exactly the shape a named host produces.
+  expect(
+    remoteQuickstartAddresses('myhost.example', '203.0.113.5', 4170, false, {}),
+  ).toEqual([{ label: 'Address', url: 'http://myhost.example:4170' }]);
+});
+
 it('stays quiet about zone-scoped explicit binds and empty fixtures', () => {
   expect(
     remoteQuickstartAddresses('fe80::1%en0', 'fe80::1%en0', 43210, false, {}),
