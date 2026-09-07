@@ -190,6 +190,46 @@ disable-model-invocation: true
 
 You can combine both fields, but then the Skill is not reachable through the normal user or model invocation paths.
 
+### Optional: enforce a rule deterministically (`hooks:`)
+
+Everything in a `SKILL.md` body is an instruction to the model: it is prompt text, so following it depends on the model. When a rule must hold no matter what the model decides — refuse to run unless a required value was injected, never touch a protected path — declare a [hook](hooks.md) in the frontmatter instead. Hooks run as code, so they do not depend on the model's cooperation:
+
+```yaml
+---
+name: gated-skill
+description: Calls the downstream CLI using a runtime-injected session ID
+hooks:
+  PreToolUse:
+    - matcher: run_shell_command
+      hooks:
+        - type: command
+          command: '"$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"'
+---
+```
+
+`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. The command string is handed to a shell, so **keep the inner quotes**: unquoted, a project path containing a space splits into two words and the gate never runs. **Make the script executable** (`chmod +x`) too. Both mistakes fail open in the same way: the tool call proceeds, and nothing appears in the transcript or the log to say the gate did not run. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
+
+```bash
+#!/usr/bin/env bash
+if [ -z "${DOWNSTREAM_SESSION_ID:-}" ]; then
+  echo "Required input DOWNSTREAM_SESSION_ID is not available. Cannot proceed." >&2
+  exit 2
+fi
+exit 0
+```
+
+Notes:
+
+- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
+- Session hooks live only in memory, so resuming a session with `--continue` / `--resume` does **not** restore them, on either invocation path. The Skill's instructions can come back with the replayed conversation while the hooks meant to enforce them are gone — re-run the Skill after resuming to re-arm its gate.
+- Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
+- Always give a tool event an explicit `matcher:`. An omitted one is stored as the empty pattern, which is compiled to `^$` and matches no tool name — the hook registers and then never fires, with nothing to say so. Use `*` if you mean every tool.
+- The `command:` runs through the platform shell: `bash` on macOS and Linux, and on Windows Git Bash when it is detected (`MSYSTEM`/`TERM`), otherwise `cmd.exe` or PowerShell. The example above is POSIX shell — under `cmd.exe` `$QWEN_SKILL_ROOT` is not expanded and a `.sh` script is not executable, so the gate fails open there. A hook may set `shell: bash` to force bash, but that resolves to whatever `bash` is on `PATH`, so on Windows outside Git Bash write the gate for the shell you actually have.
+- Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there. Bare mode goes further: no Skills are discovered at all, so there is no body and no `allowedTools` either.
+- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and trust is re-read every time a hook fires and every time a permission is decided. With an IDE companion connected that value is live: revoking trust silences an already-registered gate — and suspends the Skill's `allowedTools` — at the next tool call, without a restart. Without an IDE connection the value is fixed when the CLI starts, so a change made through the CLI's own trust dialog takes effect on restart. Granting trust never retro-registers: invoke the Skill again.
+- `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
+- See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
+
 ## Add supporting files
 
 Create additional files alongside `SKILL.md`:
