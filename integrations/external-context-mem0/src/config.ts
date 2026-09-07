@@ -18,6 +18,7 @@ import type {
   DialectV1,
   InstanceConfigV2,
   InstanceConfigV3,
+  InstanceConfigBase,
   RuntimeConfiguration,
   ScopeLocation,
 } from './types.js';
@@ -78,7 +79,7 @@ async function loadConfiguration<T extends InstanceConfigV2 | InstanceConfigV3>(
   };
 }
 
-async function readConfigFile(
+export async function readConfigFile(
   path: string,
   kind: 'instance' | 'dialect',
 ): Promise<unknown> {
@@ -133,7 +134,7 @@ function validateInstance(
   validateScope(instance, dialect);
 }
 
-function validateEndpoint(instance: InstanceConfigV2 | InstanceConfigV3): void {
+export function validateEndpoint(instance: InstanceConfigBase): void {
   let origin: URL;
   try {
     origin = new URL(instance.endpoint.origin);
@@ -159,7 +160,7 @@ function validateEndpoint(instance: InstanceConfigV2 | InstanceConfigV3): void {
   throw new ConfigurationError('Mem0 extension endpoint is invalid.');
 }
 
-function validateStaticPath(path: string, allowEmpty: boolean): void {
+export function validateStaticPath(path: string, allowEmpty: boolean): void {
   if (path === '' && allowEmpty) return;
   if (
     !path.startsWith('/') ||
@@ -206,7 +207,7 @@ function validateScope(
   requireScopeValue(instance.scope.appId, dialect.search.appIdLocation);
 }
 
-async function resolveRepositoryRoot(value: string): Promise<string> {
+export async function resolveRepositoryRoot(value: string): Promise<string> {
   if (!isAbsolute(value)) {
     throw new ConfigurationError('Mem0 extension repository root is invalid.');
   }
@@ -247,7 +248,7 @@ export async function isWithinRepository(
   }
 }
 
-function requireScopeValue(
+export function requireScopeValue(
   value: string | undefined,
   location: ScopeLocation,
 ): void {
@@ -255,7 +256,10 @@ function requireScopeValue(
   throw new ConfigurationError('Mem0 extension scope is invalid.');
 }
 
-function readRequiredEnvironment(env: NodeJS.ProcessEnv, name: string): string {
+export function readRequiredEnvironment(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): string {
   const value = env[name];
   const trimmed = value?.trim();
   if (!value || !trimmed || trimmed === '${' + name + '}') {
