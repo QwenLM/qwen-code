@@ -166,7 +166,14 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
 export function resolveTargets(
   thread: Thread,
   message: ThreadMessage,
-  hasExplicitMention = message.mentions.length > 0,
+  /**
+   * Whether the post carried any `@token`, known or unknown. Required, and
+   * deliberately not defaulted to `message.mentions.length > 0`: an *unknown*
+   * mention resolves to no id yet must still suppress the assignee fallback,
+   * so a default computed from the resolved ids would silently reinstate the
+   * "typo wakes the assignee" bug the admission foundation fixed.
+   */
+  hasExplicitMention: boolean,
 ): string[] {
   if (hasExplicitMention) return [...message.mentions];
   return thread.assigneeAgentId ? [thread.assigneeAgentId] : [];
