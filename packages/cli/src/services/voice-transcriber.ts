@@ -840,7 +840,7 @@ async function transcribeViaQwenAsr(
     }
     if (/model_not_supported|unsupported model/i.test(details)) {
       throw new Error(
-        'This voice model cannot be used for batch transcription. Use qwen3-asr-flash for batch or choose a realtime voice model such as qwen3-asr-flash-realtime / fun-asr-realtime / paraformer-realtime-v2.',
+        'This voice model cannot be used for batch transcription. Use qwen3-asr-flash or qwen-audio-3.0-asr-flash (Token Plan) for batch, or choose a realtime voice model such as qwen3-asr-flash-realtime / fun-asr-realtime / paraformer-realtime-v2.',
       );
     }
     const suffix = details ? `: ${details}` : '';

@@ -24,7 +24,12 @@ export function isVoiceModelId(id: string): boolean {
   const s = id.toLowerCase();
   return (
     /^qwen3-asr-flash-realtime(?:-|$)/.test(s) ||
-    /^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(s) ||
+    // Batch (chat-completions) ASR: qwen3-asr-flash and the Model Studio
+    // Token Plan model qwen-audio-3.0-asr-flash, each optionally date-stamped.
+    // Mirrors BATCH_ASR_MODEL_RE in the CLI's voice-model.ts (issue #10932).
+    /^(?:qwen3-asr-flash|qwen-audio-3\.0-asr-flash)(?:-\d{4}-\d{2}-\d{2})?$/.test(
+      s,
+    ) ||
     /^(fun-asr|paraformer).*realtime(?:-|$)/.test(s)
   );
 }

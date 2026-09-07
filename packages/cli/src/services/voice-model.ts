@@ -13,13 +13,28 @@ export type VoiceTransport =
   | 'dashscope-task-realtime'
   | 'unsupported';
 
+/**
+ * Batch (chat-completions) ASR model ids. These take an `input_audio` chat
+ * message and return the transcript as the assistant message, so they all share
+ * the `qwen-asr-chat` transport:
+ *
+ * - `qwen3-asr-flash` (optionally date-stamped) — the DashScope batch ASR model.
+ * - `qwen-audio-3.0-asr-flash` (optionally date-stamped) — the Model Studio
+ *   **Token Plan** batch ASR model (served under the `qwen-audio-3.0-*` family).
+ *   It is the same batch protocol as `qwen3-asr-flash`, so it routes to the same
+ *   transport. (The realtime and TTS members of that family are not batch ASR and
+ *   are handled separately.)
+ */
+const BATCH_ASR_MODEL_RE =
+  /^(?:qwen3-asr-flash|qwen-audio-3\.0-asr-flash)(?:-\d{4}-\d{2}-\d{2})?$/;
+
 /** Map a model id to the ASR transport it uses, or 'unsupported'. */
 export function resolveVoiceTransport(model: string): VoiceTransport {
   const id = model.toLowerCase();
   if (/^qwen3-asr-flash-realtime(?:-|$)/.test(id)) {
     return 'qwen-asr-realtime';
   }
-  if (/^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
+  if (BATCH_ASR_MODEL_RE.test(id)) {
     return 'qwen-asr-chat';
   }
   if (/^(fun-asr|paraformer).*realtime(?:-|$)/.test(id)) {

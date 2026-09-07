@@ -9,6 +9,7 @@ import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
 import {
   isSelectableVoiceModel,
   isTranscribableVoiceModel,
+  resolveVoiceTransport,
 } from './voice-model.js';
 
 function model(overrides: Partial<AvailableModel>): AvailableModel {
@@ -41,6 +42,22 @@ describe('voice model guards', () => {
     expect(
       isSelectableVoiceModel(model({ id: 'qwen3-asr-flash-realtime' })),
     ).toBe(true);
+    // Token Plan batch ASR model (issue #10932) is selectable too.
+    expect(
+      isSelectableVoiceModel(model({ id: 'qwen-audio-3.0-asr-flash' })),
+    ).toBe(true);
+  });
+
+  it('resolveVoiceTransport routes the Token Plan ASR model to the batch chat transport', () => {
+    // Self-contained transport assertion (issue #10932): the new id must
+    // resolve to the batch chat transport, not 'unsupported'.
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash')).toBe(
+      'qwen-asr-chat',
+    );
+    // A date-stamped snapshot of the same model resolves identically.
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-2026-09-01')).toBe(
+      'qwen-asr-chat',
+    );
   });
 
   it('isSelectableVoiceModel rejects ids with no ASR transport', () => {

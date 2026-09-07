@@ -157,6 +157,19 @@ describe('voice-transcriber', () => {
     expect(resolveVoiceTransport('qwen3-asr-flash-filetrans')).toBe(
       'unsupported',
     );
+    // Model Studio Token Plan batch ASR model (issue #10932): same batch
+    // protocol as qwen3-asr-flash, so it routes to the chat transport too.
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash')).toBe(
+      'qwen-asr-chat',
+    );
+    // The realtime / TTS members of the qwen-audio-3.0 family are not batch
+    // ASR and must stay unsupported by this resolver.
+    expect(resolveVoiceTransport('qwen-audio-3.0-realtime-plus')).toBe(
+      'unsupported',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-tts-plus')).toBe(
+      'unsupported',
+    );
   });
 
   it('does not rewrite qwen3-asr-flash to a realtime model', () => {
