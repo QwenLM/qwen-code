@@ -292,14 +292,19 @@ test('replaces clicked details when hovering another entry @smoke', async ({
 }) => {
   const panel = page.locator('[data-web-shell-session-panel]');
   await panel.getByRole('button', { name: 'Details for Idle fixture' }).click();
+  await expect(
+    page.getByRole('dialog', { name: 'Idle fixture', exact: true }),
+  ).toBeVisible();
   await panel
     .getByRole('button', { name: 'Approve fixture', exact: true })
     .hover();
+  await expect(
+    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(1);
-  await expect(page.getByRole('dialog')).toHaveAttribute(
-    'aria-label',
-    'Approve fixture',
-  );
+  await expect(
+    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+  ).toHaveAttribute('data-state', 'open');
   await page.mouse.move(0, 0);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
