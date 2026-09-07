@@ -397,12 +397,13 @@ export function createGoalRuntime(
     options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
 
   /**
-   * The shared `usage_limited` settle: every stop builds the same limited
-   * snapshot, journals it, then commits it in memory and broadcasts. Each
-   * settling site keeps its own re-entry guard and flag resets around this.
+   * The snapshot a runtime-driven stop settles on, built once so the
+   * journalled record and the in-memory state cannot drift, and shared by
+   * every stop class so the settled shape is maintained in one place.
    */
-  const usageLimitedSnapshot = (
+  const settledSnapshot = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
+    status: 'paused' | 'usage_limited',
     reason: string,
     limitKind?: GoalLimitKind,
   ): GoalSnapshotV2 => {
@@ -411,7 +412,7 @@ export function createGoalRuntime(
       v: GOAL_STATE_VERSION,
       goal: {
         ...goal,
-        status: 'usage_limited',
+        status,
         activeTimeMs: elapsedActiveTime(goal, now),
         updatedAt: now,
         lastReason: reason,
@@ -420,6 +421,18 @@ export function createGoalRuntime(
       activity: 'idle',
     };
   };
+
+  /**
+   * The shared `usage_limited` settle: every stop builds the same limited
+   * snapshot, journals it, then commits it in memory and broadcasts. Each
+   * settling site keeps its own re-entry guard and flag resets around this.
+   */
+  const usageLimitedSnapshot = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): GoalSnapshotV2 =>
+    settledSnapshot(goal, 'usage_limited', reason, limitKind);
 
   const journalUsageLimitedSettle = async (
     goal: NonNullable<GoalSnapshotV2['goal']>,
@@ -436,8 +449,7 @@ export function createGoalRuntime(
   };
 
   /**
-   * The paused snapshot the no-progress bound stops on, built once so the
-   * journalled record and the in-memory state cannot drift.
+   * The paused snapshot the no-progress bound stops on.
    *
    * A pause rather than a `usage_limited` stop: nothing was spent and no
    * limit was reached, the Goal simply stopped producing anything to judge.
@@ -445,20 +457,8 @@ export function createGoalRuntime(
    */
   const noProgressPausedSnapshot = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
-  ): GoalSnapshotV2 => {
-    const now = Date.now();
-    return {
-      v: GOAL_STATE_VERSION,
-      goal: {
-        ...goal,
-        status: 'paused',
-        activeTimeMs: elapsedActiveTime(goal, now),
-        updatedAt: now,
-        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
-      },
-      activity: 'idle',
-    };
-  };
+  ): GoalSnapshotV2 =>
+    settledSnapshot(goal, 'paused', GOAL_PAUSE_REASON_NO_PROGRESS);
 
   const commitUsageLimitedSettle = (limitedSnapshot: GoalSnapshotV2): void => {
     continuationQueued = false;
@@ -1626,10 +1626,23 @@ export function createGoalRuntime(
           // Measured on this turn, not read off the record: a restored
           // streak must not stop a Goal whose ledger cannot see the turn
           // that would have relieved it.
+          //
+          // The bound yields to the limits that describe the Goal better. A
+          // spent token budget is an allowance that was used up, and the
+          // continuation gate owes that Goal its wind-down hand-off before
+          // the `token_budget` stop; pausing here would skip both. A Goal
+          // carrying a checkpoint stall streak is drowning in evidence, not
+          // idling -- its prose overflowed the window and `update_goal`
+          // answers `checkpointRequired` without recording a proposal -- so
+          // its checkpoint runs and the stall breaker stops it with the
+          // reason that fits, instead of a pause whose remedy (resume) would
+          // re-enter the same overflowing window.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
-            nextGoal.status === 'active';
+            nextGoal.status === 'active' &&
+            !isGoalTokenBudgetSpent(nextGoal) &&
+            !(nextGoal.checkpointStalls ?? 0);
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -1663,7 +1676,7 @@ export function createGoalRuntime(
               : {}),
           });
           assertAvailable();
-          const nextTurnKey = queuedTurnKey;
+          let nextTurnKey = queuedTurnKey;
           // A user turn reserved while this one ran outranks the bound: the
           // user is steering right now, and that turn restarts the streak
           // anyway. Stopping in front of it would strand the caller waiting
@@ -1684,6 +1697,18 @@ export function createGoalRuntime(
               // persistence loss.
             }
             assertAvailable();
+            // `beginTurn` is synchronous and does not queue, so a reservation
+            // can land during the write above. Re-read it, as
+            // `stopForSpentBudget` re-validates after its own write, and let
+            // it win: the pause is not committed and the reservation is
+            // served below, exactly as one that arrived before the write.
+            // The journal may then hold a `pause` record the runtime never
+            // adopted. That is the same shape `stopForSpentBudget` leaves
+            // when its re-validation fails after journalling, and it is the
+            // conservative side to land on: a restart recovers a paused Goal
+            // with its reason, and resume is the whole remedy.
+            nextTurnKey = queuedTurnKey;
+            if (nextTurnKey) noProgressSnapshot = undefined;
           }
           if (activeProposal?.blockedAuditCandidate) {
             blockedAudit = activeProposal.blockedAuditCandidate;
