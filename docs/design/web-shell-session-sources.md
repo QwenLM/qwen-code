@@ -2,6 +2,8 @@
 
 Status: draft proposal; this PR changes documentation only.
 
+[中文版](./web-shell-session-sources.zh-CN.md)
+
 ## Decision and scope
 
 Add a session reference list for files and links. A source means “added to this
