@@ -154,13 +154,21 @@
       ],
       "@lydell/node-pty": [
         "node_modules/@lydell/node-pty/node-pty.d.ts"
+      ],
+      "@qwen-code/channel-base": [
+        "packages/channels/base/src/index.ts"
+      ],
+      "@qwen-code/channel-base/*": [
+        "packages/channels/base/src/*"
       ]
     }
   },
   "include": [
     "../../packages/cli/src/serve/workspace-agents/**/*.ts",
     "../../packages/cli/src/serve/routes/workspace-agents.ts",
-    "../../packages/cli/src/acp-integration/session/agent-run-meta.ts"
+    "../../packages/cli/src/acp-integration/session/agent-run-meta.ts",
+    "../../packages/cli/src/acp-integration/acpAgent.ts",
+    "../../packages/cli/src/acp-integration/session/Session.ts"
   ],
   "exclude": [
     "../../packages/cli/src/**/*.test.ts"

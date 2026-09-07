@@ -25,9 +25,13 @@ import type { AgentRunContext } from '@qwen-code/qwen-code-core';
  * thread tools would act on it.
  */
 export function parsePromptAgentRun(params: {
-  _meta?: Record<string, unknown>;
+  // Deliberately `unknown` rather than a record: the ACP `PromptRequest`
+  // declares `_meta` with its own shape, and naming a stricter one here made
+  // the real request unassignable. Any declared shape satisfies this, and the
+  // check below is what establishes the shape anyway.
+  _meta?: unknown;
 }): AgentRunContext | undefined {
-  const meta = params._meta;
+  const meta = params._meta as Record<string, unknown> | undefined;
   const value = meta?.[DAEMON_AGENT_RUN_META_KEY];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return undefined;
