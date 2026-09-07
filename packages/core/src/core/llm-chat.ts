@@ -4621,11 +4621,13 @@ export class LlmChat {
         // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
         if (isRateLimitError(error, extraRetryErrorCodes)) return true;
 
-        // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
-        // status and would otherwise fall through every predicate above.
+        // Errors carrying no HTTP status would otherwise fall through every
+        // predicate above: transient network errors (ECONNRESET, ETIMEDOUT, …)
+        // and upstream error bodies the provider traced with its own request id
+        // (a gateway `{"error": …}` pushed into an already-200 SSE stream).
         if (
-          classifyRetryError(error, { extraRetryErrorCodes }).kind ===
-          'transport'
+          classifyRetryError(error, { extraRetryErrorCodes }).diagnosis ===
+          'retryable'
         ) {
           return true;
         }

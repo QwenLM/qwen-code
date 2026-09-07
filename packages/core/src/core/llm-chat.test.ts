@@ -11059,6 +11059,66 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('retries a mid-stream upstream error that carries no HTTP status', async () => {
+      // A gateway that pushes `{"error":{"code":"KeyError","message":"'id'"}}`
+      // into an already-200 SSE stream reaches us as an APIError with no status
+      // and the response's x-request-id. Drive the real inline
+      // shouldRetryOnError predicate through the retryWithBackoff options and
+      // assert it retries instead of failing the turn on the first attempt.
+      const upstreamError = Object.assign(new Error("'id'"), {
+        code: 'KeyError',
+        requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+      });
+
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(upstreamError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Recovered from upstream KeyError' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-upstream-statusless-retry',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'Recovered from upstream KeyError',
+        ),
+      ).toBe(true);
+    });
+
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {
       // A definitive 4xx is a permanent client error; the socket-level cause
       // must not relabel it as retryable (classifier keeps 4xx authoritative).

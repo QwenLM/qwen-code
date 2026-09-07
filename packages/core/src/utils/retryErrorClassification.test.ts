@@ -422,12 +422,94 @@ describe('classifyRetryError', () => {
     });
 
     expect(classifyRetryError(error)).toMatchObject({
-      kind: 'unknown',
-      diagnosis: 'unknown',
+      kind: 'provider',
+      diagnosis: 'retryable',
       providerCode: 'Throttling.Custom',
       providerMessage: 'Provider-specific throttle',
       requestId: 'req-direct-error',
-      reason: 'unclassified',
+      reason: 'upstream-error-without-status',
+    });
+  });
+
+  it('classifies a mid-stream upstream error with no HTTP status as retryable', () => {
+    // A gateway that pushes `{"error": {...}}` into an already-200 SSE stream
+    // reaches us as `new APIError(undefined, data.error, undefined,
+    // response.headers)`: no status, the body's `code`/`message`, and the
+    // response's `x-request-id` under the SDK's `requestID` spelling. Observed
+    // in the wild as `code: 'KeyError'`, `message: "'id'"`, which used to fall
+    // through to 'unknown' and kill the turn on the first attempt.
+    const error = Object.assign(new Error("'id'"), {
+      code: 'KeyError',
+      requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+    });
+
+    const classification = classifyRetryError(error);
+    expect(classification).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+      providerCode: 'KeyError',
+      providerMessage: "'id'",
+      requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+    });
+    expect(classification).not.toHaveProperty('statusCode');
+  });
+
+  it('classifies a status-less provider body embedded in the message as retryable', () => {
+    // The same upstream failure can arrive with the provider's JSON body pasted
+    // into the message rather than on SDK properties. With no `:HTTP_STATUS/`
+    // marker there is no status to classify on, so the request id in the body
+    // is the only evidence that the provider traced the failure.
+    const error = new Error(
+      'id:1\nevent:error\ndata:{"request_id":"req-stream","code":"KeyError","message":"upstream failed"}',
+    );
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+      requestId: 'req-stream',
+    });
+  });
+
+  it('keeps permanent local failures without a request id unclassified', () => {
+    // A string `code` alone must not open the status-less retry gate — these
+    // are permanent, and retrying them burns the whole ladder for nothing.
+    const errors = [
+      Object.assign(new Error('No API key configured'), {
+        code: 'MISSING_API_KEY',
+      }),
+      Object.assign(new Error('Invalid MCP server configuration'), {
+        code: 'invalid_config',
+      }),
+      // MCP protocol errors carry a numeric JSON-RPC code.
+      Object.assign(new Error('Internal error'), { code: -32603 }),
+    ];
+
+    for (const error of errors) {
+      expect(classifyRetryError(error)).toMatchObject({
+        kind: 'unknown',
+        diagnosis: 'unknown',
+        reason: 'unclassified',
+      });
+    }
+  });
+
+  it('keeps a definitive HTTP status authoritative over a request id', () => {
+    // A traced 4xx is still a permanent client error: the status block runs
+    // before the status-less upstream branch, so it cannot become retryable.
+    expect(
+      classifyRetryError({
+        status: 400,
+        code: 'invalid_request_error',
+        request_id: 'req-400',
+        message: 'malformed tool call',
+      }),
+    ).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      reason: 'client-error',
+      statusCode: 400,
     });
   });
 
@@ -512,6 +594,16 @@ describe('isFallbackEligible', () => {
         statusCode: 503,
         transportCode: 'ECONNRESET',
       }),
+    ).toBe(false);
+  });
+
+  it('returns false for a status-less upstream error', () => {
+    // Retryable but with no HTTP status, so there is no capacity signal: the
+    // retries stay on the primary model instead of switching to a fallback.
+    expect(
+      isFallbackEligible(
+        classifyRetryError({ code: 'KeyError', requestID: 'req-stream' }),
+      ),
     ).toBe(false);
   });
 });

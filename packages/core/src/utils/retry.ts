@@ -118,10 +118,13 @@ function defaultShouldRetry(
   ) {
     return true;
   }
-  // Transport errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP status and
-  // would otherwise fall through every predicate above.
+  // Errors carrying no HTTP status would otherwise fall through every predicate
+  // above: transport failures (ECONNRESET, ETIMEDOUT, …) and upstream error
+  // bodies the provider traced with its own request id. Defer to the
+  // classification's verdict for both.
   return (
-    classifyRetryError(error, { extraRetryErrorCodes }).kind === 'transport'
+    classifyRetryError(error, { extraRetryErrorCodes }).diagnosis ===
+    'retryable'
   );
 }
 

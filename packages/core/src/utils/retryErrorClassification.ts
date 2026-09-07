@@ -40,10 +40,11 @@ export interface RetryErrorClassification {
  * Classifies retry-related failures.
  *
  * The result is primarily diagnostic — it labels the observed error shape for
- * logging. It also feeds a single control decision in `retryWithBackoff`: a
+ * logging. It also feeds two control decisions: a `'retryable'` diagnosis opens
+ * the status-less retry gate — `defaultShouldRetry` and LlmChat's stream
+ * predicate both retry what they cannot match on an HTTP status — and a
  * `'fail-fast'` diagnosis keeps a permanent error (e.g. allocated-quota
  * exhaustion surfacing as HTTP 429) out of the unbounded persistent loop.
- * Beyond that, it does not drive retry, fail-fast, or fallback control.
  */
 export function classifyRetryError(
   error: unknown,
@@ -178,6 +179,27 @@ export function classifyRetryError(
     };
   }
 
+  // An upstream error body that carries the provider's own request id but no
+  // HTTP status. The OpenAI SDK builds exactly this shape when a gateway pushes
+  // `{"error": {...}}` into an already-200 SSE stream —
+  // `new APIError(undefined, data.error, undefined, response.headers)` — so the
+  // status never reaches us and a server-side failure (observed in the wild as
+  // `code: 'KeyError'`, `message: "'id'"`) falls through to 'unknown' and kills
+  // the turn on the first attempt, while a socket cut above is retried. The id
+  // can equally arrive inside a provider JSON body embedded in the message.
+  //
+  // Only a request id opens this gate. Local permanent failures carry a string
+  // `code` but no request id (`MISSING_API_KEY`, `invalid_config`, MCP's
+  // numeric JSON-RPC codes), so they stay unclassified and still fail fast.
+  if (requestId !== undefined) {
+    return {
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+      ...common,
+    };
+  }
+
   return {
     kind: 'unknown',
     diagnosis: 'unknown',
@@ -256,6 +278,7 @@ function getProviderFields(error: unknown): ProviderFields {
     message?: unknown;
     request_id?: unknown;
     requestId?: unknown;
+    requestID?: unknown;
   };
   const rawCode =
     typeof source.code === 'string' || typeof source.code === 'number'
@@ -271,12 +294,17 @@ function getProviderFields(error: unknown): ProviderFields {
     (error instanceof Error && rawCode?.startsWith('ERR_')) || isHttpStatusEcho
       ? undefined
       : rawCode;
+  // `requestID` is the OpenAI SDK's spelling — it stamps the response's
+  // `x-request-id` header onto every APIError, including the status-less ones
+  // built from a mid-stream error event.
   const requestId =
     typeof source.request_id === 'string'
       ? source.request_id
       : typeof source.requestId === 'string'
         ? source.requestId
-        : undefined;
+        : typeof source.requestID === 'string'
+          ? source.requestID
+          : undefined;
   const providerMessage =
     typeof source.message === 'string' &&
     (!(error instanceof Error) ||
