@@ -24,6 +24,38 @@ interface WindowsPtyAgentInternals {
 }
 
 /**
+ * PTYs whose pseudo-console has already been closed, either by us or by a
+ * `ptyProcess.kill()` reported through `noteConPtyHostReleased`.
+ *
+ * node-pty's native `PtyKill` looks the baton up by id and calls
+ * `ClosePseudoConsole` **without removing it from its handle list**, so a
+ * second close for the same pty is a double-free on an already-closed HPCON —
+ * undefined behavior in-process, not a caught exception. The cancel path
+ * reaches teardown twice (performCancelKill, then the finalizer), so this set
+ * is what keeps that from becoming a crash.
+ *
+ * A WeakSet so a finished PTY is still collectable.
+ */
+const releasedHosts = new WeakSet<object>();
+
+const asPtyObject = (ptyProcess: unknown): object | undefined =>
+  typeof ptyProcess === 'object' && ptyProcess !== null
+    ? ptyProcess
+    : undefined;
+
+/**
+ * Record that something else — a `ptyProcess.kill()` on the cancel or
+ * process-exit path — has already closed this PTY's pseudo-console, so a later
+ * `releaseConPtyHost` does not close it a second time.
+ */
+export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
+  const key = asPtyObject(ptyProcess);
+  if (key) {
+    releasedHosts.add(key);
+  }
+};
+
+/**
  * Releases the two Windows resources a finished PTY leaves behind: the ConPTY
  * host process (`conhost.exe --headless`, ~8 MB) and the `worker_threads`
  * Worker that node-pty runs to read the conout pipe. Both leak once per PTY —
@@ -55,6 +87,11 @@ export const releaseConPtyHost = (ptyProcess: unknown): void => {
   if (os.platform() !== 'win32') {
     return;
   }
+  const key = asPtyObject(ptyProcess);
+  if (!key || releasedHosts.has(key)) {
+    return;
+  }
+  releasedHosts.add(key);
   const agent = (ptyProcess as { _agent?: WindowsPtyAgentInternals } | null)
     ?._agent;
   const ptyId = agent?._pty;

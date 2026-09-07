@@ -28,7 +28,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from './shellContextEnv.js';
-import { releaseConPtyHost } from './conpty-host.js';
+import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
@@ -617,6 +617,7 @@ const windowsStrategy: ProcessCleanupStrategy = {
     } catch {
       // already gone
     }
+    noteConPtyHostReleased(pty.ptyProcess);
   },
   killChildProcesses: (pids) => {
     if (pids.size > 0) {
@@ -2346,11 +2347,21 @@ export class ShellExecutionService {
             // Then tear down the ConPTY host so onExit fires and the cancel
             // resolves even if taskkill couldn't kill the tree. Harmless once
             // the tree is already dead. Mirrors the POSIX branch's kill fallback.
+            //
+            // kill() is right *here* — unlike on the healthy path — because we
+            // only get here while the shell is still running (see the `exited`
+            // early return above), so node-pty's console-process-list lookup
+            // resolves for real and killing it is the intended fallback for a
+            // taskkill that never launched. Record it so the finalizer's
+            // releaseConPtyHost does not close the same pseudo-console twice:
+            // node-pty's native PtyKill does not drop the handle, so a second
+            // close is a double-free. See #11303.
             try {
               ptyProcess.kill();
             } catch {
               // already gone
             }
+            noteConPtyHostReleased(ptyProcess);
           } else {
             try {
               // Send SIGTERM first to allow graceful shutdown

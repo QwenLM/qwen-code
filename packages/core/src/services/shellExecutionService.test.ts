@@ -1956,6 +1956,23 @@ describe('ShellExecutionService', () => {
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
+    it('does not close the pseudo-console twice when a cancel already killed it', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // performCancelKill runs ptyProcess.kill() while the shell is still
+      // alive, which closes the pseudo-console itself. node-pty's native
+      // PtyKill does NOT drop the handle from its list, so a second close is a
+      // double-free on an already-closed HPCON — undefined behavior, not a
+      // catchable throw. The finalizer must not add one. See #11303.
+      const { result } = await simulateExecution('sleep 100', (pty, ac) => {
+        ac.abort();
+        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+    });
+
     it('never touches the pty on non-win32 (no ConPTY host, no conout worker)', async () => {
       // Default platform is 'linux'.
       const { result } = await simulateExecution('echo hi', (pty) => {
