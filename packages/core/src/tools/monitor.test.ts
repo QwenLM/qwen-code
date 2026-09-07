@@ -246,7 +246,12 @@ describe('MonitorTool', () => {
   afterEach(async () => {
     monitorRegistry.abortAll();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    rmSync(tempProjectDir, { recursive: true, force: true });
+    rmSync(tempProjectDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 20,
+    });
 
     if (originalPager === undefined) {
       delete process.env['PAGER'];
