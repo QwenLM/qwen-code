@@ -261,6 +261,8 @@ import {
   projectStreamingTailMessages,
   useMessagesFromBlocks,
 } from './hooks/useMessages';
+import { useSessionSources } from './hooks/useSessionSources';
+import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -1413,7 +1415,7 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
 const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
 const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
@@ -1603,6 +1605,7 @@ type PersistedArtifactPanelTab =
       | 'workspaceId'
       | 'previewMimeType'
       | 'previewOnly'
+      | 'sourcePreview'
       | 'attachmentId'
       | 'sourceSessionId'
     >
@@ -1684,6 +1687,8 @@ function parsePersistedArtifactPanelTab(
     optionalStrings.some(
       (key) => tab[key] !== undefined && typeof tab[key] !== 'string',
     ) ||
+    (tab['sourcePreview'] !== undefined &&
+      typeof tab['sourcePreview'] !== 'boolean') ||
     (tab['previewOnly'] !== undefined &&
       typeof tab['previewOnly'] !== 'boolean') ||
     (tab['closeWithPane'] !== undefined &&
@@ -1717,6 +1722,7 @@ function parsePersistedArtifactPanelTab(
         workspaceId: tab['workspaceId'],
         previewMimeType: tab['previewMimeType'],
         previewOnly: tab['previewOnly'],
+        sourcePreview: tab['sourcePreview'],
         attachmentId: tab['attachmentId'],
         sourceSessionId: tab['sourceSessionId'],
       } as PersistedArtifactPanelTab;
@@ -1836,6 +1842,8 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'source':
+        return [];
       case 'review':
         return [
           {
@@ -1863,6 +1871,7 @@ function serializeArtifactPanelTabs(
                 workspaceId: tab.workspaceId,
                 previewMimeType: tab.previewMimeType,
                 previewOnly: tab.previewOnly,
+                sourcePreview: tab.sourcePreview,
                 attachmentId: tab.attachmentId,
                 sourceSessionId: tab.sourceSessionId,
               },
@@ -2975,6 +2984,9 @@ export function App({
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
     (!renderChatHeader || Boolean(header));
+  const environmentSourcesEnabled =
+    environmentPanelItems.includes('sources') ||
+    environmentPanelItems.includes('attachments');
   const environmentGitReplacementEnabled =
     environmentPanelReachable && environmentPanelItems.includes('environment');
   const environmentTasksReplacementEnabled =
@@ -3982,6 +3994,19 @@ export function App({
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
   } = useSessionArtifacts();
+  const sourcesState = useSessionSources();
+  const refreshSources = sourcesState.refresh;
+  const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
+    Array<() => Promise<void>>
+  >([]);
+  useEffect(() => {
+    setSourceRegistrationRetries([]);
+  }, [sourcesState.owner]);
+  const retrySourceRegistrations = useCallback(async () => {
+    setSourceRegistrationRetries([]);
+    await Promise.allSettled(sourceRegistrationRetries.map((retry) => retry()));
+    await refreshSources();
+  }, [sourceRegistrationRetries, refreshSources]);
   const artifactsRef = useRef(artifacts);
   artifactsRef.current = artifacts;
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
@@ -4250,12 +4275,16 @@ export function App({
     sessionAttachmentsOwnerRef.current = sessionOwnerGuard.capture();
   }
   const sessionAttachmentsOwner = sessionAttachmentsOwnerRef.current;
+  const [sessionAttachmentsError, setSessionAttachmentsError] = useState<{
+    owner: DaemonSessionOwnerSnapshot;
+    message: string;
+  }>();
   const sessionAttachmentsBySessionRef = useRef(
     new Map<string, DaemonSessionAttachmentReference[]>(),
   );
   const sessionAttachmentsSkeletonLoading =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     (sessionAttachmentsLoading ||
       Boolean(
         environmentPanelOpen &&
@@ -4269,15 +4298,13 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // The attachments panel is fed by the daemon's attachment store, never by
-  // parsing transcript blocks. Refetch while the panel is open whenever the
-  // transcript moves (a sent message is the only way the store gains
-  // attachments) — throttled so streaming appends do not hammer the route.
+  // Uploaded sources come from the daemon attachment store. Refresh on
+  // transcript updates while the panel is open, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
     environmentPanelReachable &&
-    environmentPanelItems.includes('attachments') &&
+    environmentSourcesEnabled &&
     environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
@@ -4286,8 +4313,7 @@ export function App({
     ) === true;
   useEffect(() => {
     const attachmentsSectionEnabled =
-      environmentPanelReachable &&
-      environmentPanelItems.includes('attachments');
+      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -4303,9 +4329,11 @@ export function App({
         attachmentRetryCountRef.current.delete(logicalSessionKey);
       }
       setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
       return;
     }
     if (!attachmentsSupported) {
+      setSessionAttachmentsError(undefined);
       attachmentRetryCountRef.current.delete(logicalSessionKey);
       setBoundedMapEntry(
         sessionAttachmentsBySessionRef.current,
@@ -4336,6 +4364,7 @@ export function App({
         fetchedAt: Date.now(),
       };
       const requestId = ++sessionAttachmentsRequestIdRef.current;
+      setSessionAttachmentsError(undefined);
       const listing = sessionActions.listAttachments();
       void listing
         .then((attachments) => {
@@ -4354,7 +4383,7 @@ export function App({
             setSessionAttachmentsLoading(false);
           }
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
             if (firstLoad) {
               const failures =
@@ -4380,6 +4409,10 @@ export function App({
               );
               setSessionAttachments([]);
             }
+            setSessionAttachmentsError({
+              owner: sessionAttachmentsOwner,
+              message: formatError(error, t('environment.unavailable')),
+            });
             setSessionAttachmentsLoading(false);
           }
         });
@@ -4402,6 +4435,8 @@ export function App({
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
+    environmentSourcesEnabled,
+    t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
@@ -4603,6 +4638,7 @@ export function App({
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
       const creation = (async () => {
+        const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
         const parentClientId =
           connection.sessionId === parentSessionId
@@ -4615,6 +4651,9 @@ export function App({
           },
           parentClientId,
         );
+        if (owner.isCurrent() && session.sourceWarnings?.length) {
+          pushToast('warning', session.sourceWarnings.join(' '));
+        }
         if (ownerCwd) {
           sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
         }
@@ -4633,6 +4672,8 @@ export function App({
       connection.clientId,
       connection.sessionId,
       connection.workspaceCwd,
+      sessionOwnerGuard,
+      pushToast,
       sessionCatalogController,
       workspace.client,
     ],
@@ -4922,6 +4963,66 @@ export function App({
       rememberArtifactPanelTrigger,
     ],
   );
+  const openSourcePanel = useCallback(
+    (source: SessionSource) => {
+      if (!sourcesState.owner.isCurrent() || !connection.sessionId) return;
+      const tab: ArtifactPanelTab = {
+        id: `source:${connection.sessionId}:${source.id}`,
+        kind: 'source',
+        title: source.title,
+        source,
+        sourceSessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd,
+        workspaceId: artifactWorkspaceTarget?.workspaceId,
+        owner: sourcesState.owner,
+        sessionActions,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [
+      sourcesState.owner,
+      connection.sessionId,
+      connection.workspaceCwd,
+      artifactWorkspaceTarget?.workspaceId,
+      sessionActions,
+      getDefaultReviewPanelWidth,
+    ],
+  );
+  useEffect(() => {
+    setArtifactPanelTabs((tabs) => {
+      const next = tabs.filter(
+        (tab) =>
+          tab.kind !== 'source' ||
+          (tab.owner.isCurrent() &&
+            Boolean(artifactWorkspaceTarget) &&
+            tab.workspaceId === artifactWorkspaceTarget?.workspaceId &&
+            sourcesState.supported &&
+            (tab.sourceSessionId !== connection.sessionId ||
+              !sourcesState.hydrated ||
+              sourcesState.sources.some(
+                (source) => source.id === tab.source.id,
+              ))),
+      );
+      return next.length === tabs.length ? tabs : next;
+    });
+  }, [
+    artifactWorkspaceTarget,
+    sourcesState.owner,
+    sourcesState.sources,
+    sourcesState.hydrated,
+    sourcesState.supported,
+    connection.sessionId,
+  ]);
+
   const openReviewPanel = useCallback(
     (
       changes: readonly TurnOutputFileChange[],
@@ -5118,6 +5219,7 @@ export function App({
       file: AttachmentPreviewRequest,
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
+      sourcePreview = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5157,6 +5259,7 @@ export function App({
             : {}),
           ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
+          ...(sourcePreview ? { sourcePreview: true } : {}),
           ...(workspaceCwd ? { workspaceCwd } : {}),
           ...(workspaceId ? { workspaceId } : {}),
         };
@@ -10049,6 +10152,12 @@ export function App({
 
   useEffect(() => {
     for (const notice of notices) {
+      if (notice.sourceRetry) {
+        const retry = notice.sourceRetry;
+        setSourceRegistrationRetries((previous) =>
+          previous.includes(retry) ? previous : [...previous, retry],
+        );
+      }
       if (shouldToastNotice(notice)) {
         pushToast(toastToneFromNotice(notice), notice.message);
       } else if (notice.category !== 'lifecycle') {
@@ -11539,6 +11648,8 @@ export function App({
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
           if (!result.switchStarted) return;
+          if (result.sourceWarnings?.length)
+            pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([
             {
               type: 'status',
@@ -18329,6 +18440,22 @@ export function App({
                     : []
                 }
                 attachmentsLoading={sessionAttachmentsSkeletonLoading}
+                attachmentsError={
+                  sessionAttachmentsError?.owner === sessionAttachmentsOwner &&
+                  sessionAttachmentsOwner.isCurrent()
+                    ? sessionAttachmentsError.message
+                    : undefined
+                }
+                onRetryAttachments={() =>
+                  setAttachmentRefreshNonce((value) => value + 1)
+                }
+                sources={sourcesState}
+                onOpenSource={openSourcePanel}
+                retrySourceRegistration={
+                  sourceRegistrationRetries.length
+                    ? retrySourceRegistrations
+                    : undefined
+                }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
@@ -18349,7 +18476,9 @@ export function App({
                     openImagePanel(src, alt, source);
                   }
                 }}
-                onAttachmentPreview={openAttachmentPanel}
+                onAttachmentPreview={(file) =>
+                  openAttachmentPanel(file, undefined, undefined, true)
+                }
                 onAttachmentPreviewError={(error) => {
                   if (!environmentPanelOwner.isCurrent()) return;
                   pushToast(

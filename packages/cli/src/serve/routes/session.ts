@@ -35,6 +35,7 @@ import {
   toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
+  type SessionSourceInput,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -5522,6 +5523,75 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(await runtime.bridge.getSessionHooksStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/sources',
+    withOwnerReadSession(
+      'GET /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionSources(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/sources',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.upsertSessionSource(
+          sessionId,
+          req.body as SessionSourceInput,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/sources/:sourceId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'DELETE /session/:id/sources/:sourceId',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.removeSessionSource(
+          sessionId,
+          req.params['sourceId']!,
+          { clientId },
+        );
+        res.status(200).json(result);
       },
     ),
   );

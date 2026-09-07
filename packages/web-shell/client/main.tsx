@@ -220,6 +220,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             environmentPanel: {
               items: [
                 'environment',
+                'sources',
                 'subagents',
                 'backgroundTasks',
                 'attachments',

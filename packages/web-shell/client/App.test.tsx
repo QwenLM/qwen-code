@@ -2364,36 +2364,149 @@ describe('task activity key', () => {
     ).toBeNull();
   });
 
-  it('lists current-session attachments in the environment panel', async () => {
+  it.each([
+    { items: ['sources'] as const },
+    { items: ['attachments'] as const },
+    { items: ['sources', 'attachments'] as const },
+  ])(
+    'lists current-session attachments under Sources with $items',
+    async ({ items }) => {
+      mockConnection.capabilities.features = ['session_attachment_list'];
+      mockSessionActions.listAttachments.mockResolvedValue([
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        },
+      ]);
+      const { container } = renderApp({ environmentPanel: { items } });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click();
+      });
+      await act(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      });
+      await flush();
+
+      expect(mockSessionActions.listAttachments).toHaveBeenCalled();
+      const panel = container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      );
+      expect(panel?.textContent).toContain('Sources');
+      expect(
+        panel?.querySelectorAll('[data-testid="sources-section"]'),
+      ).toHaveLength(1);
+      expect(panel?.textContent).not.toContain('Attachments');
+    },
+  );
+
+  it('opens historical HTML from Sources as text and retains that policy after reload', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     mockSessionActions.listAttachments.mockResolvedValue([
       {
         type: 'resource',
-        attachmentId: 'notes.txt',
-        mimeType: 'text/plain',
-        size: 5,
+        attachmentId: 'historical.html',
+        mimeType: 'text/html',
+        size: 20,
       },
     ]);
-    const { container } = renderApp();
+    mockSessionActions.readAttachment.mockResolvedValue({
+      data: btoa('<h1>Source only</h1>'),
+      mimeType: 'text/html',
+    });
+    const first = renderApp({ environmentPanel: { items: ['sources'] } });
     await flush();
-
-    act(() => {
-      container
+    act(() =>
+      first.container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle environment information"]',
         )
-        ?.click();
-    });
+        ?.click(),
+    );
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     });
     await flush();
-
-    expect(mockSessionActions.listAttachments).toHaveBeenCalled();
-    const panel = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
+    const row = first.container.querySelector<HTMLButtonElement>(
+      '[data-testid="sources-section"] button[title="historical.html"]',
     );
-    expect(panel?.textContent).toContain('Attachments');
+    expect(row).not.toBeNull();
+    await act(async () => row?.click());
+    await flush();
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(stored?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'file',
+        attachmentId: 'historical.html',
+        sourcePreview: true,
+      }),
+    ]);
+    expect(
+      first.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(first.container.querySelector('iframe')).toBeNull();
+    act(() => first.unmount());
+    const second = renderApp();
+    await flush();
+    expect(mockSessionActions.readAttachment).toHaveBeenCalledTimes(2);
+    expect(
+      second.container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(
+      second.container.querySelector('button[aria-label="Preview"]'),
+    ).toBeNull();
+    expect(second.container.querySelector('iframe')).toBeNull();
+  });
+
+  it('shows attachment listing failures in Sources with a working retry', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments.mockRejectedValue(
+      new Error('Listing unavailable'),
+    );
+    const { container } = renderApp({
+      environmentPanel: { items: ['sources'] },
+    });
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click(),
+    );
+    for (const delay of [0, 1_000, 0, 1_000, 0]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    expect(mockSessionActions.listAttachments).toHaveBeenCalledTimes(3);
+    const alert = container.querySelector(
+      '[data-testid="sources-section"] [role="alert"]',
+    );
+    expect(alert?.textContent).toContain('Listing unavailable');
+    mockSessionActions.listAttachments.mockResolvedValue([
+      {
+        type: 'resource',
+        attachmentId: 'recovered.txt',
+        mimeType: 'text/plain',
+        size: 2,
+      },
+    ]);
+    act(() => alert?.querySelector<HTMLButtonElement>('button')?.click());
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(container.textContent).toContain('recovered.txt');
+    expect(
+      container.querySelector('[data-testid="sources-section"] [role="alert"]'),
+    ).toBeNull();
   });
 
   it('retries a failed first attachment listing without flashing empty', async () => {

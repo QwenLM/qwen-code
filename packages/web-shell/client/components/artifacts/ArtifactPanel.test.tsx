@@ -777,6 +777,51 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('keeps HTML source attachments in text mode without an executable preview', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:page.html',
+                kind: 'file',
+                title: 'page.html',
+                workspacePath: 'page.html',
+                attachmentId: 'page.html',
+                previewContent: '<h1>Attachment page</h1>',
+                previewMimeType: 'text/html',
+                previewOnly: true,
+                sourcePreview: true,
+              },
+            ]}
+            activeTabId="attachment:page.html"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
+      '<h1>Attachment page</h1>',
+    );
+    expect(container.querySelector('button[aria-label="Preview"]')).toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
   it('shows a clear unsupported state for binary attachments', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -820,6 +865,67 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(container.querySelector('.cm-content')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('downloads binary source attachments and releases their blob URL', async () => {
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:source-binary'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revoke,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.xlsx',
+                kind: 'file',
+                title: 'report.xlsx',
+                workspacePath: 'report.xlsx',
+                previewData: new Blob(['PK'], {
+                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                }),
+                previewMimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewOnly: true,
+                sourcePreview: true,
+              },
+            ]}
+            activeTabId="attachment:report.xlsx"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Preview is not available for this file type.',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    const download = container.querySelector<HTMLAnchorElement>(
+      'a[download="report.xlsx"]',
+    );
+    expect(download?.href).toBe('blob:source-binary');
+    act(() => root.render(null));
+    expect(revoke).toHaveBeenCalledWith('blob:source-binary');
   });
 
   it('opens PDF attachments in the browser PDF preview', async () => {

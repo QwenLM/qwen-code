@@ -5883,6 +5883,67 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('binds record_source only for a supported top-level session and refreshes it after session rotation', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      const factory = vi.fn(
+        () =>
+          new SessionSourceService({
+            sessionId: config.getSessionId(),
+            workspaceCwd: () => config.getTargetDir(),
+            load: async () => ({}),
+            persist: async () => undefined,
+          }),
+      );
+      config.setSessionSourceServiceFactory(factory);
+      const original = config.getSessionSourceService();
+      await config.initialize();
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.RECORD_SOURCE);
+      const child = Object.create(config) as Config;
+      expect(child.getSessionSourceService()).toBeUndefined();
+      config.startNewSession('replacement-source-session');
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(config.getSessionSourceService()).not.toBe(original);
+    });
+
+    it('does not register record_source without a bound service or in SDK sessions', async () => {
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
+      for (const sdkMode of [false, true]) {
+        (ToolRegistry.prototype.registerFactory as Mock).mockClear();
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode,
+        });
+        if (sdkMode)
+          config.setSessionSourceServiceFactory(
+            () =>
+              new SessionSourceService({
+                sessionId: config.getSessionId(),
+                workspaceCwd: () => config.getTargetDir(),
+                load: async () => ({}),
+                persist: async () => undefined,
+              }),
+          );
+        await config.initialize();
+        const names = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(names).not.toContain(ToolNames.RECORD_SOURCE);
+      }
+    });
+
     it('registers report_findings even in headless sessions — review run depends on it', async () => {
       const config = new Config({
         ...baseParams,

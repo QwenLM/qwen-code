@@ -127,6 +127,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'file_history_snapshot',
   'session_source',
   'session_model',
+  'session_sources_snapshot',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
@@ -255,7 +256,10 @@ function diagnostic(
 export function isTranscriptConversationRecord(
   record: Pick<TranscriptRecordInput, 'type' | 'subtype'>,
 ): boolean {
-  return !isTranscriptArtifactRecord(record);
+  return (
+    !isTranscriptArtifactRecord(record) &&
+    !(record.type === 'system' && record.subtype === 'session_sources_snapshot')
+  );
 }
 
 export function isTranscriptArtifactRecord(record: {

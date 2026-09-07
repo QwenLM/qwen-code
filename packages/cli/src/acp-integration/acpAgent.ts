@@ -147,6 +147,8 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
+  SessionSourceService,
+  SessionSourceError,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -8486,6 +8488,24 @@ class QwenAgent implements Agent {
 
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
+      if (
+        [
+          'qwen/session/sources/list',
+          'qwen/session/sources/upsert',
+          'qwen/session/sources/remove',
+          'qwen/session/sources/copy',
+        ].includes(method)
+      ) {
+        return {
+          sourceError:
+            error instanceof SessionSourceError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: 'source_persistence_unavailable',
+                  message: 'Session source operation failed',
+                },
+        };
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -10245,6 +10265,112 @@ class QwenAgent implements Agent {
           this.workspaceGenerationControllers.delete(requestId);
         }
         return { requestId, cancelled };
+      }
+      case 'qwen/session/sources/list':
+      case 'qwen/session/sources/upsert':
+      case 'qwen/session/sources/remove':
+      case 'qwen/session/sources/copy': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Sources require a trusted private ACP parent',
+          );
+        }
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !sessionId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid source sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const sourceConfig = session.getConfig();
+        const service = sourceConfig.getSessionSourceService();
+        if (!service)
+          throw new SessionSourceError(
+            'source_persistence_unavailable',
+            'Session sources unavailable',
+          );
+        if (method === 'qwen/session/sources/list')
+          return { ...(await service.list()) };
+        if (method === 'qwen/session/sources/upsert')
+          return { ...(await service.upsert(params['input'])) };
+        if (method === 'qwen/session/sources/remove') {
+          const sourceId = params['sourceId'];
+          if (
+            typeof sourceId !== 'string' ||
+            !sourceId ||
+            sourceId.length > 200
+          )
+            throw new SessionSourceError('invalid_source', 'Invalid source ID');
+          return { ...(await service.remove(sourceId)) };
+        }
+        const targetSessionId = params['targetSessionId'];
+        const targetCwd = params['targetCwd'];
+        const attachmentIds = params['attachmentIds'];
+        if (
+          typeof targetSessionId !== 'string' ||
+          !SESSION_ID_RE.test(targetSessionId) ||
+          targetSessionId === sessionId ||
+          typeof targetCwd !== 'string' ||
+          path.resolve(targetCwd) !==
+            path.resolve(sourceConfig.storage.getProjectRoot()) ||
+          !Array.isArray(attachmentIds) ||
+          attachmentIds.some((id) => typeof id !== 'string')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid source copy target',
+          );
+        }
+        const sources = (await service.list()).sources;
+        if (!sources.length) return { warnings: [] };
+        const targetData = await sourceConfig
+          .getSessionService()
+          .loadSession(targetSessionId);
+        if (
+          !targetData?.conversation.messages.some(
+            (record) => record.forkedFrom?.sessionId === sessionId,
+          )
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Source copy target is not a fork of this session',
+          );
+        }
+        let temporaryConfig: Config | undefined;
+        try {
+          const targetConfig =
+            this.sessions.get(targetSessionId)?.getConfig() ??
+            (temporaryConfig = await this.newSessionConfig(
+              targetCwd,
+              [],
+              loadSettings(targetCwd),
+              undefined,
+              targetSessionId,
+              true,
+              {
+                skipMcpDiscovery: true,
+                skipHooks: true,
+                skipSkillManager: true,
+                skipFileCheckpointing: true,
+                lenientToolWarmup: true,
+              },
+            ));
+          const targetService = targetConfig.getSessionSourceService();
+          if (!targetService)
+            throw new SessionSourceError(
+              'source_persistence_unavailable',
+              'Target sources unavailable',
+            );
+          return await targetService.copyFrom(
+            sources,
+            attachmentIds as string[],
+          );
+        } finally {
+          if (temporaryConfig)
+            await this.cleanupUnstoredConfig(temporaryConfig);
+        }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
         const sessionId = params['sessionId'];
@@ -14000,6 +14126,44 @@ class QwenAgent implements Agent {
                   `${err instanceof Error ? err.message : String(err)}`,
               );
             });
+        });
+      });
+    }
+    if (
+      this.isTrustedManagedParent() &&
+      chatRecording !== false &&
+      !provisionalWorkspace &&
+      config.getChatRecordingService()
+    ) {
+      config.setSessionSourceServiceFactory(() => {
+        const sourceSessionId = config.getSessionId();
+        const recording = config.getChatRecordingService();
+        const sourceSessions = config.getSessionService();
+        return new SessionSourceService({
+          sessionId: sourceSessionId,
+          workspaceCwd: () => config.getTargetDir(),
+          load: async () => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.flush();
+            return sourceSessions.readSessionSources(sourceSessionId);
+          },
+          persist: async (snapshot) => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.recordSessionSourcesSnapshot(snapshot);
+          },
+          notify: (revision) =>
+            this.connection.extNotification(
+              'qwen/notify/session/sources-changed',
+              { sessionId: sourceSessionId, revision },
+            ),
         });
       });
     }

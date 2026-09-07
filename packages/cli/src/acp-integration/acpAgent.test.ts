@@ -227,6 +227,12 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  SessionSourceService: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceService,
+  SessionSourceError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SessionSourceError,
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -4425,6 +4431,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
       getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -6847,6 +6854,81 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).rejects.toThrowError(/Chat recording service unavailable/);
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('source methods require the trusted daemon parent before resolving a session', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+    await expect(
+      agent.extMethod('qwen/session/sources/list', { sessionId: 'unknown' }),
+    ).resolves.toEqual({
+      sourceError: {
+        code: 'source_persistence_unavailable',
+        message: 'Session source operation failed',
+      },
+    });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sources before tool discovery and persists owner-session metadata through internal methods', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionSourcesSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    innerConfig.getSessionService = vi
+      .fn()
+      .mockReturnValue({ readSessionSources: vi.fn().mockResolvedValue({}) });
+    let service:
+      | import('@qwen-code/qwen-code-core').SessionSourceService
+      | undefined;
+    innerConfig.setSessionSourceServiceFactory.mockImplementation(
+      (
+        factory: () => import('@qwen-code/qwen-code-core').SessionSourceService,
+      ) => {
+        service = factory();
+      },
+    );
+    Object.assign(innerConfig, { getSessionSourceService: () => service });
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(
+      innerConfig.setSessionSourceServiceFactory.mock.invocationCallOrder[0],
+    ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]!);
+    await expect(
+      agent.extMethod('qwen/session/sources/list', { sessionId }),
+    ).resolves.toEqual({ revision: 0, sources: [] });
+    const created = await agent.extMethod('qwen/session/sources/upsert', {
+      sessionId,
+      input: {
+        title: 'Docs',
+        locator: { type: 'workspace_file', workspacePath: 'README.md' },
+      },
+    });
+    expect(created).toMatchObject({ revision: 1, change: 'created' });
+    expect(recording.recordSessionSourcesSnapshot).toHaveBeenCalledOnce();
+    await expect(
+      agent.extMethod('qwen/session/sources/upsert', {
+        sessionId,
+        input: {
+          title: 'Docs',
+          locator: { type: 'url', url: 'file:///secret' },
+        },
+      }),
+    ).resolves.toMatchObject({ sourceError: { code: 'invalid_source' } });
+    await expect(
+      agent.extMethod('qwen/session/sources/remove', {
+        sessionId,
+        sourceId: (created['source'] as { id: string }).id,
+      }),
+    ).resolves.toEqual({ revision: 2, removed: true });
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -22792,6 +22874,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      setSessionSourceServiceFactory: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),

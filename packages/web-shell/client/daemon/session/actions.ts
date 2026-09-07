@@ -602,6 +602,57 @@ export function createDaemonSessionActions({
     );
   }
 
+  const registerAcceptedAttachmentSources = (
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionAttachmentReference[],
+    files: readonly { name: string }[],
+  ): void => {
+    if (
+      !references.length ||
+      !getConnection().capabilities?.features.includes('session_sources')
+    )
+      return;
+    const sessionId = session.sessionId;
+    const clientId = session.clientId;
+    let remaining = references.map((reference, index) => ({
+      reference,
+      title:
+        files[index - (references.length - files.length)]?.name ??
+        reference.attachmentId,
+    }));
+    const retry = async (): Promise<void> => {
+      if (sessionRef.current !== session) return;
+      const results = await Promise.allSettled(
+        remaining.map(({ reference: attachment, title }) =>
+          session.client.upsertSessionSource(
+            sessionId,
+            {
+              title,
+              locator: {
+                type: 'attachment',
+                attachmentId: attachment.attachmentId,
+              },
+            },
+            clientId,
+          ),
+        ),
+      );
+      remaining = remaining.filter(
+        (_, index) => results[index]?.status === 'rejected',
+      );
+      if (sessionRef.current !== session || !remaining.length) return;
+      noticeForSession(session)({
+        severity: 'warning',
+        category: 'user_action',
+        code: 'daemon.sources.registration_failed',
+        message: 'Message sent; some source details could not be saved',
+        recoverable: true,
+        sourceRetry: retry,
+      });
+    };
+    void retry().catch(() => {});
+  };
+
   const ignoreStaleNotice: AddDaemonSessionNotice = (notice) => ({
     ...notice,
     id: notice.id ?? 'stale-session-notice',
@@ -1109,6 +1160,11 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
+        registerAcceptedAttachmentSources(
+          session,
+          uploaded.references,
+          displayedFiles,
+        );
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
@@ -1267,6 +1323,11 @@ export function createDaemonSessionActions({
         label: text,
         ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
       });
+      registerAcceptedAttachmentSources(
+        session,
+        uploaded.references,
+        displayedFiles,
+      );
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
@@ -2741,6 +2802,30 @@ export function createDaemonSessionActions({
       }
     },
 
+    async listSources() {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(session.listSources(), 'Load sources timed out');
+    },
+
+    async upsertSource(source) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.upsertSource(source),
+        'Add source timed out',
+      );
+    },
+
+    async removeSource(sourceId) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.removeSource(sourceId),
+        'Remove source timed out',
+      );
+    },
+
     async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
@@ -2838,6 +2923,9 @@ export function createDaemonSessionActions({
           sessionId: result.sessionId,
           displayName: result.displayName,
           switchStarted,
+          ...(result.sourceWarnings?.length
+            ? { sourceWarnings: result.sourceWarnings }
+            : {}),
         };
       } catch (error) {
         if (isStaleBranchPointError(error)) {

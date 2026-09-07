@@ -734,6 +734,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
+  sourcesVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -5342,6 +5343,7 @@ function bumpSessionEventSignals(
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
+  let sources = 0;
   let lastExtensionChange:
     | DaemonWorkspaceEventSignals['lastExtensionChange']
     | undefined;
@@ -5349,6 +5351,10 @@ function bumpSessionEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.source.changed') {
+      if (includeArtifactEvents) sources += 1;
+      continue;
+    }
     if (event.type === 'session.artifact.changed') {
       if (includeArtifactEvents) artifacts += 1;
       continue;
@@ -5416,6 +5422,7 @@ function bumpSessionEventSignals(
       mcp +
       extensions +
       artifacts +
+      sources +
       init +
       auth ===
       0 &&
@@ -5439,6 +5446,7 @@ function bumpSessionEventSignals(
         mcp +
         extensions +
         artifacts +
+        sources +
         init +
         auth ===
         0 &&
@@ -5455,6 +5463,7 @@ function bumpSessionEventSignals(
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,
       artifactsVersion: current.artifactsVersion + artifacts,
+      sourcesVersion: (current.sourcesVersion ?? 0) + sources,
       ...(newSkillMutations.length > 0
         ? { lastSkillMutation: newSkillMutations.at(-1) }
         : current.lastSkillMutation

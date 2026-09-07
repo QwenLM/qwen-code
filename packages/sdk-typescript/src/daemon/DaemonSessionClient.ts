@@ -49,6 +49,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionStatsStatus,
@@ -793,6 +797,26 @@ export class DaemonSessionClient {
    */
   heartbeat(): Promise<HeartbeatResult> {
     return this.client.heartbeat(this.sessionId, this.clientId);
+  }
+
+  listSources(): Promise<SessionSourcesResult> {
+    return this.client.listSessionSources(this.sessionId, this.clientId);
+  }
+
+  upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult> {
+    return this.client.upsertSessionSource(
+      this.sessionId,
+      source,
+      this.clientId,
+    );
+  }
+
+  removeSource(sourceId: string): Promise<SessionSourceRemoveResult> {
+    return this.client.removeSessionSource(
+      this.sessionId,
+      sourceId,
+      this.clientId,
+    );
   }
 
   artifacts(): Promise<DaemonSessionArtifactsEnvelope> {

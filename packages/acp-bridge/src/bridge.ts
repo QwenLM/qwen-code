@@ -44,6 +44,8 @@ import {
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
+  SessionSourceError,
+  validateSessionSourceInput,
   canonicalSessionPrUrl,
   toSessionPrInfo,
   normalizeTurnResultError,
@@ -1948,6 +1950,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'source_changed',
   'settings_changed',
   'extensions_changed',
   'mcp_server_changed',
@@ -6605,6 +6608,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return response as unknown as T;
   };
 
+  const requestSessionSources = async <T>(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<T> => {
+    const result = await requestSessionStatus<
+      T & {
+        sourceError?: { code: SessionSourceError['code']; message: string };
+      }
+    >(sessionId, method, params);
+    if (result.sourceError) {
+      throw new SessionSourceError(
+        result.sourceError.code,
+        result.sourceError.message,
+      );
+    }
+    return result;
+  };
+
   const notifyAgentSessionClose = async (
     entry: SessionEntry,
     ci: ChannelInfo | undefined,
@@ -11104,6 +11126,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // before any restore attempt so a committed branch is visible to
           // catalog-version watchers even when the restore later fails.
           markSessionCatalogChanged();
+          const sourceWarnings: string[] = [];
+          const copySources = async (attachments?: SessionAttachmentStore) => {
+            try {
+              const attachmentIds = attachments
+                ? (await attachments.list()).map((item) => item.attachmentId)
+                : [];
+              // Let the child release the target writer before restore, even
+              // if copying sources exceeds the normal request timeout.
+              const copied = (await Promise.race([
+                entry.connection.extMethod('qwen/session/sources/copy', {
+                  sessionId,
+                  targetSessionId: result.newSessionId,
+                  targetCwd: boundWorkspace,
+                  attachmentIds,
+                }),
+                getTransportClosedReject(entry),
+              ])) as { warnings?: string[]; sourceError?: unknown };
+              if (copied.sourceError) {
+                sourceWarnings.push('Session sources could not be copied.');
+              } else {
+                sourceWarnings.push(...(copied.warnings ?? []));
+              }
+            } catch {
+              sourceWarnings.push('Session sources could not be copied.');
+            }
+          };
           if (opts.sessionAttachmentsRoot) {
             const branchAttachments = new SessionAttachmentStore(
               opts.sessionAttachmentsRoot,
@@ -11117,8 +11165,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 `qwen serve: failed to copy attachments for branched session ${result.newSessionId}: ${error instanceof Error ? error.message : String(error)}`,
               );
             } finally {
+              await copySources(branchAttachments);
               await branchAttachments.close();
             }
+          } else if (!restoreBranch) {
+            await copySources();
           }
           const rawBranchName = result.displayName ?? result.title;
           const branchDisplayName =
@@ -11128,6 +11179,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
           if (!restoreBranch) {
             return {
+              ...(sourceWarnings.length > 0 ? { sourceWarnings } : {}),
               sessionId: result.newSessionId,
               displayName: branchDisplayName,
               forkedFrom: {
@@ -11210,6 +11262,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               );
             }
           }
+          if (!opts.sessionAttachmentsRoot) {
+            await copySources(newEntry?.attachments);
+          }
           if (newEntry) newEntry.displayName = branchDisplayName;
           let sourcePersisted: boolean | undefined;
           if (newEntry?.sourceType) {
@@ -11243,6 +11298,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
           return {
             ...restored,
+            ...(sourceWarnings.length > 0 ? { sourceWarnings } : {}),
             displayName: branchDisplayName,
             forkedFrom: {
               sessionId,
@@ -11855,6 +11911,63 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch {
         /* bus already closed */
       }
+    },
+
+    async getSessionSources(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionSources(sessionId, 'qwen/session/sources/list');
+    },
+
+    async upsertSessionSource(sessionId, input, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context.clientId);
+      if (!clientId) {
+        throw new RequestError(
+          -32602,
+          'A session-bound client id is required',
+          {
+            errorKind: 'client_id_required',
+          },
+        );
+      }
+      const validated = validateSessionSourceInput(input);
+      if (validated.locator.type === 'attachment') {
+        const attachmentId = validated.locator.attachmentId;
+        const attachments = await entry.attachments.list();
+        if (byId.get(sessionId) !== entry) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        resolveTrustedClientId(entry, context.clientId);
+        if (!attachments.some((item) => item.attachmentId === attachmentId)) {
+          throw new RequestError(-32602, 'Session attachment not found', {
+            errorKind: 'source_attachment_not_found',
+          });
+        }
+      }
+      return requestSessionSources(sessionId, 'qwen/session/sources/upsert', {
+        input: validated,
+      });
+    },
+
+    async removeSessionSource(sessionId, sourceId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context.clientId);
+      if (!clientId) {
+        throw new RequestError(
+          -32602,
+          'A session-bound client id is required',
+          {
+            errorKind: 'client_id_required',
+          },
+        );
+      }
+      return requestSessionSources(sessionId, 'qwen/session/sources/remove', {
+        sourceId,
+      });
     },
 
     async getSessionArtifacts(sessionId, context) {

@@ -1,21 +1,23 @@
 # Web Shell Session Sources
 
-Status: draft proposal; this PR changes documentation only.
+Status: implemented on this branch; local validation is recorded in the
+[implementation notes](../plans/web-shell-session-sources.md).
 
 [中文版](./web-shell-session-sources.zh-CN.md)
 
 ## Decision and scope
 
-Add a session reference list for files and links. A source means “added to this
-session's reference list.” It does not mean that a model has read, cited, or used
-the resource. Keep source records separate from artifacts, and reuse existing
-file preview components and workspace ownership checks.
+Provide one Sources section for the session's uploaded files, workspace-file
+references, and links. The section combines existing attachment storage with
+explicit source metadata; users see each uploaded file once. A listed material
+does not mean that a model has read, cited, or used it. Keep these inputs separate
+from artifacts, and reuse existing previews and workspace ownership checks.
 
 The first implementation provides:
 
 - A `record_source` tool for explicit file/link registration.
 - Session APIs to list, upsert, and remove references.
-- Automatic registration of attachments after Web Shell prompt admission.
+- Optional attachment metadata enrichment after Web Shell prompt admission.
 - Durable metadata, deduplication, and a Sources section in the environment
   panel, with previews in the existing right panel.
 
@@ -50,9 +52,33 @@ point to the same workspace file, but have independent IDs and removal behavior.
 Source previews must not create hidden artifact records or add output cards to
 the transcript.
 
-## Data contract
+## Unified view and registered metadata
 
-Proposed public types:
+Attachments remain the durable store for uploaded file bytes. The Sources
+section displays those files directly, including historical files with no source
+record. The source APIs continue to manage explicit reference metadata. The UI
+uses real source records and attachment references as separate input types; it
+does not invent source IDs or timestamps for uploaded files.
+
+Deduplicate by attachment ID. When a registered attachment source exists, its
+title and description take precedence; otherwise show the existing filename.
+Workspace references and links remain independent, even when names match. No
+read, refresh, or migration automatically registers historical attachments.
+
+The source API's 200-record and field-length limits apply to registered metadata,
+not to the number or filename length of already-uploaded files in the unified
+view. The view preserves each store's ordering rather than inventing a common
+creation time.
+
+Removing an attachment's source registration removes its metadata and source ID
+from the source API. It does not delete the bytes: the file remains visible as a
+plain uploaded file. Opening or refreshing that file does not recreate the
+registration or advance its revision. Removing workspace-file or link references
+removes those explicit entries. The unified list has no per-row dismiss action.
+
+## Data contract for registered metadata
+
+Public source API types:
 
 ```ts
 type SessionSourceLocator =
@@ -121,7 +147,7 @@ history, or caller-supplied workspace identity is needed.
   limit; adding another returns `409 source_limit_reached`. Do not silently
   evict entries that the user expects to find later.
 
-List order is stable: newest `createdAt` first, then ID. Metadata edits do not
+Registered list order is stable: newest `createdAt` first, then ID. Metadata edits do not
 reorder the list.
 
 ## Registration and API behavior
@@ -195,7 +221,7 @@ The TypeScript daemon session client exposes `listSources`, `upsertSource`, and
 uses ACP for prompts, preserving one client authorization path. Internal child
 methods described below are not an alternative public mutation transport.
 
-### Attachment automation
+### Attachment metadata enrichment
 
 In the Web Shell session action, keep upload, prompt submission, admission
 callbacks, optimistic messages, and rejected-upload cleanup unchanged. After
@@ -210,15 +236,17 @@ operation using the uploaded attachment IDs and original display names.
   A model failure after acceptance does not remove the added references.
 - Ambiguous admission follows existing prompt recovery. Do not register until
   acceptance is confirmed, and never resubmit a prompt to repair source metadata.
-- A registration failure leaves the sent message/attachment intact. Show “Message
-  sent; some sources could not be added” with a metadata-only Retry action.
+- A registration failure leaves the sent message and visible uploaded file
+  intact. Show “Message sent; some source details could not be saved” with a
+  metadata-only Retry action.
   On owner change, suppress stale UI callbacks; a request already sent remains
   bound to the original session.
-- Browser closure can lose this best-effort automatic registration. First-phase
-  retry state is in memory only. A user can later add an existing session
-  attachment from the Sources picker; do not scan/replay old messages to backfill.
-- Removing a source does not cause a background history scan to add it back.
-  Explicit registration or a newly accepted message may add it again.
+- Browser closure can lose this best-effort metadata enrichment. Retry state is
+  in memory only. The uploaded file remains visible and previewable without a
+  source record; do not scan/replay old messages to backfill metadata.
+- Removing registered metadata does not cause a background history scan to add
+  it back. Existing uploaded bytes remain visible as a file. Explicit registration
+  or a newly accepted message may add metadata again.
 
 This boundary deliberately avoids server-side prompt admission changes and a
 durable registration job queue.
@@ -264,10 +292,10 @@ reducers, so it cannot become a debug bubble in the conversation.
 
 ### Lifecycle rules
 
-| Operation           | Source behavior                                                                                                            |
+| Operation           | Registered metadata behavior                                                                                               |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Refresh/reconnect   | Fetch the current list after attachment to the session                                                                     |
-| Restart/load/resume | Restore the latest valid supported snapshot; no source records means an empty list                                         |
+| Restart/load/resume | Restore the latest valid supported snapshot; no source records means an empty metadata list; uploaded files remain visible |
 | History replay      | Rebuild metadata only; never rerun registration tools or copy attachments                                                  |
 | Compaction          | Preserve the latest snapshot as session metadata, excluded from model context and summaries                                |
 | Rewind              | Keep the current reference list; if history is rewritten, carry its latest snapshot forward                                |
@@ -287,37 +315,44 @@ the currently accessible resource.
 
 Validate restored snapshots before use. A malformed last record or unsupported
 version must not silently restore an older pre-removal list. Preserve the
-transcript, mark sources unavailable, and reject source writes until a supported
+transcript, mark registered metadata unavailable, and reject source writes until a supported
 valid state can be restored. Conversation loading still proceeds. Restore/fork,
 rewind, and compaction tests are required before advertising persistence support.
 
 ## Web Shell interaction and preview
 
-Add `sources` to `WebShellEnvironmentPanelItem` and the default section list,
-after Environment and before Subagents. Hosts that pass an explicit section
-list retain their choices. Gate the section and actions on the new
-`session_sources` capability, advertised only with list, mutation, persistence,
-and notification support wired end to end. Do not infer it from artifacts.
+Use `sources` in the default environment section list, after Environment and
+before Subagents, and stop displaying a separate Attachments section. Keep the
+public `attachments` customization value as a compatibility choice for hosts:
+`attachments` alone shows uploaded files, `sources` shows the complete reference
+view, and including both still produces one section.
 
-- Header: “Sources” / “来源”, count, and an Add action. Show five rows initially
-  and an accessible “View all” / “查看全部” expansion for longer lists.
-- Rows show a file/link icon, title, secondary locator, and a Remove action.
-  Support keyboard focus, overflow truncation, and clear accessible names.
+The `session_sources` capability gates registered metadata and Add actions. An
+older daemon can still show its uploaded files through the existing attachment
+capabilities. Source metadata and attachment-list loading/errors are independent;
+one failed request must not hide successful results from the other store.
+
+- Header: “Sources” / “来源”, count, and an Add action. Show three rows initially.
+  Longer lists offer an accessible “View all” / “查看全部” button, which becomes
+  “Collapse” / “收起” when expanded and restores the three-row view.
+- Rows show a file/link icon and a single-line, truncated title. The full locator
+  remains available in the hover title and preview details. Activating a row
+  opens its preview. Support keyboard focus, overflow truncation, and clear
+  accessible names.
 - Empty state: “Add files or links for reference.” Explain in the Add form that
   adding a reference does not send its contents to the assistant.
-- Add supports a workspace-relative path, HTTP(S) link, or selection from the
-  existing session attachment list. Use existing primitives and portal root.
-  Do not add an upload pipeline; uploading to the conversation remains in the
-  composer. A title can default to the filename/hostname and be edited before
-  registration.
+- Add supports a workspace-relative path or HTTP(S) link. Use existing primitives
+  and the portal root. Uploading stays in the composer; uploaded files already
+  appear in Sources and need no second picker or registration step. A title can
+  default to the filename/hostname and be edited before registration.
 - Loading, failed load with Retry, and capability absence are separate states.
   A failed refresh keeps the last same-owner list with a visible error. Initial
   failure must not look like an empty successful list.
-- Remove updates the list after persistence acknowledgement. A failure keeps the
-  row with an error; removal does not imply erasure from earlier chat history.
 
-Add a `source` right-panel tab keyed by session ID and source ID, carrying the
-session/workspace owner identity and locator. Resolve current capabilities at
+Registered sources use a `source` right-panel tab keyed by session ID and source
+ID. Plain uploaded files reuse existing attachment preview tabs, with HTML forced
+to source-text rendering and that preview mode retained on tab restoration.
+Both paths retain the session/workspace owner identity and locator. Resolve current capabilities at
 use time, as described in
 [artifact workspace ownership](./web-shell-artifact-workspace-ownership.md).
 Invalidate pending loads and open tabs on owner replacement or trust loss.
@@ -343,8 +378,8 @@ its tab is open closes that tab after successful refresh/mutation.
 
 ## Implementation sequence and consumer checklist
 
-This design PR contains no runtime implementation. Deliver the feature in
-reviewable changes, with capability advertising last:
+The implementation follows this sequence, with capability advertising after the
+service, transport, and UI are connected:
 
 1. Core source types/service and snapshot validation; chat recording record
    allowlists, restore, fork, rewind, and compaction handling.
@@ -362,29 +397,28 @@ cover all consumers above, including event-to-transcript conversion and session
 lifecycle reconstruction. Python/Java SDKs, standalone CLI, other ACP clients,
 and Desktop receive no new public source API in this phase; their existing
 history readers must ignore the new metadata record safely. Existing artifact
-records and APIs need no migration. Old sessions start with an empty list and
-older daemons hide the feature. Do not fall back to artifact registration when
+records and APIs need no migration. Old sessions start with an empty metadata list while their uploaded files remain
+visible; older daemons show files without source metadata actions. Do not fall back to artifact registration when
 the source capability is absent or an operation fails.
 
 ## Verification plan for implementation
 
-These are future acceptance criteria, not tests run by this design PR. Before
-implementation, capture the existing global CLI/Web Shell baseline in an E2E
-plan under `.qwen/e2e-tests/`. Before declaring implementation complete, run the
-repository build and typecheck plus focused package tests, then record the E2E
-results and two clean self-audit passes.
+The acceptance matrix below defines the implementation checks. The global CLI
+baseline, focused regression results, actual daemon and browser runs, and
+self-audit notes are recorded locally under `.qwen/e2e-tests/session-sources.md`.
+See the implementation notes for the tested boundaries.
 
-| Area                   | Required evidence                                                                                                                                                                                                    |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Registration           | File/link upsert, stable IDs, no-op revision, metadata edit, description clear, capacity, invalid locators and fields                                                                                                |
-| Concurrency/durability | Simultaneous tool/client writes serialize; write failure retains old state; timeout/retry does not duplicate; restart after deletion does not resurrect                                                              |
-| Lifecycle              | Load, reconnect, compaction, rewind, fork attachment remap/cross-workspace omissions, archive rejection, malformed/future snapshots                                                                                  |
-| Ownership              | Primary and secondary sessions route correctly; unknown, untrusted, ambiguous, bootstrapping, draining, removed, and replaced owners never call primary operations                                                   |
-| Attachments            | Upload alone adds nothing; accepted message adds references; rejected submission adds nothing; registration failure/retry never resends the prompt; existing sent attachment can be added manually                   |
-| Conversation isolation | Prompt content before/after registration is identical; no file read/network fetch during registration; no artifact added; source notifications produce no transcript bubble; model tool success requires persistence |
-| UI                     | Empty/loading/error/long list; Add/Remove; keyboard and narrow layout; explicit host section configuration; capability absent                                                                                        |
-| Preview                | Workspace file, attachment image/PDF/text, URL Open original, source HTML text, unsupported type, revoked trust, stale response, missing resource, removed open tab                                                  |
-| Compatibility          | Older daemon hides sources; old session loads empty; existing artifacts and prompt flow remain unchanged; unrelated clients ignore metadata safely                                                                   |
+| Area                   | Required evidence                                                                                                                                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Registration           | File/link upsert, stable IDs, no-op revision, metadata edit, description clear, capacity, invalid locators and fields                                                                                                  |
+| Concurrency/durability | Simultaneous tool/client writes serialize; write failure retains old state; timeout/retry does not duplicate; restart after deletion does not resurrect                                                                |
+| Lifecycle              | Load, reconnect, compaction, rewind, fork attachment remap/cross-workspace omissions, archive rejection, malformed/future snapshots                                                                                    |
+| Ownership              | Primary and secondary sessions route correctly; unknown, untrusted, ambiguous, bootstrapping, draining, removed, and replaced owners never call primary operations                                                     |
+| Attachments            | Upload alone adds nothing; accepted message enriches file metadata; rejected submission adds nothing; registration failure/retry never resends the prompt; historical uploaded files stay visible without registration |
+| Conversation isolation | Prompt content before/after registration is identical; no file read/network fetch during registration; no artifact added; source notifications produce no transcript bubble; model tool success requires persistence   |
+| UI                     | Empty/loading/error/long list; Add/open; keyboard and narrow layout; explicit host section configuration; capability absent                                                                                            |
+| Preview                | Workspace file, attachment image/PDF/text, URL Open original, source HTML text, unsupported type, revoked trust, stale response, missing resource, removed open tab                                                    |
+| Compatibility          | Older daemon shows uploaded files; old session metadata loads empty; existing artifacts and prompt flow remain unchanged; unrelated clients ignore metadata safely                                                     |
 
 The main tradeoff is deliberate: explicit registration and a small durable list
 give a usable reference panel without a provenance engine. Automatic attachment

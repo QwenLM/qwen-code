@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionSourceService } from '../services/session-sources.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -4514,6 +4516,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.sessionSourceService = this.sessionSourceServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -7735,6 +7738,20 @@ export class Config {
     return this.artifactEnabled;
   }
 
+  private sessionSourceService?: SessionSourceService;
+  private sessionSourceServiceFactory?: () => SessionSourceService;
+
+  setSessionSourceServiceFactory(factory: () => SessionSourceService): void {
+    this.sessionSourceServiceFactory = factory;
+    this.sessionSourceService = factory();
+  }
+
+  getSessionSourceService(): SessionSourceService | undefined {
+    return Object.hasOwn(this, 'sessionSourceService')
+      ? this.sessionSourceService
+      : undefined;
+  }
+
   isRecordArtifactEnabled(): boolean {
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
@@ -9662,6 +9679,16 @@ export class Config {
           '../tools/artifact/artifact-tool.js'
         );
         return new ArtifactTool(this);
+      });
+    }
+    if (
+      !options?.forSubAgent &&
+      !this.sdkMode &&
+      this.getSessionSourceService()
+    ) {
+      await registerLazy(ToolNames.RECORD_SOURCE, async () => {
+        const { RecordSourceTool } = await import('../tools/record-source.js');
+        return new RecordSourceTool(this);
       });
     }
     if (this.isRecordArtifactEnabled()) {

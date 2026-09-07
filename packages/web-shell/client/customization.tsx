@@ -139,13 +139,15 @@ export interface WebShellRightPanelOptions {
 
 export type WebShellEnvironmentPanelItem =
   | 'environment'
+  | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
-  /** Sections to show. Defaults to all sections. */
+  /** Sections to show. Sources includes attachments; both keys render one section. */
   items?: readonly WebShellEnvironmentPanelItem[];
 }
 

@@ -2207,6 +2207,25 @@ export class BridgeClient implements Client {
     ) {
       return;
     }
+    if (method === 'qwen/notify/session/sources-changed') {
+      const sessionId = params['sessionId'];
+      const revision = params['revision'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof revision !== 'number' ||
+        !Number.isSafeInteger(revision) ||
+        revision < 0 ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'source_changed',
+        data: { sessionId, revision },
+      });
+      return;
+    }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {

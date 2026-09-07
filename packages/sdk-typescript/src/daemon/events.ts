@@ -49,6 +49,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_metadata_updated',
   'session_recording_degraded',
   'artifact_changed',
+  'source_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -302,6 +303,17 @@ export interface DaemonSessionMetadataUpdatedData {
   prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
+
+export interface DaemonSourceChangedData {
+  sessionId: string;
+  revision: number;
+  [key: string]: unknown;
+}
+
+export type DaemonSourceChangedEvent = DaemonEventEnvelope<
+  'source_changed',
+  DaemonSourceChangedData
+>;
 
 export interface DaemonArtifactChangedData {
   sessionId: string;
@@ -1271,6 +1283,7 @@ export type DaemonTurnEvent = DaemonTurnCompleteEvent | DaemonTurnErrorEvent;
 
 export type KnownDaemonEvent =
   | DaemonSessionEvent
+  | DaemonSourceChangedEvent
   | DaemonControlEvent
   | DaemonStreamLifecycleEvent
   | DaemonMcpGuardrailEvent
@@ -1673,6 +1686,13 @@ export function asKnownDaemonEvent(
     case 'session_recording_degraded':
       return isSessionRecordingDegradedData(event.data)
         ? (event as DaemonSessionRecordingDegradedEvent)
+        : undefined;
+    case 'source_changed':
+      return isRecord(event.data) &&
+        typeof event.data['sessionId'] === 'string' &&
+        Number.isInteger(event.data['revision']) &&
+        Number(event.data['revision']) >= 0
+        ? (event as DaemonSourceChangedEvent)
         : undefined;
     case 'artifact_changed':
       return isArtifactChangedData(event.data)
@@ -2216,6 +2236,7 @@ export function reduceDaemonSessionEvent(
     case 'settings_reloaded':
     case 'extensions_changed':
     case 'artifact_changed':
+    case 'source_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:

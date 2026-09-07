@@ -111,7 +111,7 @@ export function buildWebShellCsp(
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  const frameSrc = `frame-src blob: ${frameSrcOrigins.join(' ')}`;
   return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 
