@@ -16,6 +16,8 @@ A Goal keeps Qwen Code working across turns until a stated condition is met. Set
 
 Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
 
+Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls the Goal makes in its own turns; subagents and the verifier's own checks are not included. The window is set by [`model.goalTokenBudget`](../configuration/settings.md); resuming a Goal that has spent its window grants another one on top of what it has already spent, so the figure reads `30.0m/60.0m` rather than starting over. A Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
+
 Each turn the session takes on its own begins with what the Goal has spent so far, the window it is allowed, and how many turns are behind it, so the model can tell an early turn from the last one before the budget stops it. Those turns also carry standing instructions to re-check the workspace rather than trust earlier turns' reports, to work toward the end state the objective asks for, to do something different when the previous turn changed nothing, and to check every requirement against citable evidence before proposing that the Goal is done.
 
 ## Interrupting a Goal
@@ -52,6 +54,8 @@ Put these into the objective, in this order:
 
 Keep it to one objective. `/goal set` and `/goal edit` accept any length, but stay roughly under 1,200 characters: the objective is re-sent on every Goal turn. An objective the model proposes through `propose_goal` is capped at 1,500 characters. Both commands collapse newlines to spaces, so number the items rather than relying on line breaks.
 
+`Budget` is an instruction to the model about when to stop and report a blocker. Writing a turn count or time limit in the objective does not configure a runtime timer or change the Goal's token budget.
+
 | Weak                       | Why it fails                                                | Stronger                                                                                                                                                                                                                                |
 | -------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | make checkout faster       | No threshold, no check.                                     | `Outcome: checkout p95 is below 250 ms. Done when: 1) npm run bench:checkout exits 0 and prints p95 < 250 (paste the line); 2) npm test exits 0. Must not: change the benchmark or skip tests. Budget: stop as blocked after 20 turns.` |
@@ -61,9 +65,15 @@ Keep it to one objective. `/goal set` and `/goal edit` accept any length, but st
 
 ## Let `/goal-draft` write it
 
-`/goal-draft <what you want done>` is a bundled skill that does the above for you. It checks whether the request is a Goal at all, reads the workspace for the real test and lint commands instead of guessing, asks at most one round of multiple-choice questions when the answer changes the check or the scope, drafts the objective in the format above, runs the self-check, and hands it over: in an interactive session it proposes the objective through the `propose_goal` approval dialog described below, otherwise it prints a `/goal set …` line you can run as-is. It never starts the work itself, and nothing is set without your approval.
+`/goal-draft <what you want done>` is a bundled skill that does the above for you. It reads only enough of the workspace to establish the scope and real verification commands, without running tests, building, installing dependencies, or starting services. It asks at most one round of questions when essential choices are unclear, then writes a compact objective, usually with 3–5 completion checks (fewer when enough). Explicit requirements are preserved; it does not add checks just to reach a count.
 
-Pass an existing objective to tighten it: `/goal-draft all tests pass and the lint is clean`.
+For an audit, completion means covering the agreed scenarios and reporting evidence, including reproduction steps for confirmed defects. Finding no defects is a valid result. The draft should not invent a minimum number of scenarios, evidence files, exploration rounds, or defects.
+
+If a success criterion, command, input path, or essential decision cannot be established, the skill returns a draft marked "Needs clarification" with `<TODO: …>` items. It does not offer that draft for approval or print a runnable `/goal set` or `/goal edit` command. Nonessential defaults are marked `[ASSUMPTION]`; they do not stand in for missing success criteria.
+
+Once the objective is ready, an interactive terminal session can show the `propose_goal` approval dialog described below. Web Shell and other ACP clients, headless runs, sessions with the tool disabled, and sessions with an active Goal receive a command to run manually instead. The hand-off says that the draft has not been applied. The skill never starts the work itself, and nothing is set without your approval.
+
+Pass an existing objective to tighten it: `/goal-draft all tests pass and the lint is clean`. For an active Goal, an explicit request to tighten it produces `/goal edit`; a replacement uses `/goal set`. If the intended operation is unclear, the skill includes that choice in its single round of questions.
 
 ### Approve a Goal the model proposes
 

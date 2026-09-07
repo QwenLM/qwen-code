@@ -259,7 +259,14 @@ function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
   };
 }
 
-function formatGoalState(
+/**
+ * The TEXT rendering of a Goal control's outcome.
+ *
+ * Exported so its shape can be pinned directly: the states worth checking --
+ * a Goal mid-run, one with no budget, one that has billed nothing -- are far
+ * cheaper to construct as snapshots than to drive a headless run into.
+ */
+export function formatGoalState(
   snapshot: GoalSnapshotV2,
   operation: 'status' | 'set' | 'edit' | 'pause' | 'resume' | 'clear',
 ): string {
@@ -270,12 +277,28 @@ function formatGoalState(
   const status =
     goal.status === 'usage_limited' ? 'usage limited' : goal.status;
   const summary = `Goal ${status}: ${goal.objective}`;
+  // Spelled out rather than abbreviated: this output is read in a terminal
+  // scrollback and piped into scripts, neither of which is helped by `1.2k`.
+  const usage: string[] = [];
+  if (goal.turnCount > 0) {
+    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+  }
+  if (goal.tokensUsed > 0) {
+    const used = goal.tokensUsed.toLocaleString('en-US');
+    usage.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
+    );
+  }
+  const withUsage =
+    usage.length > 0 ? `${summary}\nUsage: ${usage.join(' · ')}` : summary;
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
   return goal.status !== 'active' && goal.lastReason
-    ? `${summary}\nReason: ${goal.lastReason}`
-    : summary;
+    ? `${withUsage}\nReason: ${goal.lastReason}`
+    : withUsage;
 }
 
 async function claimUserGoalTurn(
