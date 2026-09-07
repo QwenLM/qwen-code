@@ -1147,12 +1147,20 @@ describe('startCommand.handler', () => {
     let finishDisconnect!: () => void;
     mockLoadSettings.mockReturnValue({ merged: { channels } });
     mockChannelConnect.mockResolvedValue(undefined);
-    mockChannelDisconnect.mockImplementationOnce(
+    // The drain contract lives on waitForDisconnect: disconnectChannels
+    // discards the disconnect() return value and awaits only this hook, so
+    // the pending promise must hang off it for the test to detect a
+    // regression that exits before the drain settles.
+    const waitForDisconnect = vi.fn(
       () =>
         new Promise<void>((resolve) => {
           finishDisconnect = resolve;
         }),
     );
+    mockCreateChannel.mockReturnValueOnce({
+      ...mockChannel,
+      waitForDisconnect,
+    });
     const processOnSpy = vi
       .spyOn(process, 'on')
       .mockImplementation(() => process);
@@ -1170,6 +1178,10 @@ describe('startCommand.handler', () => {
 
       const shuttingDown = Promise.resolve(shutdown!());
       await vi.waitFor(() => expect(mockChannelDisconnect).toHaveBeenCalled());
+      await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalled());
+      // Let a real macrotask elapse: if shutdown did not await the drain,
+      // exit(0) would have fired by now.
+      await new Promise((resolve) => setImmediate(resolve));
       expect(exitSpy).not.toHaveBeenCalled();
 
       finishDisconnect();

@@ -1894,7 +1894,8 @@ describe('DingtalkChannel prompt reactions', () => {
     await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
 
     let disconnected = false;
-    const disconnecting = Promise.resolve(channel.disconnect()).then(() => {
+    channel.disconnect();
+    const disconnecting = channel.waitForDisconnect().then(() => {
       disconnected = true;
     });
 
@@ -1911,6 +1912,179 @@ describe('DingtalkChannel prompt reactions', () => {
       '🤔 Thinking',
       '👀',
     ]);
+  });
+
+  it('does not re-issue a failing status recall per streamed chunk', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(false);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-latch-recall',
+      sessionId: 'session-latch-recall',
+      messageId: 'message-latch-recall',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'a' });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledOnce());
+
+    // Further chunks ask for the same transition that just failed; the latch
+    // must keep them from re-issuing the failing recall once per chunk.
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'b' });
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'c' });
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'd' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(recallReaction).toHaveBeenCalledOnce();
+    // The failed recall must also block the replacement: no new phase tag is
+    // attached on top of the stale one.
+    expect(attachReaction).toHaveBeenCalledTimes(2);
+
+    // A different desired tag is a new request and retries the recall.
+    lifecycle({
+      ...base,
+      type: 'tool_call',
+      toolCall: {
+        sessionId: base.sessionId,
+        toolCallId: 'tool-read',
+        kind: 'read_file',
+        title: 'Read',
+        status: 'in_progress',
+      },
+    });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not re-issue a failing phase attach per repeated identical phase', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-latch-attach',
+      sessionId: 'session-latch-attach',
+      messageId: 'message-latch-attach',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+    const toolCall = (kind: string, toolCallId: string) => ({
+      ...base,
+      type: 'tool_call' as const,
+      toolCall: {
+        sessionId: base.sessionId,
+        toolCallId,
+        kind,
+        title: 'Tool activity',
+        status: 'in_progress' as const,
+      },
+    });
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+    attachReaction.mockResolvedValue(false);
+
+    lifecycle(toolCall('read_file', 'tool-1'));
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(3));
+
+    // Identical repeats of the failed attach are latched away.
+    lifecycle(toolCall('read_file', 'tool-1'));
+    lifecycle(toolCall('read_file', 'tool-1'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(attachReaction).toHaveBeenCalledTimes(3);
+
+    // A different phase tag is a new request and retries the attach.
+    lifecycle(toolCall('search', 'tool-2'));
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(4));
+    expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('🔎 Searching');
+  });
+
+  it('retries a blocked terminal cleanup on disconnect instead of forgetting it', async () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(true);
+    const recallReaction = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const reactionStates = (
+      channel as unknown as { reactionStates: Map<string, unknown> }
+    ).reactionStates;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-blocked-finish',
+      sessionId: 'session-blocked-finish',
+      messageId: 'message-blocked-finish',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, base.messageId);
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+
+    recallReaction.mockResolvedValueOnce(false).mockResolvedValue(true);
+    lifecycle({ ...base, type: 'completed' });
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The status recall failed, so the terminal tag is withheld and the state
+    // is kept — forgetting it would strand the stale phase tag forever.
+    expect(reactionStates.size).toBe(1);
+    expect(attachReaction).toHaveBeenCalledTimes(2);
+
+    channel.disconnect();
+    await channel.waitForDisconnect();
+
+    // The retry recalls only the status tag that failed before; the eye tag
+    // was already cleared by the first attempt and must not be recalled twice.
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+      '🤔 Thinking',
+    ]);
+    expect(attachReaction.mock.calls.at(-1)?.[2].name).toBe('✅ Done');
   });
 
   it('aborts a stuck emotion request so disconnect settles', async () => {
@@ -1949,7 +2123,8 @@ describe('DingtalkChannel prompt reactions', () => {
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
 
     let disconnected = false;
-    const disconnecting = channel.disconnect().then(() => {
+    channel.disconnect();
+    const disconnecting = channel.waitForDisconnect().then(() => {
       disconnected = true;
     });
     await Promise.resolve();

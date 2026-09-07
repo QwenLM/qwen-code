@@ -2645,7 +2645,11 @@ describe('runChannelDaemonWorker', () => {
   it('waits for asynchronous channel cleanup before closing', async () => {
     const sdk = createSdk();
     let finishDisconnect!: () => void;
-    const disconnect = vi.fn(
+    // disconnectChannels discards the disconnect() return value and awaits
+    // only waitForDisconnect, so the pending promise must hang off that hook
+    // for the test to detect a regression that closes before the drain.
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(
       () =>
         new Promise<void>((resolve) => {
           finishDisconnect = resolve;
@@ -2654,6 +2658,7 @@ describe('runChannelDaemonWorker', () => {
     mockCreateChannel.mockResolvedValueOnce({
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect,
+      waitForDisconnect,
       name: 'telegram',
     });
 
@@ -2669,6 +2674,10 @@ describe('runChannelDaemonWorker', () => {
     });
 
     await vi.waitFor(() => expect(disconnect).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalledOnce());
+    // Let a real macrotask elapse: if close did not await the drain, it
+    // would have settled by now.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(closed).toBe(false);
 
     finishDisconnect();

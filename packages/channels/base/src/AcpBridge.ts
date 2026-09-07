@@ -512,8 +512,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           type === 'tool_call_update' &&
           !explicitKind &&
           update['status'] === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
         ) {
+          // Matches the DaemonChannelBridge guard: kindless in_progress frames
+          // carrying only shell or subagent progress are heartbeats, not phase
+          // changes, and must not restore the slot kind onto the reaction/card.
           break;
         }
         let sessionKinds = this.toolCallKindsBySession.get(sessionId);

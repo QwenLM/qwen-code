@@ -804,6 +804,12 @@ interface DingtalkReactionState {
   finishing: boolean;
   drainScheduled: boolean;
   eyeAttached: boolean;
+  /** Set when a finish attempt could not clear both transient tags; the
+   * state stays registered so a later finish trigger retries the cleanup. */
+  finishBlocked?: boolean;
+  /** The last failed drain transition. Identical repeat requests are skipped
+   * so a failing emotion API is not re-hit once per streamed chunk. */
+  failedTransition?: { from: string | undefined; to: string };
   revision: number;
   tail: Promise<void>;
 }
@@ -1021,6 +1027,8 @@ export class DingtalkChannel extends ChannelBase {
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
+  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
    * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
@@ -2251,7 +2259,7 @@ export class DingtalkChannel extends ChannelBase {
     return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
-  async disconnect(): Promise<void> {
+  disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
@@ -2270,7 +2278,13 @@ export class DingtalkChannel extends ChannelBase {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
-    await Promise.allSettled(reactionStates.map((state) => state.tail));
+    this.disconnectDrain = Promise.allSettled(
+      reactionStates.map((state) => state.tail),
+    ).then(() => undefined);
+  }
+
+  override waitForDisconnect(): Promise<void> {
+    return this.disconnectDrain ?? Promise.resolve();
   }
 
   /** Stable API targets are conversation or user IDs, never webhook URLs. */
@@ -2312,10 +2326,11 @@ export class DingtalkChannel extends ChannelBase {
         state.drainScheduled = false;
         if (
           this.reactionStates.get(state.key) === state &&
-          (state.finishing ||
-            (this.activeReactionKeys.has(state.key) &&
+          (state.finishing
+            ? !state.finishBlocked
+            : this.activeReactionKeys.has(state.key) &&
               state.desiredStatusTag &&
-              state.desiredStatusTag.name !== state.statusTag?.name))
+              state.desiredStatusTag.name !== state.statusTag?.name)
         ) {
           this.scheduleReactionDrain(state);
         }
@@ -2340,7 +2355,16 @@ export class DingtalkChannel extends ChannelBase {
 
       const desired = state.desiredStatusTag;
       if (!desired || desired.name === state.statusTag?.name) return;
+      const latched = state.failedTransition;
       if (state.statusTag) {
+        const from = state.statusTag.name;
+        if (latched && latched.from === from && latched.to === desired.name) {
+          // This exact replacement already failed; re-issuing it once per
+          // lifecycle event hammers a failing emotion API on every streamed
+          // chunk. A different desired tag retries the recall.
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
         const revision = state.revision;
         if (
           (await this.recallReaction(
@@ -2349,23 +2373,35 @@ export class DingtalkChannel extends ChannelBase {
             state.statusTag,
           )) === false
         ) {
+          state.failedTransition = { from, to: desired.name };
           if (state.revision !== revision) continue;
           state.desiredStatusTag = state.statusTag;
           return;
         }
+        state.failedTransition = undefined;
         state.statusTag = undefined;
         continue;
       }
 
+      if (
+        latched &&
+        latched.from === undefined &&
+        latched.to === desired.name
+      ) {
+        state.desiredStatusTag = undefined;
+        return;
+      }
       const revision = state.revision;
       if (
         (await this.attachReaction(state.messageId, state.chatId, desired)) ===
         false
       ) {
+        state.failedTransition = { from: undefined, to: desired.name };
         if (state.revision !== revision) continue;
         state.desiredStatusTag = undefined;
         return;
       }
+      state.failedTransition = undefined;
       state.statusTag = desired;
     }
   }
@@ -2387,12 +2423,20 @@ export class DingtalkChannel extends ChannelBase {
       !state.eyeAttached ||
       (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
         false;
+    if (eyeCleared) state.eyeAttached = false;
     if (state.terminalTag && statusCleared && eyeCleared) {
       await this.attachReaction(
         state.messageId,
         state.chatId,
         state.terminalTag,
       );
+    }
+    if (!statusCleared || !eyeCleared) {
+      // Keep the state registered: forgetting it here would leave a stale
+      // phase tag nothing can ever recall. finishReaction re-arms the drain
+      // (disconnect, session death) so the cleanup gets a second chance.
+      state.finishBlocked = true;
+      return;
     }
     this.forgetReactionState(state);
   }
@@ -2507,12 +2551,17 @@ export class DingtalkChannel extends ChannelBase {
     if (!messageId || !this.isStableTargetId(chatId)) return;
     const key = this.reactionKey(messageId, chatId);
     const state = this.reactionStates.get(key);
-    if (!state || !this.activeReactionKeys.delete(key)) return;
-    if (sessionId) {
-      const keys = this.sessionReactionKeys.get(sessionId);
-      keys?.delete(key);
-      if (keys?.size === 0) this.sessionReactionKeys.delete(sessionId);
+    if (!state) return;
+    if (state.finishing) {
+      // A finish is either draining or blocked on a failed recall; only the
+      // blocked case needs this trigger to retry the cleanup.
+      if (!state.finishBlocked) return;
+      state.finishBlocked = false;
+      if (terminalTag) state.terminalTag = terminalTag;
+      this.scheduleReactionDrain(state);
+      return;
     }
+    if (!this.activeReactionKeys.delete(key)) return;
     state.finishing = true;
     state.desiredStatusTag = undefined;
     state.terminalTag = terminalTag;

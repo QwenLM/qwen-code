@@ -8,7 +8,7 @@ Expose agent progress consistently on both the inbound DingTalk message and the 
 
 - Start with two tags: `👀` and `🤔 Thinking`.
 - Keep `👀` fixed while replacing only the status tag.
-- Map tool events to `📖 Reading`, `🔎 Searching`, `🖥️ Running`, `🛠️ Editing`, `🛠️ Working`, or `⚠️ Retrying`.
+- Map tool events to the phases in the projection contract table below (`📖 Reading`, `🔎 Searching`, `🖥️ Running`, `🛠️ Editing`, `🗑️ Deleting`, `📦 Moving`, `🤔 Thinking`, `🌐 Fetching`, `🔄 Switching mode`, `🛠️ Working`, or `⚠️ Retrying`).
 - Map response text to `✍️ Replying`.
 - On a terminal event, recall both transient tags before adding exactly one of `✅ Done`, `❌ Failed`, or `⏹️ Stopped`.
 

@@ -1321,6 +1321,47 @@ describe('AcpBridge', () => {
     expect(responseBoundary).toHaveBeenCalledOnce();
   });
 
+  it('ignores meta-only subagent progress heartbeats', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-agent',
+        kind: 'other',
+        title: 'Agent: explore',
+        status: 'in_progress',
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-agent',
+        status: 'in_progress',
+        _meta: {
+          subagentType: 'Explore',
+          provenance: 'subagent',
+          subagentProgress: true,
+        },
+      },
+    });
+
+    expect(toolCall).toHaveBeenCalledOnce();
+    expect(toolCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: 'other', title: 'Agent: explore' }),
+    );
+    expect(responseBoundary).toHaveBeenCalledOnce();
+  });
+
   it('forwards kindful terminal updates that carry shell progress metadata', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

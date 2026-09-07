@@ -1,6 +1,6 @@
 # 钉钉工具类型精细阶段实施计划
 
-> 状态说明：后续产品评审批准了在活动卡片阶段行展示受限的工具 title，并要求最小化修复 `AcpBridge` partial heartbeat 回归。最终契约以 `docs/design/dingtalk-dynamic-lifecycle-tags.md` 为准；下文保留最初的分步计划和当时的范围判断，不能作为当前实现边界。
+> 状态说明：后续产品评审确定活动卡片阶段行仅展示阶段标签（不投影 ACP 工具 title），并批准了最小化的 `AcpBridge` partial heartbeat 回归修复。最终契约以 `docs/design/dingtalk-dynamic-lifecycle-tags.md` 为准；下文保留最初的分步计划和当时的范围判断，不能作为当前实现边界。
 
 > **供执行 Agent 使用：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐项执行本计划。所有步骤使用复选框（`- [ ]`）跟踪进度。
 
