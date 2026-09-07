@@ -14,13 +14,14 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
-import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import {
-  FatalSandboxError,
-  Storage,
-  isSubpath,
-  resolveBundleDir,
-} from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SandboxConfig,
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
