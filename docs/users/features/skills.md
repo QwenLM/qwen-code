@@ -203,11 +203,11 @@ hooks:
     - matcher: run_shell_command
       hooks:
         - type: command
-          command: '$QWEN_SKILL_ROOT/scripts/gate-session-id.sh'
+          command: '"$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"'
 ---
 ```
 
-`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. **Make the script executable** (`chmod +x`) — a hook command that cannot be executed fails open: the tool call proceeds, and nothing appears in the transcript or the log to say the gate did not run. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
+`$QWEN_SKILL_ROOT` is set to the Skill's own directory, so hook commands can reference files shipped alongside `SKILL.md`. The command string is handed to a shell, so **keep the inner quotes**: unquoted, a project path containing a space splits into two words and the gate never runs. **Make the script executable** (`chmod +x`) too. Both mistakes fail open in the same way: the tool call proceeds, and nothing appears in the transcript or the log to say the gate did not run. A `PreToolUse` hook blocks the tool call when it exits with code `2` (stderr is fed back to the model as the reason), or when it prints `hookSpecificOutput.permissionDecision: "deny"`:
 
 ```bash
 #!/usr/bin/env bash
@@ -223,8 +223,10 @@ Notes:
 - Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
 - Resuming a session with `--continue` / `--resume` re-registers the hooks of every Skill the **model** loaded through the Skill tool, because those invocations are recorded in the conversation as tool calls. Three cases are not restored, and each is reported in the debug log: a Skill whose `SKILL.md` changed since it was invoked, one you have since disabled, and a conditional (`paths:`) Skill that this session has not activated yet. A Skill you started yourself with `/<skill-name>` is submitted as an ordinary prompt and leaves no tool-call record, so it is not restored either — re-run `/<skill-name>` after resuming to re-arm its gate. In every one of these cases the Skill's instructions can still be in the replayed conversation while the hooks meant to enforce them are absent.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
-- Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, bare mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there.
-- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder. Changing that trust takes effect on restart — a trust change made during a session does not arm or silence an already-running session's hooks. The same gate applies to `allowedTools`.
+- Always give a tool event an explicit `matcher:`. An omitted one is stored as the empty pattern, which is compiled to `^$` and matches no tool name — the hook registers and then never fires, with nothing to say so. Use `*` if you mean every tool.
+- The `command:` runs through the platform shell: `bash` on macOS and Linux, and on Windows Git Bash when it is detected (`MSYSTEM`/`TERM`), otherwise `cmd.exe` or PowerShell. The example above is POSIX shell — under `cmd.exe` `$QWEN_SKILL_ROOT` is not expanded and a `.sh` script is not executable, so the gate fails open there. A hook may set `shell: bash` to force bash, but that resolves to whatever `bash` is on `PATH`, so on Windows outside Git Bash write the gate for the shell you actually have.
+- Sessions that disable hooks register none of them — `disableAllHooks`, safe mode, and an ACP client's `skipHooks`. The Skill's body and its `allowedTools` still apply in those sessions, but its gate does not, so a rule you rely on a hook to enforce is not enforced there. Bare mode goes further: no Skills are discovered at all, so there is no body and no `allowedTools` either.
+- A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and trust is re-read every time a hook fires and every time a permission is decided. With an IDE companion connected that value is live: revoking trust silences an already-registered gate — and suspends the Skill's `allowedTools` — at the next tool call, without a restart. Without an IDE connection the value is fixed when the CLI starts, so a change made through the CLI's own trust dialog takes effect on restart. Granting trust never retro-registers: invoke the Skill again.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
 - See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
 

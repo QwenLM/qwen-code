@@ -489,7 +489,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       `Not restoring skill "${skill.name}" on resume: ${reason}. ` +
       `Its instructions may still be in the replayed conversation; ` +
       `re-invoke the skill to re-apply its hooks and allowedTools.`;
-    if (skill.hooks) {
+    // Emptiness, not truthiness, exactly as `applySkillHooks` tests it: `{}`
+    // is truthy, and the parser assigns one for `hooks: {}` and for a block
+    // whose event names are all unknown. Such a skill promised no gate, so a
+    // warn here would be the same phantom failure that guard exists to avoid.
+    if (skill.hooks && Object.keys(skill.hooks).length > 0) {
       debugLogger.warn(message);
     } else {
       debugLogger.debug(message);

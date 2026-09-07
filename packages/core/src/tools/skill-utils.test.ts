@@ -234,6 +234,23 @@ describe('applySkillSideEffects', () => {
     });
   });
 
+  it('stays silent for a skill whose hooks block parses to nothing', () => {
+    const { config, addSessionAllowRule } = makeConfig({
+      getHookSystem: () => undefined,
+    });
+    // `parseSkillContent` assigns `{}` for an explicit `hooks: {}` and for a
+    // block whose event names are all unknown, and `{}` is truthy — so this
+    // is the shape a `!skill.hooks` guard alone lets through.
+    const emptyHooks = { ...gatedSkill, hooks: {} } as SkillConfig;
+
+    applySkillSideEffects(config, emptyHooks);
+
+    expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
+  });
+
   it('registers nothing and does not throw when there is no session id', () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getSessionId: () => undefined,
@@ -260,6 +277,29 @@ describe('applySkillSideEffects', () => {
     );
     expect(addSessionAllowRule).not.toHaveBeenCalled();
     expect(addSessionHook).not.toHaveBeenCalled();
+  });
+
+  it('warns for a project skill in an untrusted folder that declares only hooks', () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig();
+    // The sibling test above uses a skill carrying both halves, so it passes
+    // on the `allowedTools` operand alone. This one pins the `|| skill.hooks`
+    // half: a skill whose only side effect is a gate must still say so.
+    const hooksOnly = {
+      ...gatedSkill,
+      level: 'project',
+      allowedTools: undefined,
+    } as unknown as SkillConfig;
+
+    applySkillSideEffects(
+      { ...config, isTrustedFolder: () => false } as unknown as Config,
+      hooksOnly,
+    );
+
+    expect(addSessionAllowRule).not.toHaveBeenCalled();
+    expect(addSessionHook).not.toHaveBeenCalled();
+    expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('untrusted folder'),
+    );
   });
 
   it('is a no-op without a config', () => {
