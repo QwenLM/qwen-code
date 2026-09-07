@@ -9,7 +9,7 @@ import { Ajv, type ValidateFunction } from 'ajv';
 import dialectSchema from '../schemas/dialect.schema.json' with { type: 'json' };
 // eslint-disable-next-line import/no-internal-modules -- bundle the canonical package schema
 import instanceConfigSchema from '../schemas/instance-config.schema.json' with { type: 'json' };
-import type { DialectV1, InstanceConfigV1 } from './types.js';
+import type { DialectV1, InstanceConfigV2 } from './types.js';
 
 const ajv = new Ajv({ allErrors: true, strict: true });
 const validateInstance = ajv.compile(instanceConfigSchema);
@@ -17,15 +17,19 @@ const validateDialect = ajv.compile(dialectSchema);
 
 export class ConfigurationError extends Error {}
 
-export function parseInstanceConfig(value: unknown): InstanceConfigV1 {
-  requireValid(validateInstance, value);
-  const parsed = value as Omit<InstanceConfigV1, 'endpoint'> & {
+export function parseInstanceConfig(value: unknown): InstanceConfigV2 {
+  requireValid(
+    validateInstance,
+    value,
+    'Mem0 extension instance configuration is invalid.',
+  );
+  const parsed = value as Omit<InstanceConfigV2, 'endpoint'> & {
     endpoint: Omit<
-      InstanceConfigV1['endpoint'],
+      InstanceConfigV2['endpoint'],
       'basePath' | 'allowInsecureHttp'
     > &
       Partial<
-        Pick<InstanceConfigV1['endpoint'], 'basePath' | 'allowInsecureHttp'>
+        Pick<InstanceConfigV2['endpoint'], 'basePath' | 'allowInsecureHttp'>
       >;
   };
   return {
@@ -39,15 +43,20 @@ export function parseInstanceConfig(value: unknown): InstanceConfigV1 {
 }
 
 export function parseDialect(value: unknown): DialectV1 {
-  requireValid(validateDialect, value);
+  requireValid(
+    validateDialect,
+    value,
+    'Mem0 extension dialect configuration is invalid.',
+  );
   return value as DialectV1;
 }
 
 function requireValid(
   validate: ValidateFunction,
   value: unknown,
+  message: string,
 ): asserts value is object {
   if (!validate(value)) {
-    throw new ConfigurationError('Mem0 extension configuration is invalid.');
+    throw new ConfigurationError(message);
   }
 }

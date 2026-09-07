@@ -14,13 +14,14 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
-import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import {
-  FatalSandboxError,
-  Storage,
-  isSubpath,
-  resolveBundleDir,
-} from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SandboxConfig,
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -654,7 +655,10 @@ export async function start_sandbox(
     containerName = `${imageName}-${randomBytes(4).toString('hex')}`;
     writeStderrLine(`ContainerName (regular): ${containerName}`);
   }
-  args.push('--name', containerName, '--hostname', containerName);
+  args.push('--name', containerName);
+  if (containerName.length <= 64) {
+    args.push('--hostname', containerName);
+  }
 
   // copy QWEN_CODE_TEST_VAR for integration tests
   if (process.env['QWEN_CODE_TEST_VAR']) {

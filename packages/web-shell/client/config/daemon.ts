@@ -7,6 +7,27 @@ export function getDaemonBaseUrl(): string {
   return getAllowedDaemonOrigin(raw);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '[::1]'
+  );
+}
+
+/**
+ * Whether the browser and the daemon are on the same machine. Host-local
+ * affordances (e.g. opening a folder in the OS file manager) only make sense
+ * then; a LAN-paired client must not see them.
+ */
+export function isLocalDaemon(): boolean {
+  if (typeof window === 'undefined') return false;
+  const base = getDaemonBaseUrl();
+  const hostname = base ? new URL(base).hostname : window.location.hostname;
+  return isLoopbackHostname(hostname);
+}
+
 let cachedDaemonToken: string | undefined;
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
@@ -126,12 +147,7 @@ function getAllowedDaemonOrigin(raw: string): string {
     const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     if (!isHttp) return '';
     if (parsed.origin === window.location.origin) return parsed.origin;
-    const isLocalhost =
-      parsed.hostname === 'localhost' ||
-      parsed.hostname === '127.0.0.1' ||
-      parsed.hostname === '::1' ||
-      parsed.hostname === '[::1]';
-    if (!isLocalhost) return '';
+    if (!isLoopbackHostname(parsed.hostname)) return '';
     const pagePort =
       window.location.port ||
       (window.location.protocol === 'https:' ? '443' : '80');

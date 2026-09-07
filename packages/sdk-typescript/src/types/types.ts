@@ -415,7 +415,10 @@ export interface QueryOptions {
    * loadable via `tool_search` while ToolSearch is registered; when ToolSearch
    * is not registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
    * rule, or the automatic DeepSeek opt-out) the demoted tools are out of
-   * reach for that session and a warning is logged. Tools already deferred by
+   * reach for that session and a warning is logged. Two carve-outs: demoted
+   * tools referenced in resumed session history get their schemas re-sent
+   * without a warning, and demoted tools listed in `tools.visible` are
+   * declared up front. Tools already deferred by
    * default remain on
    * demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -468,7 +471,9 @@ export interface QueryOptions {
    *   `tool_search` while ToolSearch is registered; when ToolSearch is not
    *   registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
    *   rule, or the automatic DeepSeek opt-out) the demoted tools are out of
-   *   reach for that session and a warning is logged (#9827)
+   *   reach for that session and a warning is logged — except demoted tools
+   *   referenced in resumed session history (re-sent without a warning) or
+   *   listed in `tools.visible` (declared up front) (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

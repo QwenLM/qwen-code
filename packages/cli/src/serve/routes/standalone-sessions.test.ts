@@ -26,6 +26,13 @@ function createHarness({
   isWorkspaceTrusted?: () => boolean;
 } = {}) {
   const service = {
+    getOptions: vi.fn(async () => ({
+      v: 1 as const,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default' as const,
+      providers: [],
+    })),
     create: vi.fn(async () => ({
       session: {
         sessionId,
@@ -101,6 +108,28 @@ function createHarness({
 
 describe('standalone session routes', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it('returns session options without accepting workspace inputs', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get('/standalone/session-options');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      v: 1,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default',
+      providers: [],
+    });
+    expect(service.getOptions).toHaveBeenCalledOnce();
+
+    const invalid = await request(app).get(
+      '/standalone/session-options?cwd=/tmp',
+    );
+    expect(invalid.status).toBe(400);
+    expect(service.getOptions).toHaveBeenCalledOnce();
+  });
 
   it('creates a prompt-less standalone session without workspace inputs', async () => {
     const { app, service } = createHarness();
