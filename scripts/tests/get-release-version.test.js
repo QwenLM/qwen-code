@@ -946,7 +946,7 @@ describe('assertVersionUnreleased', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '' })).toBe(2);
     expect(logSpy).toHaveBeenCalledWith(
-        '::error::assert-unreleased requires a version in release format, e.g. --assert-unreleased=1.2.3',
+      '::error::assert-unreleased requires a version in release format, e.g. --assert-unreleased=1.2.3',
     );
   });
 
