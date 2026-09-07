@@ -326,6 +326,46 @@ export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
 export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
   return Math.max(1, Math.floor(outerWaitMs * 0.8));
 }
+
+/**
+ * Backoff for a conditional close that keeps failing.
+ *
+ * One deferral is the documented recovery for a lost close response: the next
+ * snapshot asks again, and a child that already closed answers `closed` for a
+ * Session it no longer has. That first retry therefore stays immediate. What
+ * is not recoverable is the same probe failing on every snapshot forever — a
+ * Session the child can never settle would otherwise be re-probed at the
+ * report cadence for the lifetime of the daemon, spending a full drain budget
+ * each time. Past `GRACE` consecutive failures the next probe is deferred
+ * geometrically up to `CEILING`.
+ *
+ * The count resets on any evidence that the world moved on — the child
+ * answering a probe either way, a snapshot reporting held work, or a snapshot
+ * omitting the Session because the child has let go of it — so a wedge that
+ * resolves visibly is never stranded, and goes back to being probed on the
+ * next snapshot exactly as it was before the run of failures began. A wedge
+ * that resolves silently is not: work of a kind the child cannot report as a
+ * hold (see #11118) produces none of those signals, so such a Session is
+ * probed again when the rung expires instead, and `CEILING` is what bounds
+ * that rather than any reset.
+ */
+export const ACTIVE_WORK_CLOSE_RETRY_GRACE = 1;
+export const ACTIVE_WORK_CLOSE_RETRY_BASE_MS = 60_000;
+export const ACTIVE_WORK_CLOSE_RETRY_CEILING_MS = 3_600_000;
+
+/**
+ * How long to defer the next conditional-close probe after `failures`
+ * consecutive unanswered probes; `null` while probing stays immediate.
+ */
+export function activeWorkCloseRetryDelayMs(failures: number): number | null {
+  if (failures <= ACTIVE_WORK_CLOSE_RETRY_GRACE) return null;
+  const exponent = failures - ACTIVE_WORK_CLOSE_RETRY_GRACE - 1;
+  return Math.min(
+    ACTIVE_WORK_CLOSE_RETRY_BASE_MS * 2 ** exponent,
+    ACTIVE_WORK_CLOSE_RETRY_CEILING_MS,
+  );
+}
+
 /** Bounds on a single snapshot. Generous next to any real deployment — it
  *  exists so a version-skewed or buggy child cannot make the daemon walk an
  *  unbounded Session list per report. An oversized packet is discarded whole. */
@@ -1368,6 +1408,7 @@ export interface BridgeBackgroundNotification {
   status: 'completed' | 'failed' | 'cancelled';
   kind: 'agent';
   toolUseId?: string;
+  label?: string;
 }
 
 export type RuntimeMcpServerAddResult =
