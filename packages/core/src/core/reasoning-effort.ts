@@ -149,18 +149,14 @@ export function parseModelReasoningCapabilities(
   ) {
     return undefined;
   }
-  // Downstream reads `toggleOnly` by truthiness and `canDisable` by
-  // `=== false`, so a mistyped value would silently change the declaration
-  // instead of failing the entry.
-  const toggleOnly = candidate['toggleOnly'];
-  if (toggleOnly !== undefined && typeof toggleOnly !== 'boolean') {
+  if (
+    ('toggleOnly' in candidate &&
+      typeof candidate['toggleOnly'] !== 'boolean') ||
+    ('canDisable' in candidate && candidate['canDisable'] !== false)
+  ) {
     return undefined;
   }
-  const canDisable = candidate['canDisable'];
-  if (canDisable !== undefined && canDisable !== false) {
-    return undefined;
-  }
-  if (toggleOnly === true) {
+  if (candidate['toggleOnly'] === true) {
     return candidate as unknown as ModelReasoningCapabilities;
   }
   const efforts = candidate['efforts'];

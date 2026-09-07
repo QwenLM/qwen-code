@@ -143,17 +143,12 @@ export function getConfiguredModelReasoning(
 ): ModelReasoningConfiguration | undefined {
   const generation = config.getContentGeneratorConfig?.();
   const authType = generation?.authType ?? config.getAuthType?.();
-  // Key the registry lookup on the registry's own base URL, never the live
-  // endpoint: an env/flag/settings baseUrl override points the live endpoint
-  // away from the registry entry that declares the capability, so an exact
-  // match on it misses while the preview surfaces still read the entry. The
-  // unscoped fallback mirrors the resolver idiom in modelsConfig
-  // (syncAfterAuthRefresh) so the entry is still found by id.
-  const registryBaseUrl =
-    config.getCurrentModelRegistryBaseUrl?.() ?? undefined;
+  const baseUrl =
+    generation?.baseUrl ??
+    config.getCurrentModelRegistryBaseUrl?.() ??
+    undefined;
   const configured = authType
-    ? (config.getResolvedModelConfig?.(authType, modelId, registryBaseUrl) ??
-      config.getResolvedModelConfig?.(authType, modelId))
+    ? config.getResolvedModelConfig?.(authType, modelId, baseUrl)
     : undefined;
   const reasoning = parseModelReasoningCapabilities(
     configured?.capabilities?.reasoning,

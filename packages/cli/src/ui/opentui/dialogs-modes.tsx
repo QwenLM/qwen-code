@@ -193,29 +193,11 @@ export function OpenTuiEffortDialog(props: {
   // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
-  const initialIndex = Math.max(0, configuredIndex);
-  const [sel, setSel] = useState(initialIndex);
-  // "Just looking" must be read from the user's movement, not the cursor's
-  // position: arrowing away and back lands on initialIndex again, where a
-  // position test would re-arm the guard against a deliberate pick. A
-  // boundary-clamped arrow leaves sel unchanged, so it never arms this.
-  const movedOffInitial = useRef(false);
-  useEffect(() => {
-    if (sel !== initialIndex) movedOffInitial.current = true;
-  }, [sel, initialIndex]);
+  const [sel, setSel] = useState(Math.max(0, configuredIndex));
   useEsc(onClose);
   const pick = () => {
     const effort = tiers[sel];
-    // On a forced cursor, confirming without moving is the "just looking"
-    // gesture: close without persisting a tier the user never chose over the
-    // stored global value (ink EffortDialog parity). A single-row list has
-    // no "just looking" gesture to distinguish, so it confirms its row.
-    const forcedCursor =
-      currentEffort &&
-      configuredIndex === -1 &&
-      tiers.length > 1 &&
-      !movedOffInitial.current;
-    if (effort && !forcedCursor) {
+    if (effort) {
       try {
         // Apply at runtime (next turn) and persist for future sessions;
         // provider adapters clamp the tier per model (ink useEffortCommand
@@ -248,11 +230,9 @@ export function OpenTuiEffortDialog(props: {
         }
         onPick={pick}
       />
-      {configuredIndex === -1 ? (
+      {currentEffort && configuredIndex === -1 ? (
         <text fg={C.dim}>
-          {currentEffort
-            ? `${currentEffort} is not available for this model — using the model/provider default.`
-            : 'No effort configured — using the model/provider default.'}
+          {`${currentEffort} is not available for this model — using the model/provider default.`}
         </text>
       ) : null}
     </Shell>

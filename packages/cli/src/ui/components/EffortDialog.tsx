@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useRef } from 'react';
+import { useCallback } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
@@ -14,7 +14,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { keyMatchers, Command } from '../keyMatchers.js';
 import { t } from '../../i18n/index.js';
 
 interface EffortDialogProps {
@@ -49,55 +48,21 @@ export function EffortDialog({
   // at the top rather than highlighting 'high', and so does a tier the global
   // `model.reasoningEffort` carried over from another model (only ACP sessions
   // reconcile it) — either way the cursor must not read as "this tier is
-  // current".
+  // current", or a bare Enter silently overwrites the stored value with it.
   const configuredIndex = currentEffort ? efforts.indexOf(currentEffort) : -1;
   const initialIndex = Math.max(0, configuredIndex);
-  // Armed only by the user's own input — a digit quick-select, a navigation
-  // key, or a click (onSelectIntent below). Pointer hover reaches the list
-  // through the same highlight channel as real navigation, so highlight
-  // state cannot tell "just looking" apart from an explicit pick; input can.
-  const explicitChoice = useRef(false);
-
-  const handleSelectIntent = useCallback(() => {
-    explicitChoice.current = true;
-  }, []);
 
   const handleSelect = useCallback(
     (effort: ReasoningEffort) => {
-      // On a forced cursor, confirming without an explicit choice gesture is
-      // the "just looking" act: cancel rather than persist a tier the user
-      // never chose over the stored global value, which is still valid on
-      // other models. A single-row list has no "just looking" gesture to
-      // distinguish, so it confirms the row it shows.
-      if (
-        currentEffort &&
-        configuredIndex === -1 &&
-        efforts.length > 1 &&
-        !explicitChoice.current
-      ) {
-        onSelect(undefined);
-        return;
-      }
       onSelect(effort);
     },
-    [onSelect, currentEffort, configuredIndex, efforts.length],
+    [onSelect],
   );
 
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
         onSelect(undefined);
-        return;
-      }
-      // A nav key fails to move the cursor only on a single-row list, where
-      // the guard above never runs — so arming here never credits a clamped
-      // no-op arrow as a choice.
-      if (
-        /^[0-9]$/.test(key.sequence) ||
-        keyMatchers[Command.SELECTION_UP](key) ||
-        keyMatchers[Command.SELECTION_DOWN](key)
-      ) {
-        explicitChoice.current = true;
       }
     },
     { isActive: true },
@@ -123,7 +88,6 @@ export function EffortDialog({
         items={items}
         initialIndex={initialIndex}
         onSelect={handleSelect}
-        onSelectIntent={handleSelectIntent}
         isFocused
         showNumbers
       />

@@ -33,8 +33,6 @@ export interface RadioButtonSelectProps<T> {
   onSelect: (value: T) => void;
   /** Function called when an item is highlighted. Receives the `value` of the selected item. */
   onHighlight?: (value: T) => void;
-  /** Function called when the user performs an explicit selection gesture (clicking a row). */
-  onSelectIntent?: () => void;
   /** Whether this select input is currently focused and should respond to input. */
   isFocused?: boolean;
   /** Whether to show the scroll arrows. */
@@ -56,7 +54,6 @@ export function RadioButtonSelect<T>({
   initialIndex = 0,
   onSelect,
   onHighlight,
-  onSelectIntent,
   isFocused = true,
   showScrollArrows = false,
   maxItemsToShow = 10,
@@ -68,7 +65,6 @@ export function RadioButtonSelect<T>({
       initialIndex={initialIndex}
       onSelect={onSelect}
       onHighlight={onHighlight}
-      onSelectIntent={onSelectIntent}
       isFocused={isFocused}
       showNumbers={showNumbers}
       showScrollArrows={showScrollArrows}

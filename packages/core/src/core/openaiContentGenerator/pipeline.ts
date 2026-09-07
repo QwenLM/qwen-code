@@ -884,24 +884,15 @@ export class ContentGenerationPipeline {
     }
 
     const authType = this.contentGeneratorConfig.authType;
-    // Resolve the capability with the same base-URL rule the pickers use
-    // (getConfiguredModelReasoning): key on the registry's own base URL with
-    // an unscoped fallback, never the live endpoint — an env/flag/settings
-    // baseUrl override otherwise hides the declaration here while the
-    // pickers still advertise it (or the inverse).
-    const registryBaseUrl =
-      this.config.cliConfig.getCurrentModelRegistryBaseUrl?.() ?? undefined;
-    const resolvedModelConfig = authType
-      ? (this.config.cliConfig.getResolvedModelConfig?.(
-          authType,
-          context.model,
-          registryBaseUrl,
-        ) ??
-        this.config.cliConfig.getResolvedModelConfig?.(authType, context.model))
+    const reasoningCapabilities = authType
+      ? parseModelReasoningCapabilities(
+          this.config.cliConfig.getResolvedModelConfig?.(
+            authType,
+            context.model,
+            this.contentGeneratorConfig.baseUrl,
+          )?.capabilities.reasoning,
+        )
       : undefined;
-    const reasoningCapabilities = parseModelReasoningCapabilities(
-      resolvedModelConfig?.capabilities.reasoning,
-    );
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
@@ -1046,13 +1037,7 @@ export class ContentGenerationPipeline {
           };
         }
       }
-      // Qwen-family wire models already emitted their route-correct disable
-      // shape in the branch above: re-emitting the declared field here would
-      // resurrect the top-level `enable_thinking` that branch deleted (an
-      // unknown field a validating gateway rejects, failing the AUTO-mode
-      // classifier closed) or pair it with `reasoning_effort: 'none'` on
-      // tiered DashScope — two competing knobs for one setting.
-      if (!thinkingMandatory && !isQwenFamilyWireModel(model)) {
+      if (!thinkingMandatory) {
         if (reasoningCapabilities?.disableField === 'reasoning_effort') {
           delete typed['enable_thinking'];
           delete typed['thinking_budget'];
