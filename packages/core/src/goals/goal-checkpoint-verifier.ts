@@ -176,6 +176,13 @@ export function createGoalCheckpointVerifier(
         purpose: 'goal-checkpoint-verifier',
         maxAttempts: 1,
         skipOutputLanguagePreference: true,
+        // Stream so a slow claims generation outlives the provider request
+        // timeout: non-streaming returns no bytes until the whole JSON is
+        // generated, so the SDK timeout (default 120 s) would abort every
+        // attempt past it and retry from zero, leaving any ceiling above
+        // that unreachable. Streamed, the timeout bounds only connect +
+        // first response and the stream guards apply instead.
+        stream: true,
         systemInstruction: GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT,
         config: {
           temperature: 0,

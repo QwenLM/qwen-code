@@ -100,6 +100,9 @@ describe('createGoalCheckpointVerifier', () => {
       model: 'fast-model',
       promptId: 'side-query:goal-checkpoint-verifier',
       maxAttempts: 1,
+      // Streamed, so the provider request timeout bounds only connect +
+      // first response and the armed ceiling stays reachable past it.
+      stream: true,
       config: {
         temperature: 0,
         responseMimeType: 'application/json',

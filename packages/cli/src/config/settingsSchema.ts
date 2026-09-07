@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -1641,8 +1642,10 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: undefined as number | undefined,
+        minimum: 1,
+        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
         description:
-          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; the call is abandoned at this ceiling and counts as a stalled checkpoint when the evidence window had overflowed. Unset uses the built-in default of 180. Must be an integer between 1 and 3,600 (one hour, a typo guard); other values are rejected at startup.',
+          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; a call that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. Unset uses the built-in default of 180. Must be an integer between 1 and 3,600 (one hour, a typo guard); other values are rejected at startup. The call is streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response; ceilings past the reach of the stream guards (QWEN_STREAM_MAX_LIFETIME_MS, default 900 s) require raising that too.',
         showInDialog: false,
       },
       maxToolCalls: {
