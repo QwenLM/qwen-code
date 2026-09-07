@@ -324,11 +324,9 @@ async function openSessionAction(
   sessionName: string,
   actionName: string,
 ): Promise<void> {
-  const row = page.locator('[role="button"]').filter({
-    has: page.locator('[data-web-shell-session-title]', {
-      hasText: sessionName,
-    }),
-  });
+  const row = page
+    .locator('[data-web-shell-session-title]', { hasText: sessionName })
+    .locator('..');
   await row.hover();
   await row.getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: actionName, exact: true }).click();
