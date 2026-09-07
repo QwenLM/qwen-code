@@ -27,6 +27,13 @@ import {
   enableTasksForSessions,
   removeTasksForSessions,
 } from '../scheduled-task-session-lifecycle.js';
+import {
+  acquireWorktreeCleanupLock,
+  executeWorktreeCleanup,
+  logWorktreeCleanupPreserve,
+  preclassifyWorktreeCleanup,
+  verifyWorktreeCleanupOwnership,
+} from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -517,6 +524,47 @@ export async function deleteDaemonSessions(params: {
       coordinator.assertNotTransitioning(sessionId);
     }
   }
+  // Ownership-verified worktree cleanup (#11024): classify before the
+  // record deletion (the deletion destroys the sidecar), execute only
+  // after a confirmed removal, all under the worktree ownership lock so
+  // no restore or reset can interleave. Only the caller-locked path is
+  // armed: with `coordinatorLockHeld` an outer batch lock is already
+  // held, taking the worktree lock there would invert the
+  // worktree→coordinator order restores and resets follow — and
+  // internal-runtime sessions never own Part 4A worktrees.
+  const runWithWorktreeCleanup = async (
+    sessionId: string,
+    mutateSession: () => Promise<DeleteOneResult>,
+  ): Promise<DeleteOneResult> => {
+    const cleanupPlan = await preclassifyWorktreeCleanup(service, sessionId);
+    if (!cleanupPlan) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const releaseCleanupLock = await acquireWorktreeCleanupLock(cleanupPlan);
+    try {
+      const ownership = await verifyWorktreeCleanupOwnership(cleanupPlan);
+      if (!ownership.ok) {
+        logWorktreeCleanupPreserve(sessionId, ownership.reason);
+      }
+      const result = await coordinator.runExclusiveMany(
+        [sessionId],
+        mutateSession,
+      );
+      if (ownership.ok && result.kind === 'removed') {
+        try {
+          await executeWorktreeCleanup(cleanupPlan);
+        } catch (error) {
+          logWorktreeCleanupPreserve(
+            sessionId,
+            `cleanup execution failed: ${errorMessage(error)}`,
+          );
+        }
+      }
+      return result;
+    } finally {
+      releaseCleanupLock();
+    }
+  };
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
@@ -581,7 +629,7 @@ export async function deleteDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : runWithWorktreeCleanup(sessionId, mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
