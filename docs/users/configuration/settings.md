@@ -661,6 +661,33 @@ Configures logging and metrics collection for Qwen Code. For more information, s
 | `telemetry.sensitiveSpanAttributeMaxLength` | number  | Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Must be between `1` and `104857600` (100 MiB). Set lower if your collector or backend rejects large attributes.                                                                          | `1048576` |
 | `telemetry.outfile`                         | string  | Path to write telemetry to a file. When set, overrides OTLP export.                                                                                                                                                                                                                      |           |
 
+#### outboundCorrelation
+
+⚠️ **Security-relevant.** Controls what client-side correlation data qwen-code writes into outbound LLM API requests — a separate consent decision from `telemetry.*` (which governs data flowing into your OWN observability backend). All values default to off.
+
+| Setting                                            | Type     | Description                                                                                                                                                                      | Default      |
+| -------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `outboundCorrelation.propagateTraceContext`        | boolean  | Inject W3C `traceparent` on outbound `fetch` requests and as a `TRACEPARENT` env var in shell child processes. Requires `telemetry.enabled: true`.                               | `false`      |
+| `outboundCorrelation.sessionIdHeader.enabled`      | boolean  | Master switch for sending the qwen-code session ID as a per-request header to the hosts you list. When off (default), nothing is sent beyond the built-in first-party allowlist. | `false`      |
+| `outboundCorrelation.sessionIdHeader.headerName`   | string   | Header name to set. Must be a valid HTTP header name (letters, digits, `.`, `_`, `-`); an invalid name is ignored with a warning.                                                | `session_id` |
+| `outboundCorrelation.sessionIdHeader.trustedHosts` | string[] | Exact hostnames (no wildcards) allowed to receive the header. HTTPS requests only; matching is case-insensitive. An empty list sends nothing even when enabled.                  | `[]`         |
+
+The session ID is resolved per request, so `/new` and `/resume` rotate the value without restarting. Some gateways require such a per-conversation identifier — for example OpenCode Go rejects requests without `x-opencode-session` since 2026-09-06:
+
+```json
+{
+  "outboundCorrelation": {
+    "sessionIdHeader": {
+      "enabled": true,
+      "headerName": "x-opencode-session",
+      "trustedHosts": ["opencode.ai"]
+    }
+  }
+}
+```
+
+**Privacy note:** the header is a stable identifier that lets every listed host group all requests of one conversation. Only list hosts you already send your prompt content to.
+
 ### Example `settings.json`
 
 Here is an example of a `settings.json` file with the nested structure, new as of v0.3.0:

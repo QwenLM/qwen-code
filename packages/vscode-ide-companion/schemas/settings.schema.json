@@ -637,6 +637,30 @@
           "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
           "type": "boolean",
           "default": false
+        },
+        "sessionIdHeader": {
+          "description": "Send the qwen-code session ID as a per-request header to the listed HTTPS hosts. Default off with an empty host list — nothing is sent unless you opt in. Use for gateways that require a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session` since 2026-09-06). The value is resolved per request, so `/new` and `/resume` rotate it. Privacy: listed hosts can group every request of one conversation under a stable ID — only list hosts you already send your prompts to.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Master switch. Default false: no user-configured session header is sent anywhere.",
+              "type": "boolean",
+              "default": false
+            },
+            "headerName": {
+              "description": "Header name to set, e.g. `x-opencode-session`. Must be a valid HTTP header name (letters, digits, dot, underscore, hyphen); an invalid name is ignored with a warning. Default: `session_id`.",
+              "type": "string"
+            },
+            "trustedHosts": {
+              "description": "Exact hostnames (no wildcards) allowed to receive the header, e.g. `[\"opencode.ai\"]`. HTTPS requests only; matching is case-insensitive. Default empty — `enabled: true` with no hosts sends nothing.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false,

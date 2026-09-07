@@ -645,6 +645,49 @@ export interface OutboundCorrelationSettings {
    * Tracing + DashScope — for cross-process trace stitching.
    */
   propagateTraceContext?: boolean;
+  /**
+   * Send the qwen-code session ID as a per-request header to
+   * user-chosen HTTPS hosts. Default: disabled with an empty host
+   * list — nothing is sent anywhere unless the operator opts in.
+   *
+   * Some OpenAI-compatible gateways require a stable per-conversation
+   * identifier for prompt-cache routing (e.g. OpenCode Go rejects
+   * requests without `x-opencode-session` since 2026-09-06). The value
+   * is resolved per request from `getSessionId()`, so `/new` and
+   * `/resume` rotate it without rebuilding the client.
+   *
+   * Privacy: the header is a stable identifier that lets the listed
+   * hosts group every request of one conversation. Only list hosts you
+   * already send your prompts to; see
+   * docs/design/telemetry-outbound-propagation-design.md §12.7.
+   */
+  sessionIdHeader?: OutboundSessionIdHeaderSettings;
+}
+
+/**
+ * User-configurable session-ID header for outbound LLM requests.
+ * Lives under `outboundCorrelation.*` — see the parent interface for
+ * why this namespace is separate from `telemetry.*`.
+ */
+export interface OutboundSessionIdHeaderSettings {
+  /**
+   * Master switch. Default `false`: no user-configured header is sent,
+   * and `trustedHosts`/`headerName` are ignored.
+   */
+  enabled?: boolean;
+  /**
+   * Header name to set, e.g. `x-opencode-session`. Must be a valid
+   * HTTP token (letters, digits, `-`); an invalid name is ignored with
+   * a debug warning rather than sent. Default: `session_id`.
+   */
+  headerName?: string;
+  /**
+   * Exact hostnames (no wildcards) that may receive the header, e.g.
+   * `["opencode.ai"]`. HTTPS only. Matching is case-insensitive.
+   * Default: empty — with `enabled: true` but no hosts, nothing is
+   * sent (fail-closed rather than "all hosts").
+   */
+  trustedHosts?: string[];
 }
 
 export interface OutputSettings {
@@ -2617,6 +2660,7 @@ export class Config {
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
+      sessionIdHeader: params.outboundCorrelation?.sessionIdHeader,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -7508,6 +7552,20 @@ export class Config {
    */
   getOutboundCorrelationPropagateTraceContext(): boolean {
     return this.outboundCorrelationSettings.propagateTraceContext ?? false;
+  }
+
+  /**
+   * The user-configured session-ID header settings, or `undefined`
+   * when the feature is off (the default). Consumers treat `undefined`
+   * as "send nothing beyond the built-in first-party allowlist" — see
+   * `core/outbound-session-id.ts`.
+   */
+  getOutboundSessionIdHeaderSettings():
+    | OutboundSessionIdHeaderSettings
+    | undefined {
+    const settings = this.outboundCorrelationSettings.sessionIdHeader;
+    if (!settings?.enabled) return undefined;
+    return settings;
   }
 
   getTelemetryOutfile(): string | undefined {
