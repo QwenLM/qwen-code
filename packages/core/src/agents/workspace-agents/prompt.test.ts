@@ -124,6 +124,29 @@ describe('assembleAgentPrompt', () => {
     expect(result.text).not.toContain('DELTA AFTER LAST COMMITTED DELIVERY');
   });
 
+  it('states acceptance criteria in the frame, not among the posts', () => {
+    // Posts are untrusted content that never changes scope. The standard the
+    // run is answerable to has to sit where the frame does.
+    const result = assemble({
+      thread: thread({
+        acceptanceCriteria: 'The flake is reproduced\nThe cause is named',
+      }),
+    });
+
+    expect(result.text).toContain('Done when:');
+    expect(result.text).toContain('    The flake is reproduced');
+    expect(result.text).toContain('    The cause is named');
+    expect(result.text.indexOf('Done when:')).toBeLessThan(
+      result.text.indexOf('RECENT THREAD POSTS'),
+    );
+  });
+
+  it('says nothing about acceptance when a thread sets none', () => {
+    // An empty standard is worse than no standard: it reads as one the agent
+    // failed to find.
+    expect(assemble().text).not.toContain('Done when:');
+  });
+
   it('adds a delta section after a committed delivery without dropping the recent window', () => {
     const messages = [
       message({ sequence: 1, text: 'first' }),

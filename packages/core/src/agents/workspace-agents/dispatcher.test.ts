@@ -114,6 +114,138 @@ async function seedQueued(overrides: Partial<Thread> = {}): Promise<Thread> {
 }
 
 describe('selectCandidates', () => {
+  it('lets priority outrank age, and only priority', () => {
+    // The queue is first-come by design. Priority is the one thing allowed to
+    // reorder it, so an urgent thread booked later still goes first.
+    const old = threadFixture({
+      id: 'th_old',
+      rootThreadId: 'th_old',
+      runs: [run({ id: 'rn_old', queueSequence: 1 })],
+    });
+    const urgent = threadFixture({
+      id: 'th_urgent',
+      rootThreadId: 'th_urgent',
+      priority: 'urgent',
+      runs: [run({ id: 'rn_urgent', queueSequence: 99 })],
+    });
+
+    expect(
+      selectCandidates([{ ...ALICE, maxConcurrentRuns: 5 }], [old, urgent]).map(
+        (c) => c.run.id,
+      ),
+    ).toEqual(['rn_urgent', 'rn_old']);
+  });
+
+  it('stays first-come within one priority', () => {
+    // Otherwise a steady arrival of equal-priority peers could starve a
+    // thread that has been waiting.
+    const late = threadFixture({
+      id: 'th_late',
+      rootThreadId: 'th_late',
+      priority: 'high',
+      runs: [run({ id: 'rn_late', queueSequence: 9 })],
+    });
+    const early = threadFixture({
+      id: 'th_early',
+      rootThreadId: 'th_early',
+      priority: 'high',
+      runs: [run({ id: 'rn_early', queueSequence: 2 })],
+    });
+
+    expect(
+      selectCandidates([{ ...ALICE, maxConcurrentRuns: 5 }], [late, early]).map(
+        (c) => c.run.id,
+      ),
+    ).toEqual(['rn_early', 'rn_late']);
+  });
+
+  it('ranks a thread with no priority as normal, neither sinking nor jumping', () => {
+    // A thread written before the field existed must keep its place.
+    const none = threadFixture({
+      id: 'th_none',
+      rootThreadId: 'th_none',
+      runs: [run({ id: 'rn_none', queueSequence: 5 })],
+    });
+    const low = threadFixture({
+      id: 'th_low',
+      rootThreadId: 'th_low',
+      priority: 'low',
+      runs: [run({ id: 'rn_low', queueSequence: 1 })],
+    });
+    const high = threadFixture({
+      id: 'th_high',
+      rootThreadId: 'th_high',
+      priority: 'high',
+      runs: [run({ id: 'rn_high', queueSequence: 9 })],
+    });
+
+    expect(
+      selectCandidates(
+        [{ ...ALICE, maxConcurrentRuns: 5 }],
+        [none, low, high],
+      ).map((c) => c.run.id),
+    ).toEqual(['rn_high', 'rn_none', 'rn_low']);
+  });
+
+  it('fills an agent only to its concurrency limit', () => {
+    const first = threadFixture({
+      id: 'th_1',
+      rootThreadId: 'th_1',
+      runs: [run({ id: 'rn_1', queueSequence: 1 })],
+    });
+    const second = threadFixture({
+      id: 'th_2',
+      rootThreadId: 'th_2',
+      runs: [run({ id: 'rn_2', queueSequence: 2 })],
+    });
+    const third = threadFixture({
+      id: 'th_3',
+      rootThreadId: 'th_3',
+      runs: [run({ id: 'rn_3', queueSequence: 3 })],
+    });
+
+    expect(
+      selectCandidates(
+        [{ ...ALICE, maxConcurrentRuns: 2 }],
+        [first, second, third],
+      ).map((c) => c.run.id),
+    ).toEqual(['rn_1', 'rn_2']);
+  });
+
+  it('counts a live run against that limit', () => {
+    // Capacity is what is left, not what the policy allows in total.
+    const working = threadFixture({
+      id: 'th_live',
+      rootThreadId: 'th_live',
+      runs: [run({ id: 'rn_live', status: 'running', queueSequence: 1 })],
+    });
+    const waiting = threadFixture({
+      id: 'th_wait',
+      rootThreadId: 'th_wait',
+      runs: [run({ id: 'rn_wait', queueSequence: 2 })],
+    });
+
+    expect(
+      selectCandidates(
+        [{ ...ALICE, maxConcurrentRuns: 1 }],
+        [working, waiting],
+      ),
+    ).toEqual([]);
+  });
+
+  it('offers nothing to a retired agent', () => {
+    // Its name still resolves so old posts read; it just takes no work.
+    const queued = threadFixture({
+      id: 'th_r',
+      rootThreadId: 'th_r',
+      runs: [run({ id: 'rn_r', queueSequence: 1 })],
+    });
+
+    expect(selectCandidates([{ ...ALICE, retiredAt: 123 }], [queued])).toEqual(
+      [],
+    );
+  });
+
   it('takes each agent oldest-first by queue sequence, not by file order', () => {
     const later = threadFixture({
       id: 'th_aaa',

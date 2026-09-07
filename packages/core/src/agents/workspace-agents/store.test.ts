@@ -58,6 +58,9 @@ import {
   readAgentWorkspace,
   readThread,
   reconcileThreadOutbox,
+  retireWorkspaceAgent,
+  isAgentAddressable,
+  updateWorkspaceAgents,
   updateThread,
   withAgentStoreTransaction,
   writeThread,
@@ -530,5 +533,99 @@ describe('agent versioned store', () => {
       reason: 'token_budget_exhausted',
     });
     expect(result.dispatched).toEqual([]);
+  });
+});
+
+describe('retiring an agent', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-retire-test-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  const seed = (agents: WorkspaceAgent[]) =>
+    updateWorkspaceAgents(PROJECT_ROOT, () => agents);
+
+  it('keeps the entry so every post it made still names its author', async () => {
+    // The whole point: a thread is read long after an agent stops working,
+    // and removing the row would turn its side of the conversation into an
+    // author nobody can look up.
+    await seed([ALICE, BOB]);
+
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
+      'updated',
+    );
+
+    const roster = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(roster.map((agent) => agent.id)).toEqual([ALICE.id, BOB.id]);
+    const alice = roster.find((agent) => agent.id === ALICE.id);
+    expect(alice?.name).toBe('alice');
+    expect(alice?.retiredAt).toEqual(expect.any(Number));
+  });
+
+  it('stops the identity taking new work without disabling it', async () => {
+    // Retired and disabled are different refusals. `enabled` is untouched, so
+    // a reader can tell which one happened.
+    await seed([ALICE]);
+    await retireWorkspaceAgent(PROJECT_ROOT, ALICE.id);
+
+    const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(isAgentAddressable(alice)).toBe(false);
+    expect(alice.enabled).toBeUndefined();
+  });
+
+  it('is idempotent and does not restamp the first retirement', async () => {
+    await seed([ALICE]);
+    await retireWorkspaceAgent(PROJECT_ROOT, ALICE.id);
+    const first = (await readWorkspaceAgents(PROJECT_ROOT))[0].retiredAt;
+
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
+      'updated',
+    );
+
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0].retiredAt).toBe(first);
+  });
+
+  it('refuses while a run of its own is still live', async () => {
+    // An agent cannot be retired out from under a turn in flight.
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running' })] }),
+    );
+
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
+      'has_live_work',
+    );
+    expect(
+      (await readWorkspaceAgents(PROJECT_ROOT))[0].retiredAt,
+    ).toBeUndefined();
+  });
+
+  it("ignores another agent's live run", async () => {
+    await seed([ALICE, BOB]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running' })] }),
+    );
+
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, BOB.id)).resolves.toBe(
+      'updated',
+    );
+  });
+
+  it('reports an unknown id rather than inventing an entry', async () => {
+    await seed([ALICE]);
+
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, 'ag_nobody')).resolves.toBe(
+      'not_found',
+    );
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
   });
 });
