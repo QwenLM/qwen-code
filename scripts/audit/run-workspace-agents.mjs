@@ -32,6 +32,8 @@ await fs.writeFile(
 export { selectCandidates } from '${repo}/${src}/dispatcher.js';
 export { assembleAgentPrompt } from '${repo}/${src}/prompt.js';
 export { decideDispatch, resolveTargets } from '${repo}/${src}/dispatch-policy.js';
+export * from '${repo}/${src}/thread-actions.js';
+export { resolveThreadStatus } from '${repo}/${src}/thread-status.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
@@ -341,6 +343,146 @@ ok(
 ok(
   'a full queue is refused',
   decide({ agentQueuedElsewhere: 99 }).reason === 'queue_full',
+);
+
+console.log('\n7. mention routing');
+ok(
+  'an explicit mention routes to whoever was named',
+  JSON.stringify(
+    M.resolveTargets(
+      thr('t', undefined, []),
+      post({ mentions: ['ag_x'] }),
+      true,
+    ),
+  ) === '["ag_x"]',
+);
+ok(
+  'no mention falls back to the assignee',
+  JSON.stringify(
+    M.resolveTargets(
+      { ...thr('t', undefined, []), assigneeAgentId: 'ag_a' },
+      post(),
+      false,
+    ),
+  ) === '["ag_a"]',
+);
+ok(
+  'an unknown @token still suppresses the assignee fallback',
+  // Otherwise a typo silently wakes whoever the thread is assigned to.
+  M.resolveTargets(
+    { ...thr('t', undefined, []), assigneeAgentId: 'ag_a' },
+    post({ mentions: [] }),
+    true,
+  ).length === 0,
+);
+
+console.log('\n8. posting books real work');
+await M.updateWorkspaceAgents(ROOT, () => [BOB]);
+const live = await M.createThread(ROOT, {
+  title: 'Live',
+  assigneeAgentId: BOB.id,
+});
+const posted = await M.postMessage(ROOT, live.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'please look',
+});
+ok(
+  'a human post books a run for the assignee',
+  posted.dispatched.length === 1 && posted.dispatched[0].agentId === BOB.id,
+  JSON.stringify(posted.dispatched.map((r) => r.agentId)),
+);
+ok('the run starts queued', posted.dispatched[0]?.status === 'queued');
+ok(
+  'the outcome is recorded on the message',
+  posted.outcomes.some((o) => o.decision.kind === 'dispatch'),
+);
+const again = await M.postMessage(ROOT, live.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'and this too',
+});
+ok(
+  'a second post coalesces instead of booking twice',
+  again.dispatched.length === 0 &&
+    again.outcomes.some((o) => o.decision.kind === 'coalesce'),
+  JSON.stringify(again.outcomes.map((o) => o.decision.kind)),
+);
+const stored = await M.readThread(ROOT, live.id);
+ok(
+  'the thread holds exactly one run',
+  stored.runs.length === 1,
+  String(stored.runs.length),
+);
+ok(
+  'an unknown mention is reported back',
+  (
+    await M.postMessage(ROOT, live.id, {
+      from: M.HUMAN_AUTHOR_ID,
+      text: 'hi @nobody',
+    })
+  ).unknownMentions.length === 1,
+);
+
+console.log('\n9. retirement reaches the posting path');
+await M.updateWorkspaceAgents(ROOT, (a) =>
+  a.map((x) => (x.id === BOB.id ? { ...x, retiredAt: 5 } : x)),
+);
+const toRetired = await M.postMessage(ROOT, live.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'still there?',
+});
+ok(
+  'no run is booked for a retired assignee',
+  toRetired.dispatched.length === 0,
+);
+ok(
+  'and the refusal names retirement',
+  toRetired.outcomes.some((o) => o.decision.reason === 'agent_retired'),
+  JSON.stringify(toRetired.outcomes.map((o) => o.decision.reason)),
+);
+
+console.log('\n10. status is an aggregate, not a stored flag');
+const st = (thread, hasLiveChildDependency = false) =>
+  M.resolveThreadStatus({ thread, hasLiveChildDependency }).status;
+ok(
+  'a done thread reads done',
+  st({ ...thr('s', undefined, []), status: 'done' }) === 'done',
+);
+ok(
+  'a running run reads in_progress',
+  st(thr('s', undefined, [run('r', 1, { status: 'running' })])) ===
+    'in_progress',
+);
+ok(
+  'a queued run reads in_progress',
+  st(thr('s', undefined, [run('r', 1)])) === 'in_progress',
+);
+// Quiescent with no obligation falls back to the stored status, so both
+// stored values have to be checked — an earlier version of this assertion
+// used an `in_progress` fixture and expected `open`, and the harness was
+// right to refuse it.
+ok(
+  'quiescent and stored open reads open',
+  st({ ...thr('s', undefined, []), status: 'open' }) === 'open',
+);
+ok(
+  'quiescent and stored in_progress stays in_progress',
+  st(thr('s', undefined, [])) === 'in_progress',
+);
+const blocked = thr('s', undefined, [
+  run('r', 1, { status: 'completed', closeKind: 'blocked', endedAt: 2 }),
+]);
+ok(
+  'an unacknowledged blocked close reads blocked',
+  st(blocked) === 'blocked',
+  st(blocked),
+);
+const review = thr('s', undefined, [
+  run('r', 1, { status: 'completed', closeKind: 'review', endedAt: 2 }),
+]);
+ok(
+  'an unacknowledged review close reads in_review',
+  st(review) === 'in_review',
+  st(review),
 );
 
 await fs.rm(tmp, { recursive: true, force: true });
