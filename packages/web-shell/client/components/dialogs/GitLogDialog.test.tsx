@@ -91,7 +91,13 @@ describe('GitLogDialog', () => {
     mount();
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent).toContain('first change');
     expect(document.body.textContent).toContain('Ada');
     expect(document.body.textContent).toContain('2 minutes ago');
@@ -153,7 +159,14 @@ describe('GitLogDialog', () => {
     await flush();
 
     // Second call uses the accumulated offset (1 entry already loaded).
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent).toContain('newest');
     expect(document.body.textContent).toContain('older');
   });
@@ -182,8 +195,22 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(3, 50, 3, undefined);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      3,
+      50,
+      3,
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent?.match(/duplicate/g)).toHaveLength(1);
     expect(document.body.textContent).toContain('older');
   });
@@ -230,7 +257,11 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(e.sha, undefined);
+    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(
+      e.sha,
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent).toContain('the full body');
     expect(document.body.textContent).toContain('src/x.ts');
   });
@@ -330,13 +361,23 @@ describe('GitLogDialog', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <GitLogContent workspaceCwd="/repo" gitCwd="/worktrees/wt" />
+          <GitLogContent
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            gitSessionId="session-worktree"
+          />
         </I18nProvider>,
       );
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/wt');
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      '/worktrees/wt',
+      undefined,
+      'session-worktree',
+    );
 
     const loadMore = Array.from(document.body.querySelectorAll('button')).find(
       (b) => b.textContent === 'Load more',
@@ -347,7 +388,14 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, '/worktrees/wt');
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      '/worktrees/wt',
+      undefined,
+      'session-worktree',
+    );
 
     const row = document.body.querySelector(
       'button[aria-expanded="false"]',
@@ -361,6 +409,7 @@ describe('GitLogDialog', () => {
     expect(workspaceGitCommitDetail).toHaveBeenCalledWith(
       e.sha,
       '/worktrees/wt',
+      'session-worktree',
     );
   });
 });

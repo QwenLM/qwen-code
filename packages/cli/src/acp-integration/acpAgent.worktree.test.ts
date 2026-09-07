@@ -510,7 +510,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       mcpServers: [],
     });
 
-    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(SIDECAR_PATH);
+    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(
+      SIDECAR_PATH,
+      undefined,
+      SESSION_ID,
+    );
     expect(lastSessionMock?.pendingWorktreeNotice).toBeNull();
 
     mockConnectionState.resolve();
@@ -542,7 +546,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       mcpServers: [],
     });
 
-    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(SIDECAR_PATH);
+    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(
+      SIDECAR_PATH,
+      undefined,
+      SESSION_ID,
+    );
     expect(lastSessionMock?.pendingWorktreeNotice).toBe(contextMessage);
 
     mockConnectionState.resolve();

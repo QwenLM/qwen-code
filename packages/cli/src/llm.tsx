@@ -67,6 +67,7 @@ import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
+  WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
 import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
@@ -1023,6 +1024,7 @@ export async function main() {
           ),
         );
       } catch (error) {
+        if (error instanceof WorktreeOwnershipConflictError) throw error;
         debugLogger.warn(
           `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
         );

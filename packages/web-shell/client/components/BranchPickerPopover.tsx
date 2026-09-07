@@ -79,6 +79,7 @@ interface BranchPickerPopoverProps {
   onOpenChange: (open: boolean) => void;
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
   /**
@@ -317,6 +318,7 @@ export function BranchPickerPopover({
   onOpenChange,
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   side = 'bottom',
   onBranchChanged,
   status,
@@ -390,7 +392,7 @@ export function BranchPickerPopover({
       if (!silent) setLoading(true);
       setError(null);
       try {
-        const result = await ws.workspaceGitBranches(gitCwd);
+        const result = await ws.workspaceGitBranches(gitCwd, gitSessionId);
         if (requestId !== requestIdRef.current) return;
         setData(result);
         setListingFetchedAt(Date.now());
@@ -403,7 +405,7 @@ export function BranchPickerPopover({
         }
       }
     },
-    [ws, gitCwd],
+    [ws, gitCwd, gitSessionId],
   );
 
   const fetchStatus = useCallback(async () => {
@@ -412,7 +414,7 @@ export function BranchPickerPopover({
       // Mirrors the app-level poll: a worktree `?cwd=` read always computes
       // directly, so `wait` only matters for the workspace root.
       const fresh = await ws.workspaceGit(
-        gitCwd ? { cwd: gitCwd } : { wait: true },
+        gitCwd ? { cwd: gitCwd, sessionId: gitSessionId } : { wait: true },
       );
       if (requestId !== statusRequestIdRef.current) return;
       setLiveStatus(fresh);
@@ -420,7 +422,7 @@ export function BranchPickerPopover({
     } catch {
       // Keep whatever the caller passed; the hints degrade to the listing.
     }
-  }, [ws, gitCwd]);
+  }, [ws, gitCwd, gitSessionId]);
 
   // Re-read the listing and the status together so the hints never mix a
   // fresh listing with a pre-action tree snapshot.
@@ -498,7 +500,7 @@ export function BranchPickerPopover({
       clearPullPanel();
       setBusyAction('checkout');
       try {
-        await ws.workspaceGitCheckout(ref, gitCwd);
+        await ws.workspaceGitCheckout(ref, gitCwd, gitSessionId);
         showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
         onBranchChanged?.();
         onOpenChange(false);
@@ -512,6 +514,7 @@ export function BranchPickerPopover({
       ws,
       busyAction,
       gitCwd,
+      gitSessionId,
       onBranchChanged,
       onOpenChange,
       showStatus,
@@ -535,7 +538,12 @@ export function BranchPickerPopover({
     clearPullPanel();
     setBusyAction('newBranch');
     try {
-      await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);
+      await ws.workspaceGitCreateBranch(
+        newBranchName,
+        undefined,
+        gitCwd,
+        gitSessionId,
+      );
       showStatus(
         t('branchPicker.createdBranch', { branch: newBranchName }),
         'success',
@@ -551,6 +559,7 @@ export function BranchPickerPopover({
     ws,
     busyAction,
     gitCwd,
+    gitSessionId,
     newBranchName,
     onBranchChanged,
     onOpenChange,
@@ -569,7 +578,11 @@ export function BranchPickerPopover({
     clearPullPanel();
     setBusyAction('push');
     try {
-      const result = await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
+      const result = await ws.workspaceGitPush(
+        { setUpstream: true },
+        gitCwd,
+        gitSessionId,
+      );
       showStatus(result.output || t('branchPicker.pushSuccess'), 'success');
       await fetchBranches();
       onBranchChanged?.();
@@ -586,6 +599,7 @@ export function BranchPickerPopover({
     ws,
     busyAction,
     gitCwd,
+    gitSessionId,
     refreshAfterAction,
     fetchBranches,
     onBranchChanged,
@@ -608,6 +622,7 @@ export function BranchPickerPopover({
         const result = await ws.workspaceGitPull(
           opts,
           gitCwd,
+          gitSessionId,
           GIT_PULL_FETCH_TIMEOUT_MS,
         );
         // The resolution panel stays mounted (with its button spinner) while
@@ -658,6 +673,7 @@ export function BranchPickerPopover({
       ws,
       busyAction,
       gitCwd,
+      gitSessionId,
       fetchBranches,
       refreshAfterAction,
       onBranchChanged,

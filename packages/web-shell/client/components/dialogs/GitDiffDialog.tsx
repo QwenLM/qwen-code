@@ -237,10 +237,12 @@ function DiffHunks({ hunks, path }: { hunks: DaemonDiffHunk[]; path: string }) {
 function DiffFileRow({
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   file,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   file: DaemonWorkspaceGitDiffFile;
 }) {
   const { t } = useI18n();
@@ -273,7 +275,7 @@ function DiffFileRow({
         .workspaceByCwd(workspaceCwd)
         // Pass the pre-rename path so a renamed file diffs old→new (rename
         // detection) instead of showing the new path as fully added.
-        .workspaceGitDiffFile(file.path, file.oldPath, gitCwd)
+        .workspaceGitDiffFile(file.path, file.oldPath, gitCwd, gitSessionId)
         .then((result) => {
           if (cancelledRef.current) return;
           setHunks(result.hunks);
@@ -362,10 +364,12 @@ function DiffFileRow({
 export function GitDiffContent({
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
@@ -380,7 +384,7 @@ export function GitDiffContent({
     setError(false);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitDiff(gitCwd)
+      .workspaceGitDiff(gitCwd, gitSessionId)
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -393,7 +397,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd]);
+  }, [client, workspaceCwd, gitCwd, gitSessionId]);
 
   const subtitle =
     diff && diff.available
@@ -428,6 +432,7 @@ export function GitDiffContent({
             key={`${workspaceCwd}:${gitCwd ?? ''}:${file.path}`}
             workspaceCwd={workspaceCwd}
             gitCwd={gitCwd}
+            gitSessionId={gitSessionId}
             file={file}
           />
         ))}

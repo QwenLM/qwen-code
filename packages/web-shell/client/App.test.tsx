@@ -11709,6 +11709,183 @@ describe('App read-only local commands mid-turn', () => {
 });
 
 describe('App session callbacks', () => {
+  it('submits the selected isolation when the daemon preflight allows a worktree', async () => {
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+
+    expect(
+      container
+        .querySelector('[role="radio"][value="current"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-1',
+        });
+      });
+    });
+
+    mockSessionActions.branchSession.mockClear();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    const worktree = container.querySelector<HTMLButtonElement>(
+      '[role="radio"][value="worktree"]',
+    );
+    expect(worktree).not.toBeNull();
+    act(() => worktree?.click());
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-1',
+          worktree: {},
+        });
+      });
+    });
+
+    mockSessionActions.branchSession.mockClear();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-3');
+    });
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+
+    workspaceGit.mockResolvedValueOnce({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: false,
+    });
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-2');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-2',
+        });
+      });
+    });
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+  });
+
+  it('does not let an older branch request close a newer session dialog', async () => {
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const branch = deferred<{
+      sessionId: string;
+      displayName: string;
+      switchStarted: boolean;
+    }>();
+    mockSessionActions.branchSession
+      .mockReturnValueOnce(branch.promise)
+      .mockResolvedValue({
+        sessionId: 'branch-b',
+        displayName: 'Branch B',
+        switchStarted: false,
+      });
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-a');
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[role="radio"][value="worktree"]')
+        ?.click();
+    });
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await vi.waitFor(() => {
+      expect(workspaceGit).toHaveBeenCalledWith({
+        cwd: undefined,
+        sessionId: 'session-2',
+      });
+    });
+    await flush();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-b');
+    });
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+
+    await act(async () => {
+      branch.resolve({
+        sessionId: 'branch-a',
+        displayName: 'Branch A',
+        switchStarted: false,
+      });
+      await branch.promise;
+    });
+
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+  });
+
   it('forwards an Assistant checkpoint and returns the pending branch request', async () => {
     const branch = deferred<{
       sessionId: string;
@@ -11728,10 +11905,9 @@ describe('App session callbacks', () => {
         testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
     });
 
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'checkpoint-1',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'checkpoint-1',
+    });
     expect(request!).toBeInstanceOf(Promise);
     expect(duplicate).toBe(request);
     expect(mockSessionActions.branchSession).toHaveBeenCalledTimes(1);
@@ -11812,6 +11988,51 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('refreshes the source catalog after a late worktree activation failure', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other-project';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          500,
+          {
+            code: 'branch_worktree_activation_failed',
+            sessionId: 'branch-1',
+          },
+          'Activation failed',
+        ),
+      );
+      await request;
+    });
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
+    );
+  });
+
   it('reloads the transcript when a historical checkpoint becomes stale', async () => {
     const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
     mockConnection.capabilities.features = ['session_transcript_pagination'];
@@ -11832,10 +12053,9 @@ describe('App session callbacks', () => {
       );
     });
 
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'stale-checkpoint',
+    });
     expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
       expect.any(AbortSignal),
     );
@@ -11863,10 +12083,9 @@ describe('App session callbacks', () => {
       request =
         testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
     });
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'stale-checkpoint',
+    });
 
     // The user switches to another session before the branch call returns.
     act(() => {
@@ -15708,8 +15927,14 @@ describe('App session callbacks', () => {
     // background recomputation lands (no SSE exists before the first
     // prompt). Both share one daemon-side `git status` computation.
     await vi.waitFor(() => {
-      expect(workspaceGit).toHaveBeenCalledWith({ cwd: undefined });
-      expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        cwd: undefined,
+        sessionId: undefined,
+      });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        wait: true,
+        sessionId: undefined,
+      });
     });
   });
 
@@ -15785,7 +16010,10 @@ describe('App session callbacks', () => {
     // The worktree session status lands and the git effect re-runs with the
     // worktree path.
     await vi.waitFor(() => {
-      expect(workspaceGit).toHaveBeenCalledWith({ cwd: worktreePath });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        cwd: worktreePath,
+        sessionId: 'session-1',
+      });
     });
 
     // After the worktree cwd call, no wait:true call should follow — worktree

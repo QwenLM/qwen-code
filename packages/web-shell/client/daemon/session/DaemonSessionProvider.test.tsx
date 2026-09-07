@@ -13062,10 +13062,10 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
 
-    const branch = requireActions(actions).branchSession(
-      'Branch 1',
-      'checkpoint-1',
-    );
+    const branch = requireActions(actions).branchSession({
+      name: 'Branch 1',
+      atRecordId: 'checkpoint-1',
+    });
     await act(async () => {
       await wait(5);
       await flushPromises();
@@ -13131,9 +13131,9 @@ describe('DaemonSessionProvider', () => {
     }>;
     let second!: Promise<unknown>;
     await act(async () => {
-      first = requireActions(actions).branchSession('First');
+      first = requireActions(actions).branchSession({ name: 'First' });
       second = requireActions(actions)
-        .branchSession('Second')
+        .branchSession({ name: 'Second' })
         .catch((error: unknown) => error);
       await flushPromises();
     });
