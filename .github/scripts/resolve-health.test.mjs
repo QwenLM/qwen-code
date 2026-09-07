@@ -2410,6 +2410,41 @@ describe('resolve-health: decisions', () => {
     );
   });
 
+  it('holds the cap when answerable judgments alone reach it', () => {
+    // `slice(-0)` is `slice(0)` — the whole array — so a cap that computes the
+    // remaining room and slices without checking it voids itself at exactly
+    // its own boundary: the saturation case the cap exists for.
+    const wave = [];
+    for (let i = 0; i < JUDGMENT_CAP + 50; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-26T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(`asker${i}`, at, '@qwen-code /resolve', 7, at, 'COLLABORATOR'),
+      );
+    }
+    for (let i = 0; i < 1000; i += 1) {
+      const at = new Date(
+        Date.parse('2026-08-27T00:00:00Z') + i * 1000,
+      ).toISOString();
+      wave.push(
+        comment(`drive-by${i}`, at, '@qwen-code /resolve', 7, at, 'NONE'),
+      );
+    }
+    const saturated = assess([{ number: 7, state: 'open', comments: wave }], {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const body = decide(saturated, null)[0].body;
+    const recorded = readState([body]).requests;
+    assert.equal(recorded.length, JUDGMENT_CAP);
+    assert.ok(
+      recorded.every((e) => e[2] === 'COLLABORATOR'),
+      'the room left for refusals is none, so none come back',
+    );
+    const marker = body.match(/<!-- qwen-resolve-health-state [^\n]*-->/)[0];
+    assert.ok(marker.length < 30000, `state marker is ${marker.length} bytes`);
+  });
+
   it('caps the judgment record so a comment wave cannot wedge the write', () => {
     // Every request-SHAPED comment is sighted, from anyone, so the window
     // prune alone does not bound the record: a wave of `/resolve`-shaped

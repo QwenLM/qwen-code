@@ -393,13 +393,18 @@ export function assess(prs, options = {}) {
     // recovered, and again as proof this request was served.
     // Which request the deficit belongs to is not observable — a result that
     // never arrived names nobody — so the walk decides it. Oldest-first blames
-    // whichever request the cursor runs out on, which is always the NEWEST: a
-    // single permanently lost result (a cancelled run, a deleted result
-    // comment) then reports the newest ask as unanswered and slides forward
-    // onto each new one, renewing a veto instead of letting it expire. Walk
-    // newest-first and the deficit lands on the OLDEST unmatched request —
-    // the earliest moment the lane demonstrably owed an answer — which leaves
-    // the window when that ask does.
+    // whichever request the cursor runs out on, which is always the NEWEST, so
+    // a single permanently lost result (a cancelled run, a deleted result
+    // comment) reported the newest ask as unanswered and slid that report onto
+    // each new one. Walking newest-first lands it on the OLDEST unmatched
+    // request instead: the earliest moment the lane demonstrably owed an
+    // answer, and a value that stops advancing.
+    //
+    // This changes what the gate REPORTS, not what it decides: the veto is
+    // keyed on a deficit existing at all, so its lifetime is set by the count
+    // and still runs until the deficient ask leaves the window. Separating a
+    // stale deficit from a live one needs the result comment to name the
+    // request that triggered it, which the producer does not write.
     let cursor = prResults.length - 1;
     let prUnserved = null;
     for (let i = gateRequests.length - 1; i >= 0; i -= 1) {
@@ -543,8 +548,15 @@ function capJudgments(entries) {
   const answerable = entries.filter((e) => ANSWERABLE_ASSOCIATIONS.has(e[2]));
   const refused = entries.filter((e) => !ANSWERABLE_ASSOCIATIONS.has(e[2]));
   const keep = new Set(answerable.slice(-JUDGMENT_CAP));
-  for (const entry of refused.slice(-Math.max(0, JUDGMENT_CAP - keep.size))) {
-    keep.add(entry);
+  // `slice(-0)` is `slice(0)` — the whole array — so the room left has to be
+  // checked before slicing, or the cap voids itself at exactly its own
+  // boundary: once the answerable judgments alone fill it, every refusal came
+  // back and the record grew without limit again.
+  const room = JUDGMENT_CAP - keep.size;
+  if (room > 0) {
+    for (const entry of refused.slice(-room)) {
+      keep.add(entry);
+    }
   }
   return entries.filter((e) => keep.has(e));
 }
