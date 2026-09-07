@@ -445,7 +445,7 @@ export async function gitCreateBranch(
   const startCommit = (
     await runGit(
       cwd,
-      ['rev-parse', '--verify', `${startPoint ?? 'HEAD'}^{commit}`],
+      ['rev-parse', '--verify', `${startPoint || 'HEAD'}^{commit}`],
       env,
     ).catch(() => '')
   ).trim();
