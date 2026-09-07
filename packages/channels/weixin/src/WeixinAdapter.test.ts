@@ -8,6 +8,27 @@ const sendMocks = vi.hoisted(() => ({
   sendText: vi.fn().mockResolvedValue(undefined),
   sendImage: vi.fn().mockResolvedValue(undefined),
 }));
+const monitorMocks = vi.hoisted(() => ({
+  startPollLoop: vi.fn().mockResolvedValue(undefined),
+}));
+const mediaMocks = vi.hoisted(() => ({
+  downloadAndDecrypt: vi.fn(),
+}));
+const accountMocks = vi.hoisted(() => ({
+  loadAccount: vi.fn(() => ({ token: 'token', baseUrl: 'https://wx.invalid' })),
+}));
+
+vi.mock('./monitor.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./monitor.js')>('./monitor.js');
+  return { ...actual, startPollLoop: monitorMocks.startPollLoop };
+});
+
+vi.mock('./accounts.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./accounts.js')>('./accounts.js');
+  return { ...actual, loadAccount: accountMocks.loadAccount };
+});
 
 vi.mock('./api.js', async () => {
   const actual = await vi.importActual<typeof import('./api.js')>('./api.js');
@@ -27,12 +48,20 @@ vi.mock('./send.js', async () => {
   };
 });
 
+vi.mock('./media.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./media.js')>('./media.js');
+  return { ...actual, downloadAndDecrypt: mediaMocks.downloadAndDecrypt };
+});
+
 import { TYPING_KEEPALIVE_MAX_MS, WeixinChannel } from './WeixinAdapter.js';
 import { TypingStatus } from './types.js';
+import type { ParsedMessage } from './monitor.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
   ChannelTaskLifecycleEvent,
+  Envelope,
 } from '@qwen-code/channel-base';
 
 type LifecycleBase = Omit<
@@ -41,6 +70,16 @@ type LifecycleBase = Omit<
 >;
 
 class TestWeixinChannel extends WeixinChannel {
+  readonly inboundEnvelopes: Envelope[] = [];
+
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    if ((await prepare()) === false) return;
+    this.inboundEnvelopes.push(envelope);
+  }
+
   emitLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.onTaskLifecycle(event);
   }
@@ -96,7 +135,64 @@ describe('WeixinChannel', () => {
     apiMocks.sendTyping.mockReset();
     sendMocks.sendText.mockClear();
     sendMocks.sendImage.mockClear();
+    monitorMocks.startPollLoop.mockClear();
+    mediaMocks.downloadAndDecrypt.mockReset();
     vi.useFakeTimers();
+  });
+
+  it.each([
+    {
+      label: 'a caption-less image',
+      msg: { text: '(image)', syntheticText: true as const },
+      synthetic: true,
+    },
+    {
+      label: 'a caption-less file',
+      msg: { text: '(file: report.pdf)', syntheticText: true as const },
+      synthetic: true,
+    },
+    {
+      label: 'text the user typed',
+      msg: { text: '/review inspect this' },
+      synthetic: undefined,
+    },
+  ])('marks $label for the message-prefix gate', async ({ msg, synthetic }) => {
+    // The placeholder is the adapter's own text: no user action can put
+    // the configured prefix on it, so gating it would drop every WeChat
+    // media message.
+    const channel = createChannel({ messagePrefix: '/review' });
+    await channel.connect();
+    const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
+      ?.onMessage as (parsed: ParsedMessage) => Promise<void>;
+
+    await onMessage({ fromUserId: 'user-1', messageId: 'm-1', ...msg });
+
+    expect(channel.inboundEnvelopes[0]?.syntheticText).toBe(synthetic);
+  });
+
+  it('replaces a captionless image placeholder when the download fails', async () => {
+    mediaMocks.downloadAndDecrypt.mockRejectedValue(
+      new Error('download unavailable'),
+    );
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = createChannel({ messagePrefix: '/review' });
+    await channel.connect();
+    const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
+      ?.onMessage as (parsed: ParsedMessage) => Promise<void>;
+
+    await onMessage({
+      fromUserId: 'user-1',
+      messageId: 'm-image-failure',
+      text: '(image)',
+      syntheticText: true,
+      image: { encryptQueryParam: 'query', aesKey: 'key' },
+    });
+
+    await vi.waitFor(() => expect(channel.inboundEnvelopes).toHaveLength(1));
+    expect(channel.inboundEnvelopes[0]?.text).toBe(
+      '(User sent an image but download failed)',
+    );
+    expect(channel.inboundEnvelopes[0]?.imageBase64).toBeUndefined();
   });
 
   it('applies attribution only after raw image-marker projection', async () => {
