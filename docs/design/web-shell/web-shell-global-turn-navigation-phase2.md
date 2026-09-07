@@ -6,6 +6,10 @@ Phase 2A merged in [#11054](https://github.com/QwenLM/qwen-code/pull/11054);
 Phase 2B implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208),
 following the
 [historical viewport integration design](web-shell-global-turn-navigation-phase2b.md).
+The same open PR also implements the agreed Phase 3 rail and scoped frontend
+verification. See the [parent design](web-shell-global-turn-navigation.md) for
+the current delivery scope and remaining real-daemon acceptance; Phase 3 is no
+longer an unimplemented UI dependency.
 Original proposal: 2026-09-04. Builds on
 `web-shell-global-turn-navigation.md` (Phase 1 merged as #10751) and the
 page-table model of `web-shell-bounded-transcript-and-subagent-details.md`.
@@ -26,7 +30,8 @@ The [implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigatio
 supersedes the proposed API names and migration sequence below. Phase 2A adds
 the headless index, isolated historical page table, reconciliation, and hooks.
 The Phase 2B design supersedes the earlier prepend-compatibility migration and
-defers only the global rail, not the minimal historical viewport, to Phase 3.
+assigns only the global rail, not the minimal historical viewport, to Phase 3;
+both are now implemented in #11208.
 The problem analysis below describes `origin/main` at `80497a74d0`, before Phase 2A.
 
 ## Problem
@@ -658,7 +663,9 @@ Provider/store unit tests (vitest + jsdom, extending the existing
 - fallback: capability-absent and ceiling-exceeded paths keep the existing
   rail behavior.
 
-Real-browser random-jump E2E remains Phase 3 with the rail UI.
+Real-browser random-jump checks have since passed with the Phase 3 rail in
+#11208 using the built frontend and deterministic daemon responses. Integrated
+browser-to-real-daemon acceptance remains a separate verification follow-up.
 
 ## Open questions
 

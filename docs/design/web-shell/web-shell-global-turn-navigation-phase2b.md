@@ -4,6 +4,13 @@
 
 Implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208),
 2026-09-07. Review and verification status are tracked on that PR.
+The same open PR now includes the agreed Phase 3 global rail, implemented at
+`02e975e9fa`. Its final interaction preserves ordinary upward pagination and
+adds compact ticks with hover/focus previews and distant on-demand selection;
+there is no historical snapshot toolbar. The original integration rationale
+below is superseded where it describes explicit sequential-entry controls.
+See the [parent design](web-shell-global-turn-navigation.md) for current scope
+and the distinction between completed frontend tests and real-daemon acceptance.
 Implementation started on `1a86cd6c5`. User approved the compatibility variant:
 keep `HistoricalTranscriptRange` and the legacy navigation snapshot unchanged;
 expose sequential ranges through an additional viewport snapshot/command surface
@@ -25,8 +32,9 @@ This supersedes the **Phase 2B migration and UI deferral** portions of the
 That plan proposed an atomic-prepend compatibility projection and deferred the
 historical viewport to Phase 3. Here, Phase 2B includes the minimum viewport,
 boundary controls, and scroll preservation needed to make sequential browsing
-use the bounded history cache. Phase 3 still owns the global virtualized rail,
-ordinal navigation controls, previews, and rail keyboard interaction.
+use the bounded history cache. Phase 3 owns the global virtualized rail,
+ordinal navigation controls, previews, and rail keyboard interaction; that work
+has now been delivered in the same PR with the final scrolling interaction above.
 
 ## Outcome and non-goals
 
@@ -35,7 +43,8 @@ cap, and return to the live tail. Pages and missing ranges remain distinguishabl
 background output and current approvals continue while history is visible.
 The existing loaded-only path remains available for unsupported daemons.
 
-This phase does not add a global turn rail, search, browser persistence, a new
+The Phase 2B data/viewport scope excludes the rail delivered as Phase 3 in the
+same PR. Neither phase adds search, browser persistence, a new
 daemon route, an SDK reducer rewrite, or a second navigation/ledger store.
 It does not migrate subagent detail pagination or the public read-only
 `WebShellTranscript` component. It does not promise a low-latency recovery of an
@@ -438,8 +447,12 @@ offset positioning instead of leaving a long-lived index target behind.
 The native review runner captured all 26 changed files, including five new files,
 but its ten-minute unattended run returned `completed: false`, `timedOut: true`
 and no verdict. This is not an approval. Integrated browser-to-real-HTTP-daemon
-coverage, comprehensive grouped-row/media cases and browser lifecycle races also
-remain unverified; the separate UI and signed-reader results do not cover them.
+coverage and comprehensive grouped-row/media cases remain unverified; the
+separate UI and signed-reader results do not cover them. Subsequent verification
+at `02e975e9fa` passed eight browser lifecycle scenarios for reconnect, rewind,
+branch, and late-request isolation using deterministic HTTP/SSE fixtures, plus
+105 targeted unit tests. These unit runs overlap previous totals. See the parent
+design for the tested behavior and remaining real-daemon acceptance boundary.
 
 ## Review gates and tradeoffs
 
@@ -449,10 +462,11 @@ confirm the main/split consumer map against the implementation base. If that
 requires a breaking public API or a cross-package protocol change, stop and
 re-scope rather than silently expanding this phase.
 
-The visible tradeoff is an explicit transition into a historical window instead
-of a single infinite scrollback containing both all cached ranges and the live
-tail. This limits cross-gap grouping and mutation risk. Smooth simultaneous
-multi-range rendering would require a separate gap-aware projection design.
+The final UI preserves ordinary upward scrolling and opens an isolated historical
+window when a distant rail target is selected. That window does not concatenate
+all cached ranges with the live tail. This limits cross-gap grouping and mutation
+risk. Smooth simultaneous multi-range rendering would require a separate
+gap-aware projection design.
 Long-gap recovery is memory-bounded but can require many reads; record request
 counts and latency, allow logical cancellation, and do not advertise constant-time
 recovery. Protocol optimization belongs in a separate measured follow-up.
