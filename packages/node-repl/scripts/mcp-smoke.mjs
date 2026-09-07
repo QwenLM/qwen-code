@@ -23,7 +23,9 @@ const client = new Client({ name: 'node-repl-smoke', version: '0.0.0' });
 
 let failures = 0;
 const check = (label, cond, detail) => {
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
+  console.log(
+    `${cond ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`,
+  );
   if (!cond) failures++;
 };
 const textOf = (res) =>
@@ -38,28 +40,41 @@ try {
   const tools = await client.listTools();
   const names = tools.tools.map((t) => t.name).sort();
   check(
-    'lists the three node_repl tools',
+    'lists the five node_repl tools',
     names.join(',') ===
-      'node_repl,node_repl_add_node_module_dir,node_repl_reset',
+      'node_repl,node_repl_add_node_module_dir,node_repl_cancel,node_repl_reset,node_repl_wait',
     names.join(','),
   );
 
-  await client.callTool({ name: 'node_repl', arguments: { code: 'const x = 40;' } });
+  await client.callTool({
+    name: 'node_repl',
+    arguments: { code: 'const x = 40;' },
+  });
   const r = await client.callTool({
     name: 'node_repl',
     arguments: { code: 'nodeRepl.write(String(x + 2));' },
   });
-  check('binding persists across MCP calls', textOf(r).includes('42'), textOf(r).trim());
+  check(
+    'binding persists across MCP calls',
+    textOf(r).includes('42'),
+    textOf(r).trim(),
+  );
 
   await client.callTool({ name: 'node_repl_reset', arguments: {} });
   const r2 = await client.callTool({
     name: 'node_repl',
     arguments: { code: 'nodeRepl.write(typeof x);' },
   });
-  check('reset clears bindings over the wire', textOf(r2).includes('undefined'), textOf(r2).trim());
+  check(
+    'reset clears bindings over the wire',
+    textOf(r2).includes('undefined'),
+    textOf(r2).trim(),
+  );
 } finally {
   await client.close();
 }
 
-console.log(failures === 0 ? '\nMCP WIRE SMOKE PASSED' : `\n${failures} FAILED`);
+console.log(
+  failures === 0 ? '\nMCP WIRE SMOKE PASSED' : `\n${failures} FAILED`,
+);
 process.exit(failures === 0 ? 0 : 1);

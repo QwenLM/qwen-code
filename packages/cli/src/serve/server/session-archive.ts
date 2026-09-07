@@ -627,7 +627,13 @@ export async function deleteDaemonSessions(params: {
 export async function deleteDaemonSessionIfOrphan(params: {
   sessionId: string;
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'killSession' | 'markSessionCatalogChanged'>;
+  bridge: Pick<
+    AcpSessionBridge,
+    | 'deleteSessionAttachments'
+    | 'getSessionSummary'
+    | 'killSession'
+    | 'markSessionCatalogChanged'
+  >;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
   const { sessionId, service, bridge, coordinator } = params;
@@ -643,9 +649,21 @@ export async function deleteDaemonSessionIfOrphan(params: {
       killed = true;
     }
     if (!killed) {
-      return undefined;
+      try {
+        bridge.getSessionSummary(sessionId);
+        return undefined;
+      } catch (error) {
+        if (!isSessionNotFoundError(error)) throw error;
+      }
     }
-    return deletePersistedSessionWithLease(service, sessionId);
+    const removal = await deletePersistedSessionWithLease(service, sessionId);
+    if (removal.kind !== 'error') {
+      // Mirror deleteDaemonSessions: a reaped orphan is never looked up
+      // again, and close() on a persistent store deletes nothing — without
+      // this the attachment bytes leak from both storage roots.
+      await bridge.deleteSessionAttachments(sessionId);
+    }
+    return removal;
   });
   if (result === undefined) {
     return false;

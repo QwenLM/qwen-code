@@ -33,6 +33,13 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
+    key: 'messagePrefix',
+    label: 'Message Prefix',
+    kind: 'string',
+    description:
+      'Only dispatch user messages that start with this exact prefix after any leading @mentions. The prefix is removed before the task runs',
+  },
+  {
     key: 'senderPolicy',
     label: 'Sender Policy',
     kind: 'enum',

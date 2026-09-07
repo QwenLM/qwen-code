@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import process from 'node:process';
@@ -105,7 +106,9 @@ vi.mock('../../services/McpPromptLoader.js', () => ({
 }));
 
 vi.mock('../contexts/SessionContext.js', () => ({
-  useSessionStats: vi.fn(() => ({ stats: {} })),
+  useSessionStats: vi.fn(() => ({
+    stats: { sessionStartTime: new Date(0) },
+  })),
 }));
 
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -163,6 +166,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenSettingsDialog = vi.fn();
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
+  const mockOpenOutputStyleDialog = vi.fn();
   const mockOpenHelpDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
   const mockClearPendingState = vi.fn();
@@ -183,6 +187,7 @@ describe('useSlashCommandProcessor', () => {
     openSettingsDialog: mockOpenSettingsDialog,
     openStatusLineDialog: vi.fn(),
     openModelDialog: mockOpenModelDialog,
+    openOutputStyleDialog: mockOpenOutputStyleDialog,
     openTrustDialog: vi.fn(),
     openPermissionsDialog: vi.fn(),
     openApprovalModeDialog: vi.fn(),
@@ -217,6 +222,7 @@ describe('useSlashCommandProcessor', () => {
     mockOpenMemoryDialog.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
     vi.mocked(refreshExtensionContentRuntime).mockResolvedValue(undefined);
+    mockConfig.getDisabledSlashCommands = vi.fn().mockReturnValue([]);
     mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     mockConfig.getHookSystem = vi.fn().mockReturnValue({
@@ -234,8 +240,13 @@ describe('useSlashCommandProcessor', () => {
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
     isIdleRef = { current: true },
+    builtinCommandsPromise?: Promise<readonly SlashCommand[]>,
   ) => {
-    mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
+    if (builtinCommandsPromise) {
+      mockBuiltinLoadCommands.mockReturnValue(builtinCommandsPromise);
+    } else {
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
+    }
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
     mockMcpLoadCommands.mockResolvedValue(Object.freeze(mcpCommands));
 
@@ -380,6 +391,65 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Command Execution Logic', () => {
+    it.each(['/quit', '/exit'])(
+      'should handle %s while slash commands are still loading',
+      async (input) => {
+        const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
+          () => undefined,
+        );
+        const result = setupProcessorHook(
+          [],
+          [],
+          [],
+          vi.fn(),
+          mockSettings,
+          undefined,
+          { current: true },
+          commandsNeverLoad,
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockSetQuittingMessages).toHaveBeenCalledWith([
+          expect.objectContaining({ type: 'user', text: '/quit' }),
+          expect.objectContaining({ type: 'quit' }),
+        ]);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ text: `Unknown command: ${input}` }),
+          expect.any(Number),
+        );
+      },
+    );
+
+    it('should respect disabled commands while slash commands are loading', async () => {
+      mockConfig.getDisabledSlashCommands = vi.fn().mockReturnValue(['exit']);
+      const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
+        () => undefined,
+      );
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: true },
+        commandsNeverLoad,
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/quit');
+      });
+
+      expect(mockSetQuittingMessages).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        { type: MessageType.ERROR, text: 'Unknown command: /quit' },
+        expect.any(Number),
+      );
+    });
+
     it('should display an error for an unknown command', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -820,7 +890,7 @@ describe('useSlashCommandProcessor', () => {
       },
     );
 
-    it.each(['/effort', '/model', '/stats', '/statusline'])(
+    it.each(['/effort', '/model', '/output-style', '/stats', '/statusline'])(
       'hides the invocation for the bare %s picker',
       async (input) => {
         const [name] = input.slice(1).split(' ');
@@ -986,6 +1056,7 @@ describe('useSlashCommandProcessor', () => {
     it.each([
       ['/effort high', 'effort'],
       ['/model qwen3-max', 'model'],
+      ['/output-style Concise', 'output-style'],
       ['/statusline make it compact', 'statusline'],
       ['/stats export', 'stats export'],
     ])(
@@ -1131,6 +1202,23 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockOpenModelDialog).toHaveBeenCalled();
+    });
+
+    it('should handle "dialog: output-style" action', async () => {
+      const command = createTestCommand({
+        name: 'output-style',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'output-style' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/output-style');
+      });
+
+      expect(mockOpenOutputStyleDialog).toHaveBeenCalledTimes(1);
     });
 
     it('should handle "dialog: voice-model" action', async () => {

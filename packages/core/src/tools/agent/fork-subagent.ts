@@ -173,7 +173,26 @@ function isSystemReminderPart(content: Content, partIndex: number): boolean {
     : false;
 }
 
-function isRealUserTurn(content: Content): boolean {
+/**
+ * Whether `content` starts a fork window.
+ *
+ * Deliberately NOT the rewind classifier (`isApiUserPrompt` in
+ * services/api-user-prompt.ts), despite answering a similar-sounding
+ * question. Two differences are load-bearing here:
+ *
+ * - A media-only user entry (inlineData with no text) starts a fork window;
+ *   the rewind classifier requires a text part, because a media-only entry
+ *   produces no visible UI turn to rewind to.
+ * - Exclusions apply per part, not per entry: an entry mixing a
+ *   functionResponse or a reminder with real prompt content still starts a
+ *   window, whereas rewind drops any entry carrying a functionResponse
+ *   because such an entry is a tool result, not a turn boundary.
+ *
+ * Named apart from `isRealUserTurn` so the two are not read as copies of one
+ * rule that drifted — that drift is exactly the regression class #9437
+ * tracks.
+ */
+function startsForkWindow(content: Content): boolean {
   if (content.role !== 'user' || !content.parts?.length) return false;
   return content.parts.some((part, index) => {
     if (part.functionResponse || isSystemReminderPart(content, index)) {
@@ -240,7 +259,7 @@ export function selectForkHistory(
     const realUserTurnIndexes: number[] = [];
     for (let index = syntheticPrefixLength; index < history.length; index++) {
       const content = history[index]!;
-      if (isRealUserTurn(content)) {
+      if (startsForkWindow(content)) {
         realUserTurnIndexes.push(index);
       }
     }

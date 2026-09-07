@@ -74,6 +74,9 @@ pub mod wgc;
 #[cfg(target_os = "windows")]
 pub mod launch_uwp;
 
+#[cfg(target_os = "windows")]
+pub(crate) mod uia_worker;
+
 pub fn register_tools() -> ToolRegistry {
     tools::build_registry(false)
 }

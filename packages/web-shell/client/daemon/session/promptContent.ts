@@ -44,8 +44,8 @@ export function toDaemonPromptContent(
   files: readonly DaemonPromptFile[] = [],
 ): PromptContentBlock[] {
   // Token lines keep a visible trace in the daemon-recorded transcript
-  // (which stores text blocks only). Skipped for slash commands: the
-  // daemon's slash path drops attachment blocks, so a token would dangle.
+  // (which stores text blocks only). Slash commands resolve attachment blocks
+  // separately from their expanded text, so they do not need token lines.
   const withTokens = withAttachmentTokens(
     text,
     files.map((file) => attachmentUriForName(file.name)),

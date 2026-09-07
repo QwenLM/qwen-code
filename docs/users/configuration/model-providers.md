@@ -18,6 +18,10 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 >
 > **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
+> [!note]
+>
+> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). `providerProtocol` is read once at startup and **requires a restart**.
+
 ### Image generation routes
 
 Set `supportsImageGeneration: true` when a route can be used by the built-in

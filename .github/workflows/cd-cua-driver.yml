@@ -9,7 +9,9 @@ name: 'CD: Qwen CUA Driver'
 #                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
 #     The Developer ID Application identity is auto-discovered from the
 #     imported cert (no DEVELOPER_NAME secret needed).
-# Windows ships UNSIGNED (matches upstream — no EV cert).
+# Windows archives carry the unsigned UIAccess worker. Deployments that need
+# UIAccess must sign and trust that worker on the target machine before placing
+# it under the secure Program Files path required by Windows.
 #
 # Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
@@ -28,7 +30,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.2'
+        default: '0.20.3'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -274,7 +276,7 @@ jobs:
           path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
           if-no-files-found: 'error'
 
-  # ── Windows (x86_64 + arm64) — UNSIGNED ──────────────────────────────────
+  # ── Windows (x86_64 + arm64) — unsigned UIAccess worker ────────────────────
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
@@ -320,9 +322,14 @@ jobs:
             }}"
           restore-keys: |
             cua-driver-windows-${{ matrix.arch }}-
-      - name: 'Build (release, unsigned)'
+      - name: 'Build (release)'
         working-directory: 'packages/cua-driver/rust'
-        run: 'cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}'
+        shell: 'pwsh'
+        run: |
+          # A cached target may contain a worker mutated by an earlier signing
+          # job. Remove the final PE so Cargo always relinks an unsigned worker.
+          Remove-Item "target/${{ matrix.target }}/release/cua-driver-uia.exe" -Force -ErrorAction SilentlyContinue
+          cargo build -p cua-driver -p cursor-theme-cli -p cua-driver-uia -p cua-driver-sdk --release --locked --target ${{ matrix.target }}
       - name: 'Build Electron-compatible Node runtime'
         working-directory: 'packages/cua-driver'
         shell: 'bash'
@@ -331,6 +338,17 @@ jobs:
           node scripts/build-node-runtime.mjs \
             --target "${{ matrix.target }}" \
             --output "rust/target/${{ matrix.target }}/release/cua_driver_node_runtime.node"
+      - name: 'Verify unsigned UIAccess worker'
+        shell: 'pwsh'
+        run: |
+          $worker = "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"
+          if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
+            throw 'Windows build did not produce cua-driver-uia.exe'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $worker
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Release worker must be unsigned for target-machine signing; status is $($signature.Status)"
+          }
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
         shell: 'pwsh'
@@ -814,7 +832,9 @@ jobs:
 
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
-            - **Windows**: unsigned (x86_64 + arm64)
+            - **Windows**: unsigned UIAccess worker + native SDK payload
+              (x86_64 + arm64); deployments must sign and trust the worker
+              on the target machine before UIAccess activation
             - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
               after a clean install against these release assets and publishes
               the independently versioned `@qwen-code/node-repl-mcp` package

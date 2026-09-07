@@ -19,6 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
@@ -71,6 +72,7 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  onWorkspaceRemoved?: (workspaceCwd: string) => void;
   pickWorkspaceDirectory?: (
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
@@ -85,6 +87,7 @@ export interface WorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions: number;
+  workspaceRuntime: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -164,6 +167,11 @@ export function registerWorkspaceManagementRoutes(
     string,
     'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
+  // Owned Conversations publications ride the same in-flight serialization
+  // map (they must keep colliding on cwd and nesting), but they are daemon
+  // infrastructure: the capacity projection skips them just like it skips
+  // the published internal runtime.
+  const internalAdditionsInFlight = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -219,13 +227,20 @@ export function registerWorkspaceManagementRoutes(
     }
   };
   const projectedWorkspaceCount = (): number => {
+    // The daemon-owned Conversations runtime is daemon infrastructure, not a
+    // user workspace: it must not consume user registration capacity.
     // A scratch request reserves capacity before its cwd exists, while normal
     // additions reserve by canonical cwd. Count both forms exactly once.
     const cwdSet = new Set(
-      workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
     );
     for (const [cwd, operation] of inFlight) {
-      if (operation === 'addition') cwdSet.add(cwd);
+      if (operation === 'addition' && !internalAdditionsInFlight.has(cwd)) {
+        cwdSet.add(cwd);
+      }
     }
     return cwdSet.size + pendingScratchCreations;
   };
@@ -267,7 +282,12 @@ export function registerWorkspaceManagementRoutes(
     if (nestingConflict) {
       throw new Error('Workspace path nests with an existing workspace');
     }
-    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+    // The owned Conversations runtime is daemon infrastructure: user
+    // workspaces filling the limit must not block its publication.
+    if (
+      provenance !== 'live-conversation' &&
+      projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES
+    ) {
       throw new Error('Workspace registration limit reached');
     }
   };
@@ -284,6 +304,9 @@ export function registerWorkspaceManagementRoutes(
     }
     assertOwnedRuntimeAdmission(canonicalCwd, provenance);
     inFlight.set(canonicalCwd, 'addition');
+    if (provenance === 'live-conversation') {
+      internalAdditionsInFlight.add(canonicalCwd);
+    }
     operationStarted();
     let runtime: WorkspaceRuntime | undefined;
     let registered = false;
@@ -311,7 +334,10 @@ export function registerWorkspaceManagementRoutes(
         if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
-        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+        if (
+          provenance !== 'live-conversation' &&
+          projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES
+        ) {
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
@@ -349,6 +375,7 @@ export function registerWorkspaceManagementRoutes(
           });
       }
       inFlight.delete(canonicalCwd);
+      internalAdditionsInFlight.delete(canonicalCwd);
       operationFinished();
     }
   };
@@ -405,6 +432,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (error) {
           failures.push(error);
         }
@@ -1245,6 +1273,11 @@ export function registerWorkspaceManagementRoutes(
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
       voiceSessions: controllerActivity.voiceSessions,
+      workspaceRuntime:
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime)?.hasActiveWork() ===
+        true
+          ? 1
+          : 0,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
@@ -1455,6 +1488,9 @@ export function registerWorkspaceManagementRoutes(
       let controllerDraining = false;
       let acpDraining = false;
       let removalCommitted = false;
+      let runtimeCoordinatorDraining = false;
+      const runtimeCoordinator =
+        getWorkspaceRuntimeCoordinatorIfSupported(runtime);
       const rollbackDrain = (): void => {
         if (removalCommitted) return;
         if (acpDraining) {
@@ -1472,6 +1508,14 @@ export function registerWorkspaceManagementRoutes(
             // Continue rolling back the remaining gates.
           }
           controllerDraining = false;
+        }
+        if (runtimeCoordinatorDraining) {
+          try {
+            runtimeCoordinator?.cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
+          runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {
           try {
@@ -1543,6 +1587,7 @@ export function registerWorkspaceManagementRoutes(
         }
         try {
           workspaceRegistry.completeDrain(runtime);
+          deps.onWorkspaceRemoved?.(runtime.workspaceCwd);
         } catch (err) {
           logCleanupFailure(
             `qwen serve: failed to complete workspace registry drain: ${
@@ -1553,6 +1598,7 @@ export function registerWorkspaceManagementRoutes(
         registryDraining = false;
         controllerDraining = false;
         acpDraining = false;
+        runtimeCoordinatorDraining = false;
       };
 
       try {
@@ -1564,6 +1610,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        runtimeCoordinator?.beginDrain();
+        runtimeCoordinatorDraining = runtimeCoordinator !== undefined;
         runtimeRemoval.beginDrain(runtime);
         controllerDraining = true;
         getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);

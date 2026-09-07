@@ -28,7 +28,10 @@ import {
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
-import { parseTaggedThinkingText } from './taggedThinkingParser.js';
+import {
+  parseTaggedThinkingText,
+  TaggedThinkingParser,
+} from './taggedThinkingParser.js';
 import {
   convertSchema,
   relaxSchemaForFunctionCalling,
@@ -41,6 +44,7 @@ import {
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -331,6 +335,18 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
+const grammarSchemaValidationCache = new WeakMap<object, boolean>();
+
+function isStrictlyValidSchema(schema: object): boolean {
+  const cached = grammarSchemaValidationCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const valid = SchemaValidator.compileStrict(schema) === null;
+  grammarSchemaValidationCache.set(schema, valid);
+  return valid;
+}
+
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -370,6 +386,13 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const sourceSchema = func.parametersJsonSchema;
+            const canValidateLocally =
+              typeof sourceSchema === 'object' &&
+              sourceSchema !== null &&
+              !Array.isArray(sourceSchema) &&
+              !('$id' in sourceSchema) &&
+              isStrictlyValidSchema(sourceSchema);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -377,7 +400,10 @@ export async function convertLlmToolsToOpenAI(
             // mutually exclusive optional fields (Agent working_dir vs
             // isolation). Relax the wire schema; client-side
             // validateToolParams still enforces the source schema.
-            parameters = relaxSchemaForFunctionCalling(parameters);
+            parameters = relaxSchemaForFunctionCalling(
+              parameters,
+              canValidateLocally,
+            );
           }
 
           openAITools.push({
@@ -1096,7 +1122,10 @@ function convertOpenAITextToParts(
   requestContext: RequestContext,
   final = true,
 ): Part[] {
-  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+  if (
+    !requestContext.responseParsingOptions?.taggedThinkingTags &&
+    !requestContext.taggedThinkingParser
+  ) {
     return text ? [{ text }] : [];
   }
 
@@ -1369,17 +1398,51 @@ export function convertOpenAIChunkToLlm(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      const normalizedContent = normalizeStreamingTextDelta(
-        choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
-      );
-      // Skip empty-string push mid-stream; still call on finish_reason to
-      // flush any buffered tagged-thinking content.
-      if (normalizedContent || choice.finish_reason) {
+      const rawContent = choice.delta.content;
+      const replayState = requestContext.textDeltaState;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        replayState !== undefined &&
+        (replayState.emittedText === rawContent ||
+          (rawContent.length === replayState.emittedLength &&
+            rawContent.startsWith(replayState.emittedText))) &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      if (replayedTaggedThinkingSnapshot) {
+        replayState.emittedText = rawContent;
+        replayState.emittedLength = rawContent.length;
+        replayState.cumulativeMode = true;
+      }
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
+      const taggedThinkingCandidate =
+        (requestContext.pendingThinkingTagCandidate?.text ?? '') +
+        normalizedContent;
+      if (
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning &&
+        (requestContext.hasStructuredReasoningContent || reasoningText) &&
+        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+        !taggedThinkingCandidate.trimStart().startsWith('</')
+      ) {
+        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = requestContext.taggedThinkingParser.parse(
+          taggedThinkingCandidate,
+          Boolean(choice.finish_reason),
+        );
+      } else if (normalizedContent || choice.finish_reason) {
+        // Skip empty-string push mid-stream; still call on finish_reason to
+        // flush any buffered tagged-thinking content.
         contentParts = convertOpenAITextToParts(
           normalizedContent,
           requestContext,
@@ -1389,6 +1452,14 @@ export function convertOpenAIChunkToLlm(
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       contentParts = convertOpenAITextToParts('', requestContext, true);
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      requestContext.taggedThinkingParser?.hasUnclosedThought()
+    ) {
+      throwProtocolTagLeak(requestContext);
     }
 
     if (hasThoughtPart(contentParts)) {

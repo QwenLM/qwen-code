@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.22.3",
+  "version": "0.23.0",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -13,6 +13,10 @@
     "./daemon-react-sdk": {
       "types": "./dist/types/daemon-react-sdk.d.ts",
       "import": "./dist/daemon-react-sdk.js"
+    },
+    "./transcript": {
+      "types": "./dist/types/transcript.d.ts",
+      "import": "./dist/transcript.js"
     }
   },
   "files": [
@@ -21,13 +25,13 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "test:ci": "vitest run --config vitest.config.ts --coverage",
+    "test:ci": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
     "test:e2e:perf": "cross-env WEB_SHELL_PERF=1 playwright test --config playwright.config.ts --grep @perf --project=chromium",
