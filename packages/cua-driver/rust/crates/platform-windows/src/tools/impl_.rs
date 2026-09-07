@@ -1427,7 +1427,7 @@ impl Tool for GetWindowStateTool {
         let observation_revision = match (
             revision_request_for_capture.as_ref(),
             observation_session,
-            tree_result.as_ref().ok().filter(|tree| tree.complete),
+            tree_result.as_ref().ok(),
         ) {
             (Some(request), Some(session), Some(tree)) => match observation_revisions.observe(
                 session,
@@ -1505,6 +1505,8 @@ impl Tool for GetWindowStateTool {
                     structured["_uia_worker_restart_required"] = json!(true);
                 }
 
+                let mut selected_tree_bytes = None;
+                let mut full_tree_bytes = None;
                 if let Some(mut tr) = tree_opt {
                     let is_msaa = tr.backend == crate::uia::UiaBackend::Msaa;
                     let count = tr
@@ -1512,14 +1514,6 @@ impl Tool for GetWindowStateTool {
                         .iter()
                         .filter(|n| n.element_index.is_some())
                         .count();
-                    let selected_tree_markdown = observation_revision
-                        .as_ref()
-                        .map(|revision| revision.text.as_str())
-                        .unwrap_or(&tr.tree_markdown);
-                    let header = format!("window_id={hwnd} pid={pid} elements={count}\n\n");
-                    content.push(cua_driver_core::protocol::Content::text(
-                        header + selected_tree_markdown,
-                    ));
                     // Route the cache to the matching dispatch path: any
                     // node whose msaa_role is Some came from the MSAA
                     // walker, so the entire snapshot must Drop via
@@ -1540,7 +1534,6 @@ impl Tool for GetWindowStateTool {
                     structured["element_count"] = json!(count);
                     structured["elements_complete"] = json!(tr.complete);
                     structured["element_bindings_retained"] = json!(bindings_transferred);
-                    structured["tree_markdown"] = json!(selected_tree_markdown);
 
                     // Surface 6: register a snapshot in the global token
                     // registry. Windows uses u64 HWND but the registry
@@ -1594,6 +1587,35 @@ impl Tool for GetWindowStateTool {
                                 .collect::<std::collections::HashMap<_, _>>()
                         })
                         .unwrap_or_default();
+                    let selected_tree_markdown = observation_revision
+                        .as_ref()
+                        .map(|revision| {
+                            if !revision.stable_element_ids {
+                                if let Some(snapshot_id) = snapshot_id {
+                                    return revision.render_full_with_action_tokens(|index| {
+                                        cua_driver_core::element_token::token_for(
+                                            snapshot_id,
+                                            index,
+                                        )
+                                    });
+                                }
+                            }
+                            revision.text.clone()
+                        })
+                        .unwrap_or_else(|| tr.tree_markdown.clone());
+                    selected_tree_bytes = Some(selected_tree_markdown.len());
+                    full_tree_bytes = observation_revision.as_ref().map(|revision| {
+                        if revision.stable_element_ids {
+                            revision.full_text.len()
+                        } else {
+                            selected_tree_markdown.len()
+                        }
+                    });
+                    let header = format!("window_id={hwnd} pid={pid} elements={count}\n\n");
+                    content.push(cua_driver_core::protocol::Content::text(
+                        header + &selected_tree_markdown,
+                    ));
+                    structured["tree_markdown"] = json!(&selected_tree_markdown);
 
                     // Structured `elements` array — preferred consumption
                     // path. Shape matches the cross-platform spec:
@@ -1639,6 +1661,11 @@ impl Tool for GetWindowStateTool {
                             }
                             if let Some(label) = label {
                                 entry["label"] = json!(label);
+                            }
+                            if let Some(automation_id) =
+                                n.automation_id.clone().filter(|id| !id.is_empty())
+                            {
+                                entry["automation_id"] = json!(automation_id);
                             }
                             // Surface the element's value separately from `label`
                             // (which collapses name→value→automation_id→help): a
@@ -1798,9 +1825,11 @@ impl Tool for GetWindowStateTool {
                         "elements_scope": "current_full",
                         "stable_element_ids": revision.stable_element_ids,
                         "retained": revision.stable_element_ids,
-                        "selected_bytes": revision.text.len(),
-                        "full_bytes": revision.full_text.len(),
-                        "estimated_tokens": revision.text.len().div_ceil(4),
+                        "selected_bytes": selected_tree_bytes.unwrap_or(revision.text.len()),
+                        "full_bytes": full_tree_bytes.unwrap_or(revision.full_text.len()),
+                        "estimated_tokens": selected_tree_bytes
+                            .unwrap_or(revision.text.len())
+                            .div_ceil(4),
                         "serializer_duration_us": revision.serializer_duration_us,
                         "cache_estimate_bytes": revision.cache_estimate_bytes,
                     });
