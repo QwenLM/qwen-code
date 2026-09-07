@@ -724,6 +724,58 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('does NOT refuse over an include directive whose target is missing', () => {
+    // The shape every standard CI checkout has, and the one that turned this
+    // screen into a permanent refusal: `actions/checkout` with persisted
+    // credentials writes `includeIf "gitdir:…"` directives into the
+    // repository-local config, their target is a per-job file that is gone by
+    // the next job, and on a persistent runner the directives accumulate in a
+    // reused `.git/config`. git ignores a dangling include, so the checkout
+    // this screen authorises executes nothing from it — and a repository that
+    // defines no content filter must not be told that it defines one. Measured
+    // before the fix: two hits, `filters` empty, the whole efficacy phase
+    // not-run.
+    //
+    // The condition below cannot match this tree, and that is deliberately NOT
+    // what this turns on: the screen does not evaluate includeIf conditions,
+    // because a match test against only the screened tree's own gitdir would
+    // re-open the creation path, where `worktree add` registers a NEW admin
+    // entry under `<common>/worktrees/`. What it asks is whether the target
+    // exists. `lib/worktree.test.ts` pins the same rule on the screen itself.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-dangling-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      appendFileSync(
+        join(dir, '.git', 'config'),
+        '[includeIf "gitdir:/github/workspace/.git"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n',
+      );
+
+      let detail: string;
+      try {
+        detail = runOneMutant(
+          dir,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        ).detail;
+      } catch (e) {
+        detail = e instanceof Error ? e.message : String(e);
+      }
+
+      expect(detail).not.toContain('could not read to the bottom');
+      expect(detail).not.toContain('content filter');
+      // And it reached the runner, which this bare fixture does not have: the
+      // screen PASSED, rather than the run failing for some other reason — the
+      // difference between "did not refuse" and "proceeded".
+      expect(detail).toContain('vitest');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('flattens control characters in the filter key it names', () => {
     // A config subsection name legally carries control and format characters,
     // and `--get-regexp` prints them verbatim. These detail strings reach the

@@ -82,10 +82,10 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
+  checkoutFilterCommands,
   describeFilterScreen,
   discardWorktree,
   exposeDependencies,
-  localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -1686,7 +1686,7 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // A non-empty answer is a refusal whichever half it came from: a filter the
   // screen found, or a candidate it could not read to the bottom. Both mean
   // the checkout below would execute something this screen did not clear.
-  const filters = localFilterCommands(probeTree);
+  const filters = checkoutFilterCommands(probeTree);
   if (filters.length > 0) {
     return filterScreenRefusal(
       filters,
@@ -2183,7 +2183,7 @@ export function runOneHunkProbe(
   // revert phase's own comment credits — and a plant that lands there is live
   // here, once per hunk candidate, on the reviewer's host. Repo-local scope,
   // for the git-lfs reason the restore's screen states.
-  const applyFilters = localFilterCommands(probeTree);
+  const applyFilters = checkoutFilterCommands(probeTree);
   if (applyFilters.length > 0) {
     return {
       ...meta,
@@ -2728,7 +2728,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // cannot reach back to it. Same repo-local scope, for the same git-lfs
       // reason. The throw lands in this phase's existing catch, which records
       // every probe as not-run — what it is, since nothing was isolated.
-      const creationFilters = localFilterCommands(worktree);
+      const creationFilters = checkoutFilterCommands(worktree);
       if (creationFilters.length > 0) {
         throw new Error(
           filterScreenRefusal(
@@ -3089,7 +3089,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // the restore's screen states. A non-empty answer is a refusal
           // whichever half it came from. The throw lands in this phase's
           // existing catch and is recorded as a probe that did not run.
-          const revertFilters = localFilterCommands(probeTree);
+          const revertFilters = checkoutFilterCommands(probeTree);
           if (revertFilters.length > 0) {
             throw new Error(
               filterScreenRefusal(

@@ -231,12 +231,36 @@ export interface FilterScreen {
   filters: string[];
   /**
    * Every file the walk could NOT read to the bottom, each with its reason:
-   * a dangling include, another user's `~user/`, a target that is not a
-   * regular file, a parse failure, a nesting past git's limit, a fan-out
-   * past this screen's. A filter behind one of these is a filter the
-   * caller cannot see and therefore cannot blank — so each is a refusal.
+   * another user's `~user/`, a target that is not a regular file, a parse
+   * failure, a nesting past git's limit, a fan-out past this screen's. A
+   * filter behind one of these is a filter the caller cannot see and therefore
+   * cannot blank — so each is a refusal.
    */
   unread: string[];
+  /**
+   * Every include directive whose target DOES NOT EXIST, each named with the
+   * directive that reached it. Apart from `unread` because the two answer
+   * different questions and one caller needs them apart: git ignores a
+   * dangling include, so a checkout reads nothing from it and executes nothing
+   * from it, while a file that could not be read is a file that may hold a
+   * filter. A caller refusing on `unread` alone still refuses everything it
+   * cannot certify, and stops refusing over a config git itself skips.
+   *
+   * No capability is given up. Whoever can write `include.path` into
+   * repo-local config can write `filter.<name>.smudge` into the same file at
+   * the same moment, and `filters` sees that; what a dangling-include refusal
+   * bought was a race every other gate here already accepts as unclosable.
+   * What it cost was every standard CI checkout — `actions/checkout` with
+   * persisted credentials writes `includeIf "gitdir:…"` directives whose
+   * per-job target file is gone afterwards, and on a persistent runner the
+   * directives accumulate in a reused `.git/config`. Measured: two hits, and
+   * `filters` empty, on a repository defining no content filter at all.
+   *
+   * A TOP-LEVEL candidate that does not exist is not recorded here. That is
+   * the ordinary "no per-worktree config, no linked worktrees registered" and
+   * stays silent, as before.
+   */
+  dangling: string[];
 }
 
 /**
@@ -321,6 +345,7 @@ export function filterCommandsIn(
   }
   const filters = new Set<string>();
   const unread = new Set<string>();
+  const dangling = new Set<string>();
   const visited = new Set<string>();
   // `-z`: one `key\nvalue\0` record per hit, so a value holding a newline
   // (a path can) still parses — the key never holds one. Exit 1 is "no key
@@ -362,12 +387,12 @@ export function filterCommandsIn(
       real = realpathSync(file);
     } catch {
       // A candidate that is not there is the normal case (no per-worktree
-      // config, no linked worktrees); an include target that is not there
-      // is the dangling include git ignores and this screen refuses.
+      // config, no linked worktrees) and stays silent. An include target that
+      // is not there is recorded apart from `unread`, because git ignores it
+      // and so does the checkout a caller is about to authorise — see
+      // `FilterScreen.dangling` for what refusing on it cost.
       if (via !== null) {
-        unread.add(
-          `${via} -> ${file} (missing — git ignores a dangling include; this screen refuses it)`,
-        );
+        dangling.add(`${via} -> ${file} (missing — git ignores it)`);
       }
       return;
     }
@@ -432,7 +457,11 @@ export function filterCommandsIn(
     }
   };
   for (const candidate of candidates) visit(candidate, 0, null);
-  return { filters: [...filters], unread: [...unread] };
+  return {
+    filters: [...filters],
+    unread: [...unread],
+    dangling: [...dangling],
+  };
 }
 
 /**
@@ -489,15 +518,20 @@ export function filterBlankEnv(filterKeys: string[]): NodeJS.ProcessEnv {
 }
 
 /**
- * `filterCommandsIn` for a tree path, flattened for a caller that refuses on
- * any hit: the scratch-tree command screens the review worktree this way
- * before any checkout. Discovery is per flag and absolute, as
- * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs
- * under a directory whose name holds a newline — and a discovery that
- * fails is itself a hit: a repository whose git dirs cannot be resolved is
- * not one this screen can call filter-free.
+ * A discovery that failed is itself a hit, for every caller: a repository
+ * whose git dirs cannot be resolved is not one this screen can call
+ * filter-free.
  */
-export function localFilterCommands(worktree: string): string[] {
+const UNRESOLVED_REPO =
+  "the repository's git directories could not be resolved (git rev-parse failed) — not screened";
+
+/**
+ * `filterCommandsIn` for a tree path. Discovery is per flag and absolute, as
+ * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs under
+ * a directory whose name holds a newline. `null` is the unresolved repository
+ * above, which every caller reports rather than reads as clean.
+ */
+function screenForTree(worktree: string): FilterScreen | null {
   const discover = (flag: string): string | null => {
     const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
       cwd: worktree,
@@ -511,12 +545,48 @@ export function localFilterCommands(worktree: string): string[] {
   };
   const commonDir = discover('--git-common-dir');
   const gitDir = discover('--git-dir');
-  if (commonDir === null || gitDir === null) {
-    return [
-      "the repository's git directories could not be resolved (git rev-parse failed) — not screened",
-    ];
-  }
-  const screen = filterCommandsIn(commonDir, gitDir);
+  if (commonDir === null || gitDir === null) return null;
+  return filterCommandsIn(commonDir, gitDir);
+}
+
+/**
+ * The screen flattened for a caller that refuses on ANY hit, a dangling
+ * include among them: the scratch-tree command screens the review worktree
+ * this way before any checkout.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const screen = screenForTree(worktree);
+  if (screen === null) return [UNRESOLVED_REPO];
+  return [...screen.filters, ...screen.unread, ...screen.dangling];
+}
+
+/**
+ * The screen for a caller about to AUTHORISE a checkout, which asks a narrower
+ * question than "is this repository certifiably filter-free": it asks "will
+ * this rewrite execute a command". A dangling include delivers nothing to that
+ * checkout, because git skips it, so it is not part of the answer — and
+ * refusing on it darkened the whole efficacy phase on every standard CI
+ * checkout, where `actions/checkout`'s persisted credentials leave `includeIf`
+ * directives whose per-job target is already gone. See `FilterScreen.dangling`
+ * for the measurement and for why no capability is given up.
+ *
+ * Everything else is unchanged: a filter key is a refusal, and so is any file
+ * the walk could not read to the bottom, because that is a file that may hold
+ * one.
+ *
+ * Deliberately NOT reached by dropping `includeIf` from `SCREEN_KEYS`, and not
+ * by evaluating its condition either. A matching `includeIf.gitdir:` IS
+ * honoured by the checkouts this screen authorises, and at the site that
+ * creates a probe tree the screen is asked about one worktree while `git
+ * worktree add` registers a NEW admin entry under `<common>/worktrees/` — the
+ * wildcard form git writes for exactly that case. A condition test matching
+ * only the screened tree's own gitdir would therefore re-open the creation
+ * path the screen exists to cover. Only the target's existence is asked here;
+ * origin-resolution of what a hit came from is #10441.
+ */
+export function checkoutFilterCommands(worktree: string): string[] {
+  const screen = screenForTree(worktree);
+  if (screen === null) return [UNRESOLVED_REPO];
   return [...screen.filters, ...screen.unread];
 }
 
@@ -1249,14 +1319,21 @@ export function worktreeResidue(
       // a config the screen could not read to the bottom: a filter it cannot
       // see it cannot blank.
       const screen = filterCommandsIn(commonDir, realpathSync(gitDir));
-      if (screen.unread.length > 0) {
+      // BOTH halves here, where `checkoutFilterCommands` takes only the first.
+      // This consumer does not authorise one rewrite and then stop: it hands
+      // back a measurement the rest of the review acts on, and a dangling
+      // include is a payload file that can land one step later, before the
+      // `status` refresh that would execute it. Refusing keeps it unmeasured
+      // rather than measured against a config nobody read.
+      const notReadToTheBottom = [...screen.unread, ...screen.dangling];
+      if (notReadToTheBottom.length > 0) {
         return {
           paths: [],
           total: 0,
           unmeasured:
             'the residue measurement would run under repo-local config ' +
             'this screen could not read to the bottom: ' +
-            `${describeFilterScreen(screen.unread)} — a content filter ` +
+            `${describeFilterScreen(notReadToTheBottom)} — a content filter ` +
             'reached that way would execute on the index refresh, and a ' +
             'filter the screen cannot see it cannot blank; remove the ' +
             'include, or the file it names, if it is not yours',

@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
+  checkoutFilterCommands,
   discardWorktree,
   exposeDependencies,
   filterBlankEnv,
@@ -1898,6 +1899,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.evil.process'],
       unread: [],
+      dangling: [],
     });
   });
 
@@ -1920,6 +1922,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.evil.clean'],
         unread: [],
+        dangling: [],
       });
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
@@ -1943,6 +1946,7 @@ describe('filterCommandsIn — the include walk', () => {
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.x.clean'],
         unread: [],
+        dangling: [],
       });
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
@@ -1963,6 +1967,7 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: ['filter.home.clean'],
       unread: [],
+      dangling: [],
     });
   });
 
@@ -2062,6 +2067,64 @@ describe('filterCommandsIn — the include walk', () => {
       g('worktree', 'add', '--detach', '-q', wt, 'HEAD');
       g('config', 'filter.evil.smudge', 'touch PWNED');
       expect(localFilterCommands(wt)).toEqual(['filter.evil.smudge']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('checkoutFilterCommands: a dangling include is not a hit, and localFilterCommands still reports it', () => {
+    // The two consumers ask different questions and the difference IS the fix.
+    // `actions/checkout` with persisted credentials writes `includeIf
+    // "gitdir:…"` directives into the repository-local config whose target is a
+    // per-job file, gone by the next job; on a persistent runner the directives
+    // accumulate in a reused `.git/config`. git ignores a dangling include, so
+    // a checkout the screen is about to authorise executes nothing from it —
+    // while the residue measurement, which hands back a result the rest of the
+    // review acts on, keeps refusing on it.
+    //
+    // Measured before this split: `localFilterCommands` returned 2 hits on a
+    // repository defining NO content filter, so all four efficacy screens
+    // refused and the phase shipped zero evidence while telling the reader the
+    // repository "defines content filter(s)".
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-dangling-')));
+    try {
+      const repo = join(base, 'repo');
+      mkdirSync(repo, { recursive: true });
+      const g = (...args: string[]) =>
+        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@t.t');
+      g('config', 'user.name', 't');
+      writeFileSync(join(repo, 'a.ts'), 'x\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      // The runner's shape, both directives: the plain form and the wildcard
+      // form git writes for linked worktrees. Neither condition can match this
+      // tree, and that is deliberately NOT what the assertion turns on — the
+      // screen does not evaluate includeIf conditions, because a match test
+      // against only the screened tree's own gitdir would re-open the creation
+      // path, where `worktree add` registers a NEW admin entry. What it asks is
+      // whether the target exists.
+      appendFileSync(
+        join(repo, '.git', 'config'),
+        '[includeIf "gitdir:/github/workspace/.git"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n' +
+          '[includeIf "gitdir:/github/workspace/.git/worktrees/*"]\n' +
+          '\tpath = /github/runner_temp/git-credentials.config\n',
+      );
+
+      expect(checkoutFilterCommands(repo)).toEqual([]);
+      // Unchanged for the consumer that refuses on any hit.
+      expect(localFilterCommands(repo)).toHaveLength(2);
+      expect(localFilterCommands(repo).join(' ')).toContain(
+        'git-credentials.config',
+      );
+      // And the structured answer says which half they came from: nothing is
+      // defined and nothing was unreadable, so both are `dangling`.
+      const screen = filterCommandsIn(join(repo, '.git'), join(repo, '.git'));
+      expect(screen.filters).toEqual([]);
+      expect(screen.unread).toEqual([]);
+      expect(screen.dangling).toHaveLength(2);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
