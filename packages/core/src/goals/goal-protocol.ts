@@ -188,12 +188,14 @@ export interface GoalRecord {
   /**
    * Consecutive checkpoint checks that failed to relieve an overflowing
    * evidence window: the checkpoint came back full (see
-   * `isGoalCheckpointStalled`) or the verifier result could not be folded
-   * into claims at all. Persisted on the record rather than held in memory
-   * so a daemon restart or session resume cannot launder the count; absent
-   * means zero. Reset by any checkpoint check that finds room, and by every
-   * control action that starts a different evidence window: edit, replace,
-   * and the resume of an evidence-limited Goal.
+   * `isGoalCheckpointStalled`), the verifier result could not be folded
+   * into claims at all, or the check itself failed -- a provider error or
+   * a verifier that never answered before its timeout. Persisted on the
+   * record rather than held in memory so a daemon restart or session
+   * resume cannot launder the count; absent means zero. Reset by any
+   * checkpoint check that finds room, and by every control action that
+   * starts a different evidence window: edit, replace, and the resume of
+   * an evidence-limited Goal.
    */
   checkpointStalls?: number;
   lastReason?: string;

@@ -1571,10 +1571,14 @@ describe('goal runtime', () => {
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0]!;
+    // 101 records overflow the evidence window, so this also pins the
+    // precedence the stall branch relies on: a structurally oversized
+    // request must keep its immediate checkpoint_request stop instead of
+    // being counted as a stall on the truncated window.
     records = verifierEvidenceWindow(
       permit,
       runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
+      101,
     );
 
     await runtime.finishTurn(permit);
@@ -2275,6 +2279,37 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
     // Every unusable check was settled as bookkeeping and retried.
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+  });
+
+  it('keeps the stall streak through a provider failure on a window with room', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
+
+    // A transient failure on a window with room proves nothing about
+    // compaction: the streak carries through instead of resetting. The
+    // streak must be non-zero here -- a preserved 0 and a reset 0 both
+    // render as an absent field, so only from 1 can this tell them apart.
+    // 60 records keep this window inside the budget once the stalled
+    // checkpoint's full claim list sits in front of it.
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', checkpointStalls: 1 },
+    });
+    expect(host.started).toHaveLength(3);
   });
 
   it('keeps the stall streak when a turn records no evidence at all', async () => {

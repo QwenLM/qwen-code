@@ -60,6 +60,9 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GOAL_RUNTIME');
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -974,9 +977,11 @@ export function createGoalRuntime(
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
       // Only a check that found room ends a stall streak. A check that
-      // never ran or failed transiently proved nothing about the window;
-      // resetting there would launder the count. An unusable verifier
-      // result while the window overflowed counts like a stalled checkpoint.
+      // produced nothing while the window overflowed -- an unusable
+      // result, a provider failure, or a verifier timeout -- counts like
+      // a stalled checkpoint. Any other check (never ran, or failed while
+      // the window had room) proved nothing about the window, so it
+      // preserves the streak; resetting there would launder the count.
       const checkpointStalls =
         outcome === 'room'
           ? 0
@@ -1213,6 +1218,10 @@ export function createGoalRuntime(
           // overflowing window run a Goal in circles: each turn paid the
           // call, kept the same cursor, and was told to retry, with nothing
           // but the token budget left to stop it.
+          debugLogger.debug(
+            'Checkpoint check failed on an overflowing window; counting it as a stall.',
+            error,
+          );
           await finishCheckpointCheck(attempt, 'stalled');
           return;
         }
