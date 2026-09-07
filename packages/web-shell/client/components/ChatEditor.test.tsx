@@ -398,6 +398,7 @@ interface ChatEditorRenderProps {
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
   language?: WebShellLanguage;
@@ -533,6 +534,27 @@ describe('ChatEditor add menu (+)', () => {
       visibleToolbarActions: ['approvalMode', 'voice'],
     });
     expect(trigger(container)).toBeNull();
+  });
+
+  it('keeps session attachments available without workspace actions', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file-attach"]'),
+    ).not.toBeNull();
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-file-upload"]:not([data-disabled])',
+      ),
+    ).toBeNull();
   });
 
   it('stays off by default when the host passes no toolbar list', () => {
@@ -1174,6 +1196,41 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('controls the workspace selector with the workspace action', () => {
+    const props = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/main',
+          label: 'main',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'api',
+          cwd: '/work/api',
+          label: 'api',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      onSelectWorkspace: vi.fn(),
+    };
+
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: [],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+  });
+
   it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
     renderChatEditor({
       composerScopeKey: 'live',
