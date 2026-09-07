@@ -475,23 +475,6 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           error: { message: refusal },
         };
       }
-      if (
-        existing.status === 'in_progress' &&
-        existingOwner &&
-        existingOwner !== LEADER_NAME &&
-        ownerChanged &&
-        teamManager.validateTaskOwner(existingOwner) === undefined
-      ) {
-        const msg =
-          `Cannot reassign task #${taskId} from "${existingOwner}" while ` +
-          `that teammate is still active. Shut down or release the current ` +
-          `owner before assigning "${explicitOwner}".`;
-        return {
-          llmContent: msg,
-          returnDisplay: msg,
-          error: { message: msg },
-        };
-      }
     }
 
     let task;

@@ -211,7 +211,7 @@ describe('TaskUpdateTool', () => {
     expect(reloaded?.status).toBe('completed');
   });
 
-  it('rejects reassignment while the current owner is active', async () => {
+  it('allows sequential reassignment while the current owner is active', async () => {
     const dispatchedOwners: string[] = [];
     const teamManager = {
       validateTaskOwner: () => undefined,
@@ -232,10 +232,9 @@ describe('TaskUpdateTool', () => {
       .build({ taskId: task.id, owner: 'bob' })
       .execute(new AbortController().signal);
 
-    expect(result.error).toBeDefined();
-    expect(String(result.llmContent)).toContain('still active');
-    expect(dispatchedOwners).toEqual([]);
-    expect((await getTask(TEAM, task.id))?.owner).toBe('alice');
+    expect(result.error).toBeUndefined();
+    expect(dispatchedOwners).toEqual(['bob']);
+    expect((await getTask(TEAM, task.id))?.owner).toBe('bob');
   });
 
   it('allows reassignment after the current owner becomes inactive', async () => {
