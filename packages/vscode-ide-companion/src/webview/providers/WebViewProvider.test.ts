@@ -2440,6 +2440,102 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     });
   });
 
+  it('keeps the binding when the bootstrap is interrupted before the echo', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // The canonical key's only other writer (`webShellSessionChanged`) runs
+      // after the shell attaches. Retiring the alias without moving the id
+      // first would lose the folder->session binding for good if the window
+      // reloads inside that window.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+      setup.postMessage.mockClear();
+      // No `webShellSessionChanged` in between: this is the interrupted path.
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap?.data?.sessionId).toBe('pre-upgrade-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('pre-upgrade-session-id');
+    });
+  });
+
+  it('does not let the alias id overwrite an existing canonical one', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // A user who opened the same folder under both spellings before
+      // upgrading has an entry under each. The canonical one is authoritative;
+      // the alias is retired without clobbering it.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'canonical-session-id',
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'alias-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const bootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(bootstrap?.data?.sessionId).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`),
+      ).toBeUndefined();
+    });
+  });
+
+  it('leaves the stored id alone when the folder is not symlinked', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const workspace = realpathSync.native(root);
+    try {
+      // Here the legacy and canonical keys are the same string, so a
+      // retirement that is not gated on an alias actually existing would
+      // delete the entry it just read.
+      setWorkspaceFolders([workspace]);
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`]: 'existing-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`,
+        ),
+      ).toBe('existing-session-id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
     const context = createSharedContext();
     const first = await setupAttachedProvider({

@@ -482,13 +482,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // A workspace folder that stops resolving while the window stays open
       // (deleted or renamed from a terminal, a removed worktree, an unmounted
       // volume, a dangling symlink) must not block the export. For a
-      // non-symlinked folder the raw spelling IS the canonical one, so the
-      // transcript bucket under `~/.qwen/tmp/<getProjectHash(cwd)>/chats` still
-      // matches. The daemon hashes the *canonicalized* workspace
-      // (packages/cli/src/serve/server.ts), so in a symlinked folder the
-      // canonical spelling is unrecoverable once the alias stops resolving and
-      // this degrades the way it did before the branch existed — the export
-      // still gets a folder path for the save dialog instead of failing.
+      // non-symlinked folder whose spelling already matches the on-disk casing,
+      // the raw spelling IS the canonical one, so the transcript bucket under
+      // `~/.qwen/tmp/<getProjectHash(cwd)>/chats` still matches. The daemon
+      // hashes the *canonicalized* workspace (packages/cli/src/serve/server.ts),
+      // so two spellings do not: a case-variant on a case-insensitive volume
+      // (`getProjectHash` lowercases only on win32) and any alias in a symlinked
+      // folder that has stopped resolving both hash to a bucket the daemon never
+      // wrote. There the export fails the way it did before this branch existed
+      // — `loadSession` misses and `exportSessionToFile` throws "No active
+      // session found to export." before it ever reaches the save dialog.
       // Only ENOENT falls back; EACCES/EIO/ELOOP keep propagating so transient
       // I/O failures are not hidden, matching `canonicalizeWorkspace` in
       // packages/acp-bridge/src/workspacePaths.ts.

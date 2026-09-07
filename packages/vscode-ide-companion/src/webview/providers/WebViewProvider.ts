@@ -2011,20 +2011,59 @@ export class WebViewProvider {
           // overwritten or cleared: a session the user has since cleared would
           // be resurrected by the fallback on every later bootstrap, with no
           // action able to clear it again.
+          const canonicalKey = webShellSessionStateKey(canonicalWorkspaceCwd);
+          const canonicalSessionId =
+            this.context.workspaceState.get<string>(canonicalKey);
           const legacyKey = webShellSessionStateKey(workspaceCwd);
           const legacySessionId =
             canonicalWorkspaceCwd !== workspaceCwd
               ? this.context.workspaceState.get<string>(legacyKey)
               : undefined;
           if (legacySessionId !== undefined) {
-            await this.context.workspaceState.update(legacyKey, undefined);
+            // Move the id rather than dropping it: the canonical key's only
+            // other writer (`webShellSessionChanged`) does not run until the
+            // shell has attached, so retiring the alias first would lose the
+            // binding for good if this bootstrap is interrupted before the
+            // echo. Both writes are best-effort — neither is needed for this
+            // bootstrap, whose id comes from the fallback below, and a
+            // rejecting `Memento.update` (locked `state.vscdb`, full disk,
+            // read-only profile) must not abort a bootstrap whose daemon has
+            // already started. Leaving the alias entry behind is safe because
+            // the next bootstrap reads it and retries the migration.
+            const migrated = getRestorableDaemonSessionId(legacySessionId);
+            const migrationSettled =
+              canonicalSessionId === undefined && migrated !== undefined
+                ? await this.context.workspaceState
+                    .update(canonicalKey, migrated)
+                    .then(
+                      () => true,
+                      (error: unknown) => {
+                        logger.warn(
+                          '[WebViewProvider] Failed to migrate legacy web-shell session key:',
+                          error,
+                        );
+                        return false;
+                      },
+                    )
+                : true;
+            if (migrationSettled) {
+              await this.context.workspaceState
+                .update(legacyKey, undefined)
+                .then(
+                  () => undefined,
+                  (error: unknown) => {
+                    logger.warn(
+                      '[WebViewProvider] Failed to retire legacy web-shell session key:',
+                      error,
+                    );
+                  },
+                );
+            }
           }
           // The fallback binds an id to a folder's *spelling* rather than to
           // folder identity, so it is only sound as this one-shot migration.
           viewSessionId = getRestorableDaemonSessionId(
-            this.context.workspaceState.get<string>(
-              webShellSessionStateKey(canonicalWorkspaceCwd),
-            ) ?? legacySessionId,
+            canonicalSessionId ?? legacySessionId,
           );
         }
         const restoredSessionId = this.isViewHost
