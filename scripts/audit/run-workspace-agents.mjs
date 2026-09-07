@@ -36,7 +36,7 @@ export * from '${repo}/${src}/thread-actions.js';
 export { resolveThreadStatus } from '${repo}/${src}/thread-status.js';
 export * from '${repo}/${src}/run-lifecycle.js';
 export { runWithAgentRunContext, getAgentRunContext } from '${repo}/${src}/run-context.js';
-export { ThreadPostTool, ThreadReviewTool, ThreadReadTool } from '${repo}/packages/core/src/tools/thread-tools.js';
+export { ThreadPostTool, ThreadReviewTool, ThreadReadTool, ThreadCreateTool, ThreadBlockTool, ThreadWaitTool } from '${repo}/packages/core/src/tools/thread-tools.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
@@ -808,6 +808,194 @@ ok(
   }).outstanding.some((o) => o.kind === 'review'),
 );
 ok('an agent cannot mark a thread done', afterReview.status !== 'done');
+
+console.log('\n14. delegation, blocking and waiting');
+const sig = () => new AbortController().signal;
+const asAgent = async (agentId, threadId, runId, rootThreadId, fn) =>
+  M.runWithAgentRunContext(
+    {
+      workspaceId: ws.workspaceId,
+      agentId,
+      runId,
+      threadId,
+      rootThreadId,
+      attempt: 1,
+    },
+    fn,
+  );
+// Each scenario gets its own agent: maxConcurrentRuns defaults to 1, so an
+// agent still running an earlier scenario cannot be claimed onto a new one.
+// The claim is asserted rather than assumed — silently continuing with a
+// queued run is what turned that limit into six confusing failures once.
+let agentSeq = 0;
+const startFor = async (title) => {
+  const agentId = `ag_w${++agentSeq}`;
+  await M.updateWorkspaceAgents(ROOT, (a) => [
+    ...a,
+    { id: agentId, name: `w${agentSeq}`, createdAt: 1 },
+  ]);
+  const th = await M.createThread(ROOT, { title, assigneeAgentId: agentId });
+  const bk2 = await M.postMessage(ROOT, th.id, {
+    from: M.HUMAN_AUTHOR_ID,
+    text: 'go',
+  });
+  const id = bk2.dispatched[0].id;
+  const got = await M.claimRun(ROOT, { threadId: th.id, runId: id });
+  if (!got) throw new Error(`could not claim ${title} for ${agentId}`);
+  return { th, runId: id, agentId };
+};
+
+const d1 = await startFor('Delegating');
+const created = await asAgent(
+  d1.agentId,
+  d1.th.id,
+  d1.runId,
+  d1.th.rootThreadId,
+  () =>
+    new M.ThreadCreateTool(cfg).buildAndExecute(
+      {
+        title: 'Sub-task',
+        body: 'the smaller half',
+        acceptanceCriteria: 'It compiles',
+      },
+      sig(),
+    ),
+);
+ok(
+  'an agent can split out a sub-thread',
+  !created.error,
+  JSON.stringify(created.error),
+);
+const all = (await M.listThreads(ROOT)).threads;
+const child = all.find((t) => t.parentThreadId === d1.th.id);
+ok('the child records its parent', Boolean(child));
+ok(
+  'and shares the parent budget root',
+  child?.rootThreadId === d1.th.rootThreadId,
+  child?.rootThreadId,
+);
+ok(
+  'the child carries the criteria it was handed',
+  child?.acceptanceCriteria === 'It compiles',
+  String(child?.acceptanceCriteria),
+);
+const again2 = await asAgent(
+  d1.agentId,
+  d1.th.id,
+  d1.runId,
+  d1.th.rootThreadId,
+  () =>
+    new M.ThreadCreateTool(cfg).buildAndExecute({ title: 'Sub-task' }, sig()),
+);
+ok(
+  'splitting the same title twice reuses the first',
+  !again2.error &&
+    (await M.listThreads(ROOT)).threads.filter(
+      (t) => t.parentThreadId === d1.th.id,
+    ).length === 1,
+);
+
+const b1 = await startFor('Blocking');
+const blocked2 = await asAgent(
+  b1.agentId,
+  b1.th.id,
+  b1.runId,
+  b1.th.rootThreadId,
+  () =>
+    new M.ThreadBlockTool(cfg).buildAndExecute(
+      { question: 'Which environment?' },
+      sig(),
+    ),
+);
+ok(
+  'an agent can block on a person',
+  !blocked2.error,
+  JSON.stringify(blocked2.error),
+);
+const bth = await M.readThread(ROOT, b1.th.id);
+ok(
+  'the question is posted for a person to read',
+  bth.messages.some((m) => m.text.includes('Which environment?')),
+);
+ok(
+  'and the run closes as blocked',
+  bth.runs.find((r) => r.id === b1.runId)?.closeKind === 'blocked',
+);
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: b1.th.id,
+    runId: b1.runId,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+ok(
+  'the thread then reads blocked',
+  M.resolveThreadStatus({
+    thread: await M.readThread(ROOT, b1.th.id),
+    hasLiveChildDependency: false,
+  }).status === 'blocked',
+);
+
+const w1 = await startFor('Waiting');
+// Waiting is only legal when something can still wake the thread. Refusing
+// otherwise is the guard against an agent stranding its own work.
+const idleWait = await asAgent(
+  w1.agentId,
+  w1.th.id,
+  w1.runId,
+  w1.th.rootThreadId,
+  () => new M.ThreadWaitTool(cfg).buildAndExecute({}, sig()),
+);
+ok(
+  'waiting with nothing open is refused',
+  Boolean(idleWait.error),
+  'it should not have been allowed to strand the thread',
+);
+// Assigned, not merely created: an open sub-thread with nobody on it cannot
+// wake its parent, so delegating to no one is not delegation and the guard
+// still refuses. This is the shape that makes a wait legitimate.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_helper', name: 'helper', createdAt: 1 },
+]);
+await asAgent(w1.agentId, w1.th.id, w1.runId, w1.th.rootThreadId, () =>
+  new M.ThreadCreateTool(cfg).buildAndExecute(
+    { title: 'Delegated bit', assignee: 'helper' },
+    sig(),
+  ),
+);
+const waited = await asAgent(
+  w1.agentId,
+  w1.th.id,
+  w1.runId,
+  w1.th.rootThreadId,
+  () => new M.ThreadWaitTool(cfg).buildAndExecute({}, sig()),
+);
+ok(
+  'waiting on an open sub-thread succeeds',
+  !waited.error,
+  JSON.stringify(waited.error),
+);
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: w1.th.id,
+    runId: w1.runId,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+const wth = await M.readThread(ROOT, w1.th.id);
+ok(
+  'the wait reads in_progress while the child is live',
+  M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: true })
+    .status === 'in_progress',
+  M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: true }).status,
+);
+ok(
+  'and blocked once nothing can wake it',
+  M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: false })
+    .status === 'blocked',
+  M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: false }).status,
+);
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
