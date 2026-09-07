@@ -12837,3 +12837,64 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
   });
 });
+
+describe('applyWorkspaceAgentPersona', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+    chatRecording: false,
+  };
+
+  const agentSession = () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent', 'ag_alice');
+    return config;
+  };
+
+  it('puts the persona where the main session prompt is read from', () => {
+    // The whole reason no new machinery was needed: the prompt path already
+    // prefers an override over the core prompt.
+    const config = agentSession();
+
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('refuses on a session that is not an agent', () => {
+    // Otherwise any session could be handed a persona and post under a name
+    // that is not its own.
+    expect(() =>
+      new Config(baseParams).applyWorkspaceAgentPersona('x', 'alice'),
+    ).toThrow(/only be applied to an agent session/);
+  });
+
+  it('refuses on a session belonging to another source', () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'ws_1');
+
+    expect(() => config.applyWorkspaceAgentPersona('x', 'alice')).toThrow(
+      /only be applied to an agent session/,
+    );
+  });
+
+  it('refuses a second persona rather than changing one in place', () => {
+    // A session's prompt is part of what its transcript means; swapping it
+    // under a running conversation would make the record a lie.
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(() =>
+      config.applyWorkspaceAgentPersona('You are bob.', 'bob'),
+    ).toThrow(/already has a persona/);
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('names no agent on a session that never had a persona applied', () => {
+    expect(new Config(baseParams).getWorkspaceAgentName()).toBeUndefined();
+  });
+});

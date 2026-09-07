@@ -34,6 +34,9 @@ import { postMessage } from './thread-actions.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
+  DEFAULT_THREAD_PRIORITY,
+  THREAD_PRIORITY_ORDER,
+  threadPriorityRank,
   type WorkspaceAgent,
   type Thread,
   type ThreadRun,
@@ -112,6 +115,27 @@ async function seedQueued(overrides: Partial<Thread> = {}): Promise<Thread> {
   await writeThread(PROJECT_ROOT, thread);
   return thread;
 }
+
+describe('threadPriorityRank', () => {
+  it('orders the priorities highest first', () => {
+    expect(THREAD_PRIORITY_ORDER.map(threadPriorityRank)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('ranks an absent priority as the default', () => {
+    // What keeps a thread written before the field existed in its place.
+    expect(threadPriorityRank()).toBe(
+      threadPriorityRank(DEFAULT_THREAD_PRIORITY),
+    );
+  });
+
+  it('ranks an unrecognised priority as the default rather than first', () => {
+    // The store refuses a malformed value, so this is defence in depth. If one
+    // ever reaches here it must not silently jump the queue.
+    expect(
+      threadPriorityRank('critical' as (typeof THREAD_PRIORITY_ORDER)[number]),
+    ).toBe(threadPriorityRank(DEFAULT_THREAD_PRIORITY));
+  });
+});
 
 describe('selectCandidates', () => {
   it('lets priority outrank age, and only priority', () => {
