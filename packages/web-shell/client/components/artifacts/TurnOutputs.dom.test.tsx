@@ -378,7 +378,8 @@ describe('TurnOutputs artifact downloads', () => {
         .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
         ?.click();
       container
-        .querySelector<HTMLButtonElement>('button[title="Secondary artifact"]')
+        .querySelector<HTMLElement>('[title="Secondary artifact"]')
+        ?.querySelector('button')
         ?.click();
       container
         .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
@@ -618,7 +619,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).not.toHaveBeenCalled();
   });
 
-  it('disables Open for a missing workspace artifact and shows the recorded path', () => {
+  it('disables Open for a missing workspace artifact without showing its path', () => {
     const onOpenArtifact = vi.fn();
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -654,7 +655,10 @@ describe('TurnOutputs artifact downloads', () => {
       (button) => button.textContent?.trim() === 'Open',
     );
     expect(open?.disabled).toBe(true);
-    expect(container.textContent).toContain(
+    expect(open?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('w/agent/report.csv');
+    expect(open?.title).toBe('');
+    expect(open?.parentElement?.title).toBe(
       'File not found in the workspace · w/agent/report.csv',
     );
 
