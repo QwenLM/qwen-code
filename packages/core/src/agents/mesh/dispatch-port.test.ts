@@ -4,17 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import {
-  getAgentMetaPath,
-  patchAgentMeta,
-  readAgentMeta,
-  writeAgentMeta,
-} from '../agent-transcript.js';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { Config } from '../../config/config.js';
 import {
@@ -41,7 +31,6 @@ function makeConfig(
   const config = {
     getBackgroundTaskRegistry: () => registry,
     getSessionId: () => 'se_host',
-    getProjectRoot: () => '/mesh-port-test',
     reviveCompletedBackgroundAgent: vi.fn(async () => overrides.revive),
     resumeBackgroundAgent: vi.fn(async () => overrides.resume),
   } as unknown as Config;
@@ -68,9 +57,6 @@ describe('inspectBody', () => {
 });
 
 describe('createMeshDispatchPort', () => {
-  // The binding write is best effort by design: with no meta on disk the
-  // patch is a no-op, and the turn seam then refuses to run mesh tools, which
-  // is the safe direction. These tests exercise the entry-point choice.
   const start = (
     config: Config,
     action: 'launch' | 'resume' | 'continue_completed',
@@ -167,64 +153,5 @@ describe('createMeshDispatchPort', () => {
       status: 'launch_failed',
       error: 'registry exploded',
     });
-  });
-});
-
-describe('per-turn thread binding', () => {
-  let projectRoot: string;
-
-  beforeEach(() => {
-    projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-bind-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(projectRoot, { recursive: true, force: true });
-  });
-
-  it('rewrites which thread the next turn is for, without disturbing identity', () => {
-    // The turn seam reads this record once per turn. A body that worked thread
-    // A last turn and thread B this turn must get B; the durable identity that
-    // makes it the same body across both must not move.
-    const metaPath = getAgentMetaPath(projectRoot, 'se_host', 'mesh-ag_alice');
-    fs.mkdirSync(path.dirname(metaPath), { recursive: true });
-    writeAgentMeta(metaPath, {
-      agentId: 'mesh-ag_alice',
-      meshAgentId: 'ag_alice',
-      agentType: 'log-reader',
-      description: 'reads CI logs',
-      parentSessionId: 'se_host',
-      parentAgentId: null,
-      createdAt: new Date().toISOString(),
-      status: 'running',
-      meshRun: {
-        workspaceId: projectRoot,
-        agentId: 'ag_alice',
-        runId: 'rn_first',
-        threadId: 'th_a',
-        rootThreadId: 'th_a',
-        attempt: 1,
-      },
-    });
-
-    const { config } = makeConfig();
-    (config as unknown as { getProjectRoot: () => string }).getProjectRoot =
-      () => projectRoot;
-    createMeshDispatchPort(config);
-    const next = {
-      workspaceId: projectRoot,
-      agentId: 'ag_alice',
-      runId: 'rn_second',
-      threadId: 'th_b',
-      rootThreadId: 'th_b',
-      attempt: 1,
-    };
-    // The same helper the port uses on every non-launch start.
-    patchAgentMeta(metaPath, { meshRun: next });
-
-    const stored = readAgentMeta(metaPath);
-    expect(stored?.meshRun?.threadId).toBe('th_b');
-    expect(stored?.meshRun?.runId).toBe('rn_second');
-    expect(stored?.meshAgentId).toBe('ag_alice');
-    expect(stored?.agentType).toBe('log-reader');
   });
 });

@@ -23,7 +23,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { MeshRunContext } from './mesh/run-context.js';
 import {
   AgentEventType,
   type AgentEventEmitter,
@@ -113,17 +112,6 @@ export interface AgentMeta {
   agentId: string;
   /** Durable mesh identity when this runtime belongs to the shared-thread mesh. */
   meshAgentId?: string;
-  /**
-   * Which thread and run this body's *next* turn is executing.
-   *
-   * A shared-thread agent is one long-lived body that works many threads in
-   * sequence, so the turn seam has to be told which one it is on. The
-   * dispatcher writes this immediately before it starts a turn and the seam
-   * reads it once, synchronously, to open an AsyncLocalStorage frame — the
-   * frame is what stops the binding leaking across concurrent async work,
-   * which a process-global "current run" variable could not.
-   */
-  meshRun?: MeshRunContext;
   agentType: string;
   description: string;
   /** SessionId of the user session that launched this agent. */

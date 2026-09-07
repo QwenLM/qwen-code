@@ -24,10 +24,6 @@ import type {
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
-import {
-  runWithMeshRunContext,
-  type MeshRunContext,
-} from '../../agents/mesh/run-context.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
@@ -125,7 +121,6 @@ import {
   getAgentMetaPath,
   getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
-  readAgentMeta,
   patchAgentMeta,
   writeAgentMeta,
   type AgentPersistedCliFlags,
@@ -284,8 +279,6 @@ export type ProgrammaticBackgroundAgentLaunchResult =
 interface ProgrammaticBackgroundAgentLaunchOptions {
   agentId: string;
   meshAgentId: string;
-  /** Thread and run the first turn executes. See `AgentMeta.meshRun`. */
-  meshRun?: MeshRunContext;
   subagentConfig: SubagentConfig;
   toolConfig: ToolConfig;
 }
@@ -3343,12 +3336,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           ...(this.programmatic
-            ? {
-                meshAgentId: this.programmatic.meshAgentId,
-                ...(this.programmatic.meshRun
-                  ? { meshRun: this.programmatic.meshRun }
-                  : {}),
-              }
+            ? { meshAgentId: this.programmatic.meshAgentId }
             : {}),
           agentType: hookOpts.agentType,
           description: this.params.description,
@@ -3819,11 +3807,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           turnAbortController: AbortController,
           fireStartHook: boolean,
         ) => {
-          // Re-read the binding at the seam, once per turn. A shared-thread
-          // body works many threads in sequence, so the dispatcher rewrites
-          // this immediately before each turn; a frame opened around the
-          // lifetime would pin the body to whichever thread it started on.
-          const meshRun = readAgentMeta(metaPath)?.meshRun;
           const framedBgBody = () =>
             this.runWithSubagentSpan(
               this.buildSubagentSpanSpec(
@@ -3832,22 +3815,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 isFork ? 'fork' : 'background',
               ),
               turnAbortController.signal,
-              (recordOutcome) => {
-                const body = () =>
-                  bgBody(
-                    turnContextState,
-                    turnAbortController,
-                    recordOutcome,
-                    fireStartHook,
-                  );
-                return runWithAgentContext(
+              (recordOutcome) =>
+                runWithAgentContext(
                   hookOpts.agentId,
-                  meshRun
-                    ? () => runWithMeshRunContext(meshRun, body)
-                    : body,
+                  () =>
+                    bgBody(
+                      turnContextState,
+                      turnAbortController,
+                      recordOutcome,
+                      fireStartHook,
+                    ),
                   launchDepth,
-                );
-              },
+                ),
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();
         };
