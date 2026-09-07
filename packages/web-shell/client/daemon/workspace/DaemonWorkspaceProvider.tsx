@@ -63,6 +63,7 @@ export function DaemonWorkspaceProvider({
     DaemonCapabilities | undefined
   >(undefined);
   const [brand, setBrand] = useState<DaemonBrand | undefined>(undefined);
+  const [brandSettled, setBrandSettled] = useState(false);
   const [status, setStatus] = useState<DaemonWorkspaceStatus>(
     autoConnect ? 'connecting' : 'idle',
   );
@@ -212,17 +213,29 @@ export function DaemonWorkspaceProvider({
   // a synchronous TypeError out of this effect — white-screening the shell over
   // a cosmetic feature. Deferring turns that throw into a rejection the catch
   // below swallows like any other.
+  //
+  // `brandSettled` flips true on either outcome — never back. Consumers must
+  // not fire on the in-flight undefined (that would reset cached branding
+  // mid-load), but they must learn about the settled-with-no-brand outcome:
+  // it is the only way to clear branding cached from an earlier daemon.
   useEffect(() => {
     if (!client) return undefined;
     let disposed = false;
     setBrand(undefined);
+    setBrandSettled(false);
     void Promise.resolve()
       .then(() => client.brand())
       .then((resolved) => {
-        if (!disposed) setBrand(resolved);
+        if (!disposed) {
+          setBrand(resolved);
+          setBrandSettled(true);
+        }
       })
       .catch(() => {
-        // Silent by design; see the comment above.
+        // Silent by design; see the comment above. A failure still settles the
+        // fetch — the daemon answered (or refused to), so there is nothing more
+        // to wait for.
+        if (!disposed) setBrandSettled(true);
       });
     return () => {
       disposed = true;
@@ -253,6 +266,7 @@ export function DaemonWorkspaceProvider({
       error,
       capabilities,
       brand,
+      brandSettled,
       getCapabilities,
       refreshCapabilities,
       actions: workspaceActions,
@@ -266,6 +280,7 @@ export function DaemonWorkspaceProvider({
     error,
     capabilities,
     brand,
+    brandSettled,
     getCapabilities,
     refreshCapabilities,
     workspaceActions,

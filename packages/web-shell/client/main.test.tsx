@@ -5,7 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
-import type { WebShellBrand } from './brandContext';
+import type { WebShellResolvedBrand } from './brandContext';
+import { readIndexHtml } from './test/indexHtmlTestUtils';
 
 interface CapturedWorkspaceSessionProps {
   sessionId?: string;
@@ -200,7 +201,7 @@ describe('StandaloneApp brand', () => {
     window.localStorage.clear();
   });
 
-  function resolveBrand(brand: WebShellBrand): void {
+  function resolveBrand(brand: WebShellResolvedBrand): void {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
     act(() => {
       testState.props?.webShellProps.onBrandResolved?.(brand);
@@ -251,5 +252,28 @@ describe('StandaloneApp brand', () => {
     resolveBrand({});
 
     expect(readCachedBrand()).toBeNull();
+  });
+
+  it('leaves the favicon alone when only a name is configured', () => {
+    // `ui.brand.name` with no logoPath is the common white-label config. If the
+    // guard that keeps a logo-less brand from touching the favicon is dropped,
+    // `link.href = undefined` writes the literal string "undefined" into the
+    // href and blanks the tab icon.
+    resolveBrand({ name: 'QiuQiu Code' });
+
+    expect(document.title).toBe('QiuQiu Code Web chat');
+    expect(icon.getAttribute('href')).toBe('data:image/svg+xml,BUILT-IN');
+  });
+
+  it('derives the built-in title from the document, not from a parallel literal', () => {
+    // The flash-free default works only while `webShellDocumentTitle(undefined)`
+    // in main.tsx exactly equals index.html's static <title>. Check the two
+    // copies against each other, not each against a third hard-coded literal.
+    const htmlTitle = /<title>([^<]+)<\/title>/.exec(readIndexHtml())?.[1];
+
+    resolveBrand({});
+
+    expect(htmlTitle).toBeDefined();
+    expect(document.title).toBe(htmlTitle);
   });
 });

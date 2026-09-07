@@ -187,7 +187,7 @@ function readBrandLogo(
   }
   if (!hasSvgRoot(read.content)) {
     return {
-      warning: `ui.brand.logoPath is not an SVG document (root element is not <svg>): ${filePath}`,
+      warning: `ui.brand.logoPath is not an SVG document (root element is not a namespaced <svg>): ${filePath}`,
     };
   }
 
@@ -259,12 +259,16 @@ function readRegularFileNoFollow(
 
 /**
  * Skip the XML prolog — declaration, comments, DOCTYPE — then require the
- * first element to be `<svg>`.
+ * first element to be an `<svg>` that declares the SVG namespace.
  *
- * This is a correctness check, not a security boundary. The client renders a
- * custom logo as an `img` whose `src` is the data URI, never as injected
- * markup, and SVG loaded as an image cannot run script. Do not switch the
- * client to inline rendering without adding a sanitizer here first.
+ * The namespace requirement is renderability, not paranoia: a bare `<svg>`
+ * root is parsed as an image only when it carries
+ * `xmlns="http://www.w3.org/2000/svg"`, so without it the daemon would ship a
+ * data URI that paints a blank mark and writes nothing to stderr. This is a
+ * correctness check, not a security boundary. The client renders a custom logo
+ * as an `img` whose `src` is the data URI, never as injected markup, and SVG
+ * loaded as an image cannot run script. Do not switch the client to inline
+ * rendering without adding a sanitizer here first.
  */
 function hasSvgRoot(content: string): boolean {
   let rest = content.replace(/^\uFEFF/, '');
@@ -288,7 +292,9 @@ function hasSvgRoot(content: string): boolean {
       rest = rest.slice(end);
       continue;
     }
-    return /^<svg[\s>]/.test(rest);
+    return /^<svg\s[^>]*xmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg["']/.test(
+      rest,
+    );
   }
 }
 

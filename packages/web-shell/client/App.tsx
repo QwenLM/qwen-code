@@ -355,7 +355,12 @@ import {
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
-import { BrandProvider, EMPTY_BRAND, type WebShellBrand } from './brandContext';
+import {
+  BrandProvider,
+  EMPTY_BRAND,
+  type WebShellBrand,
+  type WebShellResolvedBrand,
+} from './brandContext';
 import { InteractionBlockContext } from './interactionBlockContext';
 import {
   WebShellThemeId,
@@ -1081,7 +1086,7 @@ export interface WebShellProps {
    * render. The shell itself never writes `document.title` or the favicon; an
    * embedded shell must not hijack its host page's tab.
    */
-  onBrandResolved?: (brand: WebShellBrand) => void;
+  onBrandResolved?: (brand: WebShellResolvedBrand) => void;
   /** Additional CSS class name appended to the root element. */
   className?: string;
   /** Inline styles applied to the root element. */
@@ -10846,12 +10851,13 @@ export function App({
 
   // `workspace.brand` is undefined both while the fetch is in flight and when a
   // daemon has no brand route, so rendering can treat it as "built-in" but the
-  // resolution callback must not: firing with the built-in brand before the
-  // daemon answers would make the standalone entry reset the tab title and drop
-  // the pre-paint cache on every load, flashing branded → default → branded and
-  // defeating the whole point of caching it.
+  // resolution callback must not fire on the in-flight state — that would make
+  // the standalone entry reset the tab title and drop the pre-paint cache on
+  // every load. `brandSettled` is the distinction: it flips on either outcome,
+  // so a settled-with-no-brand result (older daemon, withdrawn host prop) is
+  // reported as an empty brand and clears stale cached chrome.
   const brandResolved =
-    providedBrand !== undefined || workspace.brand !== undefined;
+    providedBrand !== undefined || workspace.brandSettled === true;
 
   // Keyed on the two primitive fields with the callback behind a ref, so a host
   // passing an inline `brand` object and an inline handler — the shape the
@@ -10862,8 +10868,11 @@ export function App({
   // favicon, and a React node has no stable identity by construction.
   const onBrandResolvedRef = useRef(onBrandResolved);
   onBrandResolvedRef.current = onBrandResolved;
-  const brandNameValue = resolvedBrand.name;
-  const brandLogoUri = resolvedBrand.logoDataUri;
+  // Empty means unset on the settings surface; the payload must not hand a host
+  // an `''` it would write into a tab title. Truthiness matches every in-shell
+  // reader (`useBrandName`, `webShellDocumentTitle`).
+  const brandNameValue = resolvedBrand.name || undefined;
+  const brandLogoUri = resolvedBrand.logoDataUri || undefined;
 
   useEffect(() => {
     if (!brandResolved) return;

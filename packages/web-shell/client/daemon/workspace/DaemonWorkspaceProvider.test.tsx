@@ -325,12 +325,14 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
     expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+    expect(context?.brandSettled).toBe(true);
   });
 
   it('keeps the connection healthy when the daemon has no /brand route', async () => {
     // An older daemon answers 404. Branding is cosmetic, so the failure is
     // swallowed and the client falls back to its built-in brand rather than
-    // putting the whole shell into an error state.
+    // putting the whole shell into an error state. The fetch still SETTLES —
+    // that is what lets a consumer clear branding cached from an earlier daemon.
     sdkMocks.brand.mockRejectedValue(new Error('404 not found'));
     let context: DaemonWorkspaceContextValue | undefined;
 
@@ -345,6 +347,7 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(true);
     expect(context?.status).toBe('connected');
     expect(context?.error).toBeUndefined();
   });
@@ -370,8 +373,66 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(true);
     expect(context?.status).toBe('connected');
     expect(context?.error).toBeUndefined();
+  });
+
+  it('does not let a superseded client write its brand into the new connection', async () => {
+    // `client` is memoized on baseUrl/token, so a host that re-points the shell
+    // at another daemon creates a new client while the first `/brand` response
+    // is still in flight. The disposed flag on the first effect's then-handler
+    // is the only thing keeping daemon A's white-label off daemon B's shell.
+    let resolveFirst!: (brand: unknown) => void;
+    let resolveSecond!: (brand: unknown) => void;
+    const first = new Promise((r) => (resolveFirst = r));
+    const second = new Promise((r) => (resolveSecond = r));
+    sdkMocks.brand
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    // Re-point the shell: a new client, a new brand fetch. The first effect's
+    // cleanup has now marked its resolution as disposed.
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:5173">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveSecond({ name: 'Daemon B' });
+      await second;
+    });
+    expect(context?.brand).toEqual({ name: 'Daemon B' });
+
+    await act(async () => {
+      resolveFirst({ name: 'Daemon A' });
+      await first;
+    });
+
+    expect(context?.brand).toEqual({ name: 'Daemon B' });
+
+    act(() => root.unmount());
+    container.remove();
   });
 
   it('refreshCapabilities re-fetches and updates capabilities state', async () => {

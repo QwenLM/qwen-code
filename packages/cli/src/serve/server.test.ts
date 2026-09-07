@@ -4439,6 +4439,36 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('GET /brand', () => {
+    it('answers JSON on the real app, ahead of the SPA fallback', async () => {
+      const primaryBridge = fakeBridge();
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: createWorkspaceRegistry([primary]),
+      });
+
+      // The route is registered unconditionally: no settings needed, and an
+      // empty brand is a valid answer. A browser-like Accept must still get
+      // JSON — registered ahead of the Web Shell SPA fallback, per the
+      // ordering claim in docs/developers/qwen-serve-protocol.md.
+      for (const accept of ['*/*', 'application/json', 'text/html']) {
+        const response = await request(app)
+          .get('/brand')
+          .set('Accept', accept)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.headers['content-type']).toContain('application/json');
+        expect(response.body).toEqual({});
+      }
+    });
+  });
+
   describe('GET /capabilities', () => {
     it('advertises workflow availability per workspace before a session exists', async () => {
       const primaryBridge = fakeBridge();

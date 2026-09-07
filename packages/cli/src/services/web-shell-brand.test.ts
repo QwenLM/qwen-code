@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LoadedSettings, type SettingsFile } from '../config/settings.js';
 import type { Settings } from '../config/settingsSchema.js';
+import { resolveCustomBanner } from '../ui/utils/customBanner.js';
 import { resolveWebShellBrand } from './web-shell-brand.js';
 
 const LOGO_SVG =
@@ -249,7 +250,10 @@ describe('resolveWebShellBrand', () => {
         'a file over the size cap',
         () =>
           writeLogo(`<svg>${'<!-- padding -->'.repeat(2400)}</svg>`, 'big.svg'),
-        'exceeds',
+        // Unique to the pre-read `stat.size` guard; the post-decode cap says
+        // 'bytes once decoded' instead. Pinning the pre-read message matters:
+        // that guard is what keeps an oversized file out of memory entirely.
+        'exceeds 32768 bytes:',
       ],
     ])('rejects %s', (_label, makePath, expectedWarning) => {
       const { brand, warning } = resolveWebShellBrand(
@@ -259,13 +263,60 @@ describe('resolveWebShellBrand', () => {
       expect(warning).toContain(expectedWarning);
     });
 
-    it('rejects a symlink, even one pointing at a valid SVG', () => {
+    it('rejects a file whose decoded size exceeds the cap though its on-disk size does not', () => {
+      // 0x80 is invalid UTF-8, so each byte decodes to a 3-byte U+FFFD: a
+      // 32,768-byte file passes the pre-read stat check and can only be caught
+      // by the post-decode byte-length check inside readRegularFileNoFollow.
+      // Without this fixture the inner cap is unreachable from any shipped test.
+      const file = path.join(dir, 'undecodable.svg');
+      fs.writeFileSync(file, Buffer.alloc(32768, 0x80));
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('once decoded');
+    });
+
+    it('rejects an <svg> root that declares no SVG namespace', () => {
+      // A bare <svg> root is only parsed as an image when it carries the SVG
+      // namespace. Accepting this shape would ship a data URI that paints a
+      // blank mark — and writes nothing to stderr, the one channel the
+      // protocol reference promises the operator.
+      const file = writeLogo(
+        '<svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('namespaced <svg>');
+    });
+
+    it("accepts whitespace around the xmlns attribute's equals sign", () => {
+      // XML's grammar allows whitespace around an attribute's `=`, and a
+      // browser's image loader parses this as SVG just fine — the namespace
+      // check must not reject a renderable document over spacing.
+      const file = writeLogo(
+        '<svg xmlns = "http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it('rejects a symlink, even one pointing at a valid SVG', (ctx) => {
       const target = writeLogo(LOGO_SVG);
       const link = path.join(dir, 'link.svg');
       try {
         fs.symlinkSync(target, link);
       } catch {
-        return; // Platform without symlink privileges; covered on POSIX CI.
+        // Reported as a skip rather than an early return: a silent `return`
+        // would show as a pass on a platform without symlink privileges, and
+        // the refusal guard this test pins could then be deleted undetected.
+        ctx.skip();
+        return;
       }
       const { brand, warning } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: link }) }),
@@ -274,13 +325,14 @@ describe('resolveWebShellBrand', () => {
       expect(warning).toContain('must not be a symlink');
     });
 
-    it('reports a hard-linked logo distinctly from a non-regular file', () => {
+    it('reports a hard-linked logo distinctly from a non-regular file', (ctx) => {
       const target = writeLogo(LOGO_SVG);
       const link = path.join(dir, 'hard.svg');
       try {
         fs.linkSync(target, link);
       } catch {
-        return; // Platform without hard-link privileges; covered on POSIX CI.
+        ctx.skip(); // Same reason as the symlink case above.
+        return;
       }
       const { brand, warning } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: link }) }),
@@ -348,11 +400,12 @@ describe('resolveWebShellBrand', () => {
     });
 
     it('accepts an SVG that contains script, because the client renders it as an image', () => {
-      // SVG loaded as an image cannot run script; the sidebar and the favicon
-      // both render the data URI through an image context. This test pins that
-      // invariant so the absence of a sanitizer stays a deliberate decision
-      // rather than an oversight — if a future change injects the logo as
-      // markup, this case becomes a vulnerability and must start failing.
+      // The resolver passes bytes through: SVG loaded as an image cannot run
+      // script, and the sidebar and the favicon both render the data URI
+      // through an image context. The alarm for a renderer that ever INLINES
+      // those bytes lives in the sidebar test (it asserts an img src and zero
+      // script nodes in the document) — this test stays green by design then,
+      // which is exactly why that other test exists.
       const logoPath = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
       );
@@ -361,6 +414,29 @@ describe('resolveWebShellBrand', () => {
       );
       expect(warning).toBeUndefined();
       expect(brand.logoDataUri).toContain('data:image/svg+xml,');
+    });
+  });
+
+  describe('TUI banner parity', () => {
+    // The resolver's own comments and the schema description claim the name is
+    // sanitized exactly like the TUI banner title — strip, fold, clamp at 80,
+    // drop empty — but nothing joined the two implementations until this test.
+    // `resolveCustomBanner` is that sanitizer's only other consumer, so if
+    // either side drifts, this goes red.
+    it.each([
+      ['plain', 'QiuQiu Code'],
+      ['escape sequences and newlines', '\u001b[31mQiuQiu\u001b[0m\n\nCode'],
+      ['over the 80 character cap', 'x'.repeat(120)],
+      ['nothing but escape sequences', '\u001b[31m\u001b[0m'],
+    ])('sanitizes %s identically to the TUI banner title', (_label, raw) => {
+      const settings = makeSettings({
+        user: {
+          ui: { brand: { name: raw }, customBannerTitle: raw },
+        } as Settings,
+      });
+      expect(resolveWebShellBrand(settings).brand.name).toBe(
+        resolveCustomBanner(settings).title,
+      );
     });
   });
 });

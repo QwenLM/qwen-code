@@ -653,6 +653,18 @@ function IconQwenLogo() {
   );
 }
 
+function BrandLogoImage({ dataUri }: { dataUri: string }) {
+  // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
+  // fires `error` and otherwise leaves a blank 28x28 box where the product mark
+  // was. Fall back to the built-in mark — the same outcome a daemon-rejected
+  // logo produces — instead of rendering nothing.
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <IconQwenLogo />;
+  }
+  return <img src={dataUri} alt="" onError={() => setFailed(true)} />;
+}
+
 function IconChevron({ expanded }: { expanded: boolean }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -5485,9 +5497,14 @@ export function WebShellSidebar({
             ) : (
               <>
                 <span className={styles.brandLogo} aria-hidden="true">
-                  {brand.logo ??
+                  {brand.logo ||
                     (brand.logoDataUri ? (
-                      <img src={brand.logoDataUri} alt="" />
+                      // `key` remounts on a new URI: after one decode failure,
+                      // the failed state must not stick to the next logo.
+                      <BrandLogoImage
+                        key={brand.logoDataUri}
+                        dataUri={brand.logoDataUri}
+                      />
                     ) : (
                       <IconQwenLogo />
                     ))}

@@ -155,6 +155,11 @@ function brandLogoImage(): HTMLImageElement | null {
   return container.querySelector('img[src^="data:image/svg+xml,"]');
 }
 
+/** The built-in inline mark — the one every unconfigured deployment sees. */
+function builtInMark(): Element | null {
+  return container.querySelector('svg[viewBox="0 0 141.38 140"]');
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   container = document.createElement('div');
@@ -175,6 +180,9 @@ describe('sidebar brand', () => {
 
     expect(container.textContent).toContain('Qwen Code');
     expect(brandLogoImage()).toBeNull();
+    // The positive half of "default unchanged": the built-in mark is actually
+    // there, not merely that no img is present (an empty 28px box passes that).
+    expect(builtInMark()).not.toBeNull();
   });
 
   it('renders the configured name', () => {
@@ -217,14 +225,44 @@ describe('sidebar brand', () => {
     renderSidebar({ name: 'QiuQiu Code', logoDataUri: hostile });
 
     expect(brandLogoImage()?.getAttribute('src')).toBe(hostile);
+    expect(builtInMark()).toBeNull();
     expect(container.querySelectorAll('script')).toHaveLength(0);
     expect(container.innerHTML).not.toContain('alert(1)</script>');
+  });
+
+  it('falls back to the built-in mark when the logo image fails to decode', () => {
+    renderSidebar({ logoDataUri: 'data:image/svg+xml,NOT-SVG' });
+
+    const img = brandLogoImage();
+    expect(img).not.toBeNull();
+    expect(builtInMark()).toBeNull();
+
+    // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
+    // fires `error` — the mark must come back rather than leaving a blank box.
+    act(() => {
+      img!.dispatchEvent(new Event('error'));
+    });
+
+    expect(brandLogoImage()).toBeNull();
+    expect(builtInMark()).not.toBeNull();
   });
 
   it('renders a host-provided logo node in place of the built-in mark', () => {
     renderSidebar({ logo: <span data-testid="host-logo" /> });
 
     expect(container.querySelector('[data-testid="host-logo"]')).not.toBeNull();
+    // "In place of", not "alongside": the built-in mark must not render beside
+    // a replacement — that is the one leak a white-label feature exists to stop.
+    expect(builtInMark()).toBeNull();
+  });
+
+  it('falls back when the host logo node is falsy', () => {
+    // The common host idiom `logo: hasCustomLogo && <Logo />` yields `false` —
+    // a legal ReactNode that renders nothing. It must mean "no logo", matching
+    // the empty-name rule, or the row would blank.
+    renderSidebar({ logo: false });
+
+    expect(builtInMark()).not.toBeNull();
   });
 
   it('still lets the branding render override replace the whole row', () => {

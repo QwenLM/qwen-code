@@ -31,6 +31,14 @@ export interface WebShellBrand {
 export const DEFAULT_BRAND_NAME = 'Qwen Code';
 
 /**
+ * The payload of `onBrandResolved` — the subset of `WebShellBrand` a host
+ * document can act on. `logo` (a React node) is deliberately absent: a document
+ * can apply a title and a favicon URI but never renders a node, and the node
+ * has no stable identity to key a change notification on.
+ */
+export type WebShellResolvedBrand = Pick<WebShellBrand, 'name' | 'logoDataUri'>;
+
+/**
  * Stable identity for "no brand configured". Returning a fresh `{}` from a hook
  * would change the provider value on every render and re-render every consumer.
  */

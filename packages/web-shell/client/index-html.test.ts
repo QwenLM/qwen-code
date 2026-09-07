@@ -246,7 +246,16 @@ describe('brand pre-paint script', () => {
       querySelector: (selector: string) =>
         selector === 'link[rel="icon"]' ? icon : null,
     };
-    const localStorage = { getItem: () => stored };
+    const localStorage = {
+      getItem: (key: string) => {
+        // The inline script must ask for exactly this key — a drift between
+        // index.html's literal and main.tsx's BRAND_STORAGE_KEY silently
+        // disables the pre-paint cache, and an argument-ignoring stub would
+        // never catch it.
+        if (key !== 'qwen-code-web-shell-brand') return null;
+        return stored;
+      },
+    };
     Function('localStorage', 'document', script)(localStorage, document);
     return { title: document.title, iconHref: icon.href };
   }

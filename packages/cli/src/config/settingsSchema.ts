@@ -938,7 +938,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: '' as string,
             description:
-              'Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading "~" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file, not a symlink, and at most 32 KiB. Leave empty to use the built-in logo.',
+              'Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading "~" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file, not a symlink, at most 32 KiB, and its root element must be a namespaced <svg> — the xmlns attribute is what makes it renderable as an image. Leave empty to use the built-in logo.',
             showInDialog: false,
           },
         },

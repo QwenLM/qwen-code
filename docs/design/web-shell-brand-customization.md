@@ -221,16 +221,20 @@ through a callback prop, the same shape as the existing theme and language
 change callbacks, which keeps every `document` write out of the component an
 embedding host mounts.
 
-The callback fires only once the brand is actually known. The workspace context
-reports `undefined` both while the fetch is in flight and when a daemon has no
-brand route at all, and rendering is happy to treat either as "built-in" — but
-firing the callback on the in-flight case would reset the tab title and drop the
-cache on every single load, flashing branded to default to branded and defeating
-the cache entirely. The cost of waiting is one narrow case: pointed at a daemon
-too old to have the route, a previously cached brand stays in the tab chrome
-because nothing ever reports "no brand" to clear it. That is a downgrade
-scenario, and the alternative trades it for a flash on every load of every
-branded deployment.
+The callback must not fire while the brand fetch is in flight: the workspace
+context reports `undefined` both then and on a daemon without the route, and
+firing on the in-flight case would reset the tab title and drop the cache on
+every load, flashing branded to default to branded. But "no value yet" and "no
+value, ever" are genuinely different outcomes, and an earlier draft of this
+design conflated them — pointed at a daemon too old to have the route, a
+previously cached brand would have stayed in the tab chrome forever because
+nothing could report the absence. The provider therefore exposes a settled flag
+beside the value: it flips when the fetch finishes, successfully or not, and
+the callback fires on a host prop or on that flag. A settled-with-no-brand
+outcome reports an empty brand, which clears stale cached chrome; an unsettled
+one reports nothing, which is what keeps the flash away. An older daemon's 404
+and a host withdrawing its `brand` prop both settle, so both invalidate the
+cache the same way.
 
 ## The prop channel
 
@@ -296,30 +300,30 @@ override without this feature.
 
 ## Files affected
 
-| Layer                                                                     | Change                                                                                 |
-| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `packages/cli/src/config/settingsSchema.ts`                               | two string leaves under `ui`, both `showInDialog: false`                               |
-| `packages/vscode-ide-companion/schemas/settings.schema.json`              | regenerated, not hand-edited                                                           |
-| `packages/cli/src/services/web-shell-brand.ts`                            | new resolver: layer selection, name sanitization, hardened SVG read, data URI encoding |
-| `packages/cli/src/serve/routes/brand.ts`                                  | new process-global route                                                               |
-| `packages/cli/src/serve/server.ts`                                        | route registration                                                                     |
-| `packages/sdk-typescript/src/daemon/types.ts`                             | new response type                                                                      |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                      | new client method                                                                      |
-| `packages/sdk-typescript/src/index.ts`, `src/daemon/index.ts`             | type re-exports                                                                        |
-| `packages/web-shell/client/brandContext.ts`                               | new: context, provider, hooks, built-in name, stable empty value                       |
-| `packages/web-shell/client/daemon/workspace/types.ts`                     | optional brand field on the workspace context                                          |
-| `packages/web-shell/client/daemon/workspace/DaemonWorkspaceProvider.tsx`  | fetch once per connection, outside the status machine                                  |
-| `packages/web-shell/client/App.tsx`                                       | brand and callback props, precedence resolution, provider mount                        |
-| `packages/web-shell/client/index.tsx`                                     | export the brand prop type                                                             |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`        | name, version tooltip, logo                                                            |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css` | size the `img` logo like the inline `svg` one                                          |
-| `packages/web-shell/client/components/WelcomeHeader.tsx`                  | name                                                                                   |
-| `packages/web-shell/client/components/messages/StatusMessage.tsx`         | About row label                                                                        |
-| `packages/web-shell/client/i18n.tsx`                                      | drop the orphaned About label key from both tables                                     |
-| `packages/web-shell/client/index.html`                                    | pre-paint title and favicon from cache                                                 |
-| `packages/web-shell/client/main.tsx`                                      | apply title and favicon, write and clear the cache                                     |
-| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                       | answer the new route                                                                   |
-| `packages/web-shell/README.md`, `docs/users/configuration/settings.md`    | document both channels                                                                 |
+| Layer                                                                     | Change                                                                                                                            |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/config/settingsSchema.ts`                               | two string leaves under `ui`, both `showInDialog: false`                                                                          |
+| `packages/vscode-ide-companion/schemas/settings.schema.json`              | regenerated, not hand-edited                                                                                                      |
+| `packages/cli/src/services/web-shell-brand.ts`                            | new resolver: layer selection, name sanitization, hardened SVG read, data URI encoding                                            |
+| `packages/cli/src/serve/routes/brand.ts`                                  | new process-global route                                                                                                          |
+| `packages/cli/src/serve/server.ts`                                        | route registration                                                                                                                |
+| `packages/sdk-typescript/src/daemon/types.ts`                             | new response type                                                                                                                 |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                      | new client method                                                                                                                 |
+| `packages/sdk-typescript/src/index.ts`, `src/daemon/index.ts`             | type re-exports                                                                                                                   |
+| `packages/web-shell/client/brandContext.ts`                               | new: context, provider, hooks, built-in name, stable empty value                                                                  |
+| `packages/web-shell/client/daemon/workspace/types.ts`                     | optional brand and settled-flag fields on the workspace context                                                                   |
+| `packages/web-shell/client/daemon/workspace/DaemonWorkspaceProvider.tsx`  | fetch once per connection with a settled flag, outside the status machine                                                         |
+| `packages/web-shell/client/App.tsx`                                       | brand and callback props, precedence resolution, provider mount                                                                   |
+| `packages/web-shell/client/index.tsx`                                     | export the brand prop type                                                                                                        |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`        | name, version tooltip, logo with a falsy-node fallback and an image-decode fallback                                               |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css` | size the `img` logo like the inline `svg` one                                                                                     |
+| `packages/web-shell/client/components/WelcomeHeader.tsx`                  | name                                                                                                                              |
+| `packages/web-shell/client/components/messages/StatusMessage.tsx`         | About row label                                                                                                                   |
+| `packages/web-shell/client/i18n.tsx`                                      | drop the orphaned About label key from both tables                                                                                |
+| `packages/web-shell/client/index.html`                                    | pre-paint title and favicon from cache; boot watchdog excludes the icon from its fatal-resource classification and its error list |
+| `packages/web-shell/client/main.tsx`                                      | apply title and favicon, write and clear the cache                                                                                |
+| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                       | answer the new route                                                                                                              |
+| `packages/web-shell/README.md`, `docs/users/configuration/settings.md`    | document both channels                                                                                                            |
 
 ## Testing
 
@@ -328,10 +332,14 @@ touches the filesystem: layer precedence in both directions, workspace-layer
 exclusion for the name and the logo, name sanitization and the length cap,
 tilde expansion, relative resolution against the declaring file and the
 soft-fail when there is none, missing file, symlink, directory, oversize
-content, non-SVG content, and an XML prolog with a DOCTYPE internal subset. One
-case asserts that an SVG containing script is accepted, pinning the invariant
-that the client renders it as an image — if a future change inlines it, that
-test becomes the alarm.
+content in both the pre-read and post-decode caps, non-SVG content, an
+`xmlns`-less root, and an XML prolog with a DOCTYPE internal subset. One case
+asserts that an SVG containing script is _accepted_ — the resolver is meant to
+pass bytes through. The alarm for a renderer that inlines those bytes lives on
+the other side of the package boundary, in the sidebar test: it renders a
+script-bearing logo and asserts the payload reaches the document only as an
+`img` `src` with zero script nodes present. A future change that inlines the
+logo fails that test, not the resolver's.
 
 The route test asserts the response shape, that `skipWorkspaceSettings` is
 passed, that a rejected logo still answers 200 with the name and reports the
@@ -340,17 +348,27 @@ than erroring. The schema test asserts both leaves and that neither reaches the
 settings dialog; the settings route test asserts the keys are neither exposed
 nor writable through it.
 
-On the client, the provider test asserts the brand reaches the context, and
-that both a rejected fetch and a client with no brand method at all leave the
-connection healthy. The app test asserts prop-wins-over-fetched precedence and
-that nothing configured resolves to an empty brand. The sidebar test asserts
-the built-in rendering is untouched, the name and tooltip follow the brand, the
-logo renders as an image with no script node in the document, a host logo node
-renders as given, and the existing branding render override still wins. The
-standalone entry test asserts the title, the favicon and the cache write,
-including clearing the cache when the brand goes away. The pre-paint script
-joins the existing `index.html` contract test, which also pins the built-in
-title and favicon bytes.
+On the client, the provider test asserts the brand and the settled flag reach
+the context on success, on rejection, and on a client with no brand method at
+all, and that a superseded client cannot write a stale brand into a newer
+connection. The app test asserts prop-wins-over-fetched precedence, in-flight
+silence, settled-with-no-brand reporting (which is what clears stale chrome),
+host-prop withdrawal reporting the empty brand again, empty-name normalization
+in the payload, logo-URI pass-through, and no re-firing for a fresh-but-equal
+inline prop and handler. The sidebar test asserts the built-in rendering is
+untouched — the inline mark is asserted present, not merely no image asserted
+absent — the name and tooltip follow the brand, the logo renders as an image
+with no script node in the document, an undecodable logo falls back to the
+built-in mark on `error`, a falsy host logo falls back too, a host logo node
+renders as given and never beside the built-in mark, and the existing branding
+render override still wins. A server-level test asserts the route answers JSON
+on the real app for a browser-like `Accept`. The standalone entry test asserts
+the title, the favicon (untouched for a name-only brand), the cache write, and
+clearing the cache when the brand goes away, plus that the built-in title is
+derived to match the document's own static title. The pre-paint script joins
+the existing `index.html` contract test, which also pins the built-in title and
+favicon bytes. A parity test runs the same inputs through the TUI banner
+resolver and asserts identical sanitization.
 
 One property matters more than the others: with no brand configured, the
 rendered shell is unchanged. That is what makes this safe to ship, and it is

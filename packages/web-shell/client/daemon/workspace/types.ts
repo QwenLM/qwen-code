@@ -157,12 +157,20 @@ export interface DaemonWorkspaceContextValue {
   /**
    * Web Shell branding resolved by the daemon from the operator settings scopes
    * (system defaults, user, system). Fetched once per client instance beside
-   * capabilities and not retried: a fetch that fails during a cold boot stays
-   * `undefined` for the life of the page, so the client shows its built-in brand
-   * until reloaded. An older daemon without `GET /brand` also leaves it
-   * undefined.
+   * capabilities; stays `undefined` while the fetch is in flight, on a daemon
+   * too old to have the route, or when the daemon answered that no brand is
+   * configured. See {@link DaemonWorkspaceContextValue.brandSettled} to tell
+   * those apart — consumers that clear cached branding must key on that flag,
+   * because the in-flight undefined and the settled-with-no-brand outcome look
+   * identical here.
    */
   brand?: DaemonBrand;
+  /**
+   * True once the brand fetch has finished, successfully or not. Only the
+   * settled-with-no-brand state may drive invalidation of cached branding;
+   * before this flips, `brand === undefined` just means "still loading".
+   */
+  brandSettled?: boolean;
   getCapabilities?: () => Promise<DaemonCapabilities>;
   /**
    * Force a fresh `/capabilities` fetch and push the result into the

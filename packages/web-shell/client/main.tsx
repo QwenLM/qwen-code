@@ -16,7 +16,7 @@ import {
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
-import { DEFAULT_BRAND_NAME, type WebShellBrand } from './brandContext';
+import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
@@ -46,7 +46,7 @@ function webShellDocumentTitle(name?: string): string {
 
 const DEFAULT_DOCUMENT_TITLE = webShellDocumentTitle(undefined);
 
-function storeBrand(brand: WebShellBrand): void {
+function storeBrand(brand: WebShellResolvedBrand): void {
   try {
     const title = webShellDocumentTitle(brand.name);
     if (title === DEFAULT_DOCUMENT_TITLE && !brand.logoDataUri) {
@@ -69,7 +69,7 @@ function storeBrand(brand: WebShellBrand): void {
  * the built-in favicon lives in index.html and is not recoverable once
  * overwritten — clearing the cache instead lets the next load restore it.
  */
-function applyBrandToDocument(brand: WebShellBrand): void {
+function applyBrandToDocument(brand: WebShellResolvedBrand): void {
   document.title = webShellDocumentTitle(brand.name);
   if (brand.logoDataUri) {
     const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -219,7 +219,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     setLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
-  const handleBrandResolved = useCallback((brand: WebShellBrand) => {
+  const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
     applyBrandToDocument(brand);
   }, []);
   const handleSessionIdChange = useCallback(

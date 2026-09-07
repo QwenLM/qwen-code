@@ -105,8 +105,13 @@ describe('GET /brand', () => {
     const response = await request(makeApp()).get('/brand');
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ name: 'QiuQiu Code' });
+    // The protocol reference publishes this exact line as the operator's only
+    // channel for "my logo was refused", so both prefixes are pinned: the
+    // route's `qwen serve: GET /brand: ` and the resolver's `ui.brand.logoPath `.
     expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('does not exist'),
+      expect.stringMatching(
+        /^qwen serve: GET \/brand: ui\.brand\.logoPath does not exist: /,
+      ),
     );
   });
 

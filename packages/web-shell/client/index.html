@@ -230,15 +230,19 @@
           // points it at an operator-supplied data URI that this script itself
           // swaps in before paint, so a logo the browser refuses to decode
           // must not take the whole shell down with a "reload the page" panel
-          // that reloading cannot fix (the cache survives the reload).
+          // that reloading cannot fix (the cache survives the reload). Its
+          // error is also kept out of the panel's list: a bare Event on that
+          // element carries no message, so recording it would add a content-free
+          // 'unknown error' entry that points the operator at nothing.
+          var isIcon = !!(t && t.tagName === 'LINK' && t.rel === 'icon');
           var isResource = !!(
             t &&
             ((t.tagName === 'SCRIPT' && t.src) ||
-              (t.tagName === 'LINK' && t.href && t.rel !== 'icon'))
+              (t.tagName === 'LINK' && t.href && !isIcon))
           );
           var msg = (e && e.message) || 'unknown error';
           if (isResource) msg += ' (' + (t.src || t.href) + ')';
-          pushError(msg);
+          if (!isIcon) pushError(msg);
           if (appMounted()) return;
           // Runtime errors and rejections are captured and surfaced by the
           // grace timer (or by a later resource failure) so a burst of boot
