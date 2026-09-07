@@ -199,29 +199,14 @@ describe('e2e workflow', () => {
 
     it('retries the sandbox:none shard exactly once', () => {
       expect(runStep.run).toContain('run_shard || {');
-      // Definition + export into the bounded first-attempt child + first
-      // attempt + one retry: the second attempt's exit status is the
-      // step's, and a third attempt would burn pool time for nothing.
-      expect(runStep.run.match(/run_shard/g)).toHaveLength(4);
+      // Definition + first attempt + one retry: the second attempt's exit
+      // status is the step's, and a third attempt would burn pool time for
+      // nothing.
+      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
       // End-anchored scope: the retry is the group's last command and the
       // group is the script's last statement. A retry moved outside the
       // `|| { ... }` would run unconditionally, re-running green shards too.
       expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
-    });
-
-    it('bounds only the first attempt so a slow death stays retryable', () => {
-      // Run 34083672277's shard 1/3 degraded instead of dying: 40 of the 60
-      // job minutes beside 14-18 minute siblings, then dead with every test
-      // green and the 2100s budget gate already out of reach — an unbounded
-      // first attempt forfeits the retry it exists to enable. The 1500s cap
-      // clears the worst measured healthy shard (~21min) and still lands
-      // the killed attempt inside the gate.
-      expect(runStep.run).toContain(
-        'timeout --kill-after=30 1500 bash -c run_shard || {',
-      );
-      // Exactly one bounded attempt: the retry stays unbounded because the
-      // gate has already reserved its shard-time.
-      expect(runStep.run.match(/bash -c run_shard/g)).toHaveLength(1);
     });
 
     it('gates the retry on the remaining job budget', () => {
