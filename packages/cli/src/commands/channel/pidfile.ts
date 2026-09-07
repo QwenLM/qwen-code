@@ -250,9 +250,18 @@ function readServiceInfoRecord(
 ): ServiceInfo | null {
   if (!existsSync(filePath)) return null;
 
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf-8');
+  } catch {
+    // An unreadable file is not a corrupt one: its bytes were never seen,
+    // so leave the record for a side that can read it.
+    return null;
+  }
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+    parsed = JSON.parse(raw);
   } catch {
     // Corrupt file — clean up while holding the shared pidfile lock.
     if (sweep) unlinkPidFile(filePath);

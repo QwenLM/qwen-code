@@ -16,7 +16,7 @@ const fsFds = vi.hoisted(() => {
   return fds;
 });
 const mockGlobalQwenDir = vi.hoisted(() => '/tmp/qwen-pidfile-test/.qwen');
-const fsControls = vi.hoisted(() => ({ failUnlink: false }));
+const fsControls = vi.hoisted(() => ({ failUnlink: false, failRead: false }));
 const pidfileLock = vi.hoisted(() => ({
   acquire: vi.fn(),
   release: vi.fn(),
@@ -41,6 +41,11 @@ vi.mock('node:fs', () => {
         return fsStore[fdPath] ?? '';
       }
       if (!(p in fsStore)) throw new Error('ENOENT');
+      if (fsControls.failRead) {
+        const err = new Error('EACCES') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
       return fsStore[p];
     },
     writeFileSync: (
@@ -195,6 +200,7 @@ beforeEach(() => {
   for (const k of Object.keys(fsFds.flags)) delete fsFds.flags[Number(k)];
   fsFds.openedFlags.length = 0;
   fsControls.failUnlink = false;
+  fsControls.failRead = false;
   pidfileLock.acquire.mockClear();
   pidfileLock.release.mockClear();
   pidfileLock.failures = 0;
@@ -915,6 +921,22 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(info).toBeNull();
     // File should be cleaned up
     expect(filePath in fsStore).toBe(false);
+  });
+
+  it('leaves an unreadable pidfile in place and returns null', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      owner: 'channel',
+      pid: process.pid,
+      procStart: 'boot-id:current-start',
+      pidNs: 4026531836,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    fsControls.failRead = true;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
   });
 
   it('cleans up and returns null for a pidfile with pid 0', () => {
