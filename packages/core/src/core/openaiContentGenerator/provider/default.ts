@@ -16,7 +16,7 @@ import type { ReasoningEffort } from '../../reasoning-effort.js';
 import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
-  getGpt5ReasoningCapabilities,
+  getGptReasoningCapabilities,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -25,13 +25,9 @@ import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
 /**
- * Tiers a generic OpenAI-compatible endpoint accepts. `max` is a vendor
- * extension rather than part of the shared contract: DeepSeek, GLM-5.2+ and
- * newer Anthropic models take it natively, but a generic endpoint's ladder
- * stops at `xhigh` and 400s on anything above it. Matches the OpenAI column
- * of the effort ladder in
- * docs/design/2026-06-30-unified-reasoning-effort-cli.md. Subclasses whose
- * endpoint does accept `max` override `supportedReasoningEfforts`.
+ * Default tiers for an OpenAI-compatible endpoint without known model
+ * capabilities. Model-specific capabilities and provider subclasses can
+ * override this fallback, including support for `max`.
  */
 const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
   'low',
@@ -147,7 +143,7 @@ export class DefaultOpenAICompatibleProvider
     model: string | undefined,
   ): readonly ReasoningEffort[] {
     return (
-      getGpt5ReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
+      getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
     );
   }
 
@@ -221,7 +217,7 @@ export class DefaultOpenAICompatibleProvider
       ...(extraBody ? extraBody : {}),
     };
     if (
-      getGpt5ReasoningCapabilities(request.model) &&
+      getGptReasoningCapabilities(request.model) &&
       !isOpenRouterHostname(this.contentGeneratorConfig) &&
       this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
       extraBody?.['reasoning'] === undefined

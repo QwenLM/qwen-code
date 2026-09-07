@@ -64,7 +64,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       STREAM_JSON: 'stream-json',
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
-    getGpt5ReasoningCapabilities: vi.fn(() => undefined),
+    getGptReasoningCapabilities: vi.fn(() => undefined),
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
     DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,

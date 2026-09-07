@@ -361,9 +361,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
-  getGpt5ReasoningCapabilities: (
+  getGptReasoningCapabilities: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
-  ).getGpt5ReasoningCapabilities,
+  ).getGptReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.

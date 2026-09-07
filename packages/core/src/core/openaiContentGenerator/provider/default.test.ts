@@ -559,6 +559,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
       ['gpt-5.1-codex-max', 'max', 'xhigh'],
       ['gpt-5.4', 'max', 'xhigh'],
       ['gpt-5.6-sol', 'max', 'max'],
+      ['gpt-6-astra', 'high', 'high'],
+      ['gpt-6-astra', 'max', 'max'],
       ['gpt-5-pro', 'low', 'high'],
       ['gpt-5.4-pro', 'low', 'medium'],
     ])(

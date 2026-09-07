@@ -29,7 +29,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
-import { getGpt5ReasoningCapabilities } from '../reasoning-effort.js';
+import { getGptReasoningCapabilities } from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
@@ -986,7 +986,7 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
-      const gptReasoning = getGpt5ReasoningCapabilities(model);
+      const gptReasoning = getGptReasoningCapabilities(model);
       if (
         gptReasoning &&
         !gptReasoning.thinkingMandatory &&
@@ -1120,6 +1120,8 @@ export class ContentGenerationPipeline {
   private requiresThinking(model: string): boolean {
     const normalizedModel = model.toLowerCase();
     return (
+      getGptReasoningCapabilities(normalizedModel)?.thinkingMandatory ===
+        true ||
       this.requiredThinkingModels.has(normalizedModel) ||
       (this.contentGeneratorConfig.thinkingMandatory === true &&
         normalizedModel ===
@@ -1180,7 +1182,7 @@ export class ContentGenerationPipeline {
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
       const samplingParams =
-        getGpt5ReasoningCapabilities(
+        getGptReasoningCapabilities(
           request.model || this.contentGeneratorConfig.model,
         ) &&
         configSamplingParams['reasoning'] === undefined &&

@@ -22,6 +22,7 @@ describe('model configuration manifest', () => {
     ['gpt-5.4', ['none', 'low', 'medium', 'high', 'xhigh'], 'none'],
     ['gpt-5.5', ['none', 'low', 'medium', 'high', 'xhigh'], 'medium'],
     ['gpt-5.6', ['none', 'low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
+    ['gpt-6-astra', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium'],
     ['gpt-5.3-codex', ['low', 'medium', 'high', 'xhigh'], 'medium'],
     ['gpt-5-pro', ['high'], 'high'],
   ] as const)(
@@ -50,26 +51,30 @@ describe('model configuration manifest', () => {
     ).toMatchObject({ currentValue: 'none' });
   });
 
-  it('advertises mandatory GPT thinking even when the state does not require it', () => {
-    expect(
-      buildModelReasoningConfigOption('gpt-5.3-codex', {
-        enabled: false,
-        thinkingMandatory: false,
-      }),
-    ).toMatchObject({
-      currentValue: 'medium',
-      _meta: { 'qwenCode/reasoning': { thinkingMandatory: true } },
-    });
-    expect(isReasoningSelectionSupported('gpt-5.3-codex', 'none')).toBe(false);
-    expect(
-      resolvePersistedReasoningConfigState('gpt-5.3-codex', 'none'),
-    ).toEqual({ thinkingMandatory: true });
-  });
+  it.each(['gpt-5.3-codex', 'gpt-6-astra'])(
+    'advertises mandatory thinking for %s even when the state does not require it',
+    (model) => {
+      expect(
+        buildModelReasoningConfigOption(model, {
+          enabled: false,
+          thinkingMandatory: false,
+        }),
+      ).toMatchObject({
+        currentValue: 'medium',
+        _meta: { 'qwenCode/reasoning': { thinkingMandatory: true } },
+      });
+      expect(isReasoningSelectionSupported(model, 'none')).toBe(false);
+      expect(resolvePersistedReasoningConfigState(model, 'none')).toEqual({
+        thinkingMandatory: true,
+      });
+    },
+  );
 
   it('validates persisted GPT tiers against model capabilities', () => {
     expect(isReasoningSelectionSupported('gpt-5.1', 'xhigh')).toBe(false);
     expect(isReasoningSelectionSupported('gpt-5.4', 'max')).toBe(false);
     expect(isReasoningSelectionSupported('gpt-5.6', 'max')).toBe(true);
+    expect(isReasoningSelectionSupported('gpt-6-astra', 'max')).toBe(true);
     expect(resolvePersistedReasoningConfigState('gpt-5.4', 'high')).toEqual({
       thinkingMandatory: false,
       enabled: true,
@@ -77,16 +82,22 @@ describe('model configuration manifest', () => {
     });
   });
 
-  it('preserves explicit GPT reasoning overrides', () => {
-    const generation = {
-      model: 'gpt-5.4',
-      samplingParams: { max_completion_tokens: 1024, reasoning_effort: 'low' },
-      extra_body: { reasoning: { effort: 'high' } },
-    } as ContentGeneratorConfig;
-    const original = structuredClone(generation);
-    clearReasoningRequestOverrides(generation);
-    expect(generation).toEqual(original);
-  });
+  it.each(['gpt-5.4', 'gpt-6-astra'])(
+    'preserves explicit %s reasoning overrides',
+    (model) => {
+      const generation = {
+        model,
+        samplingParams: {
+          max_completion_tokens: 1024,
+          reasoning_effort: 'low',
+        },
+        extra_body: { reasoning: { effort: 'high' } },
+      } as ContentGeneratorConfig;
+      const original = structuredClone(generation);
+      clearReasoningRequestOverrides(generation);
+      expect(generation).toEqual(original);
+    },
+  );
 
   it('registers the exact stable qwen3.8-max reasoning controls', () => {
     expect(getModelConfiguration('qwen3.8-max')).toEqual({

@@ -1202,6 +1202,37 @@ describe('ContentGenerationPipeline', () => {
         expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
       },
       {
+        name: 'GPT-6 effort with a token budget',
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'GPT-6 mandatory thinking with a raw disable value',
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+        expected: {},
+      },
+      {
+        name: 'GPT-6 mandatory thinking on OpenRouter',
+        model: 'openai/gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: false,
+        samplingParams: {},
+        expected: {},
+      },
+      {
+        name: 'the wire model thinking rules over the configured GPT-6 model',
+        model: 'gpt-5.5',
+        configuredModel: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: {},
+        includeThoughts: false,
+        expected: { reasoning_effort: 'none' },
+      },
+      {
         name: 'an explicit flat override',
         model: 'gpt-5.4',
         reasoning: { effort: 'high' },
@@ -1254,6 +1285,7 @@ describe('ContentGenerationPipeline', () => {
     ])('sends $name through the real provider', async (testCase) => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
+        baseUrl: testCase.baseUrl ?? mockContentGeneratorConfig.baseUrl,
         model: testCase.configuredModel ?? testCase.model,
         reasoning: testCase.reasoning,
         samplingParams: testCase.samplingParams,
@@ -1728,40 +1760,47 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.reasoning).toBeUndefined();
     });
 
-    it('should preserve reasoning_effort none when thinking is disabled', async () => {
-      mockContentGeneratorConfig = {
-        ...mockContentGeneratorConfig,
-        samplingParams: { reasoning_effort: 'none' },
-      } as ContentGeneratorConfig;
-      mockConfig = {
-        ...mockConfig,
-        contentGeneratorConfig: mockContentGeneratorConfig,
-      };
-      pipeline = new ContentGenerationPipeline(mockConfig);
+    it.each([
+      ['gpt-5.4', 'none'],
+      ['gpt-5', undefined],
+      ['gpt-6-astra', undefined],
+    ] as const)(
+      'respects %s support for disabling thinking',
+      async (model, expected) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          samplingParams: { reasoning_effort: 'none' },
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
 
-      const request: GenerateContentParameters = {
-        model: 'gpt-5',
-        contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
-        config: { thinkingConfig: { includeThoughts: false } },
-      };
+        const request: GenerateContentParameters = {
+          model,
+          contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        };
 
-      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'Classify action' },
-      ]);
-      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-        new GenerateContentResponse(),
-      );
-      (mockClient.chat.completions.create as Mock).mockResolvedValue({
-        id: 'response-id',
-        choices: [{ message: { content: 'safe' }, finish_reason: 'stop' }],
-      } as OpenAI.Chat.ChatCompletion);
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Classify action' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'response-id',
+          choices: [{ message: { content: 'safe' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
 
-      await pipeline.execute(request, 'side-query:permission-classifier');
+        await pipeline.execute(request, 'side-query:permission-classifier');
 
-      const apiCall = (mockClient.chat.completions.create as Mock).mock
-        .calls[0][0];
-      expect(apiCall.reasoning_effort).toBe('none');
-    });
+        const apiCall = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0];
+        expect(apiCall.reasoning_effort).toBe(expected);
+      },
+    );
 
     it('should preserve enable_thinking when thinking is not explicitly disabled', async () => {
       // Arrange — normal request (not forked query), enable_thinking should be preserved

@@ -6,7 +6,7 @@
 
 import {
   REASONING_EFFORT_TIERS,
-  getGpt5ReasoningCapabilities,
+  getGptReasoningCapabilities,
   type Config,
   type ContentGeneratorConfig,
   type ReasoningEffort,
@@ -87,7 +87,7 @@ export function resolvePersistedReasoningConfigState(
   thinkingMandatory = false,
 ): ModelReasoningConfigState {
   thinkingMandatory ||=
-    getGpt5ReasoningCapabilities(modelId)?.thinkingMandatory === true;
+    getGptReasoningCapabilities(modelId)?.thinkingMandatory === true;
   const selection = parseReasoningSelection(value);
   if (
     !selection ||
@@ -106,7 +106,7 @@ export function getModelConfiguration(modelId: string | undefined):
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
-  const gptReasoning = getGpt5ReasoningCapabilities(modelId);
+  const gptReasoning = getGptReasoningCapabilities(modelId);
   return gptReasoning
     ? { reasoning: { thinking: true, ...gptReasoning } }
     : modelId
@@ -150,7 +150,7 @@ export function isReasoningSelectionSupported(
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
 ): void {
-  if (getGpt5ReasoningCapabilities(generation.model)) return;
+  if (getGptReasoningCapabilities(generation.model)) return;
   for (const source of ['extra_body', 'samplingParams'] as const) {
     const layer = generation[source];
     if (!layer) continue;

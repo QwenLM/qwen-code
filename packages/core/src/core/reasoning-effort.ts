@@ -40,7 +40,7 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
   max: 70,
 };
 
-export function getGpt5ReasoningCapabilities(model: string | undefined):
+export function getGptReasoningCapabilities(model: string | undefined):
   | {
       efforts: readonly ReasoningEffort[];
       defaultEffort: ReasoningEffort;
@@ -49,6 +49,14 @@ export function getGpt5ReasoningCapabilities(model: string | undefined):
     }
   | undefined {
   const normalized = model?.toLowerCase() ?? '';
+  if (/^(?:openai\/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
+    return {
+      efforts: REASONING_EFFORT_TIERS,
+      defaultEffort: 'medium',
+      defaultEnabled: true,
+      thinkingMandatory: true,
+    };
+  }
   const match = /^(?:openai\/)?gpt-5(?:\.(\d+))?(?:-|$)/.exec(normalized);
   if (!match || /-chat(?:-|$)/.test(normalized)) return undefined;
 
@@ -116,10 +124,9 @@ export function normalizeReasoningEffort(
  *
  * Rank-based, mirroring openclaw's `clampThinkingLevel`: if the exact tier is
  * supported, keep it; otherwise prefer the next stronger supported tier, and
- * only walk down when nothing at or above the request is available. Because an
- * unsupported `xhigh`/`max` will have no supported tier at or above it (the
- * model's supported list omits them), this naturally caps over-strong requests
- * to the model ceiling without raising cost.
+ * only walk down when nothing at or above the request is available. Requests
+ * above the model ceiling are capped; requests below its floor are raised to
+ * the weakest supported tier.
  *
  * `supported` defaults to the full ladder (no clamping).
  */

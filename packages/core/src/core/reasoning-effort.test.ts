@@ -10,12 +10,12 @@ import {
   REASONING_EFFORT_TIERS,
   applyReasoningEffort,
   clampReasoningEffort,
-  getGpt5ReasoningCapabilities,
+  getGptReasoningCapabilities,
   normalizeReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
 
-describe('getGpt5ReasoningCapabilities', () => {
+describe('getGptReasoningCapabilities', () => {
   it.each([
     ['gpt-5', ['low', 'medium', 'high'], 'medium', true, true],
     ['gpt-5-mini', ['low', 'medium', 'high'], 'medium', true, true],
@@ -62,10 +62,19 @@ describe('getGpt5ReasoningCapabilities', () => {
     ['gpt-5-pro', ['high'], 'high', true, true],
     ['gpt-5.2-pro', ['medium', 'high', 'xhigh'], 'medium', true, true],
     ['gpt-5.5-pro', ['medium', 'high', 'xhigh'], 'high', true, true],
+    ['gpt-6-astra', REASONING_EFFORT_TIERS, 'medium', true, true],
+    ['GPT-6-ASTRA', REASONING_EFFORT_TIERS, 'medium', true, true],
+    [
+      'openai/gpt-6-astra-2026-09-03',
+      REASONING_EFFORT_TIERS,
+      'medium',
+      true,
+      true,
+    ],
   ] as const)(
     'describes %s',
     (model, efforts, defaultEffort, defaultEnabled, thinkingMandatory) => {
-      expect(getGpt5ReasoningCapabilities(model)).toEqual({
+      expect(getGptReasoningCapabilities(model)).toEqual({
         efforts,
         defaultEffort,
         defaultEnabled,
@@ -83,9 +92,13 @@ describe('getGpt5ReasoningCapabilities', () => {
     'gpt-5.4custom',
     'gpt-5-chat-latest',
     'openai/gpt-5.2-chat-latest',
+    'gpt-6',
+    'gpt-6-astra-custom',
+    'my-gpt-6-astra',
+    'gpt-6-astra-chat-latest',
     'qwen3.8-max',
   ])('does not assign GPT reasoning controls to %s', (model) => {
-    expect(getGpt5ReasoningCapabilities(model)).toBeUndefined();
+    expect(getGptReasoningCapabilities(model)).toBeUndefined();
   });
 });
 

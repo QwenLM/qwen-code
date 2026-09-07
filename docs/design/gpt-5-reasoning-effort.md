@@ -1,13 +1,14 @@
-# GPT-5 reasoning effort
+# GPT reasoning effort
 
 GPT-5 models currently lack model-specific reasoning controls in ACP and Web
 Shell previews. The OpenAI pipeline also sends the internal `reasoning.effort`
 object to Chat Completions, which expects `reasoning_effort`. Configuring
-`samplingParams` bypasses the internal effort entirely.
+`samplingParams` bypasses the internal effort entirely. GPT-6 Astra has the
+same gaps when it falls through to the generic provider behavior.
 
 ## Design
 
-Share GPT-5 model capabilities in core's existing reasoning-effort module.
+Share GPT model capabilities in core's existing reasoning-effort module.
 Recognize GPT-5 and GPT-5.x identifiers, dated variants, Codex and Pro variants,
 and OpenRouter's `openai/` prefix. Exclude ChatGPT chat variants, which do not
 expose the same reasoning controls. Use the supported subset of the existing
@@ -19,11 +20,19 @@ start at medium (GPT-5 Pro only supports high). GPT-5 and Codex/Pro variants
 require thinking. Other GPT-5.x models can disable it; GPT-5.1 through GPT-5.4
 default to disabled and GPT-5.5/5.6 default to medium.
 
+GPT-6 Astra supports all five tiers and requires thinking. Recognize its
+exact identifier, dated snapshots, and OpenRouter prefix; do not infer
+capabilities for other GPT-6 variants. Its controls start enabled at medium
+and reject off. Rename the shared helper to cover both GPT generations.
+The pipeline's mandatory-thinking check must consume the same capabilities
+for the wire model, including flat disable values and automatic OpenRouter
+off requests.
+
 The default Chat Completions provider maps configured effort to the flat wire
 field and clamps to the model's supported subset. Explicit `samplingParams`
 and `extra_body` reasoning overrides keep their existing priority. OpenRouter
 keeps its nested reasoning protocol. Sampling options unrelated to reasoning
-must not suppress GPT-5's configured effort. The pipeline emits `none` when
+must not suppress GPT's configured effort. The pipeline emits `none` when
 thinking is disabled on models that support it.
 
 GPT overrides are excluded from the existing Qwen-specific ACP override
@@ -36,6 +45,9 @@ thinking, and default enabled state. Existing Web Shell consumers use these
 options without new UI code. There are no new daemon routes or persistence
 formats. Responses-only models still require a compatible Chat Completions
 gateway; adding a Responses transport is outside this change.
+GPT-6 Astra supports Chat Completions, but its official tool-calling API
+requires Responses; the configured gateway remains responsible for that
+compatibility.
 
 ## Affected areas and validation
 
@@ -47,6 +59,12 @@ gateway; adding a Responses transport is outside this change.
 Verify global CLI baseline and local bundled CLI with a local recording mock
 endpoint, plus focused core/CLI tests, build, typecheck, formatting, and lint.
 The E2E plan and results live in `.qwen/e2e-tests/gpt-5-reasoning-effort.md`.
+Live tests use the user's configured providers with isolated settings and
+runtime directories. GPT-5.5 and GPT-5.6 Sol pass; GPT-5.4 is unavailable on
+the configured gateway. GPT-6 Astra's pre-extension bundle returns real
+responses but sends nested high, clamps max to xhigh, and loses effort with
+sampling parameters. Its live verification plan is
+`.qwen/e2e-tests/gpt-6-reasoning-effort-live.md`.
 
 ## Sources
 
@@ -58,5 +76,7 @@ The E2E plan and results live in `.qwen/e2e-tests/gpt-5-reasoning-effort.md`.
 - [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
 - [GPT-5 Pro](https://developers.openai.com/api/docs/models/gpt-5-pro)
 - [GPT-5.4 Pro](https://developers.openai.com/api/docs/models/gpt-5.4-pro)
+- [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)
+- [GPT-6 reasoning and transport requirements](https://developers.openai.com/api/docs/guides/latest-model)
 
 No open questions remain for this scope.
