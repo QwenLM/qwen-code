@@ -85,6 +85,20 @@ type SkillManagerConfigShim = Pick<
 interface WorkspaceSkillManagers {
   skillManager: SkillManager;
   extensionManager?: ExtensionManager;
+  locale: string;
+}
+
+/**
+ * Fails closed on an unreadable directory while tolerating one that does not
+ * exist. The store loader swallows listing errors, so without this probe an
+ * unlistable root would silently yield a catalog missing its entries.
+ */
+async function assertReadableDir(directory: string): Promise<void> {
+  try {
+    await fs.readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -96,20 +110,51 @@ export function createWorkspaceSkillsStatusProvider(
   // fallback, so slight staleness between explicit invalidation points is
   // acceptable: the live child re-lists authoritatively once a session exists.
   const managers = new Map<string, WorkspaceSkillManagers>();
-  const provider = ((workspaceCwd: string) =>
-    buildWorkspaceSkillsStatus(
+  // Per-workspace invalidation epochs, bumped synchronously by `invalidate`.
+  // A cold build captures the epoch before its first await and installs only
+  // while it is unchanged, so an invalidation delivered mid-build cannot be
+  // undone by that build's own `managers.set`.
+  const epochs = new Map<string, number>();
+  const inFlight = new Map<
+    string,
+    { epoch: number; promise: Promise<ServeWorkspaceSkillsStatus> }
+  >();
+  const provider = ((workspaceCwd: string) => {
+    // Coalesce concurrent cold builds of one workspace; a caller arriving
+    // after an invalidation (newer epoch) starts a fresh build instead of
+    // joining a pre-mutation one.
+    const epoch = epochs.get(workspaceCwd) ?? 0;
+    const pending = inFlight.get(workspaceCwd);
+    if (pending?.epoch === epoch) return pending.promise;
+    const promise = buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
+      epochs,
+      epoch,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
-    )) as WorkspaceSkillsStatusProvider;
-  provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
+    );
+    inFlight.set(workspaceCwd, { epoch, promise });
+    const clear = () => {
+      if (inFlight.get(workspaceCwd)?.promise === promise) {
+        inFlight.delete(workspaceCwd);
+      }
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }) as WorkspaceSkillsStatusProvider;
+  provider.invalidate = (workspaceCwd) => {
+    managers.delete(workspaceCwd);
+    epochs.set(workspaceCwd, (epochs.get(workspaceCwd) ?? 0) + 1);
+  };
   return provider;
 }
 
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, WorkspaceSkillManagers>,
+  epochs: Map<string, number>,
+  epoch: number,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
@@ -120,7 +165,22 @@ async function buildWorkspaceSkillsStatus(
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
     });
+    // Resolve the extension locale from this call's settings: a language
+    // change reaches no invalidation point, so the locale is part of the
+    // cache key. Settings carry no value validation, so guard the raw value —
+    // a non-string `general.language` would otherwise throw inside locale
+    // resolution and fail the whole catalog.
+    const rawLanguage = settings.merged.general?.language;
+    const locale = resolveLanguage(
+      resolveLanguageSetting(
+        typeof rawLanguage === 'string' ? rawLanguage : undefined,
+      ),
+    );
     let cached = managers.get(workspaceCwd);
+    if (cached && cached.locale !== locale) {
+      managers.delete(workspaceCwd);
+      cached = undefined;
+    }
     if (!cached) {
       // Mirror the CLI guard in loadCliConfig: safe mode nullifies
       // disabledSkillLevels so the child session loads all bundled skills.
@@ -139,22 +199,31 @@ async function buildWorkspaceSkillsStatus(
       const safeMode =
         (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
       let extensionManager: ExtensionManager | undefined;
-      if (workspaceTrusted && !safeMode && !disabledLevels.has('extension')) {
+      // A failed extension load is served without extension Skills but not
+      // cached, so the next call retries enumeration.
+      let extensionLoadFailed = false;
+      if (workspaceTrusted && !safeMode) {
+        // Keep this probe outside the inner failure domain: an unreadable
+        // extensions *root* still fails the whole catalog (the store loader
+        // would silently swallow it), while a fault inside the load itself
+        // degrades to a catalog without extension Skills.
+        await assertReadableDir(Storage.getUserExtensionsDir());
         try {
-          await fs.readdir(Storage.getUserExtensionsDir());
+          extensionManager = new ExtensionManager({
+            workspaceDir: workspaceCwd,
+            isWorkspaceTrusted: workspaceTrusted,
+            locale,
+          });
+          await extensionManager.refreshCache();
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          extensionLoadFailed = true;
+          extensionManager = undefined;
+          writeStderrLine(
+            `qwen serve: extension skill enumeration skipped for ${workspaceCwd}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         }
-        extensionManager = new ExtensionManager({
-          workspaceDir: workspaceCwd,
-          isWorkspaceTrusted: workspaceTrusted,
-          locale: resolveLanguage(
-            resolveLanguageSetting(
-              settings.merged.general?.language as string | undefined,
-            ),
-          ),
-        });
-        await extensionManager.refreshCache();
       }
       const shim: SkillManagerConfigShim = {
         // Honor the safe-mode env the same way `Config` does when no explicit
@@ -165,9 +234,15 @@ async function buildWorkspaceSkillsStatus(
         // bare, so it is always off here.
         getBareMode: () => false,
         getProjectRoot: () => workspaceCwd,
+        // disabledLevels gates discovery only (SkillManager applies the same
+        // level gate); inactive-extension management entries are appended
+        // regardless, matching the child producer.
         getActiveExtensions: () =>
-          extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
-          [],
+          disabledLevels.has('extension')
+            ? []
+            : (extensionManager
+                ?.getLoadedExtensions()
+                .filter((e) => e.isActive) ?? []),
         getDisabledSkillLevels: () => disabledLevels,
       };
       const skillManager = new SkillManager(shim as Config);
@@ -175,19 +250,18 @@ async function buildWorkspaceSkillsStatus(
         for (const level of ['project', 'user'] as const) {
           if (disabledLevels.has(level)) continue;
           for (const directory of skillManager.getSkillsBaseDirs(level)) {
-            try {
-              await fs.readdir(directory);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
-              }
-            }
+            await assertReadableDir(directory);
           }
         }
       }
-      cached = { skillManager, extensionManager };
-      managers.set(workspaceCwd, cached);
+      cached = { skillManager, extensionManager, locale };
+      if (!extensionLoadFailed && (epochs.get(workspaceCwd) ?? 0) === epoch) {
+        managers.set(workspaceCwd, cached);
+      }
     }
+    // Settings re-load on every call, while the extension store snapshot
+    // stays frozen in the cached manager until invalidation — the two
+    // freshness clocks are deliberate for this best-effort fallback.
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager } = cached;
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
