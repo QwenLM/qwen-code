@@ -183,7 +183,10 @@ Assigned creation now writes the new thread, assignment, admission outcome, and
 first run in one replacement; a human post also invokes the dispatcher for a
 running coalesce, not only for a newly queued run. These last production-path
 changes were inspected from source only. No local unit tests, lint, typecheck,
-build, or CI wait were run.
+build, or CI wait were run. Roster and header activity copy now follows the
+actual active run state instead of calling a queued or cancelling run
+"working", and an unacknowledged cancellation is shown as an outstanding
+obligation.
 
 ### Step 10 — Channel notifications
 

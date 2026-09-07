@@ -246,7 +246,7 @@ export function ThreadView({
   const budget = useMemo(() => formatBudget(thread.budget), [thread.budget]);
   const attention =
     thread.status === 'blocked' || thread.status === 'in_review';
-  const working = live.find((row) => row.run.status === 'running');
+  const active = live.find((row) => row.run.status !== 'queued') ?? live[0];
 
   return (
     <div className={styles.page}>
@@ -262,10 +262,10 @@ export function ThreadView({
         </Button>
         <h1 className={styles.title}>{thread.title}</h1>
         <span className={styles.threadId}>{thread.id}</span>
-        {working ? (
+        {active ? (
           <span className={styles.workingChip}>
             <span className={styles.workingDot} aria-hidden="true" />
-            {working.run.agentName} working
+            {active.run.agentName} {active.state}
           </span>
         ) : null}
         {thread.status !== 'done' && onMarkDone ? (

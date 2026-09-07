@@ -190,7 +190,8 @@ export function buildRunRows(runs: readonly RunView[]): {
     outstanding:
       !run.closeAcknowledged &&
       !LIVE_RUN_STATUSES.has(run.status) &&
-      (run.status === 'failed' ||
+      (run.status === 'cancelled' ||
+        run.status === 'failed' ||
         run.closeKind === 'blocked' ||
         run.closeKind === 'review' ||
         run.closeKind === 'unclosed'),

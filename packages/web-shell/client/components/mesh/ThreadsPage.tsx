@@ -33,7 +33,11 @@ export interface MeshAgentSummaryView {
   description?: string;
   color?: string;
   enabled: boolean;
-  workingOn?: { id: string; title: string };
+  workingOn?: {
+    id: string;
+    title: string;
+    state: 'working' | 'finishing' | 'stopping';
+  };
   waiting: number;
 }
 
@@ -227,7 +231,7 @@ export function ThreadsPage({
                 </span>
                 <span className={styles.agentActivity}>
                   {agent.workingOn
-                    ? `working · ${agent.workingOn.title}`
+                    ? `${agent.workingOn.state} · ${agent.workingOn.title}`
                     : 'idle'}
                 </span>
                 <span className={styles.agentWaiting}>

@@ -80,6 +80,7 @@ const LIVE_RUN_STATUSES = new Set([
   'finishing',
   'cancelling',
 ]);
+const ACTIVE_RUN_STATUSES = new Set(['running', 'finishing', 'cancelling']);
 
 function liveRunCount(thread: Thread): number {
   return thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).length;
@@ -257,11 +258,15 @@ export function registerMeshRoutes(
       ]);
       res.json({
         agents: agents.map((agent) => {
-          const live = threads.find((thread) =>
+          const active = threads.find((thread) =>
             thread.runs.some(
               (run) =>
-                run.agentId === agent.id && LIVE_RUN_STATUSES.has(run.status),
+                run.agentId === agent.id && ACTIVE_RUN_STATUSES.has(run.status),
             ),
+          );
+          const activeRun = active?.runs.find(
+            (run) =>
+              run.agentId === agent.id && ACTIVE_RUN_STATUSES.has(run.status),
           );
           const waiting = threads.reduce(
             (count, thread) =>
@@ -277,7 +282,20 @@ export function registerMeshRoutes(
             ...(agent.description ? { description: agent.description } : {}),
             ...(agent.color ? { color: agent.color } : {}),
             enabled: agent.enabled !== false,
-            ...(live ? { workingOn: { id: live.id, title: live.title } } : {}),
+            ...(active && activeRun
+              ? {
+                  workingOn: {
+                    id: active.id,
+                    title: active.title,
+                    state:
+                      activeRun.status === 'cancelling'
+                        ? 'stopping'
+                        : activeRun.status === 'finishing'
+                          ? 'finishing'
+                          : 'working',
+                  },
+                }
+              : {}),
             waiting,
           };
         }),
