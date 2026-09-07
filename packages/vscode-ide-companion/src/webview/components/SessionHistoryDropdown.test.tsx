@@ -106,6 +106,21 @@ describe('SessionHistoryDropdown search', () => {
       ),
     ).toEqual([strings('session.untitled'), strings('session.untitled')]);
   });
+
+  it('matches a session by its own display name', async () => {
+    const { container } = await renderDropdown({
+      sessions: [
+        makeSession('report', 'Quarterly report'),
+        makeSession('missing-title'),
+      ],
+      searchQuery: 'quarterly',
+    });
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-session-id]'),
+    );
+    expect(rows.map((row) => row.dataset.sessionId)).toEqual(['report']);
+  });
 });
 
 describe('SessionHistoryDropdown focus management', () => {
