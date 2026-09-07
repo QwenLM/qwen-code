@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { getWorkspacePackageJsonPaths } from '../workspaces.js';
+import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
@@ -326,15 +326,16 @@ mkdir "\${release_state}/gh" || exit 1
 
 describe('release workflow', () => {
   // The shard-completeness pin and the zero-test ratchet must gate on the
-  // same workspace set, so resolve it once through
-  // getWorkspacePackageJsonPaths -- the same resolver scripts/clean.js
-  // consumes -- instead of letting each test carry its own selection copy.
-  const getTestCiWorkspaces = () => {
-    const rootPackage = JSON.parse(readFileSync('package.json', 'utf8'));
-    return getWorkspacePackageJsonPaths(process.cwd(), rootPackage.workspaces)
-      .map((path) => [path, JSON.parse(readFileSync(path, 'utf8'))])
-      .filter(([, packageJson]) => packageJson.scripts?.['test:ci']);
-  };
+  // same workspace set, so the selection lives once in
+  // getTestCiWorkspacePackageJsonPaths (scripts/workspaces.js) -- the same
+  // resolver unit-vitest-configs.test.ts consumes -- instead of letting
+  // each test carry its own selection copy. The pairs here only attach the
+  // parsed package.json the pins below assert on.
+  const getTestCiWorkspaces = () =>
+    getTestCiWorkspacePackageJsonPaths(process.cwd()).map((path) => [
+      path,
+      JSON.parse(readFileSync(path, 'utf8')),
+    ]);
 
   it('cleans every shared ECS workspace before checkout', () => {
     const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>

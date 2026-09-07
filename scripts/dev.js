@@ -68,14 +68,8 @@ const loaderPath = join(tmpDir, 'loader.mjs');
 const coreDir = join(root, 'packages', 'core');
 const coreSpecifier = '@qwen-code/qwen-code-core';
 const coreSourceUrl = pathToFileURL(join(coreDir, 'index.ts')).href;
+const coreSrcUrl = pathToFileURL(join(coreDir, 'src') + '/').href;
 
-// Dev runs the CLI from TypeScript source, so every core specifier has to land
-// on packages/core/src. Intercepting only the package root is not enough: a
-// named subpath (`…/debugLogger`) resolves through the package's `exports` map
-// into packages/core/dist, while the root loads src — one process holding two
-// instances of the same module, with split static state and a debug logger
-// bound to a session the other copy never set. Deriving the map from `exports`
-// keeps the interception complete as subpaths are added.
 const coreExports = JSON.parse(
   readFileSync(join(coreDir, 'package.json'), 'utf-8'),
 ).exports;
@@ -98,8 +92,13 @@ for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
 }
 
 const loaderCode = `
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 const coreSourceUrl = '${coreSourceUrl}';
 const coreSubpathSourceUrls = ${JSON.stringify(coreSubpathSourceUrls, null, 2)};
+const coreSrcUrl = '${coreSrcUrl}';
+const corePrefix = '${coreSpecifier}/';
 
 export function resolve(specifier, context, nextResolve) {
   const url =
@@ -112,6 +111,16 @@ export function resolve(specifier, context, nextResolve) {
       url,
       format: 'module',
     };
+  }
+  if (specifier.startsWith(corePrefix)) {
+    // Deep paths mirror packages/core/src; leave missing files to Node.
+    const sub = specifier.slice(corePrefix.length).replace(/\\.js$/, '');
+    for (const ext of ['.ts', '.tsx']) {
+      const candidate = new URL(sub + ext, coreSrcUrl);
+      if (existsSync(fileURLToPath(candidate))) {
+        return { shortCircuit: true, url: candidate.href, format: 'module' };
+      }
+    }
   }
   return nextResolve(specifier, context);
 }

@@ -173,6 +173,7 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './skill-hooks-invocation-parity.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
@@ -302,6 +303,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
     expect(classifyJob).not.toContain('CI_BOT_PAT');
+    expect(workflow).toContain(
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+    );
 
     // Every consumer uses the profile that was already computed from the
     // base checkout. None may execute a classifier from the PR checkout —
