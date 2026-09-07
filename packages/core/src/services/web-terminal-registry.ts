@@ -413,6 +413,18 @@ export class WebTerminalRegistry {
     session.exitListeners.clear();
     if (!session.exited) {
       killPtyTree(session.pty);
+    } else if (process.platform === 'win32') {
+      // The shell already exited, so a tree kill would target a possibly
+      // recycled pid — but node-pty does NOT release the ConPTY host on a
+      // natural exit (only `kill()` reaches `ClosePseudoConsole`), so without
+      // this every terminal the user exits leaves a headless `conhost.exe`
+      // behind for the life of the CLI. Same defect as the shell-tool path in
+      // shellExecutionService. See #11303.
+      try {
+        session.pty.kill();
+      } catch {
+        // Already gone.
+      }
     }
     return true;
   }

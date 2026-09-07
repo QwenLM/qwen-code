@@ -242,6 +242,30 @@ describe('WebTerminalRegistry', () => {
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
   });
 
+  it('releases an exited session without a tree kill, closing the ConPTY host on Windows', async () => {
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited',
+      workspaceCwd: '/workspace',
+    });
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited')).toBe(true);
+    // The shell is gone, so nothing may signal its (possibly recycled) pid —
+    // no taskkill, no process-group kill.
+    expect(spawnSync).not.toHaveBeenCalled();
+    if (process.platform === 'win32') {
+      // ...but node-pty leaves the pseudo-console open on a natural exit, so
+      // the host still has to be closed or a headless conhost.exe survives for
+      // the life of the CLI. See #11303.
+      expect(kill).toHaveBeenCalledOnce();
+    } else {
+      expect(kill).not.toHaveBeenCalled();
+    }
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
+  });
+
   it('forwards live output and bounds unacknowledged PTY input', async () => {
     const registry = new WebTerminalRegistry();
     await registry.create({

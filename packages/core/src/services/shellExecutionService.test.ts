@@ -1841,6 +1841,125 @@ describe('ShellExecutionService', () => {
     });
   });
 
+  describe('Windows ConPTY host release (#11303)', () => {
+    // taskkill owns the shell process; the pseudo-console host
+    // (`conhost.exe --headless`) is bound to the HPCON handle we hold and is
+    // released only by ptyProcess.kill(). node-pty does NOT release it on a
+    // natural shell exit, so before this fix every completed tool call orphaned
+    // one ~8 MB conhost for the lifetime of the CLI — hundreds of processes and
+    // gigabytes of RAM over a workday. See #11303.
+
+    beforeEach(() => {
+      mockCpSpawn.mockReturnValue(new EventEmitter());
+      mockSpawnSync.mockReturnValue({ status: 0 });
+    });
+
+    it('releases the ConPTY host on a clean win32 completion (the leaking path)', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The shell exited cleanly: isPtyActive is false, so the taskkill reap is
+      // (correctly) skipped — and that is exactly the path that leaked, because
+      // nothing then closed the pseudo-console.
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+
+      try {
+        const { result } = await simulateExecution('echo hi', (pty) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        });
+
+        expect(result.exitCode).toBe(0);
+        // No taskkill (the shell is already gone)...
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+          HIDDEN_WINDOW,
+        );
+        // ...but the pseudo-console host is still released.
+        expect(mockPtyProcess.kill).toHaveBeenCalled();
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+      }
+    });
+
+    it('releases the ConPTY host even when the shell lingers and taskkill fires', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // Default liveness mock: node-pty reported exit but the shell lingers.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('does not fail the result when releasing the host throws', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockPtyProcess.kill.mockImplementation(() => {
+        throw new Error('pty already gone');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('never touches the pty host on non-win32 (no ConPTY, recycled-pid hazard)', async () => {
+      // Default platform is 'linux'. UnixTerminal.kill() signals the pid, which
+      // has normally already exited — no cleanup value, and it could reach a
+      // recycled pid.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('releases the ConPTY host of a promoted shell when it settles', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_11303_settle',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        { postPromote: { onSettle: () => {} } },
+      );
+      expect(result.promoted).toBe(true);
+      // Promote itself must not kill anything — the caller owns the child.
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      // The promote branch already dropped this pid from activePtys, so the
+      // process-exit cleanup() cannot reach it: settle is the last chance to
+      // release the host.
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+  });
+
   describe('Binary Output', () => {
     it('should detect binary output and switch to progress events', async () => {
       mockIsBinary.mockReturnValueOnce(true);

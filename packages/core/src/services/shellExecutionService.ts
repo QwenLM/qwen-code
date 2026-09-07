@@ -587,6 +587,40 @@ const windowsKillPid = (pid: number, tree: boolean): void => {
   }
 };
 
+/**
+ * Releases the ConPTY host (`conhost.exe --headless`) backing a PTY, on Windows.
+ *
+ * taskkill — `windowsKillPid` above, and `performCancelKill` — owns the *shell*
+ * process (and, with `/t`, its descendants). It cannot reach the pseudo-console
+ * host: that is a separate process bound to the HPCON handle we hold, not a
+ * descendant of the shell. Only `ptyProcess.kill()` releases it, because that
+ * is the sole caller of node-pty's `WindowsPtyAgent.kill()` →
+ * `conptyNative.kill()` → `ClosePseudoConsole()`. On a *natural* shell exit
+ * node-pty runs `_$onProcessExit`, which only flushes buffered data and
+ * destroys its sockets — the pseudo-console is left open. So every PTY we drop
+ * without calling this orphans one ~8 MB conhost for the lifetime of the CLI
+ * process, one per tool call. See #11303 (and #5873 for the shell half of the
+ * pair).
+ *
+ * Unconditional by design, and safe to be so: it closes only the HPCON this
+ * process opened, so unlike a `taskkill /t` it can never touch a third-party
+ * application (the #6067 regression). It is a no-op once the host is gone.
+ *
+ * win32-only, deliberately: there is no ConPTY host elsewhere, and node-pty's
+ * `UnixTerminal.kill()` is `process.kill(this.pid, 'SIGHUP')` on a pid that has
+ * normally already exited — no cleanup value, and a recycled-pid hazard.
+ */
+const releaseConPtyHost = (ptyProcess: { kill(): void }): void => {
+  if (os.platform() !== 'win32') {
+    return;
+  }
+  try {
+    ptyProcess.kill();
+  } catch {
+    // Already gone.
+  }
+};
+
 const windowsStrategy: ProcessCleanupStrategy = {
   killPty: (pid, pty) => {
     // Sync because this runs from the process 'exit' cleanup() handler, where
@@ -1854,6 +1888,12 @@ export class ShellExecutionService {
           ) {
             windowsKillPid(ptyProcess.pid, cancelKillDispatched);
           }
+          // The taskkill above owns the shell; this owns the pseudo-console
+          // host, which nothing else releases once we delete from activePtys
+          // below. It is NOT under the isPtyActive guard: the healthy path —
+          // shell exited cleanly, so no taskkill — is exactly the one that
+          // leaks a conhost per tool call (#11303).
+          releaseConPtyHost(ptyProcess);
           this.activePtys.delete(ptyProcess.pid);
         };
 
@@ -2116,6 +2156,11 @@ export class ShellExecutionService {
             ) {
               windowsKillPid(ptyProcess.pid, false);
             }
+            // ...and release the ConPTY host itself. The promote branch already
+            // dropped this pid from activePtys, so the process-exit cleanup()
+            // cannot reach it either — without this a backgrounded command
+            // leaks a conhost exactly like the foreground path did (#11303).
+            releaseConPtyHost(ptyProcess);
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
