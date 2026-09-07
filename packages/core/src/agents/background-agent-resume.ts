@@ -1293,6 +1293,7 @@ export class BackgroundAgentResumeService {
               stopHookWarning,
             );
             const stats = getCompletionStats(subagent, liveToolCallCount);
+            if (registry.get(meta.agentId)?.retainsPhysicalSlot) break;
             if (terminateMode === AgentTerminateMode.GOAL) {
               const pending = registry.drainMessages(meta.agentId);
               if (pending.length > 0) {
@@ -1358,6 +1359,7 @@ export class BackgroundAgentResumeService {
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
+          if (registry.get(meta.agentId)?.retainsPhysicalSlot) return;
           if (turnAbortController.signal.aborted && !progressTimeout) {
             const stats = getCompletionStats(subagent, liveToolCallCount);
             registry.finalizeCancelled(meta.agentId, errorMessage, stats);
@@ -1402,6 +1404,7 @@ export class BackgroundAgentResumeService {
           bgEmitter,
           turnAbortController,
           () => monitorRegistry.hasRunningForOwner(meta.agentId),
+          (error) => registry.failUnresponsive(meta.agentId, error.message),
         );
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
@@ -1418,7 +1421,10 @@ export class BackgroundAgentResumeService {
           target.isFork
             ? runInForkContext(invocationRunBody)
             : invocationRunBody()
-        ).finally(disposeWatchdog);
+        ).finally(() => {
+          disposeWatchdog();
+          registry.releaseRetainedPhysicalSlot(meta.agentId);
+        });
       };
 
       const reportUnexpectedBackgroundError = (error: unknown) => {

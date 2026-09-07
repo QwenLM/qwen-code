@@ -16,6 +16,7 @@ import type {
 
 const MODEL_CONTROL_PROGRESS_TIMEOUT_MS = 15 * 60_000;
 const TOOL_PROGRESS_TIMEOUT_MS = 10 * 60_000;
+const UNRESPONSIVE_ABORT_GRACE_MS = 5_000;
 
 export class AgentProgressTimeoutError extends Error {
   constructor(
@@ -50,16 +51,26 @@ export function attachAgentProgressWatchdog(
   emitter: AgentEventEmitter,
   controller: AbortController,
   isWaitingForExternalInput: () => boolean,
+  onUnresponsive: (error: AgentProgressTimeoutError) => void,
 ): () => void {
   let disposed = false;
   let waitingForExternalInput = false;
   let roundHadToolCalls = false;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
   const tools = new Map<string, ToolDeadline>();
 
   const abort = (error: AgentProgressTimeoutError) => {
     if (disposed || controller.signal.aborted) return;
     controller.abort(error);
+    const armEscalation = () => {
+      escalationTimer = schedule(
+        UNRESPONSIVE_ABORT_GRACE_MS,
+        () => onUnresponsive(error),
+        armEscalation,
+      );
+    };
+    armEscalation();
   };
   const schedule = (
     timeoutMs: number,
@@ -183,6 +194,7 @@ export function attachAgentProgressWatchdog(
     if (disposed) return;
     disposed = true;
     clearModel();
+    if (escalationTimer) clearTimeout(escalationTimer);
     for (const tool of tools.values()) {
       if (tool.timer) clearTimeout(tool.timer);
     }

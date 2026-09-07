@@ -3710,6 +3710,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
 
+  async function requestRuntimeRecycleForSession(
+    sessionId: string,
+  ): Promise<void> {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    const owner = channelInfoForEntry(entry);
+    if (!owner || owner.state === 'dying') {
+      throw new SessionNotFoundError(sessionId);
+    }
+    await retireChannelAfterSessionsDrain(
+      owner,
+      `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
+    );
+    if (!owner.isDying) await ensureChannel();
+  }
+
   async function retireChannelOnTimeout(
     ci: ChannelInfo,
     error: unknown,
@@ -4671,6 +4687,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // nothing else would settle what its last drain missed.
           settleMidTurnQueueAfterGoalTurn,
           opts.onCreateCurrentSessionScheduledTask,
+          requestRuntimeRecycleForSession,
         );
         const rawConnection = new ClientSideConnection(
           () =>
@@ -9486,17 +9503,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async requestRuntimeRecycle(sessionId) {
-      const entry = byId.get(sessionId);
-      if (!entry) throw new SessionNotFoundError(sessionId);
-      const owner = channelInfoForEntry(entry);
-      if (!owner || owner.state === 'dying') {
-        throw new SessionNotFoundError(sessionId);
-      }
-      await retireChannelAfterSessionsDrain(
-        owner,
-        `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
-      );
-      if (!owner.isDying) await ensureChannel();
+      await requestRuntimeRecycleForSession(sessionId);
     },
 
     get pendingPermissionCount() {

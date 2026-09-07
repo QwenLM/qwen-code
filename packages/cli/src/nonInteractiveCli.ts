@@ -1489,7 +1489,7 @@ export async function runNonInteractive(
       // tool-call chain can push completions onto the queue.
       const registry = config.getBackgroundTaskRegistry();
       registry.setNotificationCallback((displayText, modelText, meta) => {
-        localQueue.push({
+        const item: LocalQueueItem = {
           displayText,
           modelText,
           sendMessageType: SendMessageType.Notification,
@@ -1506,7 +1506,12 @@ export async function runNonInteractive(
                 }
               : undefined,
           },
-        });
+        };
+        if (meta.recordOnly) {
+          emitNotificationToSdk(item);
+          return;
+        }
+        localQueue.push(item);
       });
 
       registry.setRegisterCallback((entry) => {

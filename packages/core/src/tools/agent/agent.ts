@@ -3594,6 +3594,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 recordTerminalOutcome();
               }
 
+              if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) break;
+
               if (terminateMode === AgentTerminateMode.GOAL) {
                 keepResident =
                   residentRegistered && !needsAutoPermissionLease();
@@ -3705,6 +3707,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
             const errorMsg = baseErrorMsg + wtSuffix;
 
+            if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) return;
+
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
@@ -3762,6 +3766,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               this.config
                 .getMonitorRegistry()
                 .hasRunningForOwner(hookOpts.agentId),
+            (error) =>
+              registry.failUnresponsive(hookOpts.agentId, error.message),
           );
           const framedBgBody = () =>
             this.runWithSubagentSpan(
@@ -3786,7 +3792,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             );
           return (
             isFork ? runInForkContext(framedBgBody) : framedBgBody()
-          ).finally(disposeWatchdog);
+          ).finally(() => {
+            disposeWatchdog();
+            registry.releaseRetainedPhysicalSlot(hookOpts.agentId);
+          });
         };
 
         const reportUnexpectedBackgroundError = (err: unknown) => {
