@@ -5,53 +5,63 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import {
-  ArchiveIcon,
-  DownloadIcon,
-  EllipsisIcon,
-  MessageSquareIcon,
-  PencilIcon,
-  RotateCcwIcon,
-  Trash2Icon,
-} from 'lucide-react';
+import { CircleDashedIcon, SquarePenIcon } from 'lucide-react';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
   type DaemonStandaloneSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import {
+  useConnection,
   useStreamingState,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { useI18n } from '../../i18n';
-import { DialogShell } from '../dialogs/DialogShell';
-import { Button } from '../ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
-import { Input } from '../ui/input';
+import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
 import {
   getDaemonErrorCode,
   isSessionWriterBlockedCode,
 } from '../../daemon/session/session-context';
+import { useI18n } from '../../i18n';
+import { DialogShell } from '../dialogs/DialogShell';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import sidebarStyles from './WebShellSidebar.module.css';
+import workspaceStyles from './WorkspaceSection.module.css';
 
 interface StandaloneRecentsProps {
-  collapsed: boolean;
-  onExpand: () => void;
+  archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
   currentSessionReady?: boolean;
+  refreshKey?: number;
+  searchQuery?: string;
+  onNewSession?: () => void;
+  renderSession: (
+    session: DaemonStandaloneSessionSummary,
+    options: {
+      active: boolean;
+      busy: boolean;
+      isArchived: boolean;
+      onOpen: () => void;
+      onRename: () => void;
+      onExport: () => void;
+      onArchive?: () => void;
+      onUnarchive?: () => void;
+      onDelete: () => void;
+    },
+  ) => ReactNode;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
+  onMutated?: () => void;
+  onStatusChange?: (status: {
+    count: number;
+    loading: boolean;
+    error: boolean;
+  }) => void;
   onError: (error: unknown, fallback: string) => void;
   onNotice: (message: string) => void;
 }
 
 const PAGE_SIZE = 50;
-
 function sessionLabel(session: DaemonStandaloneSessionSummary): string {
   return session.displayName?.trim() || session.sessionId.slice(0, 8);
 }
@@ -70,17 +80,6 @@ function appendUnique(
   return [
     ...current,
     ...incoming.filter((session) => !known.has(session.sessionId)),
-  ];
-}
-
-function mergeRefreshedPage(
-  current: readonly DaemonStandaloneSessionSummary[],
-  refreshed: readonly DaemonStandaloneSessionSummary[],
-): DaemonStandaloneSessionSummary[] {
-  const refreshedIds = new Set(refreshed.map((session) => session.sessionId));
-  return [
-    ...refreshed,
-    ...current.filter((session) => !refreshedIds.has(session.sessionId)),
   ];
 }
 
@@ -105,42 +104,43 @@ function downloadExport(result: {
 }
 
 export function StandaloneRecents({
-  collapsed,
-  onExpand,
+  archiveState,
   currentSessionId,
   currentSessionReady = false,
+  refreshKey,
+  searchQuery = '',
+  onNewSession,
+  renderSession,
   onLoadSession,
   onRenameSession,
+  onMutated,
+  onStatusChange,
   onError,
   onNotice,
 }: StandaloneRecentsProps) {
   const workspace = useWorkspace();
+  const connection = useConnection();
   const streamingState = useStreamingState();
   const previousStreamingStateRef = useRef(streamingState);
   const loadGenerationRef = useRef(0);
-  const archivedLoadGenerationRef = useRef(0);
+  const loadedRef = useRef(false);
+  const previousRefreshKeyRef = useRef(refreshKey);
   const busySessionIdRef = useRef<string | undefined>(undefined);
   const openGenerationRef = useRef(0);
   const openingSessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
-  const [active, setActive] = useState<DaemonStandaloneSessionSummary[]>([]);
-  const activeRef = useRef(active);
-  activeRef.current = active;
-  const [archived, setArchived] = useState<DaemonStandaloneSessionSummary[]>(
+  const [sessions, setSessions] = useState<DaemonStandaloneSessionSummary[]>(
     [],
   );
-  const archivedRef = useRef(archived);
-  archivedRef.current = archived;
-  const [activeCursor, setActiveCursor] = useState<string>();
-  const [archivedCursor, setArchivedCursor] = useState<string>();
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
-  const [loadingActive, setLoadingActive] = useState(false);
-  const [loadingArchived, setLoadingArchived] = useState(false);
-  const [loadingMore, setLoadingMore] = useState<DaemonSessionArchiveState>();
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const [cursor, setCursor] = useState<string>();
+  const [expanded, setExpanded] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState<{ cursor?: string }>();
   const [busySessionId, setBusySessionId] = useState<string>();
-  const [listErrors, setListErrors] = useState<
-    Partial<Record<DaemonSessionArchiveState, { cursor?: string }>>
-  >({});
   const [sessionError, setSessionError] = useState<{
     sessionId: string;
     kind: 'open' | 'action';
@@ -156,134 +156,44 @@ export function StandaloneRecents({
     workspace.capabilities?.features?.includes(
       STANDALONE_SESSIONS_CAPABILITY,
     ) === true;
-  const loading = loadingActive || (archivedExpanded && loadingArchived);
 
   const load = useCallback(
-    async (preserveActivePages = false) => {
+    async (preservePages = false) => {
       if (!supported) return;
       const generation = loadGenerationRef.current + 1;
       loadGenerationRef.current = generation;
-      setLoadingMore((current) => (current === 'active' ? undefined : current));
-      setLoadingActive(true);
+      setLoadingMore(false);
+      setLoading(true);
       try {
-        const activePage = await workspace.client.listStandaloneSessionsPage({
-          archiveState: 'active',
+        const targetCount = preservePages ? sessionsRef.current.length : 0;
+        let page = await workspace.client.listStandaloneSessionsPage({
+          archiveState,
           pageSize: PAGE_SIZE,
         });
         if (loadGenerationRef.current !== generation) return;
-        const activeSessions = withoutChildren(activePage.sessions);
-        const preserveLoadedPages =
-          preserveActivePages && activeRef.current.length > 0;
-        setActive((current) =>
-          preserveLoadedPages
-            ? mergeRefreshedPage(current, activeSessions)
-            : activeSessions,
-        );
-        if (!preserveLoadedPages) setActiveCursor(activePage.nextCursor);
-        setListErrors((current) => ({ ...current, active: undefined }));
+        let loaded = withoutChildren(page.sessions);
+        while (page.nextCursor && loaded.length < targetCount) {
+          page = await workspace.client.listStandaloneSessionsPage({
+            archiveState,
+            cursor: page.nextCursor,
+            pageSize: PAGE_SIZE,
+          });
+          if (loadGenerationRef.current !== generation) return;
+          loaded = appendUnique(loaded, withoutChildren(page.sessions));
+        }
+        loadedRef.current = true;
+        setSessions(loaded);
+        setCursor(page.nextCursor);
+        setLoadError(undefined);
       } catch (error) {
         if (loadGenerationRef.current !== generation) return;
         console.warn('[web-shell] standalone session list failed:', error);
-        setListErrors((current) => ({ ...current, active: {} }));
+        setLoadError({});
       } finally {
-        if (loadGenerationRef.current === generation) setLoadingActive(false);
+        if (loadGenerationRef.current === generation) setLoading(false);
       }
     },
-    [supported, workspace.client],
-  );
-
-  const loadArchived = useCallback(
-    async (preserveArchivedPages = false) => {
-      if (!supported) return;
-      const generation = archivedLoadGenerationRef.current + 1;
-      archivedLoadGenerationRef.current = generation;
-      setLoadingMore((current) =>
-        current === 'archived' ? undefined : current,
-      );
-      setLoadingArchived(true);
-      try {
-        const page = await workspace.client.listStandaloneSessionsPage({
-          archiveState: 'archived',
-          pageSize: PAGE_SIZE,
-        });
-        if (archivedLoadGenerationRef.current !== generation) return;
-        const archivedSessions = withoutChildren(page.sessions);
-        const preserveLoadedPages =
-          preserveArchivedPages && archivedRef.current.length > 0;
-        setArchived((current) =>
-          preserveLoadedPages
-            ? mergeRefreshedPage(current, archivedSessions)
-            : archivedSessions,
-        );
-        if (!preserveLoadedPages) setArchivedCursor(page.nextCursor);
-        setListErrors((current) => ({ ...current, archived: undefined }));
-      } catch (error) {
-        if (archivedLoadGenerationRef.current !== generation) return;
-        console.warn('[web-shell] archived session list failed:', error);
-        setListErrors((current) => ({ ...current, archived: {} }));
-      } finally {
-        if (archivedLoadGenerationRef.current === generation) {
-          setLoadingArchived(false);
-        }
-      }
-    },
-    [supported, workspace.client],
-  );
-
-  const loadMore = useCallback(
-    async (archiveState: DaemonSessionArchiveState, cursor: string) => {
-      if (loadingMore) return;
-      const generation =
-        archiveState === 'active'
-          ? loadGenerationRef.current
-          : archivedLoadGenerationRef.current;
-      setLoadingMore(archiveState);
-      try {
-        const page = await workspace.client.listStandaloneSessionsPage({
-          archiveState,
-          cursor,
-          pageSize: PAGE_SIZE,
-        });
-        if (
-          (archiveState === 'active'
-            ? loadGenerationRef.current
-            : archivedLoadGenerationRef.current) !== generation
-        ) {
-          return;
-        }
-        const sessions = withoutChildren(page.sessions);
-        if (archiveState === 'active') {
-          setActive((current) => appendUnique(current, sessions));
-          setActiveCursor(page.nextCursor);
-        } else {
-          setArchived((current) => appendUnique(current, sessions));
-          setArchivedCursor(page.nextCursor);
-        }
-        setListErrors((current) => ({ ...current, [archiveState]: undefined }));
-      } catch (error) {
-        if (
-          (archiveState === 'active'
-            ? loadGenerationRef.current
-            : archivedLoadGenerationRef.current) !== generation
-        ) {
-          return;
-        }
-        console.warn('[web-shell] standalone session page failed:', error);
-        setListErrors((current) => ({
-          ...current,
-          [archiveState]: { cursor },
-        }));
-      } finally {
-        if (
-          (archiveState === 'active'
-            ? loadGenerationRef.current
-            : archivedLoadGenerationRef.current) === generation
-        ) {
-          setLoadingMore(undefined);
-        }
-      }
-    },
-    [loadingMore, workspace.client],
+    [archiveState, supported, workspace.client],
   );
 
   useEffect(() => {
@@ -305,31 +215,62 @@ export function StandaloneRecents({
   }, [currentSessionId, currentSessionReady]);
 
   useEffect(() => {
-    void load(true);
-  }, [currentSessionId, load]);
-
-  useEffect(() => {
-    if (archivedExpanded) void loadArchived(true);
-  }, [archivedExpanded, loadArchived]);
+    const refreshRequested = previousRefreshKeyRef.current !== refreshKey;
+    previousRefreshKeyRef.current = refreshKey;
+    if (!loadedRef.current || refreshRequested) void load(true);
+  }, [load, refreshKey]);
 
   useEffect(() => {
     const previous = previousStreamingStateRef.current;
     previousStreamingStateRef.current = streamingState;
-    if (previous !== 'idle' && streamingState === 'idle') void load(true);
-  }, [load, streamingState]);
+    if (
+      archiveState === 'active' &&
+      connection.sessionContext?.kind === 'standalone' &&
+      previous !== 'idle' &&
+      streamingState === 'idle'
+    ) {
+      void load(true);
+    }
+  }, [archiveState, connection.sessionContext?.kind, load, streamingState]);
 
-  const refreshLists = useCallback(async () => {
-    await Promise.all([load(), archivedExpanded ? loadArchived() : undefined]);
-  }, [archivedExpanded, load, loadArchived]);
+  useEffect(() => {
+    onStatusChange?.({ count: sessions.length, loading, error: !!loadError });
+  }, [loadError, loading, onStatusChange, sessions.length]);
 
-  const refreshListsRef = useRef(refreshLists);
-  refreshListsRef.current = refreshLists;
+  useEffect(() => {
+    if (!expanded) setShowAll(false);
+  }, [expanded]);
+
+  const loadMore = useCallback(async () => {
+    if (!cursor || loadingMore) return;
+    const generation = loadGenerationRef.current;
+    setLoadingMore(true);
+    try {
+      const page = await workspace.client.listStandaloneSessionsPage({
+        archiveState,
+        cursor,
+        pageSize: PAGE_SIZE,
+      });
+      if (loadGenerationRef.current !== generation) return;
+      setSessions((current) =>
+        appendUnique(current, withoutChildren(page.sessions)),
+      );
+      setCursor(page.nextCursor);
+      setLoadError(undefined);
+    } catch (error) {
+      if (loadGenerationRef.current === generation) {
+        console.warn('[web-shell] standalone session page failed:', error);
+        setLoadError({ cursor });
+      }
+    } finally {
+      if (loadGenerationRef.current === generation) setLoadingMore(false);
+    }
+  }, [archiveState, cursor, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
       sessionId: string,
       action: () => Promise<void>,
-      refresh = true,
     ): Promise<boolean> => {
       if (busySessionIdRef.current) return false;
       busySessionIdRef.current = sessionId;
@@ -337,7 +278,6 @@ export function StandaloneRecents({
       setSessionError(undefined);
       try {
         await action();
-        if (refresh) await refreshListsRef.current();
         return true;
       } catch (error) {
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
@@ -352,7 +292,7 @@ export function StandaloneRecents({
             kind: 'action',
             message: t('session.writerBlocked'),
             retry: () => {
-              void run(sessionId, action, refresh);
+              void run(sessionId, action);
             },
           });
         } else {
@@ -367,6 +307,16 @@ export function StandaloneRecents({
     [onError, t],
   );
 
+  const removeMutated = useCallback(
+    (sessionId: string) => {
+      setSessions((current) =>
+        current.filter((entry) => entry.sessionId !== sessionId),
+      );
+      onMutated?.();
+    },
+    [onMutated],
+  );
+
   const archiveSession = useCallback(
     async (session: DaemonStandaloneSessionSummary) => {
       await run(session.sessionId, async () => {
@@ -378,6 +328,7 @@ export function StandaloneRecents({
           result.alreadyArchived.includes(session.sessionId) ||
           result.notFound?.includes(session.sessionId)
         ) {
+          removeMutated(session.sessionId);
           return;
         }
         const failure = result.errors.find(
@@ -389,7 +340,7 @@ export function StandaloneRecents({
         );
       });
     },
-    [run, t, workspace.client],
+    [removeMutated, run, t, workspace.client],
   );
 
   const unarchiveSession = useCallback(
@@ -403,6 +354,7 @@ export function StandaloneRecents({
           result.alreadyActive.includes(session.sessionId) ||
           result.notFound?.includes(session.sessionId)
         ) {
+          removeMutated(session.sessionId);
           return;
         }
         const failure = result.errors.find(
@@ -414,12 +366,12 @@ export function StandaloneRecents({
         );
       });
     },
-    [run, t, workspace.client],
+    [removeMutated, run, t, workspace.client],
   );
 
   const deleteSession = useCallback(
-    async (session: DaemonStandaloneSessionSummary): Promise<boolean> =>
-      await run(session.sessionId, async () => {
+    async (session: DaemonStandaloneSessionSummary): Promise<boolean> => {
+      const succeeded = await run(session.sessionId, async () => {
         const result = await workspace.client.deleteStandaloneSessions([
           session.sessionId,
         ]);
@@ -438,8 +390,11 @@ export function StandaloneRecents({
         if (result.fileCleanupPending.includes(session.sessionId)) {
           onNotice(t('sidebar.standaloneCleanupPending'));
         }
-      }),
-    [onNotice, run, t, workspace.client],
+        removeMutated(session.sessionId);
+      });
+      return succeeded;
+    },
+    [onNotice, removeMutated, run, t, workspace.client],
   );
 
   const openSession = useCallback(
@@ -467,36 +422,80 @@ export function StandaloneRecents({
   );
 
   if (!supported) return null;
-  if (collapsed) {
-    const label =
-      listErrors.active || listErrors.archived
-        ? `${t('sidebar.recents')}: ${t('sidebar.standaloneLoadFailed')}`
-        : t('sidebar.recents');
-    return (
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        title={label}
-        aria-label={label}
-        className={
-          listErrors.active || listErrors.archived
-            ? 'text-destructive'
-            : undefined
-        }
-        onClick={onExpand}
-      >
-        <MessageSquareIcon />
-      </Button>
-    );
+  if (
+    archiveState === 'archived' &&
+    !loadError &&
+    !sessionError &&
+    !loading &&
+    sessions.length === 0 &&
+    !cursor
+  ) {
+    return null;
   }
+  const query = searchQuery.trim().toLowerCase();
+  const visibleSessions = query
+    ? sessions.filter(
+        (session) =>
+          sessionLabel(session).toLowerCase().includes(query) ||
+          session.sessionId.toLowerCase().includes(query),
+      )
+    : sessions;
+  const sessionsLimited =
+    !query &&
+    !showAll &&
+    visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+  const displayedSessions = sessionsLimited
+    ? visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)
+    : visibleSessions;
 
   return (
     <>
-      <section className="px-2 pb-3" aria-label={t('sidebar.recents')}>
-        <div className="flex items-center justify-between px-2 py-1 text-xs font-medium text-muted-foreground">
-          <span>{t('sidebar.recents')}</span>
-          {loading && <span>{t('common.loading')}</span>}
+      <section
+        className={`${workspaceStyles.section} mb-3`}
+        aria-label={
+          archiveState === 'active'
+            ? t('sidebar.noWorkspaceSessions')
+            : `${t('sidebar.archivedTitle')}: ${t('sidebar.noWorkspaceSessions')}`
+        }
+        data-testid={`standalone-${archiveState}-group`}
+      >
+        <div className={`${workspaceStyles.headerRow} group`}>
+          <button
+            type="button"
+            className={workspaceStyles.header}
+            aria-expanded={expanded}
+            onClick={(event) => {
+              setExpanded((value) => !value);
+              if (event.detail > 0) event.currentTarget.blur();
+            }}
+          >
+            <CircleDashedIcon
+              className={workspaceStyles.folderIcon}
+              size={14}
+              strokeWidth={1.4}
+              aria-hidden="true"
+            />
+            <span className={workspaceStyles.headerContent}>
+              <span className={workspaceStyles.name}>
+                {t('sidebar.noWorkspaceSessions')}
+              </span>
+            </span>
+          </button>
+          {archiveState === 'active' && onNewSession && (
+            <div
+              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover:visible group-focus-within:visible`}
+            >
+              <button
+                className={sidebarStyles.workspaceHeaderAction}
+                type="button"
+                title={t('sidebar.newTask')}
+                aria-label={t('sidebar.newTask')}
+                onClick={onNewSession}
+              >
+                <SquarePenIcon size={16} strokeWidth={1.2} />
+              </button>
+            </div>
+          )}
         </div>
         {sessionError && (
           <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
@@ -513,149 +512,84 @@ export function StandaloneRecents({
             </Button>
           </div>
         )}
-        {listErrors.active && (
+        {loadError && (
           <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
             {t('sidebar.standaloneLoadFailed')}
             <Button
               variant="ghost"
               size="sm"
-              disabled={loadingActive || loadingMore !== undefined}
+              disabled={loading || loadingMore}
               onClick={() => {
-                const cursor = listErrors.active?.cursor;
-                void (cursor ? loadMore('active', cursor) : load(true));
+                void (loadError.cursor ? loadMore() : load(true));
               }}
             >
               {t('common.retry')}
             </Button>
           </div>
         )}
-        <div className="flex flex-col gap-0.5">
-          {active.map((session) => {
-            const isCurrent = session.sessionId === currentSessionId;
-            return (
-              <StandaloneRow
-                key={session.sessionId}
-                session={session}
-                active={isCurrent}
-                busy={busySessionId === session.sessionId}
-                onOpen={() => void openSession(session.sessionId)}
-                onRename={() => {
+        {(expanded || Boolean(query)) && (
+          <div className="flex flex-col gap-0.5">
+            {displayedSessions.map((session) => {
+              const isCurrent = session.sessionId === currentSessionId;
+              return renderSession(session, {
+                active: isCurrent,
+                busy: busySessionId === session.sessionId,
+                isArchived: archiveState === 'archived',
+                onOpen: () => void openSession(session.sessionId),
+                onRename: () => {
                   setRenameCandidate(session);
                   setRenameValue(sessionLabel(session));
-                }}
-                onExport={() => {
-                  void run(
-                    session.sessionId,
-                    async () => {
-                      downloadExport(
-                        await workspace.client.exportStandaloneSession(
-                          session.sessionId,
-                          { format: 'html' },
-                        ),
-                      );
-                    },
-                    false,
-                  );
-                }}
-                onArchive={
-                  isCurrent ? undefined : () => void archiveSession(session)
-                }
-                onDelete={
-                  isCurrent ? undefined : () => setDeleteCandidate(session)
-                }
-              />
-            );
-          })}
-        </div>
-        {!loading && !listErrors.active && active.length === 0 && (
-          <div className="px-2 py-1 text-xs text-muted-foreground">
-            {t('sidebar.noRecents')}
-          </div>
-        )}
-        {activeCursor && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="w-full"
-            disabled={loadingMore !== undefined}
-            onClick={() => void loadMore('active', activeCursor)}
-          >
-            {t('sidebar.showAllSessions')}
-          </Button>
-        )}
-        <button
-          type="button"
-          className="mt-1 flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs text-muted-foreground hover:bg-muted"
-          aria-expanded={archivedExpanded}
-          onClick={() => setArchivedExpanded((value) => !value)}
-        >
-          <ArchiveIcon size={13} />
-          {t('sidebar.archivedTitle')}
-        </button>
-        {archivedExpanded && listErrors.archived && (
-          <div role="alert" className="px-2 py-1 text-xs text-muted-foreground">
-            {t('sidebar.standaloneLoadFailed')}
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={loadingArchived || loadingMore !== undefined}
-              onClick={() => {
-                const cursor = listErrors.archived?.cursor;
-                void (cursor
-                  ? loadMore('archived', cursor)
-                  : loadArchived(true));
-              }}
-            >
-              {t('common.retry')}
-            </Button>
-          </div>
-        )}
-        {archivedExpanded &&
-          !listErrors.archived &&
-          archived.length === 0 &&
-          !loading && (
-            <div className="px-2 py-1 text-xs text-muted-foreground">
-              {t('sidebar.archivedEmpty')}
-            </div>
-          )}
-        {archivedExpanded &&
-          archived.map((session) => (
-            <StandaloneRow
-              key={session.sessionId}
-              session={session}
-              active={false}
-              busy={busySessionId === session.sessionId}
-              onOpen={() => undefined}
-              onExport={() => {
-                void run(
-                  session.sessionId,
-                  async () => {
+                },
+                onExport: () => {
+                  void run(session.sessionId, async () => {
                     downloadExport(
                       await workspace.client.exportStandaloneSession(
                         session.sessionId,
                         { format: 'html' },
                       ),
                     );
-                  },
-                  false,
-                );
-              }}
-              onUnarchive={() => void unarchiveSession(session)}
-              onDelete={() => setDeleteCandidate(session)}
-            />
-          ))}
-        {archivedExpanded && archivedCursor && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="w-full"
-            disabled={loadingMore !== undefined}
-            onClick={() => void loadMore('archived', archivedCursor)}
-          >
-            {t('sidebar.showAllSessions')}
-          </Button>
+                  });
+                },
+                onArchive:
+                  archiveState === 'active'
+                    ? () => void archiveSession(session)
+                    : undefined,
+                onUnarchive:
+                  archiveState === 'archived'
+                    ? () => void unarchiveSession(session)
+                    : undefined,
+                onDelete: () => setDeleteCandidate(session),
+              });
+            })}
+            {!loading && !loadError && visibleSessions.length === 0 && (
+              <div className={workspaceStyles.empty}>
+                {archiveState === 'active'
+                  ? t('sidebar.noSessions')
+                  : t('sidebar.archivedEmpty')}
+              </div>
+            )}
+            {sessionsLimited && (
+              <button
+                type="button"
+                className={sidebarStyles.showAllSessions}
+                onClick={() => setShowAll(true)}
+              >
+                {t('sidebar.showAllSessions')}
+              </button>
+            )}
+            {cursor && !sessionsLimited && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full"
+                disabled={loadingMore}
+                onClick={() => void loadMore()}
+              >
+                {t('sidebar.showAllSessions')}
+              </Button>
+            )}
+          </div>
         )}
       </section>
       {renameCandidate && (
@@ -670,27 +604,20 @@ export function StandaloneRecents({
               event.preventDefault();
               const displayName = renameValue.trim();
               if (!displayName) return;
-              void run(
-                renameCandidate.sessionId,
-                async () => {
-                  await workspace.client.renameStandaloneSession(
-                    renameCandidate.sessionId,
-                    displayName,
-                  );
-                  const updateName = (
-                    sessions: readonly DaemonStandaloneSessionSummary[],
-                  ) =>
-                    sessions.map((session) =>
-                      session.sessionId === renameCandidate.sessionId
-                        ? { ...session, displayName }
-                        : session,
-                    );
-                  setActive(updateName);
-                  setArchived(updateName);
-                  onRenameSession?.(renameCandidate.sessionId, displayName);
-                },
-                false,
-              ).then((succeeded) => {
+              void run(renameCandidate.sessionId, async () => {
+                await workspace.client.renameStandaloneSession(
+                  renameCandidate.sessionId,
+                  displayName,
+                );
+                setSessions((current) =>
+                  current.map((session) =>
+                    session.sessionId === renameCandidate.sessionId
+                      ? { ...session, displayName }
+                      : session,
+                  ),
+                );
+                onRenameSession?.(renameCandidate.sessionId, displayName);
+              }).then((succeeded) => {
                 if (succeeded) setRenameCandidate(undefined);
               });
             }}
@@ -749,118 +676,5 @@ export function StandaloneRecents({
         </DialogShell>
       )}
     </>
-  );
-}
-
-function StandaloneRow({
-  session,
-  active,
-  busy,
-  onOpen,
-  onRename,
-  onExport,
-  onArchive,
-  onUnarchive,
-  onDelete,
-}: {
-  session: DaemonStandaloneSessionSummary;
-  active: boolean;
-  busy: boolean;
-  onOpen: () => void;
-  onRename?: () => void;
-  onExport: () => void;
-  onArchive?: () => void;
-  onUnarchive?: () => void;
-  onDelete?: () => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <div
-      className={`group flex items-center rounded px-1 ${active ? 'bg-muted' : 'hover:bg-muted/60'}`}
-    >
-      <button
-        type="button"
-        className="min-w-0 flex-1 truncate px-1 py-1.5 text-left text-sm"
-        title={sessionLabel(session)}
-        disabled={busy || session.isArchived === true}
-        onClick={onOpen}
-      >
-        {sessionLabel(session)}
-      </button>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-7"
-            aria-label={t('sidebar.sessionActions')}
-            disabled={busy}
-          >
-            <EllipsisIcon size={14} />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuGroup>
-            {onRename && (
-              <StandaloneAction
-                icon={<PencilIcon />}
-                label={t('sidebar.rename')}
-                onClick={onRename}
-              />
-            )}
-            <StandaloneAction
-              icon={<DownloadIcon />}
-              label={t('sidebar.export')}
-              onClick={onExport}
-            />
-            {onArchive && (
-              <StandaloneAction
-                icon={<ArchiveIcon />}
-                label={t('sidebar.archive')}
-                onClick={onArchive}
-              />
-            )}
-            {onUnarchive && (
-              <StandaloneAction
-                icon={<RotateCcwIcon />}
-                label={t('sidebar.unarchive')}
-                onClick={onUnarchive}
-              />
-            )}
-            {onDelete && (
-              <StandaloneAction
-                icon={<Trash2Icon />}
-                label={t('sidebar.delete')}
-                onClick={onDelete}
-                danger
-              />
-            )}
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
-}
-
-function StandaloneAction({
-  icon,
-  label,
-  onClick,
-  danger = false,
-}: {
-  icon: ReactNode;
-  label: string;
-  onClick: () => void;
-  danger?: boolean;
-}) {
-  return (
-    <DropdownMenuItem
-      className={danger ? 'text-destructive focus:text-destructive' : undefined}
-      onSelect={onClick}
-    >
-      <span className="size-4">{icon}</span>
-      {label}
-    </DropdownMenuItem>
   );
 }

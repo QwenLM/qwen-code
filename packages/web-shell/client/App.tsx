@@ -974,6 +974,8 @@ export interface WebShellSidebarOptions {
   showCompactToggle?: boolean;
   /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
   showSessionSourceSwitch?: boolean;
+  /** Whether to show daemon-owned Live conversations. Defaults to false. */
+  showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Customize the primary navigation area (new task button, custom entries). */
@@ -1469,6 +1471,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
   showSessionSourceSwitch: boolean;
+  showLive: boolean;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean;
@@ -1483,6 +1486,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
       defaultCollapsed: false,
       showCompactToggle: true,
       showSessionSourceSwitch: true,
+      showLive: false,
     };
   }
   if (!sidebar) {
@@ -1491,6 +1495,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
       defaultCollapsed: false,
       showCompactToggle: true,
       showSessionSourceSwitch: true,
+      showLive: false,
     };
   }
   return {
@@ -1498,6 +1503,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
     showSessionSourceSwitch: sidebar.showSessionSourceSwitch ?? true,
+    showLive: sidebar.showLive ?? false,
     branding: sidebar.branding,
     primaryNav: sidebar.primaryNav,
     hideProjectHeader: sidebar.hideProjectHeader,
@@ -3422,6 +3428,10 @@ export function App({
     }
     return trustedPrimaryWorkspaceCwd;
   }, [lockedWorkspaceCwd, ordinaryWorkspaces, trustedPrimaryWorkspaceCwd]);
+  const projectFeaturesAvailable =
+    ordinaryWorkspaces.length > 0 ||
+    (workspace.capabilities?.workspaces === undefined &&
+      Boolean(workspace.capabilities?.workspaceCwd));
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -3466,10 +3476,6 @@ export function App({
   // chosen. An attached projectless session hides it again.
   const composerWorkspaceSelectEnabled =
     workspaceContextActive || connection.sessionId === undefined;
-  const pendingNonWorkspaceNavigation =
-    pendingSessionContext !== undefined &&
-    pendingSessionContext.kind !== 'workspace' &&
-    settledSessionContext?.kind === 'workspace';
   const effectiveStandaloneSession =
     effectiveSessionContext?.kind === 'standalone'
       ? connection.standaloneSession
@@ -3709,10 +3715,9 @@ export function App({
     sessionHasActivePrompt,
     workspace.client,
   ]);
-  // Active workspace: the connected session's workspace, else the workspace
-  // picked for the next session (locked / selected / primary). Computed once
-  // and shared by the git-status effect and the Changes-dialog entry point so
-  // the chip and the dialog always target the same repo.
+  // Active workspace: the connected workspace session's workspace, else the
+  // workspace picked for the next workspace session. Maintenance views resolve
+  // their target separately and standalone sessions never borrow that repo.
   const activeWorkspaceCwd = useMemo(() => {
     if (!workspaceContextActive) return undefined;
     const explicitContext = pendingSessionContext ?? connection.sessionContext;
@@ -3731,12 +3736,16 @@ export function App({
     workspaceContextActive,
   ]);
   const workspaceWorkflowsEnabled =
-    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
-      ?.workflowsEnabled ?? false;
-  const workflowsEnabled = connection.sessionId
-    ? (connection.supportedCommands?.workflowsEnabled ??
-      workspaceWorkflowsEnabled)
-    : workspaceWorkflowsEnabled;
+    workspaces.find(
+      (entry) =>
+        entry.cwd ===
+        (activeWorkspaceCwd ?? resolveWorkspaceMaintenanceTargetCwd()),
+    )?.workflowsEnabled ?? false;
+  const workflowsEnabled =
+    workspaceContextActive && connection.sessionId
+      ? (connection.supportedCommands?.workflowsEnabled ??
+        workspaceWorkflowsEnabled)
+      : workspaceWorkflowsEnabled;
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
@@ -8006,40 +8015,46 @@ export function App({
     setActivePanel(null);
   }, []);
   useEffect(() => {
+    setModelDialogMode((mode) => (mode === 'main' ? mode : null));
+    setShowFallbacksDialog(false);
+  }, [workspaceContextActive]);
+  useEffect(() => {
     if (workspaceContextActive) return;
     splitClassificationGenerationRef.current += 1;
-    setSplitSessionIds([]);
-    if (
-      activePanel === 'settings' ||
-      activePanel === 'sessions' ||
-      activePanel === 'extensions' ||
-      activePanel === 'mcp' ||
-      activePanel === 'skills' ||
-      activePanel === 'agents' ||
-      activePanel === 'plugins' ||
-      activePanel === 'channels'
-    ) {
+    if (!projectFeaturesAvailable) setSplitSessionIds([]);
+    if (!projectFeaturesAvailable && activePanel !== 'status') {
       setActivePanel(null);
     }
     setShowResumeDialog(false);
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
-    setShowMemoryDialog(false);
+    if (!projectFeaturesAvailable) setShowMemoryDialog(false);
     setShowAddWorkspaceDialog(false);
     setGitDialog(undefined);
-    if (modelDialogMode && modelDialogMode !== 'main') {
+    if (
+      !projectFeaturesAvailable &&
+      modelDialogMode &&
+      modelDialogMode !== 'main'
+    ) {
       setModelDialogMode(null);
     }
-    setShowFallbacksDialog(false);
+    if (!projectFeaturesAvailable) setShowFallbacksDialog(false);
     if (
-      mainView === 'scheduledTasks' ||
-      mainView === 'goals' ||
       mainView === 'cockpit' ||
-      mainView === 'split'
+      (!projectFeaturesAvailable &&
+        (mainView === 'scheduledTasks' ||
+          mainView === 'goals' ||
+          mainView === 'split'))
     ) {
       setMainView('chat');
     }
-  }, [activePanel, mainView, modelDialogMode, workspaceContextActive]);
+  }, [
+    activePanel,
+    mainView,
+    modelDialogMode,
+    projectFeaturesAvailable,
+    workspaceContextActive,
+  ]);
   const handleUseSkill = useCallback(
     (name: string) => {
       closePanel();
@@ -8087,20 +8102,20 @@ export function App({
     setMainView('scheduledTasks');
   }, [showChat]);
   const openWorkflows = useCallback(() => {
-    if (!workspaceContextActive || !workflowsEnabled) return;
+    if (!projectFeaturesAvailable || !workflowsEnabled) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     showChat();
     setMainView('workflows');
-  }, [showChat, workflowsEnabled, workspaceContextActive]);
+  }, [projectFeaturesAvailable, showChat, workflowsEnabled]);
   useEffect(() => {
     if (
       mainView === 'workflows' &&
-      (!workspaceContextActive || !workflowsEnabled)
+      (!projectFeaturesAvailable || !workflowsEnabled)
     ) {
       showChat();
     }
-  }, [mainView, showChat, workflowsEnabled, workspaceContextActive]);
+  }, [mainView, projectFeaturesAvailable, showChat, workflowsEnabled]);
   const openGoals = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
@@ -8136,7 +8151,7 @@ export function App({
   // onPanesChange — so it must be preserved across entries, not blindly reset.
   const openSplitView = useCallback(
     (sessionIds?: readonly string[]) => {
-      if (!workspaceContextActive) return;
+      if (!projectFeaturesAvailable) return;
       setActivePanel(null);
       // See openScheduledTasks: leaving the cockpit must strip its deep link.
       showChat();
@@ -8180,7 +8195,7 @@ export function App({
       connection.workspaceCwd,
       sanitizeSplitSessionIds,
       showChat,
-      workspaceContextActive,
+      projectFeaturesAvailable,
     ],
   );
   const externalSplitSignature = useMemo(() => {
@@ -8193,15 +8208,16 @@ export function App({
   const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
   onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
   const requestOpenSplitView = useCallback(() => {
-    if (!workspaceContextActive) return;
+    if (!projectFeaturesAvailable) return;
     if (!externalSplitControlled) {
       openSplitView();
       return;
     }
+    if (!workspaceContextActive && splitSessionIds.length === 0) return;
     const requested =
       splitSessionIds.length > 0
         ? splitSessionIds
-        : connection.sessionId
+        : workspaceContextActive && connection.sessionId
           ? [connection.sessionId]
           : [];
     onSplitSessionIdsChangeRef.current?.(requested);
@@ -8210,6 +8226,7 @@ export function App({
     externalSplitControlled,
     openSplitView,
     splitSessionIds,
+    projectFeaturesAvailable,
     workspaceContextActive,
   ]);
   useEffect(() => {
@@ -8227,20 +8244,13 @@ export function App({
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
       return;
     }
-    if (!workspaceContextActive) {
-      if (pendingNonWorkspaceNavigation) return;
-      if (
-        effectiveSessionContext === undefined &&
-        !workspaceCapabilitiesReady
-      ) {
-        return;
-      }
+    if (!workspaceCapabilitiesReady) return;
+    if (!projectFeaturesAvailable) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
       onSplitSessionIdsChangeRef.current?.([]);
       return;
     }
-    if (!workspaceCapabilitiesReady) return;
     void sanitizeSplitSessionIds(requested).then((sanitized) => {
       if (splitClassificationGenerationRef.current !== generation) return;
       setSplitSessionIds((previous) =>
@@ -8260,10 +8270,9 @@ export function App({
     externalSplitControlled,
     externalSplitSignature,
     effectiveSessionContext,
-    pendingNonWorkspaceNavigation,
+    projectFeaturesAvailable,
     sanitizeSplitSessionIds,
     workspaceCapabilitiesReady,
-    workspaceContextActive,
   ]);
   const handleSplitPanesChange = useCallback(
     (sessionIds: string[]) => {
@@ -9895,6 +9904,9 @@ export function App({
     ) === true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
+  const composerAttachmentsEnabled =
+    workspaceContextActive ||
+    (effectiveSessionContext?.kind === 'standalone' && canInjectMidTurnMedia);
   const {
     queuedPrompts,
     queuedTexts,
@@ -10340,12 +10352,12 @@ export function App({
   }, []);
 
   const workspaceSettingsState = useSettings({
-    autoLoad: workspaceContextActive,
-    enabled: workspaceContextActive,
+    autoLoad: projectFeaturesAvailable,
+    enabled: projectFeaturesAvailable,
   });
   const providersState = useProviders({
-    autoLoad: workspaceContextActive,
-    enabled: workspaceContextActive,
+    autoLoad: projectFeaturesAvailable,
+    enabled: projectFeaturesAvailable,
   });
   // useProviders returns a fresh object each render, but its `reload` identity is
   // stable — pull it out so callbacks can depend on the function alone without
@@ -10363,8 +10375,8 @@ export function App({
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
   const workspaceSettings = useMemo(
-    () => (workspaceContextActive ? loadedWorkspaceSettings : []),
-    [loadedWorkspaceSettings, workspaceContextActive],
+    () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
+    [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
@@ -12044,8 +12056,21 @@ export function App({
     [switchWorkspace],
   );
   const handleSelectComposerStandalone = useCallback(() => {
-    void createNewSession({ kind: 'global' });
-  }, [createNewSession]);
+    if (connectionRef.current.sessionId) {
+      void createNewSession({ kind: 'global' });
+      return;
+    }
+    const sameTarget = pendingSessionContextRef.current?.kind === 'standalone';
+    if (!sameTarget) pendingManualTitleRef.current = undefined;
+    composerSourceVersionRef.current += 1;
+    selectedWorkspaceCwdRef.current = undefined;
+    setSelectedWorkspaceCwd(undefined);
+    setPendingSessionContext({ kind: 'standalone' });
+    if (!sameTarget) {
+      gitModeIntentRef.current = { mode: 'current' };
+      setGitModeIntent({ mode: 'current' });
+    }
+  }, [createNewSession, setPendingSessionContext]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -12307,7 +12332,7 @@ export function App({
         requestOpenSplitView();
       },
       openSessionOverview: () => {
-        if (!workspaceContextActive) return;
+        if (!projectFeaturesAvailable) return;
         closeMobileDrawer();
         openPanel('sessions');
       },
@@ -12322,9 +12347,9 @@ export function App({
       createSideTask,
       openPanel,
       openSessionDrawer,
+      projectFeaturesAvailable,
       requestOpenSplitView,
       respondToPendingPermission,
-      workspaceContextActive,
     ],
   );
   useEffect(() => {
@@ -12373,6 +12398,11 @@ export function App({
             ? ({ kind: 'live' } as const)
             : ({ kind: 'workspace', cwd: workspaceCwd } as const)
           : undefined);
+      const previousSelectedWorkspaceCwd = selectedWorkspaceCwdRef.current;
+      if (targetContext?.kind !== 'workspace') {
+        selectedWorkspaceCwdRef.current = undefined;
+        setSelectedWorkspaceCwd(undefined);
+      }
       setPendingSessionContext(targetContext);
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
@@ -12406,6 +12436,10 @@ export function App({
         ) {
           setSidebarSwitchingSessionId(null);
           setPendingSessionContext(previousPendingContext);
+          if (targetContext?.kind !== 'workspace') {
+            selectedWorkspaceCwdRef.current = previousSelectedWorkspaceCwd;
+            setSelectedWorkspaceCwd(previousSelectedWorkspaceCwd);
+          }
         }
         throw error;
       }
@@ -13332,7 +13366,7 @@ export function App({
     ) => {
       if (sessionWriteBlockedRef.current) return false;
       if (
-        !workspaceContextActive &&
+        !composerAttachmentsEnabled &&
         ((images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
       ) {
         pushToast('warning', t('composerAdd.file.attachDisabled'));
@@ -14587,6 +14621,7 @@ export function App({
       workspaceActions,
       workspace.client,
       workspaceContextActive,
+      composerAttachmentsEnabled,
       effectiveSessionContext,
       updateFailedPrompt,
       updateUnknownPromptAdmission,
@@ -15316,7 +15351,7 @@ export function App({
 
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
-    if (!workspaceContextActive) return;
+    if (!projectFeaturesAvailable) return;
     // The provider install flow doesn't broadcast a settings change, so refresh
     // the model list on close to surface any newly added models. Log a failed
     // reload (leaves stale model data) rather than swallowing it.
@@ -15326,12 +15361,12 @@ export function App({
         err,
       );
     });
-  }, [reloadProviders, workspaceContextActive]);
+  }, [reloadProviders, projectFeaturesAvailable]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
       setShowFallbacksDialog(false);
-      if (!workspaceContextActive) return;
+      if (!projectFeaturesAvailable) return;
       setWorkspaceSetting(
         modelSettingScope,
         'modelFallbacks',
@@ -15365,13 +15400,28 @@ export function App({
       reportError,
       store,
       t,
-      workspaceContextActive,
+      projectFeaturesAvailable,
     ],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (!workspaceContextActive) return;
+      if (!projectFeaturesAvailable) return;
+      if (!workspaceContextActive) {
+        void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
+          .then(() => {
+            void reloadWorkspaceSettings().catch((error: unknown) => {
+              console.warn(
+                '[web-shell] failed to reload settings after fast-model save',
+                error,
+              );
+            });
+          })
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to switch fast model'),
+          );
+        return;
+      }
       if (
         streamingState !== 'idle' ||
         sessionHasActivePromptRef.current ||
@@ -15433,6 +15483,8 @@ export function App({
       modelSettingScope,
       sessionOwnerGuard,
       isGoalGateBlocked,
+      projectFeaturesAvailable,
+      setWorkspaceSetting,
       workspaceContextActive,
     ],
   );
@@ -15463,20 +15515,28 @@ export function App({
 
   const handleVisionModelSelect = useCallback(
     (modelId: string) => {
-      if (!workspaceContextActive) return;
+      if (!projectFeaturesAvailable) return;
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded).catch(
-        (error: unknown) => reportError(error, t('model.setVision')),
-      );
+      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded)
+        .then(() => {
+          void reloadWorkspaceSettings().catch((error: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload settings after vision-model save',
+              error,
+            );
+          });
+        })
+        .catch((error: unknown) => reportError(error, t('model.setVision')));
     },
     [
       modelSettingScope,
       reportError,
       setWorkspaceSetting,
+      reloadWorkspaceSettings,
       t,
-      workspaceContextActive,
+      projectFeaturesAvailable,
     ],
   );
 
@@ -16027,7 +16087,7 @@ export function App({
             </DialogShell>
           )}
           {modelDialogMode &&
-            (workspaceContextActive || modelDialogMode === 'main') && (
+            (projectFeaturesAvailable || modelDialogMode === 'main') && (
             <DialogShell
               title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
@@ -16082,7 +16142,7 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {workspaceContextActive && gitDialog && (
+          {projectFeaturesAvailable && gitDialog && (
             <GitDialog
               key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
@@ -16193,7 +16253,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {workspaceContextActive && showFallbacksDialog && (
+          {projectFeaturesAvailable && showFallbacksDialog && (
             <DialogShell
               title={t('settings.models.fallbacks.title')}
               size="md"
@@ -16282,9 +16342,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {workspaceContextActive &&
-            !lockedWorkspaceCwd &&
-            showAddWorkspaceDialog && (
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
@@ -16401,12 +16459,12 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
-                  canOpenSessionsOverview={workspaceContextActive}
+                  canOpenSessionsOverview={projectFeaturesAvailable}
                   onOpenSplitView={() => {
                     closeMobileDrawer();
                     openSplitView();
                   }}
-                  canOpenSplitView={isLargeScreen && workspaceContextActive}
+                  canOpenSplitView={isLargeScreen && projectFeaturesAvailable}
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
@@ -16429,6 +16487,9 @@ export function App({
                         : { kind: 'inherit' },
                     )
                   }
+                  onNewStandaloneSession={() =>
+                    createNewSession({ kind: 'global' })
+                  }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -16444,7 +16505,7 @@ export function App({
                   onStandaloneNotice={(message) =>
                     pushToast('info', message)
                   }
-                  projectFeaturesEnabled={workspaceContextActive}
+                  projectFeaturesEnabled={projectFeaturesAvailable}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
@@ -16480,29 +16541,35 @@ export function App({
                       setGitModeIntent({ mode: 'current' });
                     }
                   }}
-                  onOpenGitDiff={(workspaceCwd) =>
-                    setGitDialog({
-                      workspaceCwd,
-                      gitCwd:
-                        workspaceCwd === activeWorkspaceCwd
-                          ? sessionWorktree?.path
-                          : undefined,
-                      view: 'diff',
-                    })
+                  onOpenGitDiff={
+                    projectFeaturesAvailable
+                      ? (workspaceCwd) =>
+                          setGitDialog({
+                            workspaceCwd,
+                            gitCwd:
+                              workspaceCwd === activeWorkspaceCwd
+                                ? sessionWorktree?.path
+                                : undefined,
+                            view: 'diff',
+                          })
+                      : undefined
                   }
-                  onOpenCommit={(workspaceCwd) =>
-                    setGitDialog({
-                      workspaceCwd,
-                      // A worktree session commits in the worktree checkout,
-                      // not the base workspace cwd — but only for the active
-                      // session's own workspace chip; another workspace's chip
-                      // has no association with this session's worktree.
-                      gitCwd:
-                        workspaceCwd === activeWorkspaceCwd
-                          ? sessionWorktree?.path
-                          : undefined,
-                      view: 'commit',
-                    })
+                  onOpenCommit={
+                    projectFeaturesAvailable
+                      ? (workspaceCwd) =>
+                          setGitDialog({
+                            workspaceCwd,
+                            // A worktree session commits in the worktree checkout,
+                            // not the base workspace cwd — but only for the active
+                            // session's own workspace chip; another workspace's chip
+                            // has no association with this session's worktree.
+                            gitCwd:
+                              workspaceCwd === activeWorkspaceCwd
+                                ? sessionWorktree?.path
+                                : undefined,
+                            view: 'commit',
+                          })
+                      : undefined
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
@@ -16546,6 +16613,7 @@ export function App({
                   showSessionSourceSwitch={
                     sidebarOptions.showSessionSourceSwitch
                   }
+                  showLive={sidebarOptions.showLive}
                   hideProjectHeader={sidebarOptions.hideProjectHeader}
                   sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
@@ -16741,7 +16809,7 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (workspaceContextActive || activePanel === 'status') && (
+                (projectFeaturesAvailable || activePanel === 'status') && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -16783,6 +16851,10 @@ export function App({
                       data-testid="panel-back"
                       onClick={() => {
                         if (activePanel !== 'sessions') {
+                          closePanel();
+                          return;
+                        }
+                        if (!workspaceContextActive) {
                           closePanel();
                           return;
                         }
@@ -17032,7 +17104,7 @@ export function App({
                   </div>
                 </section>
               )}
-              {workspaceContextActive && mainView === 'scheduledTasks' && (
+              {projectFeaturesAvailable && mainView === 'scheduledTasks' && (
                 <div
                   className={styles.fullPage}
                   data-testid="scheduled-tasks-page"
@@ -17132,7 +17204,7 @@ export function App({
                   </div>
                 </div>
               )}
-              {workspaceContextActive &&
+              {projectFeaturesAvailable &&
                 mainView === 'workflows' &&
                 workflowsEnabled && (
                 <div
@@ -17193,7 +17265,7 @@ export function App({
                   </div>
                 </div>
               )}
-              {workspaceContextActive && mainView === 'goals' && (
+              {projectFeaturesAvailable && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
                     <button
@@ -17327,7 +17399,7 @@ export function App({
                   />
                 </div>
               )}
-              {workspaceContextActive && mainView === 'split' && (
+              {projectFeaturesAvailable && mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
@@ -18175,6 +18247,7 @@ export function App({
                                 : undefined
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
+                          attachmentsEnabled={composerAttachmentsEnabled}
                           onSelectWorkspace={
                             composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
@@ -18194,21 +18267,21 @@ export function App({
                               : undefined
                           }
                           scratchWorkspaceSupported={
-                            workspaceContextActive &&
+                            composerWorkspaceSelectEnabled &&
                             scratchWorkspaceRegistrationSupported
                           }
                           existingFolderWorkspaceSupported={
-                            workspaceContextActive &&
+                            composerWorkspaceSelectEnabled &&
                             dynamicWorkspaceRegistrationSupported
                           }
                           workspaceMutationBusy={workspaceMutationBusy}
                           onCreateScratchWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleCreateComposerScratchWorkspace
                               : undefined
                           }
                           onOpenExistingWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleOpenExistingWorkspace
                               : undefined
                           }
@@ -18386,10 +18459,14 @@ export function App({
                 artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
                 onOpenGitDiff={
-                  gitDiffWorkspaceCwd ? handleOpenGitDiff : undefined
+                  workspaceContextActive && gitDiffWorkspaceCwd
+                    ? handleOpenGitDiff
+                    : undefined
                 }
                 onOpenGitCommit={
-                  gitDiffWorkspaceCwd ? handleOpenCommit : undefined
+                  workspaceContextActive && gitDiffWorkspaceCwd
+                    ? handleOpenCommit
+                    : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
                 onOpenAgentWorkflow={
