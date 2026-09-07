@@ -542,6 +542,12 @@ const EN: Messages = {
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
+  'approval.explain': 'Explain',
+  'approval.explanation': 'Command explanation',
+  'approval.explaining': 'Explaining…',
+  'approval.explanationThinking': 'Thinking…',
+  'approval.explanationFailed': 'Explanation failed',
+  'approval.reExplain': 'Explain again',
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
@@ -649,6 +655,8 @@ const EN: Messages = {
     'Resolve the pending standalone conversation state before continuing.',
   'session.checkStatus': 'Check status',
   'session.retryCreation': 'Start a fresh conversation',
+  'session.writerBlocked':
+    'Another Qwen process or an unresolved writer lock may be blocking this conversation. Close it in other processes and try again. If it still fails, check local daemon diagnostics before recovery.',
   'session.directoryRecreated':
     'The transcript was recovered, but files from the previous private directory were not available.',
   'session.directoryMissing':
@@ -1113,6 +1121,15 @@ const EN: Messages = {
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'history.loadingEarlier': 'Loading earlier messages…',
+  'history.openEarlier': 'Open earlier history',
+  'history.loadEarlier': 'Load earlier',
+  'history.loadNewer': 'Load newer',
+  'history.returnLatest': 'Return to latest',
+  'history.viewUnavailable':
+    'History is temporarily unavailable while the session reconnects or repairs its transcript.',
+  'history.snapshotView': 'Historical snapshot · read-only',
+  'history.viewError':
+    'This section could not be loaded. Move the reading position and retry, or return to latest.',
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
@@ -1471,7 +1488,8 @@ const EN: Messages = {
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
-  'sidebar.noWorkspace': 'No workspace (standalone)',
+  'sidebar.noWorkspace': 'No workspace',
+  'sidebar.noWorkspaceSessions': 'No-workspace sessions',
   'sidebar.copySessionId': 'Copy session ID',
   'sidebar.copySessionIdFailed': 'Failed to copy session ID',
   'sidebar.sessionIdCopied': 'Session ID copied',
@@ -1612,9 +1630,6 @@ const EN: Messages = {
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
-  'sidebar.recents': 'Recents',
-  'sidebar.noRecents': 'No recent conversations',
-  'sidebar.sessionActions': 'Conversation actions',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
   'sidebar.standaloneDeleteConfirm':
@@ -1624,7 +1639,6 @@ const EN: Messages = {
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
   'sidebar.unarchiveFailed': 'Failed to restore session',
-  'sidebar.loadingSessions': 'Loading sessions...',
   'sidebar.loadFailed': 'Failed to load sessions. Click to retry.',
   'sidebar.renameFailed': 'Failed to rename session',
   'sidebar.deleteFailed': 'Failed to delete session',
@@ -2351,6 +2365,8 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
   'goals.subtitle':
     'A goal keeps its session working until the condition is met. Only sessions that are currently loaded appear here — a goal advances only while its session is running.',
@@ -4128,6 +4144,12 @@ const ZH: Messages = {
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
+  'approval.explain': '解释',
+  'approval.explanation': '命令解释',
+  'approval.explaining': '正在解释…',
+  'approval.explanationThinking': '思考中…',
+  'approval.explanationFailed': '解释失败',
+  'approval.reExplain': '重新解释',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
   'approval.option.restorePrevious': '是，恢复之前的模式',
@@ -4223,6 +4245,8 @@ const ZH: Messages = {
     '请先处理待确认的 Standalone 会话状态，再继续操作。',
   'session.checkStatus': '检查状态',
   'session.retryCreation': '开始新会话',
+  'session.writerBlocked':
+    '其他 Qwen 进程或未解决的写入锁可能阻止该会话访问。请在其他进程中关闭它后重试；若仍失败，请先查看本地 daemon 诊断日志再进行恢复。',
   'session.directoryRecreated':
     '会话记录已恢复，但之前私有目录中的文件未能恢复。',
   'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
@@ -4657,6 +4681,14 @@ const ZH: Messages = {
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'history.loadingEarlier': '正在加载更早消息…',
+  'history.openEarlier': '打开更早历史',
+  'history.loadEarlier': '加载更早记录',
+  'history.loadNewer': '加载较新记录',
+  'history.returnLatest': '返回最新',
+  'history.viewUnavailable': '会话正在重连或修复记录，历史暂时不可用。',
+  'history.snapshotView': '历史快照 · 只读',
+  'history.viewError':
+    '暂时无法加载此段记录。请移动阅读位置后重试，或返回最新。',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
   'history.retry': '重试',
@@ -4986,7 +5018,8 @@ const ZH: Messages = {
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
-  'sidebar.noWorkspace': '无工作区（独立会话）',
+  'sidebar.noWorkspace': '无工作区',
+  'sidebar.noWorkspaceSessions': '无工作区会话',
   'sidebar.copySessionId': '复制会话 ID',
   'sidebar.copySessionIdFailed': '复制会话 ID 失败',
   'sidebar.sessionIdCopied': '会话 ID 已复制',
@@ -5117,9 +5150,6 @@ const ZH: Messages = {
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
-  'sidebar.recents': '最近会话',
-  'sidebar.noRecents': '暂无最近会话',
-  'sidebar.sessionActions': '会话操作',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
   'sidebar.standaloneDeleteConfirm': '删除该会话及其私有文件？',
@@ -5128,7 +5158,6 @@ const ZH: Messages = {
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
   'sidebar.unarchiveFailed': '恢复会话失败',
-  'sidebar.loadingSessions': '正在加载会话...',
   'sidebar.loadFailed': '会话加载失败，点击重试。',
   'sidebar.renameFailed': '重命名会话失败',
   'sidebar.deleteFailed': '删除会话失败',
@@ -5789,6 +5818,9 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) =>
+    `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': '目标',
   'goals.subtitle':
     '目标会让所在会话持续工作，直到条件满足。这里只列出当前已加载的会话——目标只在会话运行时才会推进。',
