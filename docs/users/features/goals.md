@@ -16,7 +16,7 @@ A Goal keeps Qwen Code working across turns until a stated condition is met. Set
 
 Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
 
-Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls the Goal makes in its own turns; subagents and the verifier's own checks are not included. The window is set by [`model.goalTokenBudget`](../configuration/settings.md), and a Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
+Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls the Goal makes in its own turns; subagents and the verifier's own checks are not included. The window is set by [`model.goalTokenBudget`](../configuration/settings.md); resuming a Goal that has spent its window grants another one on top of what it has already spent, so the figure reads `30.0m/60.0m` rather than starting over. A Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
 
 ## Interrupting a Goal
 

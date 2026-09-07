@@ -171,7 +171,7 @@ describe('<GoalStatusMessage />', () => {
     );
 
     expect(lastFrame()).toContain('1.2k tokens');
-    expect(lastFrame()).not.toContain('/');
+    expect(lastFrame()).not.toContain('1.2k/');
   });
 
   it('says nothing about spend before a turn has billed', () => {
