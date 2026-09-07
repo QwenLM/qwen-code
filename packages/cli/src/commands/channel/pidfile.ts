@@ -51,7 +51,7 @@ export interface ServiceInfo {
   workers?: ServiceInfoWorker[];
 }
 
-function pidFilePath(): string {
+export function pidFilePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'service.pid');
 }
 
@@ -228,41 +228,59 @@ function withPidFileLock<T>(operation: (filePath: string) => T): T {
  * Automatically cleans up stale PID files.
  */
 export function readServiceInfo(): ServiceInfo | null {
-  return withPidFileLock((filePath) => {
-    if (!existsSync(filePath)) return null;
+  const filePath = pidFilePath();
+  // Taking the lock creates the channels directory, so it costs write access
+  // a diagnostic read must not require: skip it when there is nothing to
+  // read, and degrade when it cannot be taken (a read-only or shared home).
+  if (!existsSync(filePath)) return null;
+  try {
+    return withChannelPidfileLock(filePath, () =>
+      readServiceInfoRecord(filePath, true),
+    );
+  } catch {
+    // The unlocked fallback never sweeps: unlinking without the lock would
+    // race a concurrent writer on the paths the lock serializes.
+    return readServiceInfoRecord(filePath, false);
+  }
+}
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
-    } catch {
-      // Corrupt file — clean up while holding the shared pidfile lock.
-      unlinkPidFile(filePath);
-      return null;
-    }
+function readServiceInfoRecord(
+  filePath: string,
+  sweep: boolean,
+): ServiceInfo | null {
+  if (!existsSync(filePath)) return null;
 
-    const info = parseServiceInfo(parsed);
-    if (!info) {
-      // Invalid file — clean up before treating it as a running service.
-      unlinkPidFile(filePath);
-      return null;
-    }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    // Corrupt file — clean up while holding the shared pidfile lock.
+    if (sweep) unlinkPidFile(filePath);
+    return null;
+  }
 
-    if (!isLocalIdentity(info)) {
-      // Another boot, machine, or PID namespace wrote this record: a local
-      // probe of its PID proves nothing about the writer — the number can be
-      // free here and alive there, or alive here and owned by an unrelated
-      // process. Leave it for a reader on its own side.
-      return null;
-    }
+  const info = parseServiceInfo(parsed);
+  if (!info) {
+    // Invalid file — clean up before treating it as a running service.
+    if (sweep) unlinkPidFile(filePath);
+    return null;
+  }
 
-    if (!isSameProcess(info.pid, info.procStart)) {
-      // Stale PID or recycled PID — clean up without signalling its new owner.
-      unlinkPidFile(filePath);
-      return null;
-    }
+  if (!isLocalIdentity(info)) {
+    // Another boot, machine, or PID namespace wrote this record: a local
+    // probe of its PID proves nothing about the writer — the number can be
+    // free here and alive there, or alive here and owned by an unrelated
+    // process. Leave it for a reader on its own side.
+    return null;
+  }
 
-    return info;
-  });
+  if (!isSameProcess(info.pid, info.procStart)) {
+    // Stale PID or recycled PID — clean up without signalling its new owner.
+    if (sweep) unlinkPidFile(filePath);
+    return null;
+  }
+
+  return info;
 }
 
 function writeInfo(info: ServiceInfo, flag: 'w' | 'wx' = 'w'): void {
@@ -506,18 +524,22 @@ export function removeServeServiceInfo(
   });
 }
 
+export type SignalServiceOutcome = 'sent' | 'refused' | 'not-permitted';
+
 /**
  * Send a signal to the running service.
- * Returns true if the signal was sent, false if the process is gone or its
- * recorded start token could not be confirmed.
+ * Returns 'sent' if the signal was delivered, 'not-permitted' if the OS
+ * refused it for lack of permission (a live process owned by another user),
+ * or 'refused' if the process is gone or its recorded start token could not
+ * be confirmed.
  */
 export function signalService(
   pid: number,
   signal: NodeJS.Signals = 'SIGTERM',
   procStart?: string | null,
-): boolean {
+): SignalServiceOutcome {
   if (!isValidPid(pid)) {
-    return false;
+    return 'refused';
   }
 
   if (procStart != null) {
@@ -525,14 +547,16 @@ export function signalService(
     // caller treats a refusal as licence to drop the record: retry once, as
     // the write path does, before concluding the PID belongs to someone else.
     const current = readProcStartToken(pid) ?? readProcStartToken(pid);
-    if (current !== procStart) return false;
+    if (current !== procStart) return 'refused';
   }
 
   try {
     process.kill(pid, signal);
-    return true;
-  } catch {
-    return false;
+    return 'sent';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+      ? 'not-permitted'
+      : 'refused';
   }
 }
 

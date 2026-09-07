@@ -460,28 +460,63 @@ describe('writeServiceInfo + readServiceInfo', () => {
   });
 
   it('retries brief synchronous pidfile lock contention', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:current-start',
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
     pidfileLock.failures = 2;
 
-    expect(readServiceInfo()).toBeNull();
+    expect(readServiceInfo()).toMatchObject({ pid: 1234 });
     expect(pidfileLock.acquire).toHaveBeenCalledTimes(3);
     expect(pidfileLock.release).toHaveBeenCalledOnce();
   });
 
-  it('rethrows a lock failure that is not contention without retrying', () => {
+  it('degrades to an unlocked read when the lock cannot be taken', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:current-start',
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    pidfileLock.failures = 1;
+    pidfileLock.failureCode = 'EACCES';
+
+    expect(readServiceInfo()).toMatchObject({ pid: 1234 });
+    expect(pidfileLock.acquire).toHaveBeenCalledOnce();
+    expect(pidfileLock.release).not.toHaveBeenCalled();
+  });
+
+  it('never sweeps a stale or corrupt record from the unlocked fallback', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = 'not-json!!!';
+    pidfileLock.failures = 1;
+    pidfileLock.failureCode = 'EACCES';
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
+  it('keeps throwing lock failures on the write path', () => {
     pidfileLock.failures = 1;
     pidfileLock.failureCode = 'EACCES';
 
     let thrown: NodeJS.ErrnoException | undefined;
     try {
-      readServiceInfo();
+      writeServiceInfo(['dingtalk']);
     } catch (error) {
       thrown = error as NodeJS.ErrnoException;
     }
 
     expect(thrown?.code).toBe('EACCES');
-    expect(thrown?.message).not.toContain('10 seconds');
-    expect(pidfileLock.acquire).toHaveBeenCalledOnce();
-    expect(pidfileLock.release).not.toHaveBeenCalled();
+    expect(getPidFilePath() in fsStore).toBe(false);
   });
 
   it('keeps legacy live pidfiles that do not carry a process-start token', () => {
@@ -869,6 +904,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
   it('returns null when no PID file exists', () => {
     const info = readServiceInfo();
     expect(info).toBeNull();
+    expect(pidfileLock.acquire).not.toHaveBeenCalled();
   });
 
   it('cleans up and returns null for corrupt PID file', () => {
@@ -1097,19 +1133,31 @@ describe('removeServeServiceInfo', () => {
 });
 
 describe('signalService', () => {
-  it('returns true when signal is delivered', () => {
+  it('returns sent when the signal is delivered', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
-    expect(signalService(1234, 'SIGTERM')).toBe(true);
+    expect(signalService(1234, 'SIGTERM')).toBe('sent');
     expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 
-  it('returns false when process is not found', () => {
+  it('returns refused when the process is not found', () => {
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
-    expect(signalService(9999)).toBe(false);
+    expect(signalService(9999)).toBe('refused');
+  });
+
+  it('returns not-permitted when the signal is refused with EPERM', () => {
+    process.kill = vi.fn(() => {
+      const err = new Error('EPERM') as NodeJS.ErrnoException;
+      err.code = 'EPERM';
+      throw err;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    expect(signalService(1234, 'SIGTERM')).toBe('not-permitted');
+    expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 
   it('defaults to SIGTERM', () => {
@@ -1119,10 +1167,10 @@ describe('signalService', () => {
     expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 
-  it('returns false for pid 0 without sending a signal', () => {
+  it('refuses pid 0 without sending a signal', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
-    expect(signalService(0)).toBe(false);
+    expect(signalService(0)).toBe('refused');
     expect(process.kill).not.toHaveBeenCalled();
   });
 
@@ -1131,7 +1179,7 @@ describe('signalService', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
 
-    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
+    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe('refused');
     expect(process.kill).not.toHaveBeenCalled();
   });
 
@@ -1140,7 +1188,7 @@ describe('signalService', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
 
-    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
+    expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe('refused');
     expect(process.kill).not.toHaveBeenCalled();
   });
 
@@ -1148,7 +1196,9 @@ describe('signalService', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
 
-    expect(signalService(1234, 'SIGTERM', 'boot-id:current-start')).toBe(true);
+    expect(signalService(1234, 'SIGTERM', 'boot-id:current-start')).toBe(
+      'sent',
+    );
     expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 
@@ -1157,7 +1207,9 @@ describe('signalService', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
 
-    expect(signalService(1234, 'SIGTERM', 'boot-id:recorded-start')).toBe(true);
+    expect(signalService(1234, 'SIGTERM', 'boot-id:recorded-start')).toBe(
+      'sent',
+    );
     expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 });

@@ -6,7 +6,9 @@ import {
   signalService,
   waitForExit,
   removeServiceInfo,
+  pidFilePath,
 } from './pidfile.js';
+import type { ServiceInfo, SignalServiceOutcome } from './pidfile.js';
 import {
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_SERVER_TOKEN_ENV,
@@ -16,6 +18,42 @@ interface StopArgs {
   'daemon-url'?: string;
   token?: string;
   timeout?: number;
+}
+
+/**
+ * Report a record that outlived its signal without claiming more than the
+ * record proves: a tokenless record's live PID may not be the service, and a
+ * permission refusal usually means another user owns the process. The pidfile
+ * is named because no command sweeps a record whose process stays alive.
+ */
+function reportUnstoppableService(
+  info: ServiceInfo,
+  outcome: SignalServiceOutcome,
+): void {
+  const filePath = pidFilePath();
+  if (outcome === 'not-permitted') {
+    writeStderrLine(
+      `Permission denied signalling the service (PID ${info.pid}); it may be owned by another user sharing this home. Stop it as that user — once the process is gone, the record at ${filePath} is swept on the next read.`,
+    );
+    return;
+  }
+  if (info.procStart == null) {
+    writeStderrLine(
+      `Could not stop PID ${info.pid}, and the record carries no process token, so this command cannot confirm it is the channel service. If no channel service is running, delete ${filePath} and start again.`,
+    );
+    return;
+  }
+  if (outcome === 'sent') {
+    // Reachable only from the SIGKILL branch: the signal was delivered and
+    // the token-verified process is still there.
+    writeStderrLine(
+      `Service is still running after SIGKILL; its record at ${filePath} was left in place.`,
+    );
+    return;
+  }
+  writeStderrLine(
+    `Failed to signal the service and could not re-verify its process token; its record at ${filePath} was left in place.`,
+  );
 }
 
 export const stopCommand: CommandModule<unknown, StopArgs> = {
@@ -85,15 +123,14 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
 
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
-    if (!signalService(info.pid, 'SIGTERM', info.procStart)) {
+    const outcome = signalService(info.pid, 'SIGTERM', info.procStart);
+    if (outcome !== 'sent') {
       // A refusal only proves no signal went out — `signalService` also refuses
       // when the recorded token cannot be re-read. Dropping the record of a
       // service that is still alive would leave it untracked and let the next
       // `channel start` spawn a duplicate on the same credentials.
       if (isSameProcess(info.pid, info.procStart)) {
-        writeStderrLine(
-          'Failed to signal the service, which is still running; its record was left in place.',
-        );
+        reportUnstoppableService(info, outcome);
         process.exit(1);
       }
       writeStderrLine(
@@ -113,14 +150,12 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       writeStderrLine(
         'Service did not exit within 5 seconds. Sending SIGKILL...',
       );
-      signalService(info.pid, 'SIGKILL', info.procStart);
+      const killOutcome = signalService(info.pid, 'SIGKILL', info.procStart);
       if (await waitForExit(info.pid, 2000, 200, info.procStart)) {
         removeServiceInfo(info);
         writeStdoutLine('Service killed.');
       } else {
-        writeStderrLine(
-          'Service is still running; its record was left in place.',
-        );
+        reportUnstoppableService(info, killOutcome);
         process.exit(1);
       }
     }
