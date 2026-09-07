@@ -193,6 +193,18 @@ was correctly rejected as an unknown agent name. The new-thread form now runs
 the selected assignee through the same admission rule before creation, so a
 full queue or disabled/unknown target is visible before the durable write.
 
+**Latest-source smoke (2026-09-07).** From the Web Shell, the new-thread form
+previewed `Will start @alice`, then durably created and assigned thread
+`th_eca773de-4efa-4c82-bdeb-9bdafc521077`. After a daemon restart, the queued
+run `rn_077865eb-b3da-4ab0-8521-ab8c96882818` was replayed, Alice inspected the
+workspace, posted an attributed conclusion, and explicitly closed with
+`thread_review`. The API and browser both showed the run as
+`completed/review` and the thread as `in_review`. This was a manual demo-path
+observation only: no test suite, lint, typecheck, or CI was run. The source-mode
+daemon required the ACP bridge package output to be refreshed because this
+worktree shared a `node_modules` link whose existing bridge build predated the
+mesh dispatch method.
+
 The same live daemon then covered the remaining visible step-9 paths. A fresh
 run recorded transcript offsets `16990..22071`; opening its history row showed
 only that byte range beside the still-visible thread. A second agent called

@@ -12,7 +12,6 @@ import {
   explainSkip,
   groupThreads,
   needsAttention,
-  summarizePreview,
   type RoutingPreviewTarget,
   type ThreadGroup,
   type ThreadSummaryView,
@@ -229,14 +228,27 @@ export function ThreadsPage({
             </select>
             {createPreview ? (
               <div role="status" className="space-y-1 text-xs text-muted-foreground">
-                <strong>{summarizePreview(createPreview)}</strong>
+                <strong>
+                  {createPreview.some((target) => target.willWake)
+                    ? `Will start ${createPreview
+                        .filter((target) => target.willWake)
+                        .map((target) => `@${target.agentName}`)
+                        .join(', ')}.`
+                    : 'No agent will start.'}
+                </strong>
                 {createPreview
                   .filter((target) => !target.willWake)
                   .map((target) => {
-                    const explained = explainSkip(
-                      target.reason ?? '',
-                      target.agentName,
-                    );
+                    const explained =
+                      target.reason === 'no_target'
+                        ? {
+                            what: 'this thread has no assignee',
+                            fix: 'Choose an assignee to start it.',
+                          }
+                        : explainSkip(
+                            target.reason ?? '',
+                            target.agentName,
+                          );
                     return (
                       <p key={`${target.agentName}:${target.reason ?? 'unknown'}`}>
                         {explained.what}. {explained.fix}

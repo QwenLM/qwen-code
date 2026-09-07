@@ -45,6 +45,7 @@ export {
   setMeshAgentEnabled,
   updateMeshAgents,
   updateThread,
+  withMeshStoreTransaction,
 } from './mesh/mesh-store.js';
 export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
 export { parseMentions } from './mesh/mentions.js';
@@ -55,7 +56,10 @@ export {
   postMessage,
 } from './mesh/thread-actions.js';
 export { resolveThreadStatus } from './mesh/thread-status.js';
-export { hasLiveDescendant } from './mesh/run-lifecycle.js';
+export {
+  finishRunInTransaction,
+  hasLiveDescendant,
+} from './mesh/run-lifecycle.js';
 export {
   createMeshDispatchPort,
   meshBackgroundAgentId,
