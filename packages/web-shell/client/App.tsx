@@ -9967,19 +9967,17 @@ export function App({
         // what decides whether a failure is worth telling them about. The full
         // guard also tracks composer identity, and submitting is itself what
         // moves that — so reusing it here would suppress the very message the
-        // user needs (#9911).
+        // user needs (#9911). The full guard is composed on this base rather
+        // than restating the same four conjuncts, so the two cannot drift.
         const submissionSessionIsCurrent = () =>
           appMountedRef.current &&
           sourceOwner.isCurrent() &&
           connectionRef.current.sessionId === sourceSessionId &&
           getComposerWorkspaceCwd() === sourceWorkspaceCwd;
         const submissionOwnerIsCurrent = () =>
-          appMountedRef.current &&
-          sourceOwner.isCurrent() &&
+          submissionSessionIsCurrent() &&
           !sessionWriteBlockedRef.current &&
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
-          connectionRef.current.sessionId === sourceSessionId &&
-          getComposerWorkspaceCwd() === sourceWorkspaceCwd &&
           composerSourceVersionRef.current === sourceVersion;
         void (async () => {
           let preparedPrompt = text;
