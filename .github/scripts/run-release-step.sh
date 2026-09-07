@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Match GitHub's default run shell: fail on commands, not on every pipeline leg.
-set -e
+# Fail closed like the sibling runners in this directory. Without pipefail a
+# connection-level `gh` failure inside a `gh ... | jq ...` substitution reads as
+# an empty result (jq exits 0 on empty input), which sent notify-failure down
+# its create-a-new-issue branch and past all three issue-reuse guards.
+# Per-command failures stay tolerated: every `|| ...` below attaches to a whole
+# command rather than to a pipeline leg, so it keeps working under pipefail.
+set -eo pipefail
 
 step="${1:?usage: run-release-step.sh <step>}"
 

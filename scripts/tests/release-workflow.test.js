@@ -556,6 +556,63 @@ describe('release workflow', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'aborts notify-failure instead of filing a duplicate when gh is unreachable',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-notify-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      mkdirSync(bin);
+      // Stand in for a connection-level failure: stderr only, exit 1, and
+      // nothing at all on stdout, which is what jq then reads as an empty list.
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  echo "gh: connection reset by peer" >&2\n' +
+          '  exit 1\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'notify-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              PREPARE_RESULT: 'success',
+              QUALITY_RESULT: 'failure',
+              INTEGRATION_NONE_RESULT: 'skipped',
+              INTEGRATION_DOCKER_RESULT: 'skipped',
+              PUBLISH_RESULT: 'skipped',
+              BUG_LABEL: 'type/bug',
+              READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
+              AUTOFIX_APPROVED_LABEL: 'autofix/approved',
+            },
+          },
+        );
+        // Without pipefail this arm exits 0 and files a fresh autofix/approved
+        // twin of the release-failure issue, bypassing all three reuse guards
+        // (title-prefix anchor, bot-author refusal, still_eligible) because
+        // those only run on the reuse branch.
+        expect(result.status, result.stderr).not.toBe(0);
+        expect(readFileSync(ghLog, 'utf8')).not.toContain('issue create');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('pins validation and publishing to the commit resolved by prepare', () => {
     expect(releaseYaml.jobs.prepare.outputs.release_sha).toBe(
       '${{ steps.source.outputs.release_sha }}',
@@ -714,6 +771,11 @@ describe('release workflow', () => {
     // fail-closed, so direct local execution and Actions use the same shell.
     expect(testStep.shell).toBe('bash');
     expect(workspaceTestScript).toContain('set -eo pipefail');
+    // The extracted step runner has to fail closed the same way. notify-failure
+    // reads `gh issue list ... | jq -c ...` inside a command substitution, and
+    // a connection-level gh failure leaves jq exiting 0 on empty input, so
+    // without pipefail an unreachable API reads as "no existing issue".
+    expect(releaseStepScript).toMatch(/^set -eo pipefail$/m);
     // Vitest colours its summaries from the mere presence of CI, and a
     // coloured summary sits escape bytes between a label and its value, so
     // every anchored pattern in the guard matches nothing: the pass-through
