@@ -1082,6 +1082,69 @@ export async function updateMeshAgents(
   });
 }
 
+type MeshAgentRosterChange = 'updated' | 'not_found' | 'has_live_work';
+
+async function agentHasLiveWork(
+  transaction: MeshStoreTransaction,
+  agentId: string,
+): Promise<boolean> {
+  const { threads, unreadable } = await transaction.listThreads();
+  if (unreadable.length > 0) {
+    throw new Error(
+      `Cannot change the agent roster while thread records are unreadable: ${unreadable.join(', ')}.`,
+    );
+  }
+  return threads.some((thread) =>
+    thread.runs.some(
+      (run) =>
+        run.agentId === agentId &&
+        (run.status === 'queued' ||
+          run.status === 'running' ||
+          run.status === 'finishing' ||
+          run.status === 'cancelling'),
+    ),
+  );
+}
+
+export async function setMeshAgentEnabled(
+  projectRoot: string,
+  agentId: string,
+  enabled: boolean,
+): Promise<MeshAgentRosterChange> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    if (!agent) return 'not_found';
+    if ((agent.enabled !== false) === enabled) return 'updated';
+    if (!enabled && (await agentHasLiveWork(transaction, agentId))) {
+      return 'has_live_work';
+    }
+    await transaction.writeAgents(
+      agents.map((candidate) =>
+        candidate.id === agentId ? { ...candidate, enabled } : candidate,
+      ),
+    );
+    return 'updated';
+  });
+}
+
+export async function removeMeshAgent(
+  projectRoot: string,
+  agentId: string,
+): Promise<MeshAgentRosterChange> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    if (!agents.some((candidate) => candidate.id === agentId)) {
+      return 'not_found';
+    }
+    if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
+    await transaction.writeAgents(
+      agents.filter((candidate) => candidate.id !== agentId),
+    );
+    return 'updated';
+  });
+}
+
 export function findAgentByName(
   agents: readonly MeshAgent[],
   name: string,

@@ -155,13 +155,12 @@ From the shell's 14px base: 20px/1.3 semibold thread title, 15px/1.5 header sent
 
 ## 6. Copy rules, and one borrowed law
 
-Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale: **a label must not assert a cause the reason code does not carry.** They keep `runtime_offline`, `agent_runtime_required` and `runtime_unusable` apart because the _fix_ differs, and copy that conflated them sent people to reconnect a machine that was already connected. The same discipline applies to our nine skip reasons, each of which has a different fix:
+Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale: **a label must not assert a cause the reason code does not carry.** They keep `runtime_offline`, `agent_runtime_required` and `runtime_unusable` apart because the _fix_ differs, and copy that conflated them sent people to reconnect a machine that was already connected. The same discipline applies to our eight admission skip reasons, each of which has a different fix:
 
 | Reason                   | What the reader is told                    | The fix it points at                        |
 | ------------------------ | ------------------------------------------ | ------------------------------------------- |
 | `agent_unknown`          | no agent named "dave" in this workspace    | check the spelling, or add the agent        |
 | `agent_disabled`         | alice is disabled and cannot take work     | enable alice                                |
-| `agent_unavailable`      | alice's definition "log-reader" is missing | point the agent at a definition that exists |
 | `no_target`              | your reply reached nobody                  | mention an agent, or set an assignee        |
 | `queue_full`             | alice already has 5 runs waiting           | wait, or give the work to another agent     |
 | `turn_budget_exhausted`  | 12 unattended turns spent on this thread   | reply yourself to continue                  |
@@ -169,7 +168,7 @@ Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale:
 | `thread_done`            | this thread is done and takes no new work  | open a new thread                           |
 | `self_trigger`           | an agent cannot wake itself                | mention someone else                        |
 
-The composer preview and the post-send result share this table, so a reason reads the same in both places.
+The composer preview and the post-send result share this table, so a reason reads the same in both places. Missing or invalid agent definitions are not admission reasons: only the runtime loader can know them, and they appear as a typed launch failure on the run row.
 
 Everything else follows from naming the actor and the act: _alice asked a question_, never _Blocked_. One vocabulary end to end — the button that says **Mark done** produces a thread that reads **done**, and `thread_review` surfaces as _submitted for review_ everywhere. Failures state the stage and the fix in the interface's voice and never apologise: **alice's run failed at launch: agent definition "log-reader" is unavailable.** Refusals name the alternative and link it: **this thread has 1 sub-thread that is not done. Finish or close th_91c first.**
 

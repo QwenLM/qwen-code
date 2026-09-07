@@ -44,7 +44,9 @@ import {
   postMessage,
   readMeshAgents,
   readThread,
+  removeMeshAgent,
   resolveThreadStatus,
+  setMeshAgentEnabled,
   updateMeshAgents,
   updateThread,
   resolveTargets,
@@ -697,30 +699,56 @@ export function registerMeshRoutes(
       if (!runtime) return;
       const agentId = String(req.params['id']);
       try {
-        const [{ threads }, agents] = await Promise.all([
-          listThreads(runtime.workspaceCwd),
-          readMeshAgents(runtime.workspaceCwd),
-        ]);
-        const agent = agents.find((candidate) => candidate.id === agentId);
-        if (!agent) {
+        const result = await removeMeshAgent(runtime.workspaceCwd, agentId);
+        if (result === 'not_found') {
           res.status(404).json({ error: 'agent_not_found' });
           return;
         }
-        if (
-          threads.some((thread) =>
-            thread.runs.some(
-              (run) =>
-                run.agentId === agentId && LIVE_RUN_STATUSES.has(run.status),
-            ),
-          )
-        ) {
+        if (result === 'has_live_work') {
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        await updateMeshAgents(runtime.workspaceCwd, (current) =>
-          current.filter((candidate) => candidate.id !== agentId),
-        );
         res.json({ id: agentId, deleted: true });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.patch(
+    `${prefix}/agents/:id`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({ error: 'enabled_required' });
+        return;
+      }
+      try {
+        const agentId = String(req.params['id']);
+        const result = await setMeshAgentEnabled(
+          runtime.workspaceCwd,
+          agentId,
+          enabled,
+        );
+        if (result === 'not_found') {
+          res.status(404).json({ error: 'agent_not_found' });
+          return;
+        }
+        if (result === 'has_live_work') {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
+        const dispatchError = enabled
+          ? await startBookedRuns(runtime)
+          : undefined;
+        res.json({
+          id: agentId,
+          enabled,
+          ...(dispatchError ? { dispatchError } : {}),
+        });
       } catch (error) {
         fail(res, error);
       }

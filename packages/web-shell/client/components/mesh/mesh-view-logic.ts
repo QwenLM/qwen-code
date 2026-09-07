@@ -258,11 +258,6 @@ export function explainSkip(
         what: `${target} is disabled and cannot take work`,
         fix: `Enable ${target} to let it take work again.`,
       };
-    case 'agent_unavailable':
-      return {
-        what: `${target}'s agent definition is missing or invalid`,
-        fix: 'Point the agent at a definition that exists.',
-      };
     case 'no_target':
       return {
         what: 'your reply would reach nobody',

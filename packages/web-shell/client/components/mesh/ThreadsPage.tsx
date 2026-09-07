@@ -22,6 +22,7 @@ export interface ThreadsPageProps {
   onOpenThread: (threadId: string) => void;
   onCreateAgent: (input: NewMeshAgent) => void;
   onDeleteAgent: (agentId: string) => void;
+  onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onCreateThread: (input: NewMeshThread) => void;
   pending?: boolean;
   loading?: boolean;
@@ -126,6 +127,7 @@ export function ThreadsPage({
   onOpenThread,
   onCreateAgent,
   onDeleteAgent,
+  onSetAgentEnabled,
   onCreateThread,
   pending,
   loading,
@@ -219,7 +221,14 @@ export function ThreadsPage({
             <p className={styles.emptyRoster}>No agents yet. Add one to start handing work across shared threads.</p>
           ) : (
             agents.map((agent) => (
-              <div key={agent.id} className={styles.agentRow}>
+              <div
+                key={agent.id}
+                className={
+                  agent.enabled
+                    ? styles.agentRow
+                    : `${styles.agentRow} ${styles.agentRowDisabled}`
+                }
+              >
                 <span
                   className={agent.enabled ? styles.agentDot : styles.agentDotDisabled}
                   style={agent.color ? { color: agent.color } : undefined}
@@ -239,7 +248,18 @@ export function ThreadsPage({
                 </span>
                 <button
                   type="button"
-                  className={styles.agentRemove}
+                  className={styles.agentAction}
+                  disabled={
+                    agent.enabled &&
+                    Boolean(agent.workingOn || agent.waiting)
+                  }
+                  onClick={() => onSetAgentEnabled(agent.id, !agent.enabled)}
+                >
+                  {agent.enabled ? 'Disable' : 'Enable'}
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.agentAction} ${styles.agentRemove}`}
                   disabled={Boolean(agent.workingOn || agent.waiting)}
                   onClick={() => {
                     if (

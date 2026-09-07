@@ -40,6 +40,8 @@ export {
   readMeshWorkspace,
   readThread,
   releaseMeshHostSession,
+  removeMeshAgent,
+  setMeshAgentEnabled,
   updateMeshAgents,
   updateThread,
 } from './mesh/mesh-store.js';

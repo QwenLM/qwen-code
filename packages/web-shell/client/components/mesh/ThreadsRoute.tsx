@@ -36,6 +36,7 @@ export interface ThreadsApi {
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewMeshAgent): Promise<unknown>;
   deleteAgent(id: string): Promise<unknown>;
+  setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   createThread(input: NewMeshThread): Promise<CreateThreadResult>;
   previewReply(
     id: string,
@@ -80,6 +81,11 @@ function createThreadsHttpApi(
     createAgent: (input) => post('/agents', input),
     deleteAgent: (id) =>
       request(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    setAgentEnabled: (id, enabled) =>
+      request(`/agents/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled }),
+      }),
     createThread: (input) => post('/threads', input),
     previewReply: (id, text) =>
       post(`/threads/${encodeURIComponent(id)}/preview`, { text }),
@@ -264,6 +270,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
         onOpenThread={setOpenId}
         onCreateAgent={(input) => void mutate(() => client.createAgent(input))}
         onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
+        onSetAgentEnabled={(id, enabled) =>
+          void mutate(() => client.setAgentEnabled(id, enabled))
+        }
         onCreateThread={(input) =>
           void mutate(async () => {
             const created = await client.createThread(input);

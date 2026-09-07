@@ -452,7 +452,6 @@ mechanism, and it is why the guards are not optional.
 | ------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `skip: agent_unknown`          | an explicit `@token` resolved to no roster identity, or an assignee disappeared | a typo must be visible and must not fall back to the assignee                    |
 | `skip: agent_disabled`         | agent exists but is off                                                         | keeps identity and history without taking work                                   |
-| `skip: agent_unavailable`      | the required agent definition is missing or invalid                             | fail before booking instead of turning a configuration error into a stuck run    |
 | `skip: thread_done`            | thread is finished                                                              | a late post must not silently restart spend                                      |
 | `skip: self_trigger`           | the target wrote the post                                                       | otherwise one "I'm done" becomes an infinite self-conversation                   |
 | `skip: no_target`              | no explicit mention and no assignee                                             | an accepted-looking post must not disappear silently                             |
@@ -466,9 +465,10 @@ mechanism, and it is why the guards are not optional.
 Explicit routing is a target-resolution rule, not a synthetic skip outcome: the
 presence of any `@token`, including an unknown one, suppresses assignee fallback.
 Known and unknown tokens in the same post produce their own outcomes; known
-targets still run. These twelve outcomes are the complete admission contract;
-the local foundation currently tests eleven because definition availability is
-implemented with the launcher in §5.2 step 4.
+targets still run. These eleven outcomes are the complete admission contract.
+Definition availability is deliberately not a twelfth admission outcome: it is
+known only when the runtime loads the required definition, so the dispatcher
+records a typed terminal launch failure without creating an agent body.
 
 Malformed input, authentication failure, missing/corrupt storage, lock failure,
 and unknown schema version abort the mutation as typed API errors; they are not
@@ -526,7 +526,7 @@ normal return cannot reverse the person's stop request.
 | `thread_wait()` without a live dependency                                                       | `open`, `in_progress`  | reject; the agent must block, review, or continue working                                                                                  |
 | `thread_block(question)` from the bound run                                                     | `open`, `in_progress`  | append question, record `closeKind=blocked`, mark run `finishing`, enqueue blocker notification atomically                                 |
 | `thread_review(summary)` from the bound run                                                     | `open`, `in_progress`  | append summary, record `closeKind=review`, mark run `finishing` atomically                                                                 |
-| any admission books/delivers nothing and leaves no runnable target                              | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, unavailable/unknown assignees, and `no_target` |
+| any admission books/delivers nothing and leaves no runnable target                              | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, disabled/unknown assignees, and `no_target`    |
 | terminal launch/execution failure leaves no runnable target                                     | any non-`done`         | append system failure, set `blocked`, enqueue failure notification                                                                         |
 | clean run exit without `thread_block`/`thread_review`                                           | `in_progress`          | append final text, commit consumed input, record `closeKind=unclosed`; block only if no successor is runnable                              |
 | human marks done with a non-done descendant                                                     | any non-`done`         | refuse and return the descendant ids; v1 never silently cascades                                                                           |

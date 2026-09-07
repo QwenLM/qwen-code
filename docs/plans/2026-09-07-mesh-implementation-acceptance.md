@@ -186,7 +186,11 @@ changes were inspected from source only. No local unit tests, lint, typecheck,
 build, or CI wait were run. Roster and header activity copy now follows the
 actual active run state instead of calling a queued or cancelling run
 "working", and an unacknowledged cancellation is shown as an outstanding
-obligation.
+obligation. The dead `agent_unavailable` composer branch was removed: missing
+definitions remain typed dispatcher launch failures because the pure admission
+rule has no runtime definition loader. The roster now exposes the designed
+enable/disable state; disabling or deleting is one workspace-locked mutation
+that refuses live or queued work, so a booking cannot race the roster change.
 
 ### Step 10 — Channel notifications
 
