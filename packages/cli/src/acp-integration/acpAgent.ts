@@ -268,7 +268,10 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
-import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
+import {
+  applyRestoredSessionApprovalMode,
+  isRestrictedApprovalModeConfig,
+} from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -1884,15 +1887,6 @@ function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
   return undefined;
 }
 
-/**
- * True when a session's config derives from a restricted mode: safe/bare
- * sessions ignore `tools.approvalMode` at boot (loadCliConfig pins them to
- * DEFAULT), so reload must never converge them on a file-derived mode.
- */
-function isRestrictedApprovalModeConfig(config: Config): boolean {
-  return config.isSafeMode?.() === true || config.getBareMode?.() === true;
-}
-
 function requestedSessionApprovalMode(request: {
   _meta?: Record<string, unknown> | null;
 }): ApprovalMode | undefined {
@@ -1920,8 +1914,8 @@ function setRequestedSessionApprovalMode(
   config: Config,
   mode: ApprovalMode,
   projection?: SessionRestoreProjection,
-): void {
-  if (isRestrictedApprovalModeConfig(config)) return;
+): boolean {
+  if (isRestrictedApprovalModeConfig(config)) return false;
   try {
     const restored = projection?.runtime.recording.sessionApprovalMode;
     config.restoreApprovalModeState({
@@ -1940,6 +1934,7 @@ function setRequestedSessionApprovalMode(
   } catch (error) {
     rethrowApprovalModeRequestError(error);
   }
+  return true;
 }
 
 export function normalizeCoreSettingValue(
@@ -5096,9 +5091,9 @@ class QwenAgent implements Agent {
           const approvalModeConvergenceBaseline = config.getApprovalMode();
           let session: Session;
           try {
-            if (requestedApprovalMode !== undefined) {
+            const requestedApprovalModeApplied =
+              requestedApprovalMode !== undefined &&
               setRequestedSessionApprovalMode(config, requestedApprovalMode);
-            }
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
@@ -5117,7 +5112,7 @@ class QwenAgent implements Agent {
                   : {}),
                 configProviderRevision,
                 approvalModeConvergenceBaseline,
-                persistInitialApprovalMode: requestedApprovalMode !== undefined,
+                persistInitialApprovalMode: requestedApprovalModeApplied,
               }),
             );
           } catch (error) {
@@ -5397,13 +5392,14 @@ class QwenAgent implements Agent {
             : {}),
         })) as LoadSessionResponse;
       try {
-        if (requestedApprovalMode !== undefined) {
+        const requestedApprovalModeApplied =
+          requestedApprovalMode !== undefined &&
           setRequestedSessionApprovalMode(
             config,
             requestedApprovalMode,
             projection,
           );
-        } else {
+        if (!requestedApprovalModeApplied) {
           applyRestoredSessionApprovalMode(config, projection);
         }
         if (!provisionalStandalone) {
@@ -5423,7 +5419,7 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
-            persistInitialApprovalMode: requestedApprovalMode !== undefined,
+            persistInitialApprovalMode: requestedApprovalModeApplied,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5771,13 +5767,14 @@ class QwenAgent implements Agent {
       const approvalModeConvergenceBaseline = config.getApprovalMode();
       let response: ResumeSessionResponse | undefined;
       try {
-        if (requestedApprovalMode !== undefined) {
+        const requestedApprovalModeApplied =
+          requestedApprovalMode !== undefined &&
           setRequestedSessionApprovalMode(
             config,
             requestedApprovalMode,
             projection,
           );
-        } else {
+        if (!requestedApprovalModeApplied) {
           applyRestoredSessionApprovalMode(config, projection);
         }
         if (!provisionalStandalone) {
@@ -5797,7 +5794,7 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
-            persistInitialApprovalMode: requestedApprovalMode !== undefined,
+            persistInitialApprovalMode: requestedApprovalModeApplied,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -11233,12 +11230,6 @@ class QwenAgent implements Agent {
         try {
           config.setApprovalMode(mode as ApprovalMode);
           transitionRevision = config.getApprovalModeRevision();
-          if (mode === ApprovalMode.PLAN) {
-            if (previous !== ApprovalMode.PLAN) {
-              session.clearActiveTodoPlanRevision();
-            }
-            session.clearTodoStopGuardTrust();
-          }
           await config.waitForSessionApprovalModePersistence?.();
         } catch (err) {
           if (
@@ -11273,13 +11264,13 @@ class QwenAgent implements Agent {
           }
           throw err;
         }
-        const current = config.getApprovalMode();
-        if (
-          transitionRevision !== undefined &&
-          config.getApprovalModeRevision() !== transitionRevision
-        ) {
-          return { previous, current };
+        if (mode === ApprovalMode.PLAN) {
+          if (previous !== ApprovalMode.PLAN) {
+            session.clearActiveTodoPlanRevision();
+          }
+          session.clearTodoStopGuardTrust();
         }
+        const current = config.getApprovalMode();
         if (current !== ApprovalMode.PLAN && previous === ApprovalMode.PLAN) {
           session.clearActiveTodoPlanRevision();
         }

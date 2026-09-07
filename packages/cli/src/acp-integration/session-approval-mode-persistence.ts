@@ -13,6 +13,15 @@ import {
 
 const debugLogger = createDebugLogger('SESSION_APPROVAL_MODE');
 
+/**
+ * True when a session's config derives from a restricted mode: safe/bare
+ * sessions ignore `tools.approvalMode` at boot (loadCliConfig pins them to
+ * DEFAULT), so they must never take on a requested or recorded mode.
+ */
+export function isRestrictedApprovalModeConfig(config: Config): boolean {
+  return config.isSafeMode?.() === true || config.getBareMode?.() === true;
+}
+
 export function applyRestoredSessionApprovalMode(
   config: Config,
   projection: SessionRestoreProjection | undefined,
@@ -20,7 +29,7 @@ export function applyRestoredSessionApprovalMode(
   const restored = projection?.runtime.recording.sessionApprovalMode;
   if (!restored) return;
 
-  if (config.isSafeMode() || config.getBareMode()) {
+  if (isRestrictedApprovalModeConfig(config)) {
     debugLogger.warn(
       'Ignoring restored approval mode because this session is restricted.',
     );

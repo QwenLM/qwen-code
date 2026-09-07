@@ -1306,13 +1306,10 @@ describe('ChatRecordingService', () => {
       chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
       await chatRecordingService.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
       const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(rewind.subtype).toBe('rewind');
       expect(rewind.parentUuid).toBe('pre-resume-parent');
-      expect(
-        (vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord).subtype,
-      ).toBe('session_approval_mode');
     });
 
     it('does not treat a resumed Goal runtime continuation as a rewind boundary', async () => {
@@ -1951,17 +1948,14 @@ describe('ChatRecordingService', () => {
       ]);
       await chatRecordingService.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(4);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
       const staleSnapshot = vi.mocked(jsonl.writeLine).mock
         .calls[0][1] as ChatRecord;
       const rewind = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
       const snapshots = vi.mocked(jsonl.writeLine).mock
-        .calls[3][1] as ChatRecord;
+        .calls[2][1] as ChatRecord;
       expect(staleSnapshot.subtype).toBe('file_history_snapshot');
       expect(rewind.subtype).toBe('rewind');
-      expect(
-        (vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord).subtype,
-      ).toBe('session_approval_mode');
       expect(JSON.parse(JSON.stringify(snapshots.systemPayload))).toEqual({
         snapshots: [
           {
@@ -2758,7 +2752,6 @@ describe('ChatRecordingService', () => {
       expect(written.map((record) => record.subtype)).toEqual([
         'rewind',
         'session_model',
-        'session_approval_mode',
       ]);
       expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
       expect(written[1]?.systemPayload).toEqual({
@@ -2931,6 +2924,23 @@ describe('ChatRecordingService', () => {
         }),
       ).resolves.toBe(true);
       expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('does not anchor an approval record on rewind when the session never recorded one', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(
+        written.some((record) => record.subtype === 'session_approval_mode'),
+      ).toBe(false);
     });
 
     it('re-anchors the live config state onto the rewind branch', async () => {
@@ -3314,10 +3324,8 @@ describe('ChatRecordingService', () => {
       // Same snapshot bytes — without the rewind reset this would dedup.
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
       await chatRecordingService.flush();
-      // Rewind also re-anchors the live approval mode before the fresh
-      // attribution snapshot.
       expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
-        beforeRewind + 3,
+        beforeRewind + 2,
       );
     });
 

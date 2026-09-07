@@ -4361,6 +4361,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(restoreApprovalModeState).not.toHaveBeenCalled();
         expect(setApprovalMode).not.toHaveBeenCalled();
         expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+        expect(
+          innerConfig.enableSessionApprovalModePersistence,
+        ).toHaveBeenCalledWith(false);
         expect(response).toEqual(
           expect.objectContaining({
             modes: expect.objectContaining({ currentModeId: 'default' }),
@@ -5966,6 +5969,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(innerConfig.setAutoModeDenialState).toHaveBeenCalledWith(
       autoModeDenialState,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears the plan revision on PLAN exit even when a concurrent transition supersedes it', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let approvalMode = 'plan';
+    let revision = 1;
+    Object.assign(innerConfig, {
+      getApprovalMode: vi.fn(() => approvalMode),
+      getApprovalModeRevision: vi.fn(() => revision),
+      setApprovalMode: vi.fn((mode: string) => {
+        if (approvalMode !== mode) revision++;
+        approvalMode = mode;
+      }),
+      restoreApprovalModeState: vi.fn((payload: { mode: string }) => {
+        if (approvalMode !== payload.mode) revision++;
+        approvalMode = payload.mode;
+      }),
+      // A concurrent transition lands while the handler is suspended on the
+      // durability barrier, so the exit clear must key on the post-await mode
+      // rather than on the captured revision.
+      waitForSessionApprovalModePersistence: vi
+        .fn()
+        .mockImplementation(async () => {
+          revision++;
+          approvalMode = 'auto';
+        }),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+        sessionId,
+        mode: 'yolo',
+      }),
+    ).resolves.toEqual({ previous: 'plan', current: 'auto' });
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -24024,6 +24068,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(innerConfig.restoreApprovalModeState).not.toHaveBeenCalledWith({
           mode: 'yolo',
         });
+        expect(
+          innerConfig.enableSessionApprovalModePersistence,
+        ).toHaveBeenCalledWith(false);
         expect(response).toEqual(
           expect.objectContaining({
             modes: expect.objectContaining({ currentModeId: 'default' }),

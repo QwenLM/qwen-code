@@ -2270,6 +2270,7 @@ export class Config {
   private approvalModeRevision = 0;
   private sessionApprovalModePersistenceEnabled = false;
   private sessionApprovalModePersistenceTail: Promise<void> = Promise.resolve();
+  private approvalModePersistenceSuppressed = false;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
     kind: 'clear',
@@ -7083,18 +7084,27 @@ export class Config {
   }
 
   restoreApprovalModeState(payload: SessionApprovalModeRecordPayload): void {
-    this.setApprovalMode(payload.mode);
+    // Snapshot once, from the final state: `setApprovalMode` would otherwise
+    // queue an intermediate PLAN record whose prePlanMode is the live mode
+    // the session was never restored from.
+    this.approvalModePersistenceSuppressed = true;
+    try {
+      this.setApprovalMode(payload.mode);
+    } finally {
+      this.approvalModePersistenceSuppressed = false;
+    }
     // Restoring or initializing a session establishes its current state; it
     // is not a user-driven PLAN exit that the next model turn must explain.
     Config.prototype.getManualPlanExitNoticeEventState.call(this).kind =
       'clear';
-    if (payload.mode !== ApprovalMode.PLAN) return;
-    const prePlanMode = payload.prePlanMode ?? ApprovalMode.DEFAULT;
-    this.prePlanMode =
-      prePlanMode === ApprovalMode.PLAN ||
-      (!this.isTrustedFolder() && prePlanMode !== ApprovalMode.DEFAULT)
-        ? ApprovalMode.DEFAULT
-        : prePlanMode;
+    if (payload.mode === ApprovalMode.PLAN) {
+      const prePlanMode = payload.prePlanMode ?? ApprovalMode.DEFAULT;
+      this.prePlanMode =
+        prePlanMode === ApprovalMode.PLAN ||
+        (!this.isTrustedFolder() && prePlanMode !== ApprovalMode.DEFAULT)
+          ? ApprovalMode.DEFAULT
+          : prePlanMode;
+    }
     this.queueSessionApprovalModePersistence();
   }
 
@@ -8700,6 +8710,7 @@ export class Config {
     const recorder = this.chatRecordingService;
     if (
       isDerivedConfig(this) ||
+      this.approvalModePersistenceSuppressed ||
       !this.sessionApprovalModePersistenceEnabled ||
       !recorder
     ) {

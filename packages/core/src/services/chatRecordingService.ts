@@ -2539,18 +2539,23 @@ export class ChatRecordingService {
         });
       }
 
-      const liveSessionApprovalMode = normalizeSessionApprovalModePayload({
-        mode: this.config.getApprovalMode(),
-        prePlanMode: this.config.getPrePlanMode(),
-      });
-      this.currentSessionApprovalMode = liveSessionApprovalMode;
-      if (liveSessionApprovalMode) {
-        this.appendRecord({
-          ...this.createBaseRecord('system'),
-          type: 'system',
-          subtype: 'session_approval_mode',
-          systemPayload: liveSessionApprovalMode,
+      // Re-anchor only for sessions that already record approval modes
+      // (the daemon persistence opt-in); a session that never recorded one
+      // must not gain a restorable record from a rewind.
+      if (this.currentSessionApprovalMode) {
+        const liveSessionApprovalMode = normalizeSessionApprovalModePayload({
+          mode: this.config.getApprovalMode(),
+          prePlanMode: this.config.getPrePlanMode(),
         });
+        this.currentSessionApprovalMode = liveSessionApprovalMode;
+        if (liveSessionApprovalMode) {
+          this.appendRecord({
+            ...this.createBaseRecord('system'),
+            type: 'system',
+            subtype: 'session_approval_mode',
+            systemPayload: liveSessionApprovalMode,
+          });
+        }
       }
 
       // Re-record surviving file history snapshots on the active branch so

@@ -5878,7 +5878,7 @@ describe('Session', () => {
       );
     });
 
-    it('rolls back and does not report a mode switch when persistence fails', async () => {
+    it('rolls back and reports the settled mode when persistence fails', async () => {
       let approvalMode = ApprovalMode.PLAN;
       let prePlanMode = ApprovalMode.AUTO_EDIT;
       const autoModeDenialState = {
@@ -5923,10 +5923,53 @@ describe('Session', () => {
       expect(mockConfig.setAutoModeDenialState).toHaveBeenCalledWith(
         autoModeDenialState,
       );
-      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+      // The error response tells the caller its switch failed; announcing
+      // the settled mode keeps attached clients from drifting ahead of the
+      // session when an overlapping switch was reported in between.
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
         'qwen/notify/session/mode-update',
-        expect.anything(),
+        expect.objectContaining({ currentModeId: ApprovalMode.PLAN }),
       );
+    });
+
+    it('does not clear the active plan revision when a switch into plan fails to persist', async () => {
+      let approvalMode = ApprovalMode.DEFAULT;
+      const clearSessionWorkflowPlanRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+      mockConfig.setApprovalMode = vi.fn((mode: ApprovalMode) => {
+        approvalMode = mode;
+      });
+      mockConfig.restoreApprovalModeState = vi.fn((payload) => {
+        approvalMode = payload.mode;
+      });
+      mockConfig.clearSessionWorkflowPlanRevision =
+        clearSessionWorkflowPlanRevision;
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockRejectedValue(new Error('approval persistence failed'));
+      const clearActiveTodoPlanRevision = vi.spyOn(
+        session,
+        'clearActiveTodoPlanRevision',
+      );
+      const clearTodoStopGuardTrust = vi.spyOn(
+        session,
+        'clearTodoStopGuardTrust',
+      );
+
+      await expect(
+        session.setMode({
+          sessionId: 'test-session-id',
+          modeId: 'plan',
+        }),
+      ).rejects.toThrow('approval persistence failed');
+
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+      expect(clearSessionWorkflowPlanRevision).not.toHaveBeenCalled();
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith({
+        mode: ApprovalMode.DEFAULT,
+      });
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
 
     it('does not roll back a later successful mode switch', async () => {
@@ -5984,10 +6027,20 @@ describe('Session', () => {
         if (approvalMode !== payload.mode) revision++;
         approvalMode = payload.mode;
       });
+      // Production chains each queued write off the previous tail, so the
+      // first wait settles first; the mock must chain, never fork both waits
+      // off one shared promise.
       mockConfig.waitForSessionApprovalModePersistence = vi
         .fn()
-        .mockReturnValueOnce(persistence.then(() => undefined))
-        .mockReturnValueOnce(persistence);
+        .mockReturnValueOnce(persistence)
+        .mockReturnValueOnce(
+          persistence.then(
+            () => undefined,
+            (error: unknown) => {
+              throw error;
+            },
+          ),
+        );
 
       const first = session.setMode({
         sessionId: 'test-session-id',
@@ -6002,7 +6055,7 @@ describe('Session', () => {
       await expect(first).rejects.toThrow('shared persistence failed');
       await expect(second).rejects.toThrow('shared persistence failed');
       expect(approvalMode).toBe(ApprovalMode.YOLO);
-      expect(mockClient.extNotification).toHaveBeenCalledWith(
+      expect(mockClient.extNotification).toHaveBeenLastCalledWith(
         'qwen/notify/session/mode-update',
         expect.objectContaining({ currentModeId: ApprovalMode.YOLO }),
       );
@@ -29459,6 +29512,10 @@ describe('Session', () => {
       const notificationPersistence = new Promise<void>((_resolve, reject) => {
         rejectNotification = reject;
       });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ran',
+        returnDisplay: 'ran',
+      });
       mockToolRegistry.getTool.mockReturnValue({
         name: core.ToolNames.SHELL,
         kind: core.Kind.Execute,
@@ -29474,7 +29531,7 @@ describe('Session', () => {
           }),
           getDescription: vi.fn().mockReturnValue('Run shell command'),
           toolLocations: vi.fn().mockReturnValue([]),
-          execute: vi.fn(),
+          execute: executeSpy,
         }),
       });
       mockConfig.getApprovalMode = vi.fn(() => mode);
@@ -29530,10 +29587,14 @@ describe('Session', () => {
         modeId: 'yolo',
       });
       rejectNotification(new Error('default snapshot failed'));
-      await run;
+      const result = await run;
 
       expect(mode).toBe(ApprovalMode.YOLO);
       expect(mockConfig.restoreApprovalModeState).not.toHaveBeenCalled();
+      expect(executeSpy).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).not.toEqual(
+        expect.objectContaining({ error: expect.anything() }),
+      );
     });
 
     it('does not roll back a later mode switch after plan-mode persistence fails', async () => {
@@ -29598,11 +29659,14 @@ describe('Session', () => {
         modeId: 'yolo',
       });
       rejectNotification(new Error('plan snapshot failed'));
-      await run;
+      const result = await run;
 
       expect(executeSpy).toHaveBeenCalledOnce();
       expect(mode).toBe(ApprovalMode.YOLO);
       expect(mockConfig.restoreApprovalModeState).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse?.response).not.toEqual(
+        expect.objectContaining({ error: expect.anything() }),
+      );
     });
 
     it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {

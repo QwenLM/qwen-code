@@ -10493,15 +10493,10 @@ export class Session implements SessionContext {
     };
     this.config.setApprovalMode(approvalMode);
     const transitionRevision = this.config.getApprovalModeRevision();
-    if (approvalMode === ApprovalMode.PLAN) {
-      if (previousApprovalMode !== ApprovalMode.PLAN) {
-        this.clearActiveTodoPlanRevision();
-      }
-      this.clearTodoStopGuardTrust();
-    }
     try {
       await this.config.waitForSessionApprovalModePersistence?.();
     } catch (error) {
+      let rolledBack = false;
       if (
         this.config.getApprovalMode() === approvalMode &&
         this.config.getApprovalModeRevision() === transitionRevision
@@ -10517,9 +10512,10 @@ export class Session implements SessionContext {
         } catch (rollbackError) {
           debugLogger.warn('session/set_mode rollback failed', rollbackError);
         }
+        rolledBack = true;
       }
       const currentApprovalMode = this.config.getApprovalMode();
-      if (currentApprovalMode !== previousApprovalMode) {
+      if (rolledBack || currentApprovalMode !== previousApprovalMode) {
         try {
           await this.client.extNotification('qwen/notify/session/mode-update', {
             v: 1,
@@ -10534,6 +10530,14 @@ export class Session implements SessionContext {
         }
       }
       throw error;
+    }
+    // PLAN-entry side effects run only once the transition is durable, so a
+    // failed and rolled-back entry cannot disarm an in-flight approved plan.
+    if (approvalMode === ApprovalMode.PLAN) {
+      if (previousApprovalMode !== ApprovalMode.PLAN) {
+        this.clearActiveTodoPlanRevision();
+      }
+      this.clearTodoStopGuardTrust();
     }
     if (this.config.getApprovalModeRevision() !== transitionRevision) {
       return;
@@ -13003,8 +13007,8 @@ export class Session implements SessionContext {
                     this.config.setAutoModeDenialState(
                       previousAutoModeDenialState,
                     );
+                    throw error;
                   }
-                  throw error;
                 }
                 const modeUpdateCancellation =
                   cancelBeforeExecutionIfAborted(toolName);
@@ -13477,10 +13481,6 @@ export class Session implements SessionContext {
             !toolResult.error &&
             this.config.getApprovalMode() !== approvalMode
           ) {
-            if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-              this.clearActiveTodoPlanRevision();
-              this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
-            }
             const postExecutionApprovalMode = this.config.getApprovalMode();
             const postExecutionApprovalModeRevision =
               this.config.getApprovalModeRevision();
@@ -13508,8 +13508,15 @@ export class Session implements SessionContext {
                 this.config.setAutoModeDenialState(
                   preExecutionAutoModeDenialState,
                 );
+                throw error;
               }
-              throw error;
+            }
+            // PLAN-entry side effects run only once the transition is
+            // durable, so a failed and rolled-back entry cannot disarm an
+            // in-flight approved plan.
+            if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+              this.clearActiveTodoPlanRevision();
+              this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }
 

@@ -10935,8 +10935,8 @@ describe('setApprovalMode with folder trust', () => {
       });
       await config.waitForSessionApprovalModePersistence();
 
-      expect(recordSessionApprovalMode).toHaveBeenCalledTimes(2);
-      expect(recordSessionApprovalMode).toHaveBeenLastCalledWith({
+      expect(recordSessionApprovalMode).toHaveBeenCalledTimes(1);
+      expect(recordSessionApprovalMode).toHaveBeenCalledWith({
         mode: ApprovalMode.PLAN,
         prePlanMode: ApprovalMode.AUTO_EDIT,
       });
