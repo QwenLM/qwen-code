@@ -55,11 +55,6 @@ import {
   readFileSync,
   rmSync,
   lstatSync,
-  statSync,
-  openSync,
-  readSync,
-  closeSync,
-  fstatSync,
   existsSync,
   realpathSync,
 } from 'node:fs';
@@ -87,9 +82,9 @@ import {
   type ContainerRuntime,
 } from './lib/sandboxed-exec.js';
 import {
+  describeFilterScreen,
   discardWorktree,
   exposeDependencies,
-  describeFilterScreen,
   localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -1308,19 +1303,17 @@ interface TestEfficacyArgs {
 // resets, the revert's checkout — so the mutations would land in whichever
 // repository the environment names while every check against the tree passes
 // silently. The trees this file touches are chosen by the paths it is given.
+
 // The two config-driven command surfaces a checkout fires from the very tree it
 // is cleaning: `core.hooksPath` (a `post-checkout` hook planted in the shared
 // common dir) and `core.fsmonitor` (a command git runs on checkout/status).
-// Disabling hooks does not cover filters and neutralising one checkout does not
-// cover the next — so the restore and the revert both pass these, and neither
-// is hardened while its sibling stays steerable.
-//
-// The two sites that pass it, NOT a census of this file's checkouts: the
-// `worktree add` that CREATES the probe tree materialises every file too, and
-// passes neither this nor a filter screen. It runs before any PR code has, so
-// what it would execute was planted by an EARLIER review, in the common dir
-// `discard` and `cleanup` never wipe — #10560, which wants a screen at run
-// entry rather than a fourth `-c` pair here.
+// Disabling hooks does not cover filters — those are screened at each site
+// below — and neutralising one checkout does not cover the next, so all three
+// of this file's file-materialising checkouts pass this pair: the `worktree
+// add` that creates the probe tree, the restore's `checkout --force`, and the
+// revert's pathspec checkout. The restore's `clean -ffdx` rides along in the
+// same loop. `git apply --reverse` is not a checkout and runs neither surface;
+// it is screened for filters all the same.
 const CHECKOUT_INERT = [
   '-c',
   'core.hooksPath=/dev/null/no-hooks',
@@ -1597,23 +1590,7 @@ function probeContainer(
   };
 }
 
-function restoreProbeTreeTracked(
-  probeTree: string,
-  /**
-   * The tree's identity as of `worktree add`, before any PR code ran.
-   *
-   * Capturing it at the top of this function instead answers "did the tree
-   * change during THIS restore", which a planter simply waits out: it swaps
-   * the root during a probe run — minutes, not the ~100 ms this function
-   * spans — and the next restore captures the swapped tree's identity as its
-   * own baseline, agreeing with itself all the way through. The honest anchor
-   * is the moment the pipeline made the tree.
-   *
-   * Optional because the unit entry points call this directly with a fixture
-   * they created themselves; there the local capture is the anchor.
-   */
-  anchor?: string,
-): string | null {
+function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
   }
@@ -1635,10 +1612,6 @@ function restoreProbeTreeTracked(
           `git rev-parse exited ${top.status}`;
   }
   const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
-  // Captured with the root verdict below, re-asked immediately before the
-  // spawns — see `probeRootIdentity`. The screen between them is a walk an
-  // attacker can stretch.
-  const rootAtVerdict = anchor ?? probeRootIdentity(probeTree);
   try {
     // The LEAF first. Every comparison below realpaths both sides, so a probe
     // tree that is itself a symlink into the shared review worktree agrees
@@ -1710,20 +1683,8 @@ function restoreProbeTreeTracked(
       'would EXECUTE them'
     );
   }
-  // Re-asked before EACH spawn below, not once before the first. The gap
-  // between the two is a whole `checkout --force` — a window that scales with
-  // the tracked-file count, far larger than the syscall-sized one this guards.
-  // `clean -ffdx` re-resolves its cwd when it starts, so a swap landing during
-  // the checkout sends the delete into the swapped-in tree while the checkout
-  // itself, holding an fd on the original, finishes harmlessly.
-  const rootStillOurs = (): boolean =>
-    rootAtVerdict !== null && probeRootIdentity(probeTree) === rootAtVerdict;
-  // `core.hooksPath` and `core.fsmonitor` both run a command on these two
-  // spawns, and the config that sets them lives in the tree they are cleaning:
-  // the residue probe empties them for exactly this reason.
-  const inert = CHECKOUT_INERT;
   for (const args of [
-    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    [...CHECKOUT_INERT, 'checkout', '--force', 'HEAD', '--', '.'],
     // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
     // commit under test, so a plant named to match one of them (a committed
     // `.gitignore` line and a file to match it) survived every restore. The
@@ -1731,11 +1692,8 @@ function restoreProbeTreeTracked(
     // rather than built, and it is the only ignored thing in this tree the
     // probes cannot run without. Everything else ignored — a built `dist`, a
     // planted config — goes.
-    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
+    [...CHECKOUT_INERT, 'clean', '-ffdx', '-e', 'node_modules'],
   ]) {
-    if (!rootStillOurs()) {
-      return `${probeTree} stopped being its own root while the restore was being cleared, so this spawn would run somewhere else`;
-    }
     const r = spawnSync('git', args, {
       cwd: probeTree,
       encoding: 'utf8',
@@ -1745,7 +1703,9 @@ function restoreProbeTreeTracked(
     if (r.status !== 0) {
       return (
         (r.stderr ?? '').toString().trim() ||
-        `git ${args[2]} exited ${r.status}`
+        // The subcommand, not `args[2]`: that index is a `-c` from the inert
+        // pair, so the message read "git -c exited 1" and named nothing.
+        `git ${args[CHECKOUT_INERT.length]} exited ${r.status}`
       );
     }
   }
@@ -1788,57 +1748,17 @@ function restoreProbeTreeTracked(
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
  */
-/**
- * Write a file inside the probe tree, or refuse because it is no longer ours.
- *
- * The runners write twice per probe — the mutation itself, and the restore of
- * the original after the suite — and the second of those sits on the far side
- * of a whole suite run. A tree swapped during it takes the write, so these
- * ask the same question the spawns ask, through the same identity. One helper
- * rather than four inline checks, so that a fifth write inherits it.
- */
-function writeInProbeTree(
-  probeTree: string,
-  anchor: string | undefined,
-  abs: string,
-  content: string,
-): void {
-  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
-    throw new Error(
-      `${probeTree} stopped being the tree this run created, so this write ` +
-        'would land somewhere else',
-    );
-  }
-  writeFileSync(abs, content, 'utf8');
-}
-
 function runProbeSuite(
   probeTree: string,
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
-  /**
-   * The tree's identity as of `worktree add`. Checked HERE rather than at each
-   * of this function's five call sites: everything below writes into the tree
-   * (the dependency farm is rebuilt inside it) and then runs a suite with its
-   * cwd there, so this is the single door those writes go through — and a
-   * sixth caller added later inherits the check instead of having to remember
-   * it. `probeRunOutsideItsTree` is thrown, not returned, because every caller
-   * already has a catch that records a probe as not-run.
-   */
-  anchor?: string,
 ): {
   perFile: ProbeResult[];
   ms: number;
   exposed: { linked: number; failed: number };
 } {
-  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
-    throw new Error(
-      `${probeTree} stopped being the tree this run created, so the suite ` +
-        'would build and execute somewhere else',
-    );
-  }
   const started = now();
   const timeout =
     deadlineAt !== undefined
@@ -2153,169 +2073,6 @@ function newSideLength(header: string): number {
  * control that never ran) rather than written through; a component missing on
  * disk escapes nothing — the read or write fails on its own.
  */
-/**
- * The largest `.git` gitfile this identity will read rather than size.
- *
- * git writes `gitdir: <path>\n`; anything past a few hundred bytes is a
- * plant, and reading it is work an attacker chooses for us.
- */
-const MAX_GITFILE_BYTES = 4096;
-
-/**
- * The probe tree root's identity, for re-asking immediately before a spawn.
- *
- * Every root-escape verdict in this file is taken once and then acted on
- * several statements later — and what sits in between grew: the filter screen
- * is a walk of one spawn per candidate, and an attacker can stretch it with
- * filler admin entries. A detached planter (the capability the revert phase's
- * own comment credits) that replaces the predictable `<worktree>-probe` root
- * with a symlink to the SHARED review worktree inside that window turns
- * `checkout --force` and `clean -ffdx` loose on the reviewer's own tree:
- * tracked files rewritten, untracked and ignored files deleted — `.qwen/**`
- * included — while the restore still reports success.
- *
- * So the verdict is re-taken here, with nothing but two syscalls between it
- * and the spawn. `null` means "not a root to write into"; comparing the
- * answer to the one taken earlier catches a root swapped in between. This does
- * not close the window — a check and a spawn are never one operation — it
- * narrows it to what fs calls cost, from a walk an attacker can widen.
- */
-/**
- * A `.git` entry's identity, in a namespace nothing it contains can forge.
- *
- * Three properties this needs, each learned the hard way:
- *
- * TAGGED. The file's own bytes and the words for "it was a directory" cannot
- * share one string space, or a gitfile whose literal content is the directory
- * token compares equal to a directory swapped in for it — capture-1 reads the
- * planted text, capture-2 finds a real directory, and the re-check passes over
- * a swap. Each shape gets a distinct prefix and the content is length-framed.
- *
- * RAW. Compared as bytes, not as a utf8 string: decoding folds every distinct
- * invalid-byte gitfile onto the same U+FFFD text while git resolves the raw
- * bytes differently, so two different repositories would read as one.
- *
- * ONE HANDLE. Size and content come from the same open file descriptor, so a
- * file cannot be small at the `stat` and enormous at the read. The cap is
- * enforced on what was actually read.
- *
- * Exported for its own test: the namespace property is the one an end-to-end
- * fixture cannot pin, because reaching it needs a multi-stage swap whose
- * middle stages must look clean to git.
- */
-export function gitfileMarker(dotGit: string): string {
-  let st;
-  try {
-    st = lstatSync(dotGit);
-  } catch {
-    // Absent is a state like any other, and a distinct one: a file appearing
-    // or vanishing between the two captures has to register as a change.
-    return 'absent';
-  }
-  if (st.isDirectory()) return 'dir';
-  if (!st.isFile()) return 'other';
-  const fd = openSync(dotGit, 'r');
-  try {
-    // One byte past the cap, so an oversized file is DETECTED rather than
-    // silently truncated into a marker that matches its own prefix.
-    const buf = Buffer.allocUnsafe(MAX_GITFILE_BYTES + 1);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    if (n > MAX_GITFILE_BYTES) {
-      // Not a file git wrote. Its size still moves when rewritten, which is
-      // all the identity needs, and reading it in full would be the denial of
-      // service the cap exists to prevent.
-      return `oversized:${fstatSync(fd).size}`;
-    }
-    return `file:${n}:${buf.subarray(0, n).toString('base64')}`;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * Where a tree's git administrative files live — its own `.git` when that is a
- * directory, the path its gitfile names when it is a linked worktree.
- *
- * Filesystem only, and deliberately not `git rev-parse --git-dir`: this runs
- * inside an identity whose whole point is to not ask git to resolve anything.
- * A gitfile git itself would reject resolves to a path that will not exist,
- * and the marker for a missing file is its own distinct value — which is the
- * correct answer, because the tree is not one this identity can vouch for.
- */
-function adminDirOf(probeTree: string, dotGit: string): string {
-  try {
-    if (!lstatSync(dotGit).isFile()) return dotGit;
-    // Bounded exactly as `gitfileMarker` bounds it, and for the same reason:
-    // this reads the SAME file, on every identity re-ask, so an unbounded read
-    // here hands back the denial of service that cap exists to prevent — one
-    // attacker-sized slurp per spawn and per write guard in the run, of a file
-    // the marker one statement above just declined to read past 4 KiB. Past
-    // the cap there is no pointer git wrote to resolve; `dotGit` is the same
-    // fallback every other failure here takes, and the caller's marker has
-    // already recorded the size that moves when the file is rewritten.
-    const fd = openSync(dotGit, 'r');
-    let raw: string;
-    try {
-      const buf = Buffer.allocUnsafe(MAX_GITFILE_BYTES);
-      const n = readSync(fd, buf, 0, buf.length, 0);
-      if (n === buf.length) return dotGit;
-      raw = buf.subarray(0, n).toString('utf8').trim();
-    } finally {
-      closeSync(fd);
-    }
-    const named = raw.startsWith('gitdir:') ? raw.slice(7).trim() : raw;
-    return isAbsolute(named) ? named : resolve(probeTree, named);
-  } catch {
-    return dotGit;
-  }
-}
-
-function probeRootIdentity(probeTree: string): string | null {
-  try {
-    if (lstatSync(probeTree).isSymbolicLink()) return null;
-    // A PATH is not an identity. `realpathSync` answers "what does this name
-    // resolve to", which a rename does not change: `mv <probe> <probe>.gone`
-    // followed by `mv <victim> <probe>` leaves both the path and its realpath
-    // untouched while the directory underneath is somebody else's. The inode
-    // pair is the identity; the realpath stays because it is what the refusal
-    // is about.
-    //
-    // Composite on purpose, and not because any one part is sufficient: the
-    // strength of `dev`/`ino` is a platform question (they are what libuv
-    // reports, and that is not the same guarantee everywhere), so the gitfile
-    // marker and the realpath are not fallbacks to be trimmed later — they
-    // each catch a swap the others can miss.
-    const st = statSync(probeTree);
-    // And the gitfile, because the root staying itself is not enough: the
-    // probe tree is a LINKED worktree, so `.git` is a file naming the
-    // repository every spawn below resolves through. Rewrite it mid-walk and
-    // `checkout --force HEAD -- .` materialises whatever HEAD means in the
-    // attacker's repository, into a tree whose root never moved. Read rather
-    // than stat'ed: an inode-preserving rewrite of the same length would pass
-    // a stat comparison, and this file is normally a few dozen bytes.
-    //
-    // (The revert's twin is not exposed this way — it checks out a base SHA,
-    // which is content-addressed, under `GIT_NO_REPLACE_OBJECTS=1` — but it
-    // shares this helper, and a shared answer is cheaper than two.)
-    const dotGit = join(probeTree, '.git');
-    const marker = gitfileMarker(dotGit);
-    // And the HEAD inside the admin directory that gitfile NAMES. Pinning the
-    // pointer without pinning what it points at leaves the restore's
-    // `checkout --force HEAD -- .` resolving its target commit through a file
-    // this identity never read — one plain write into the never-wiped common
-    // dir retargets every restore that follows, and the guard reports success
-    // over it. Read the same way as the gitfile, for the same reasons.
-    const adminHead = gitfileMarker(
-      join(adminDirOf(probeTree, dotGit), 'HEAD'),
-    );
-    return [realpathSync(probeTree), st.dev, st.ino, marker, adminHead].join(
-      '\u0000',
-    );
-  } catch {
-    return null;
-  }
-}
-
 function probeTargetEscapes(probeTree: string, file: string): boolean {
   // The separator set is platform-dependent: on POSIX a backslash is an
   // ordinary NAME character, so splitting on it turns `x\\y.test.ts` into two
@@ -2368,8 +2125,6 @@ export function runOneHunkProbe(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
-  /** The probe tree's identity as of `worktree add`; see `restoreProbeTreeTracked`. */
-  anchor?: string,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2381,7 +2136,7 @@ export function runOneHunkProbe(
         'the probe target resolves through a symlink — the reverse patch and the restore would follow it out of the probe tree, so nothing was neutralised',
     };
   }
-  const stale = restoreProbeTreeTracked(probeTree, anchor);
+  const stale = restoreProbeTreeTracked(probeTree);
   if (stale !== null) {
     return {
       ...meta,
@@ -2410,13 +2165,23 @@ export function runOneHunkProbe(
         'the probe target was relinked through a symlink before the reverse patch applied — nothing was neutralised',
     };
   }
-  // Same question as every other write below, before the one spawn that
-  // reaches the working tree on this path.
-  if (anchor !== undefined && probeRootIdentity(probeTree) !== anchor) {
+  // Screened, and not by the restore's screen: `git apply --reverse` rewrites
+  // the working tree and executes BOTH sides of a content filter — the clean
+  // and the smudge, where a pathspec checkout fires only the smudge. The
+  // restore screened this tree several attacker-sized spawns ago, and
+  // everything between ran the PR's own suite, so a filter planted since is
+  // live here and would run once per hunk candidate on the reviewer's host.
+  // Repo-local scope, for the git-lfs reason the restore's screen states.
+  const applyFilters = localFilterCommands(probeTree);
+  if (applyFilters.length > 0) {
     return {
-      ...hunk,
+      ...meta,
       verdict: 'inconclusive' as const,
-      detail: `${probeTree} stopped being the tree this run created, so the reverse-apply would land somewhere else`,
+      detail:
+        "the repository's local config defines content filter(s), or includes " +
+        'config this screen could not read to the bottom: ' +
+        `${describeFilterScreen(applyFilters.map(inertPath))} — this ` +
+        'reverse-apply would EXECUTE them',
     };
   }
   const applied = spawnSync('git', ['apply', '--reverse', '-'], {
@@ -2446,7 +2211,6 @@ export function runOneHunkProbe(
         deadlineAt,
         now,
         dependencyRoot,
-        anchor,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2475,7 +2239,7 @@ export function runOneHunkProbe(
         // emptied, and a restore that throws ENOENT here loses the verdict
         // AND marks every remaining hunk inconclusive.
         mkdirSync(dirname(abs), { recursive: true });
-        writeInProbeTree(probeTree, anchor, abs, original);
+        writeFileSync(abs, original, 'utf8');
       }
     }
   };
@@ -2515,8 +2279,6 @@ export function runControlMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
-  /** The probe tree's identity as of `worktree add`; see `restoreProbeTreeTracked`. */
-  anchor?: string,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2527,7 +2289,7 @@ export function runControlMutant(
   // A control run on a tree an earlier run wrote into demonstrates that
   // tree's behaviour, not the suite's — and this is the run every survivor
   // verdict is conditioned on.
-  if (restoreProbeTreeTracked(probeTree, anchor) !== null) return null;
+  if (restoreProbeTreeTracked(probeTree) !== null) return null;
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -2552,7 +2314,6 @@ export function runControlMutant(
         deadlineAt,
         now,
         dependencyRoot,
-        anchor,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2565,7 +2326,7 @@ export function runControlMutant(
       if (probeTargetEscapes(probeTree, probeFile)) {
         relinkedMidRun = true;
       } else {
-        writeInProbeTree(probeTree, anchor, abs, original);
+        writeFileSync(abs, original, 'utf8');
       }
     }
   };
@@ -2585,8 +2346,6 @@ export function runOneMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
-  /** The probe tree's identity as of `worktree add`; see `restoreProbeTreeTracked`. */
-  anchor?: string,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2597,7 +2356,7 @@ export function runOneMutant(
         'the probe target resolves through a symlink — the mutation and the restore would follow it out of the probe tree, so nothing was mutated',
     };
   }
-  const stale = restoreProbeTreeTracked(probeTree, anchor);
+  const stale = restoreProbeTreeTracked(probeTree);
   if (stale !== null) {
     return {
       ...mutant,
@@ -2649,14 +2408,13 @@ export function runOneMutant(
             'the probe target was relinked through a symlink before the mutation was written — nothing was mutated',
         };
       }
-      writeInProbeTree(probeTree, anchor, abs, lines.join('\n'));
+      writeFileSync(abs, lines.join('\n'), 'utf8');
       const { perFile } = runProbeSuite(
         probeTree,
         probes,
         deadlineAt,
         now,
         dependencyRoot,
-        anchor,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2677,7 +2435,7 @@ export function runOneMutant(
       if (probeTargetEscapes(probeTree, mutant.file)) {
         relinkedMidRun = true;
       } else {
-        writeInProbeTree(probeTree, anchor, abs, original);
+        writeFileSync(abs, original, 'utf8');
       }
     }
   };
@@ -2943,16 +2701,42 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
 
     const probeTree = probeWorktreePath(worktree);
     let created = false;
-    let probeAnchor: string | null = null;
     let sweep: SweepResult | undefined;
     try {
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
-      git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
+      // Screened at RUN ENTRY, before the first spawn that materialises files.
+      // `worktree add` checks out `headSha` into the new tree, so it executes a
+      // planted `filter.<name>.smudge` exactly as the restore does (measured:
+      // the canary fires with and without the inert `-c` pair, which blanks
+      // hooks and fsmonitor but cannot blank a filter whose key carries a name
+      // of the planter's choosing). It runs before any PR code has, which is
+      // not why it is safe: the plant it would execute was left by an EARLIER
+      // review, in the common dir that `discard` and `cleanup` never wipe. That
+      // is the persistence #9558 describes, and the per-site screens below
+      // cannot reach back to it. Same repo-local scope, for the same git-lfs
+      // reason. The throw lands in this phase's existing catch, which records
+      // every probe as not-run — what it is, since nothing was isolated.
+      const creationFilters = localFilterCommands(worktree);
+      if (creationFilters.length > 0) {
+        throw new Error(
+          "the repository's local config defines content filter(s), or " +
+            'includes config this screen could not read to the bottom: ' +
+            `${describeFilterScreen(creationFilters.map(inertPath))} — ` +
+            'creating the probe tree would EXECUTE them',
+        );
+      }
+      git(
+        worktree,
+        ...CHECKOUT_INERT,
+        'worktree',
+        'add',
+        '--detach',
+        probeTree,
+        headSha,
+      );
       created = true;
-      // The anchor, taken here: the tree is ours and no PR code has run yet.
-      probeAnchor = probeRootIdentity(probeTree);
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
@@ -3040,10 +2824,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // The probe tree is reused ACROSS reviews too (#6832), so the baseline
         // is not exempt: it can open on whatever the previous review's suite
         // left in it.
-        const staleBaseline = restoreProbeTreeTracked(
-          probeTree,
-          probeAnchor ?? undefined,
-        );
+        const staleBaseline = restoreProbeTreeTracked(probeTree);
         if (staleBaseline !== null) {
           throw new Error(
             `the probe tree could not be put back to the commit: ${staleBaseline}`,
@@ -3055,7 +2836,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           mutantDeadline,
           now,
           worktree,
-          probeAnchor ?? undefined,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -3110,7 +2890,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
-              probeAnchor ?? undefined,
             );
             if (harnessValidated === null) {
               // The probe file could not be read, so no test was injected and
@@ -3178,7 +2957,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
-                probeAnchor ?? undefined,
               ),
             );
           }
@@ -3230,7 +3008,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
-                probeAnchor ?? undefined,
               ),
             );
           }
@@ -3273,24 +3050,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               'root), so the revert would run against whatever it points at',
           );
         }
-        // Captured here, re-asked immediately before the checkout — the
-        // classification loop and the filter screen both sit in between, and
-        // both are attacker-sized (one `cat-file -e` per revert path; one
-        // spawn per screened candidate).
-        // The anchor from `worktree add`, not a fresh capture: a swap that
-        // landed during a probe run is already in place by the time this phase
-        // starts, and a fresh capture would take the swapped tree's identity
-        // as its own baseline and agree with itself.
-        const revertRootAtVerdict = probeAnchor ?? probeRootIdentity(probeTree);
-        // Filters, again, and for the same reason the restore screens them:
-        // `checkout base -- <paths>` below rewrites files, and a rewrite
-        // EXECUTES `filter.<name>.smudge`. Screening once at the restore is
-        // not enough — every run between then and here has executed the PR's
-        // own test code, which can plant the filter mid-run, and the mutation
-        // phase's catch deliberately continues so that this revert still runs.
-        // A refused restore therefore reaches this line with the plant live.
-        // The throw lands in this phase's existing catch and is recorded as a
-        // probe that did not run, which is what it is.
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did
         // not exist at base, so it is removed — through `safeRmWithin`, which
@@ -3302,49 +3061,39 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         for (const p of revert) {
           (existsAtBase(probeTree, base, p) ? modified : added).push(p);
         }
-        // Screened HERE, immediately before the spawn, not above the loop.
-        // The classification above runs one synchronous `git cat-file -e` per
-        // revert path, and `revert` is the plan's full source-file list —
-        // attacker-controlled in count. A screen above it leaves a window
-        // measured in seconds between the last read and the checkout, and the
-        // probe's own test code can spawn a detached process that plants the
-        // filter inside it. Moving the screen below the loop leaves only the
-        // checkout spawn in the gap. A residual window remains and cannot be
-        // closed from here — there is no `-c` kill switch for
-        // attribute-selected filters, so a checkout either reads merged config
-        // or does not run. It is not sub-millisecond either: the screen is a
-        // walk of several spawns over a candidate set the repository's own
-        // state sizes.
-        const revertFilters = localFilterCommands(probeTree);
-        if (revertFilters.length > 0) {
-          throw new Error(
-            "the repository's local config defines content filter(s), or " +
-              'includes config this screen could not read to the bottom: ' +
-              `${describeFilterScreen(revertFilters.map(inertPath))} — this ` +
-              "revert's checkout would EXECUTE them",
-          );
-        }
-        // The root verdict again, two syscalls before the spawn. The checkout
-        // half trusted the verdict taken above the classification loop, and a
-        // relink landing in between rewrote the reviewer's own files with base
-        // content. The deletes below get their own re-ask: `safeRmWithin`
-        // walks ancestors for symlinks, which does not see a rename swap.
-        if (
-          revertRootAtVerdict === null ||
-          probeRootIdentity(probeTree) !== revertRootAtVerdict
-        ) {
-          throw new Error(
-            'the probe tree stopped being its own root while the revert was ' +
-              'being cleared, so the checkout would run somewhere else',
-          );
-        }
         if (modified.length > 0) {
-          // Same neutralisation the restore's checkout runs (CHECKOUT_INERT):
-          // this revert rewrites the PR-modified files, and a `post-checkout`
-          // hook or a `core.fsmonitor` command planted in the never-wiped
-          // common dir mid-run would otherwise fire here — a surface the filter
-          // screen above does not cover, on a checkout the restore hardens and
-          // this one used to leave steerable.
+          // Screened HERE, inside the gate and immediately before the spawn —
+          // not above the classification loop, and not above this `if`. Two
+          // reasons, and they pull in opposite directions. Below the loop,
+          // because that loop runs one synchronous `git cat-file -e` per revert
+          // path over a list the plan sizes, so a screen above it leaves a
+          // window measured in seconds in which the PR's own suite — which ran
+          // between the restore's screen and here, and whose phase catch
+          // deliberately continues so this revert still happens — can plant the
+          // filter from a detached process. Inside the gate, because a change
+          // that only ADDS files runs no checkout at all, and refusing it would
+          // lose the whole revert probe to a screen protecting a command that
+          // never executes.
+          // `checkout base -- <paths>` rewrites files, and a rewrite EXECUTES
+          // `filter.<name>.smudge`. Repo-local scope, for the git-lfs reason
+          // the restore's screen states. A non-empty answer is a refusal
+          // whichever half it came from. The throw lands in this phase's
+          // existing catch and is recorded as a probe that did not run.
+          const revertFilters = localFilterCommands(probeTree);
+          if (revertFilters.length > 0) {
+            throw new Error(
+              "the repository's local config defines content filter(s), or " +
+                'includes config this screen could not read to the bottom: ' +
+                `${describeFilterScreen(revertFilters.map(inertPath))} — this ` +
+                "revert's checkout would EXECUTE them",
+            );
+          }
+          // Same neutralisation the restore's checkout runs: this revert
+          // rewrites the PR-modified files, and a `post-checkout` hook or a
+          // `core.fsmonitor` command planted in the never-wiped common dir
+          // mid-run would otherwise fire here — a surface the filter screen
+          // above does not cover, on a checkout the restore hardens and this
+          // one used to leave steerable.
           git(
             probeTree,
             ...CHECKOUT_INERT,
@@ -3352,20 +3101,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             base,
             '--',
             ...modified,
-          );
-        }
-        // Again before the deletes. The checkout above is a full spawn, and
-        // the comment that used to sit here credited `safeRmWithin` with
-        // asking this question per path — it does not: it walks ancestors for
-        // SYMLINKS, which is blind to the rename swap the dev/ino identity
-        // exists to catch.
-        if (
-          revertRootAtVerdict === null ||
-          probeRootIdentity(probeTree) !== revertRootAtVerdict
-        ) {
-          throw new Error(
-            'the probe tree stopped being its own root before the revert ' +
-              'deletes, so they would run somewhere else',
           );
         }
         for (const p of added) safeRmWithin(probeTree, p);
@@ -3409,7 +3144,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,
-          probeAnchor ?? undefined,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);

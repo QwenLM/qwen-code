@@ -26,7 +26,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   runOneMutant,
@@ -38,6 +38,7 @@ import {
   isolateHostGitConfig,
   isolateOperatorReviewSettings,
 } from './lib/test-utils.js';
+import { probeWorktreePath } from './lib/paths.js';
 
 type Handler = (args: {
   report: string;
@@ -1671,6 +1672,67 @@ process.stdout.write(JSON.stringify({
     ]);
   });
 
+  it('refuses at RUN ENTRY, before the probe tree is created', async () => {
+    // Neither per-site screen can reach this one. `worktree add` checks out the
+    // head into the new tree, so it materialises every file and executes a
+    // planted smudge exactly as the restore does — and it is the FIRST git
+    // spawn of the run. Running before any PR code has is not why it is safe:
+    // the plant it would execute was left by an EARLIER review, in the common
+    // dir that `discard` and `cleanup` never wipe, which is the persistence
+    // #9558 describes. Planted here from the outside, before the command runs,
+    // to be that earlier review.
+    const { wt, base } = scaffoldModifiedPr();
+    const canary = join(outside, 'PWNED-creation');
+    git(repo, 'config', 'filter.evil.smudge', `touch ${canary}`);
+    // The selecting half, in the COMMON dir's info/attributes: a linked
+    // worktree's `--git-path info/attributes` resolves there, so it is shared
+    // with the reviewer's own worktree and outlives every cleanup. A filter git
+    // never selects executes nothing, so without this line the creation
+    // checkout is harmless with the screen deleted and the test stays green.
+    // `--git-path` prints relative to the git process's own cwd, which `git()`
+    // sets to `repo` — NOT this test's cwd, so it has to be resolved against
+    // `repo` or the line lands somewhere else and this arm asserts nothing.
+    const attrsRaw = git(
+      repo,
+      'rev-parse',
+      '--git-path',
+      'info/attributes',
+    ).trim();
+    const attrs = isAbsolute(attrsRaw) ? attrsRaw : join(repo, attrsRaw);
+    mkdirSync(dirname(attrs), { recursive: true });
+    writeFileSync(attrs, '*.ts filter=evil\n');
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // Damage first. Without the run-entry screen the creation checkout fires
+    // this canary, and the restore's screen then refuses LATER with a different
+    // message — so the run still reads as an ordinary inconclusive and only the
+    // canary shows that a command executed on the host.
+    expect(existsSync(canary)).toBe(false);
+    // And nothing was materialised at all: the refusal is ahead of the add.
+    expect(existsSync(probeWorktreePath(wt))).toBe(false);
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inconclusive',
+        reason: 'not-run',
+        // This message, not the restore's: it is what proves the refusal came
+        // from run entry rather than from a screen further in.
+        detail: expect.stringContaining(
+          'creating the probe tree would EXECUTE them',
+        ),
+      }),
+    ]);
+    expect(JSON.stringify(out)).toContain('filter.evil.smudge');
+  });
+
   it('refuses the REVERT checkout when the baseline suite planted a filter mid-run', async () => {
     // The restore is screened once at the top of each run, but what runs
     // BETWEEN the restore and the revert is the PR's own test code. It can
@@ -1879,216 +1941,6 @@ process.stdout.write(JSON.stringify({
 
     expect(existsSync(canary)).toBe(false);
   });
-
-  // POSIX-only: the relink is driven from a `#!/bin/sh` shim.
-  it.skipIf(process.platform === 'win32')(
-    'refuses the REVERT when the root is swapped after its escape check',
-    async () => {
-      // The revert takes its root verdict above the classification loop and
-      // used to act on it after the loop AND the filter screen — both
-      // attacker-sized. The relink target here is the SHARED review worktree,
-      // which is the scenario that matters: it holds `base`, so without the
-      // re-check `checkout base -- <paths>` SUCCEEDS there and rewrites the
-      // reviewer's PR-modified files back to the merge base.
-      //
-      // Deterministic rather than raced: `cat-file` is unique to the
-      // classification loop, so the shim arms there (with `modified` computed
-      // against the real probe tree) and swaps on the next config read — the
-      // revert's own screen — landing exactly in the window.
-      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-revshim-'));
-      const savedPath = process.env['PATH'];
-      const realGit = execFileSync('which', ['git'], {
-        encoding: 'utf8',
-      }).trim();
-      try {
-        const { wt, base } = scaffoldModifiedPr();
-        const probe = `${wt}-probe`;
-        const prFile = join(wt, 'packages/lib/src/f.ts');
-        const prContent = readFileSync(prFile, 'utf8');
-        writeFileSync(
-          join(shimDir, 'git'),
-          `#!/bin/sh
-case "$*" in
-  *cat-file*) touch ${shimDir}/armed ;;
-  *--file*)
-    if [ -e ${shimDir}/armed ] && [ ! -e ${shimDir}/done ] && [ -d ${probe} ]; then
-      touch ${shimDir}/done
-      mv ${probe} ${probe}.real && ln -s ${wt} ${probe}
-    fi
-    ;;
-esac
-exec ${realGit} "$@"
-`,
-        );
-        chmodSync(join(shimDir, 'git'), 0o755);
-        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
-
-        await runHandler({
-          report: join(repo, 'report.json'),
-          worktree: wt,
-          base,
-          out: join(repo, 'out.json'),
-        });
-
-        // The damage assertion: the shared worktree still holds the PR's
-        // version, not the merge base's.
-        expect(readFileSync(prFile, 'utf8')).toBe(prContent);
-      } finally {
-        process.env['PATH'] = savedPath;
-        rmSync(shimDir, { recursive: true, force: true });
-      }
-    },
-  );
-
-  // POSIX-only: the swap is a `mv` pair driven from the fake runner.
-  it.skipIf(process.platform === 'win32')(
-    'refuses after a swap that happened OUTSIDE any restore',
-    async () => {
-      // Capturing the identity at the top of each restore answers "did the
-      // tree change during THIS restore" — which a planter waits out. It swaps
-      // the root while the PROBE SUITE runs (minutes), and the next restore
-      // then captures the swapped tree's identity as its own baseline and
-      // agrees with itself all the way through. The anchor has to be the
-      // moment the pipeline made the tree, before any PR code ran.
-      const victim = mkdtempSync(join(tmpdir(), 'qwen-anchorvictim-'));
-      let probe = '';
-      try {
-        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
-        execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
-          cwd: victim,
-        });
-        execFileSync('git', ['add', '-A'], { cwd: victim });
-        execFileSync(
-          'git',
-          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'v'],
-          { cwd: victim },
-        );
-        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
-        const { wt, base } = scaffoldModifiedPr();
-        probe = `${wt}-probe`;
-        // The fake runner IS the PR's test code: it swaps the root from
-        // inside a probe run, between restores.
-        writeFileSync(
-          vitestScript(),
-          `#!/usr/bin/env node
-import path from 'node:path';
-import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-const stamp = '${probe}.swapped';
-if (!fs.existsSync(stamp) && fs.existsSync('${probe}')) {
-  fs.writeFileSync(stamp, '');
-  execFileSync('sh', ['-c', 'mv ${probe} ${probe}.gone && mv ${victim} ${probe}']);
-}
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
-const results = files.map((f) => ({
-  name: path.resolve(f),
-  assertionResults: [{ status: 'passed' }],
-}));
-process.stdout.write(JSON.stringify({
-  numPassedTests: results.length,
-  numFailedTests: 0,
-  testResults: results,
-}));
-`,
-        );
-
-        await runHandler({
-          report: join(repo, 'report.json'),
-          worktree: wt,
-          base,
-          out: join(repo, 'out.json'),
-        });
-
-        // The refusal is the assertion. A damage assertion would be wrong
-        // here for a reason worth recording: the run's own CLEANUP
-        // (`discardWorktree`) removes whatever stands at the probe path when
-        // the command ends, so the swapped-in tree is emptied by teardown
-        // regardless of whether the restore and revert refused. That is a
-        // separate site with the same shape, and this anchor does not cover it.
-        const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-        const details = JSON.stringify(out.probed ?? []);
-        expect(details).toContain('stopped being its own root');
-      } finally {
-        if (probe) rmSync(`${probe}.gone`, { recursive: true, force: true });
-        rmSync(victim, { recursive: true, force: true });
-      }
-    },
-  );
-
-  // POSIX-only: the swap is a `mv` pair driven from the fake runner.
-  it.skipIf(process.platform === 'win32')(
-    'refuses the next suite run after a swap during the previous one',
-    async () => {
-      // The identity was re-asked before the destructive spawns and nowhere
-      // else, so everything the runners do between them — rebuilding the
-      // dependency farm inside the tree, running vitest with its cwd there,
-      // writing the mutation and writing the original back after the suite —
-      // ran on a verdict taken before the suite that could have swapped it.
-      // `runProbeSuite` is the single door those go through, so the question
-      // is asked there.
-      const victim = mkdtempSync(join(tmpdir(), 'qwen-suitevictim-'));
-      let probe = '';
-      try {
-        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
-        execFileSync('git', ['init', '-q', '-b', 'main', '--template=', '.'], {
-          cwd: victim,
-        });
-        execFileSync('git', ['add', '-A'], { cwd: victim });
-        execFileSync(
-          'git',
-          ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'v'],
-          { cwd: victim },
-        );
-        const { wt, base } = scaffoldModifiedPr();
-        probe = `${wt}-probe`;
-        // Swap from INSIDE a suite run — the window the pre-spawn re-asks
-        // never covered.
-        writeFileSync(
-          vitestScript(),
-          `#!/usr/bin/env node
-import path from 'node:path';
-import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-const stamp = '${probe}.swapped';
-if (!fs.existsSync(stamp) && fs.existsSync('${probe}')) {
-  fs.writeFileSync(stamp, '');
-  execFileSync('sh', ['-c', 'mv ${probe} ${probe}.gone && mv ${victim} ${probe}']);
-}
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
-const results = files.map((f) => ({
-  name: path.resolve(f),
-  assertionResults: [{ status: 'passed' }],
-}));
-process.stdout.write(JSON.stringify({
-  numPassedTests: results.length,
-  numFailedTests: 0,
-  testResults: results,
-}));
-`,
-        );
-
-        await runHandler({
-          report: join(repo, 'report.json'),
-          worktree: wt,
-          base,
-          out: join(repo, 'out.json'),
-        });
-
-        // Whichever guard fires first, the run must refuse rather than keep
-        // building and executing in a tree it did not create. In practice the
-        // revert's pre-spawn re-ask gets there first — both consult the same
-        // anchor, which is the point: the identity is one answer, asked at
-        // every door rather than at one of them.
-        const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-        expect(JSON.stringify(out)).toMatch(
-          /stopped being (its own root|the tree this run created)/,
-        );
-      } finally {
-        if (probe) rmSync(`${probe}.gone`, { recursive: true, force: true });
-        rmSync(victim, { recursive: true, force: true });
-      }
-    },
-  );
 
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the
@@ -2564,4 +2416,93 @@ describe('per-hunk probes against real git', () => {
     expect(got.verdict).toBe('inconclusive');
     expect(got.detail).toContain('does not hold');
   });
+
+  // POSIX-only: the plant is driven from a `git` shim on PATH. A shim is the
+  // only way to reach this screen at all — the restore screens the same tree
+  // first and refuses, so the filter has to appear AFTER that screen has
+  // passed and BEFORE the reverse-apply, which is a window no fixture can
+  // arrange from the outside.
+  it.skipIf(process.platform === 'win32')(
+    'refuses the reverse-apply on a filter planted after the restore screened',
+    () => {
+      // Half the plant, and it belongs in the fixture: a filter git never
+      // SELECTS for this path executes nothing, so without it the apply is
+      // harmless with the screen deleted and the test stays green. `*.ts`
+      // covers `src/x.ts`, the file every hunk here probes.
+      write('.gitattributes', '*.ts filter=evil\n');
+      commitAll('attributes');
+      const [first] = hunkPatches();
+
+      const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-apply-canary-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-apply-shim-'));
+      const canary = join(canaryDir, 'PWNED-apply');
+      const stamp = join(shimDir, 'armed');
+      const savedPath = process.env['PATH'];
+      try {
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // Armed on the restore's LAST spawn, so the plant lands after that
+        // function's screen. Paths go in through JSON.stringify rather than
+        // shell interpolation: a TMPDIR holding a space would otherwise split
+        // the argument and the shim would silently plant nothing.
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const real = ${JSON.stringify(realGit)};
+const stamp = ${JSON.stringify(stamp)};
+if (!fs.existsSync(stamp) && args.includes('ls-files') && args.includes('-v')) {
+  fs.writeFileSync(stamp, '');
+  // BOTH sides: a reverse-apply runs the clean and the smudge, where a
+  // pathspec checkout runs only the smudge.
+  spawnSync(real, ['config', 'filter.evil.smudge', ${JSON.stringify(`touch ${canary}`)}], { cwd: ${JSON.stringify(repo)} });
+  spawnSync(real, ['config', 'filter.evil.clean', ${JSON.stringify(`touch ${canary}-clean`)}], { cwd: ${JSON.stringify(repo)} });
+}
+const r = spawnSync(real, args, {
+  cwd: process.cwd(),
+  stdio: 'inherit',
+  env: process.env,
+});
+process.exit(r.status === null ? 1 : r.status);
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        const got = runOneHunkProbe(
+          repo,
+          {
+            file: FILE,
+            index: 0,
+            header: first.header,
+            startLine: first.startLine,
+            patch: first.patch,
+          },
+          [],
+        );
+
+        // The shim really armed. Without this the test can pass by never
+        // planting anything — a detector that goes dark reads as a green
+        // witness for a screen that is not there.
+        expect(existsSync(stamp)).toBe(true);
+        // The APPLY's refusal, not the restore's. Their texts differ, and only
+        // this one proves the plant landed after the restore had already
+        // passed — an arm that fired too early fails here rather than passing
+        // for the wrong reason.
+        expect(got.verdict).toBe('inconclusive');
+        expect(got.detail).toContain('reverse-apply would EXECUTE them');
+        expect(got.detail).toContain('filter.evil.smudge');
+        // Damage: neither side of the filter ran on the host.
+        expect(existsSync(canary)).toBe(false);
+        expect(existsSync(`${canary}-clean`)).toBe(false);
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(canaryDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
