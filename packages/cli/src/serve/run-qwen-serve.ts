@@ -82,7 +82,6 @@ import type {
 } from '@qwen-code/qwen-code-core';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
-import { createDebugLogger } from '@qwen-code/qwen-code-core/debugLogger';
 import {
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
@@ -269,7 +268,6 @@ const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
 // Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
 // here so the serve pre-listen graph does not statically import that module.
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
-const debugLogger = createDebugLogger('QWEN_SERVE');
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -8938,9 +8936,10 @@ async function runQwenServeImpl(
       const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
         app: Application,
       ): void => {
-        if (shuttingDown) {
-          debugLogger.debug(
-            'workspace MCP discovery after preheat skipped: shutting down',
+        if (shuttingDown || runtimeStartupError !== undefined) {
+          daemonLog.info(
+            'workspace MCP discovery after preheat skipped: ' +
+              (shuttingDown ? 'shutting down' : 'runtime startup failed'),
           );
           return;
         }
@@ -8949,7 +8948,7 @@ async function runQwenServeImpl(
           | undefined;
         const runtime = registry?.primaryEntry.current?.runtime;
         if (!runtime) {
-          debugLogger.debug(
+          daemonLog.info(
             'workspace MCP discovery after preheat skipped: no primary runtime',
           );
           return;
@@ -8957,7 +8956,7 @@ async function runQwenServeImpl(
         const coordinator =
           getWorkspaceRuntimeCoordinatorIfSupported?.(runtime);
         if (!coordinator) {
-          debugLogger.debug(
+          daemonLog.info(
             'workspace MCP discovery after preheat skipped: ' +
               'workspace runtime lifecycle is not supported',
           );
@@ -8971,7 +8970,7 @@ async function runQwenServeImpl(
               err instanceof Error && err.cause instanceof Error
                 ? err.cause.message
                 : undefined;
-            debugLogger.debug(
+            daemonLog.warn(
               `workspace MCP discovery after preheat failed: ${message}` +
                 (cause ? ` (${cause})` : ''),
             );

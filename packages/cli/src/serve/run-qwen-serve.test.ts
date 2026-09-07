@@ -88,6 +88,7 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
   WorkspaceRuntimeCoordinator,
+  WorkspaceRuntimeInitializationError,
 } from './workspace-runtime-coordinator.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
@@ -16325,6 +16326,51 @@ describe('runQwenServe startup observability', () => {
     throw new Error(`preheat status did not become ${status}`);
   }
 
+  async function waitForDaemonLog(
+    logBaseDir: string,
+    needle: string,
+  ): Promise<string> {
+    const daemonDir = path.join(logBaseDir, 'daemon');
+    for (let i = 0; i < 50; i++) {
+      if (fs.existsSync(daemonDir)) {
+        const logFile = fs
+          .readdirSync(daemonDir)
+          .find((file) => file.endsWith('.log'));
+        if (logFile) {
+          const content = fs.readFileSync(
+            path.join(daemonDir, logFile),
+            'utf8',
+          );
+          if (content.includes(needle)) return content;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`daemon log did not contain: ${needle}`);
+  }
+
+  function lifecycleBridgeExtras() {
+    return {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
+      queryWorkspaceStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: tmpDir,
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+        skills: [],
+      })),
+    };
+  }
+
   function installInternalBridge(preheat: () => Promise<void>): HttpAcpBridge {
     const bridge = makeFakeBridge();
     vi.mocked(bridge.preheat).mockImplementation(preheat);
@@ -16537,25 +16583,7 @@ describe('runQwenServe startup observability', () => {
       resolvePreheat = resolve;
     });
     const bridge = installInternalBridge(() => preheatPromise);
-    Object.assign(bridge, {
-      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
-        state: 'idle',
-        runtimeLive: true,
-        runtimeEpoch: 1,
-        activeWork: false,
-      }),
-      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
-      queryWorkspaceStatus: vi.fn(async () => ({
-        v: 1,
-        workspaceCwd: tmpDir,
-        initialized: true,
-        runtimeEpoch: 1,
-        source: 'live',
-        discoveryState: 'completed',
-        servers: [],
-        skills: [],
-      })),
-    });
+    Object.assign(bridge, lifecycleBridgeExtras());
     const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
 
     const handle = await runQwenServe(
@@ -16601,20 +16629,15 @@ describe('runQwenServe startup observability', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-reject-')),
     );
+    const logBaseDir = path.join(tmpDir, 'debug');
     const bridge = installInternalBridge(() => Promise.resolve());
-    Object.assign(bridge, {
-      getWorkspaceRuntimeLifecycleSnapshot: vi.fn().mockReturnValue({
-        state: 'idle',
-        runtimeLive: true,
-        runtimeEpoch: 1,
-        activeWork: false,
-      }),
-      initializeWorkspaceMcp: vi.fn().mockResolvedValue({ accepted: true }),
-    });
+    Object.assign(bridge, lifecycleBridgeExtras());
     const ensureSpy = vi
       .spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure')
       .mockImplementation(async () => {
-        throw new Error('ensure boom');
+        throw new WorkspaceRuntimeInitializationError(
+          new Error('cause detail'),
+        );
       });
     const rejections: unknown[] = [];
     const recordRejection = (reason: unknown) => rejections.push(reason);
@@ -16629,7 +16652,7 @@ describe('runQwenServe startup observability', () => {
         maxSessions: 1,
         serveWebShell: false,
       },
-      { preheatBridge: true },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
     );
 
     try {
@@ -16639,6 +16662,10 @@ describe('runQwenServe startup observability', () => {
       await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(rejections).toEqual([]);
+      await waitForDaemonLog(
+        logBaseDir,
+        'workspace MCP discovery after preheat failed: Workspace runtime failed to initialize (cause detail)',
+      );
     } finally {
       process.off('unhandledRejection', recordRejection);
       await handle.close();
@@ -16649,12 +16676,7 @@ describe('runQwenServe startup observability', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-lifecycle-')),
     );
-    const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
-    const debugSessionId = '550e8400-e29b-41d4-a716-446655440301';
-    const debugLogPath = qwenCore.Storage.getDebugLogPath(debugSessionId);
-    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-    qwenCore.resetDebugLoggingState();
-    qwenCore.setDebugLogSession({ getSessionId: () => debugSessionId });
+    const logBaseDir = path.join(tmpDir, 'debug');
     const bridge = installInternalBridge(() => Promise.resolve());
 
     const handle = await runQwenServe(
@@ -16666,29 +16688,20 @@ describe('runQwenServe startup observability', () => {
         maxSessions: 1,
         serveWebShell: false,
       },
-      { preheatBridge: true },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
     );
 
     try {
       expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
         status: 'succeeded',
       });
-      await vi.waitFor(() => {
-        expect(fs.existsSync(debugLogPath)).toBe(true);
-        expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
-          'workspace MCP discovery after preheat skipped: ' +
-            'workspace runtime lifecycle is not supported',
-        );
-      });
+      await waitForDaemonLog(
+        logBaseDir,
+        'workspace MCP discovery after preheat skipped: ' +
+          'workspace runtime lifecycle is not supported',
+      );
       expect(bridge.preheat).toHaveBeenCalledOnce();
     } finally {
-      qwenCore.setDebugLogSession(null);
-      qwenCore.resetDebugLoggingState();
-      if (previousDebugLogFile === undefined) {
-        delete process.env['QWEN_DEBUG_LOG_FILE'];
-      } else {
-        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
-      }
       await handle.close();
     }
   });
@@ -16697,12 +16710,7 @@ describe('runQwenServe startup observability', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-no-runtime-')),
     );
-    const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
-    const debugSessionId = '550e8400-e29b-41d4-a716-446655440302';
-    const debugLogPath = qwenCore.Storage.getDebugLogPath(debugSessionId);
-    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-    qwenCore.resetDebugLoggingState();
-    qwenCore.setDebugLogSession({ getSessionId: () => debugSessionId });
+    const logBaseDir = path.join(tmpDir, 'debug');
     let resolvePreheat!: () => void;
     const preheatPromise = new Promise<void>((resolve) => {
       resolvePreheat = resolve;
@@ -16724,7 +16732,7 @@ describe('runQwenServe startup observability', () => {
         maxSessions: 1,
         serveWebShell: false,
       },
-      { preheatBridge: true },
+      { preheatBridge: true, daemonLogBaseDir: logBaseDir },
     );
 
     try {
@@ -16733,25 +16741,186 @@ describe('runQwenServe startup observability', () => {
       delete workspaceRegistry!.primaryEntry.current;
       resolvePreheat();
       try {
-        await vi.waitFor(() => {
-          expect(fs.existsSync(debugLogPath)).toBe(true);
-          expect(fs.readFileSync(debugLogPath, 'utf8')).toContain(
-            'workspace MCP discovery after preheat skipped: no primary runtime',
-          );
-        });
+        await waitForDaemonLog(
+          logBaseDir,
+          'workspace MCP discovery after preheat skipped: no primary runtime',
+        );
       } finally {
         workspaceRegistry!.primaryEntry.current = current;
       }
     } finally {
-      qwenCore.setDebugLogSession(null);
-      qwenCore.resetDebugLoggingState();
-      if (previousDebugLogFile === undefined) {
-        delete process.env['QWEN_DEBUG_LOG_FILE'];
-      } else {
-        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
-      }
       await handle.close();
     }
+  });
+
+  it('does not schedule workspace MCP discovery when ACP preheat fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-preheat-fail-')),
+    );
+    const bridge = installInternalBridge(() =>
+      Promise.reject(new Error('preheat boom')),
+    );
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'failed')).toMatchObject({
+        status: 'failed',
+        error: 'preheat boom',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts workspace MCP discovery only for the primary workspace', async () => {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-primary-only-')),
+    );
+    const primary = path.join(root, 'primary');
+    const secondary = path.join(root, 'secondary');
+    fs.mkdirSync(primary, { recursive: true });
+    fs.mkdirSync(secondary, { recursive: true });
+    tmpDir = root;
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, {
+      ...lifecycleBridgeExtras(),
+      queryWorkspaceStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: primary,
+        initialized: true,
+        runtimeEpoch: 1,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+        skills: [],
+      })),
+    });
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      expect(ensureSpy.mock.instances[0]).toMatchObject({
+        runtime: expect.objectContaining({
+          workspaceCwd: canonicalizeWorkspace(primary),
+        }),
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not schedule workspace MCP discovery when shutting down during preheat', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-shutdown-')),
+    );
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      await waitForPreheatStatus(handle, 'running');
+      await handle.close();
+      resolvePreheat();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not schedule workspace MCP discovery after runtime startup fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-mcp-runtime-fail-')),
+    );
+    let resolvePreheat!: () => void;
+    const preheatPromise = new Promise<void>((resolve) => {
+      resolvePreheat = resolve;
+    });
+    const bridge = installInternalBridge(() => preheatPromise);
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+    const worker = {
+      start: vi.fn().mockRejectedValue(new Error('worker failed before ready')),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn(),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => ({
+        enabled: true,
+        state: 'failed',
+        channels: ['telegram'],
+        exitCode: 1,
+      })),
+      enqueueWebhookTask: vi.fn(),
+      deliverChannelMessage: vi.fn(),
+    };
+
+    const servePromise = runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        preheatBridge: true,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.preheat).toHaveBeenCalledOnce());
+    await expect(servePromise).rejects.toThrow('worker failed before ready');
+    resolvePreheat();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ensureSpy).not.toHaveBeenCalled();
   });
 
   it('tracks preheat running and succeeded states for an internally-created bridge', async () => {
