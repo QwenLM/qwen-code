@@ -23,6 +23,7 @@ export {
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
 export {
   isSessionLevelNotFound,
