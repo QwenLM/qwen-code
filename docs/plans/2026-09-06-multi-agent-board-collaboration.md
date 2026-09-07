@@ -170,45 +170,102 @@ rather than these files — argue from the symbols, not from the marketing pages
 
 ## 1. Execution model
 
-An agent is **one long-lived background agent per workspace**, not a daemon
-session. This was the design's biggest correction: the persona machinery
-(`subagent-manager.ts:868` → `{promptConfig, modelConfig, runConfig, toolConfig}`)
-targets the agent runtime, not ACP sessions, and there is no per-session persona
-hook. Building one would be new work on a hot path with no precedent.
+**An agent is its own local session process.** One OS process per agent per
+workspace, spawned through the ACP bridge, with its own model conversation, its
+own transcript, and its own lifecycle. This is what "multiple independent
+agents" means in the brief, and it is the shape Multica has: its agents are
+separate CLI runtimes that claim work, not callees inside one process.
 
-Nearly everything the execution layer needs already exists:
+### 1.1 The correction this replaces
 
-| Need                                                                 | Existing machinery                                                    |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Agent loop                                                           | `AgentCore` / `AgentInteractive`                                      |
-| Persona: prompt and restricted tools                                 | `convertToRuntimeConfig`                                              |
-| Durable log                                                          | `attachJsonlTranscriptWriter`                                         |
-| Reading that log in Web Shell                                        | virtual subagent sessions + the existing panel                        |
-| Deliver into a **running** agent                                     | `BackgroundTaskRegistry.queueExternalInput` (boolean acknowledgement) |
-| Observe when queued input is actually consumed                       | `AgentEventType.EXTERNAL_MESSAGE` (needs a correlation-id extension)  |
-| Incremental token usage                                              | `AgentEventType.USAGE_METADATA` + transcript round usage              |
-| Continue an idle resident body                                       | `BackgroundTaskRegistry.continueResidentAgent`                        |
-| Wake from transcript after process/runtime loss                      | `reviveCompletedBackgroundAgent`                                      |
-| Context growth                                                       | auto-compaction, already in the runtime (`agent-core.ts:559`, `:977`) |
-| Approvals                                                            | the background-agent approval path                                    |
-| Keeping a bound session resident, and reviving one the reaper closed | `scheduled-task-keepalive.ts`                                         |
+An earlier revision of this section chose **one long-lived background agent per
+workspace** — a subagent inside a hidden host session — and called it "the
+design's biggest correction". The reasoning was that the persona machinery
+(`subagent-manager.ts` → `{promptConfig, modelConfig, runConfig, toolConfig}`)
+targets the agent runtime rather than ACP sessions, and that `BridgeSpawnRequest`
+carries no persona field, so a per-session persona hook would be "new work on a
+hot path with no precedent".
 
-So the work is the **orchestration layer**, which does not exist yet, plus one
-narrow runtime contract extension: mesh external input and its consumed event
-must carry a server-generated delivery id. `queueMessage(true)` proves only that
-an in-memory queue accepted the input; the existing `EXTERNAL_MESSAGE` event is
-emitted when the agent actually drains it, but currently carries no correlation
-id. No agent loop rewrite is required, and none of the reuse goes through Agent
-Team — it goes through the background-agent layer that Agent Team and ordinary
-subagents both sit on.
+That reasoning was about implementation cost, and it silently traded away the
+property the whole subsystem exists to provide. Under it:
 
-The hidden host session and its keepalive are correctness dependencies, not
-cleanup details. If the session is reaped, an idle resident body is disposed and
-the next turn is a transcript-backed cold revive. The background registry also
-caps concurrently running bodies (10 by default, with optional per-model caps).
-That is a workspace throughput ceiling, not a roster-size limit: idle resident
-agents do not occupy running slots, but launch admission and its failure outcome
-must be visible.
+- Every agent shares one process, so one agent's crash, memory growth or
+  runaway loop is every agent's. Decision 1 (read-only) was partly a way to
+  live with that; it is not a substitute for isolation.
+- "Independent identities" was true of the _records_ and false of the
+  _execution_. The roster looked like Multica's; the runtime was a fan-out of
+  subagents.
+- §10 listed "real OS-process isolation" as out of scope and §7 scored runtime
+  binding at zero, which was honest bookkeeping of a gap that should never have
+  been opened.
+
+The cost argument was also wrong on its facts. A session _can_ carry a persona
+today, and the pieces were already in the codebase when that paragraph was
+written:
+
+- **Prompt.** `Config.systemPrompt` is read by `getMainSessionBaseSystemPrompt`,
+  which uses `getCustomSystemPrompt(...)` instead of the default core prompt
+  when it is set. That is the per-session prompt hook the paragraph said did not
+  exist.
+- **Tools.** `deriveConfig` already overrides `getToolRegistry` and
+  `getToolInvocationGuard`; #11224 built the mesh read-only guard on exactly
+  that seam for subagents, and it applies unchanged to a session.
+- **Model.** `getModel` is overridable the same way, and the roster already
+  carries a per-agent model.
+
+So the persona machinery does not have to be rebuilt. It has to be pointed at a
+session instead of a subagent.
+
+`BridgeSpawnRequest` genuinely has no persona field. But the mesh host session
+already proves the mechanism that closes that gap: it is spawned with
+`sourceType: 'mesh'` and the child _recognises itself_ at `newSession` and
+behaves accordingly. An agent session uses the same mechanism with
+`sourceType: 'mesh-agent'` and `sourceId: <agent id>`: the child reads the
+workspace roster, finds its own identity, and applies that agent's definition to
+its own `Config` before the session goes live. No new bridge field, and the
+persona machinery is used where it already works.
+
+### 1.2 What this changes, and what it does not
+
+The layering was built so that this swap is possible, and it holds. Unchanged:
+the store and its transaction protocol, admission and the budget gates, the
+status aggregate, run close and the outbox, the six thread tools, the prompt
+envelope, REST and Web Shell. All of it addresses agents by `MeshAgent.id` and
+threads by file, and none of it knows how a body is started.
+
+What changes is the runtime seam, and only it:
+
+| Concern                | Was                                                   | Becomes                                                                               |
+| ---------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| A body                 | background agent `mesh-<id>` inside the host session  | a session process with `sourceType: 'mesh-agent'`, `sourceId: <id>`                   |
+| Persona                | `convertToRuntimeConfig` into a subagent `toolConfig` | the same conversion, applied by the child to its own session `Config` at `newSession` |
+| Start a turn           | `launchProgrammaticBackgroundAgent`                   | `bridge.spawnOrAttach` then a prompt into that session                                |
+| Inspect                | `registry.get('mesh-<id>')`                           | the bridge's live-session record for that agent                                       |
+| Mid-run steering       | `registry.queueExternalInput`                         | the session's existing mid-prompt input path                                          |
+| Per-turn binding       | `AgentMeta.meshRun` read at the in-process turn seam  | the same record, read by the agent's own process                                      |
+| Usage and drain events | `AgentEventEmitter` in the host process               | the session's own event stream                                                        |
+
+`dispatch-port.ts` is the whole of it: the dispatcher, its rules, and every
+outcome it can record are unchanged, because the port was always the only thing
+that knew what a body is.
+
+The hidden host session stays, with a smaller job: it owns nothing but the
+dispatch loop. It no longer contains the agents.
+
+### 1.3 What isolation buys, and what it costs
+
+Buys: an agent that crashes takes down only itself and its current run, which
+the existing interrupted-run reconciliation already recovers; per-agent memory
+and model settings; a transcript per agent that is genuinely that agent's; and
+the honest version of the roster the UI already draws.
+
+Costs: N processes instead of one, each with a model client and its own
+context. The background-agent concurrency cap stops being the relevant limit and
+the machine's memory becomes it. A roster is small — two to five agents — so
+this is a real cost and not a prohibitive one, but it is the reason decision 4
+scopes agents to one workspace and the reason a roster limit belongs in the UI.
+
+Everything the execution layer needs still exists:
 
 ## 2. Settled decisions
 
@@ -217,12 +274,12 @@ Recorded so implementation does not relitigate them.
 
 ### Scope and safety
 
-| #   | Decision                                                                                                                                                                           | Consequence                                                                                                                                                            |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **v1 agents are read-only.** No file writes, no worktrees, no branches.                                                                                                            | Removes all concurrent-write design. The deliverable of a thread is a conclusion, not a diff.                                                                          |
+| #   | Decision                                                                                                                                                                            | Consequence                                                                                                                                                                                                                                   |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **v1 agents are read-only.** No file writes, no worktrees, no branches.                                                                                                             | Removes all concurrent-write design. The deliverable of a thread is a conclusion, not a diff.                                                                                                                                                 |
 | 2   | Read-only means **workspace file-reading tools only**. Shell, MCP, `save_memory`, context-file writes, and every other persistent-write or host-wide tool are outside that ceiling. | A read-only shell classifier does not confine absolute paths, so it cannot protect secrets outside the workspace. Shell stays denied until execution has a real filesystem sandbox. Agent definitions may narrow the ceiling, never widen it. |
-| 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                        | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                              |
-| 4   | Agents are **scoped to one workspace**.                                                                                                                                            | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                             |
+| 3   | Tool sets otherwise **follow a required agent definition**.                                                                                                                         | No second permission model. An enabled mesh agent with a missing definition is unavailable, never silently replaced by a generic persona.                                                                                                     |
+| 4   | Agents are **scoped to one workspace**.                                                                                                                                             | Trust and permissions follow the workspace. Five repos means five rosters.                                                                                                                                                                    |
 
 The owner settled the v1 MCP policy: every MCP tool fails closed. A later
 release may admit only individual tools whose policy can prove they are
@@ -255,7 +312,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 16  | Two gates: **12 unattended agent deliveries per thread / 1M accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                  | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
 | 17  | A child **inherits the parent's current turn count** and charges tokens to the root.                                                                                                                                                                                                                                                          | Creating a child does not mint immediate unattended turns; a child created at the limit may be gated immediately. Later human input resets only the child being supervised.                                         |
-| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                                                                                           | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
+| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                            | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
 | 19  | A stuck run, and any run still `running` after a **daemon restart**, is reconciled once. Restart-recovered registry entries are `paused` and use `resumeBackgroundAgent`; completed entries use resident continue or cold revive. A second execution failure is terminal. A launch failure is typed and terminal unless classified transient. | Recovery follows the runtime's actual state machine and replays only work not committed by the delivery watermark; queued launch failures cannot poison the backlog indefinitely.                                   |
 
 ### Surfaces
@@ -532,20 +589,20 @@ normal return cannot reverse the person's stop request.
 
 ### Status transition matrix
 
-| Action                                                                                          | Allowed from           | Result and durable side effects                                                                                                            |
-| ----------------------------------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| first successful booking/delivery                                                               | `open`                 | `in_progress`                                                                                                                              |
-| human feedback that successfully books/delivers                                                 | `blocked`, `in_review` | acknowledge applicable blockers/review candidates, set `in_progress`, reset only this thread's turn count; target scope remains §9.11      |
-| `thread_wait()` from the bound run with another live run (excluding itself) or a descendant with a future wake path | `open`, `in_progress`  | record `closeKind=waiting`, mark run `finishing`, keep `in_progress`; no person notification                                               |
-| `thread_wait()` without a live dependency                                                       | `open`, `in_progress`  | reject; the agent must block, review, or continue working                                                                                  |
-| `thread_block(question)` from the bound run                                                     | `open`, `in_progress`  | append question, record `closeKind=blocked`, mark run `finishing`, enqueue blocker notification atomically                                 |
-| `thread_review(summary)` from the bound run                                                     | `open`, `in_progress`  | append summary, record `closeKind=review`, mark run `finishing` atomically                                                                 |
-| any admission books/delivers nothing and leaves no runnable target                              | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, disabled/unknown assignees, and `no_target`    |
-| terminal launch/execution failure leaves no runnable target                                     | any non-`done`         | append system failure, set `blocked`, enqueue failure notification                                                                         |
-| clean run exit without `thread_block`/`thread_review`                                           | `in_progress`          | append final text, commit consumed input, record `closeKind=unclosed`; block only if no successor is runnable                              |
-| human marks done with a non-done descendant                                                     | any non-`done`         | refuse and return the descendant ids; v1 never silently cascades                                                                           |
-| human marks done with no non-done descendant                                                    | any non-`done`         | set `done`, cancel queued runs, request running cancellation                                                                               |
-| any late post                                                                                   | `done`                 | append for audit, persist `thread_done`, never book or reopen                                                                              |
+| Action                                                                                                              | Allowed from           | Result and durable side effects                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| first successful booking/delivery                                                                                   | `open`                 | `in_progress`                                                                                                                           |
+| human feedback that successfully books/delivers                                                                     | `blocked`, `in_review` | acknowledge applicable blockers/review candidates, set `in_progress`, reset only this thread's turn count; target scope remains §9.11   |
+| `thread_wait()` from the bound run with another live run (excluding itself) or a descendant with a future wake path | `open`, `in_progress`  | record `closeKind=waiting`, mark run `finishing`, keep `in_progress`; no person notification                                            |
+| `thread_wait()` without a live dependency                                                                           | `open`, `in_progress`  | reject; the agent must block, review, or continue working                                                                               |
+| `thread_block(question)` from the bound run                                                                         | `open`, `in_progress`  | append question, record `closeKind=blocked`, mark run `finishing`, enqueue blocker notification atomically                              |
+| `thread_review(summary)` from the bound run                                                                         | `open`, `in_progress`  | append summary, record `closeKind=review`, mark run `finishing` atomically                                                              |
+| any admission books/delivers nothing and leaves no runnable target                                                  | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, disabled/unknown assignees, and `no_target` |
+| terminal launch/execution failure leaves no runnable target                                                         | any non-`done`         | append system failure, set `blocked`, enqueue failure notification                                                                      |
+| clean run exit without `thread_block`/`thread_review`                                                               | `in_progress`          | append final text, commit consumed input, record `closeKind=unclosed`; block only if no successor is runnable                           |
+| human marks done with a non-done descendant                                                                         | any non-`done`         | refuse and return the descendant ids; v1 never silently cascades                                                                        |
+| human marks done with no non-done descendant                                                                        | any non-`done`         | set `done`, cancel queued runs, request running cancellation                                                                            |
+| any late post                                                                                                       | `done`                 | append for audit, persist `thread_done`, never book or reopen                                                                           |
 
 Thread status is an aggregate, not last-writer-wins. While any run is queued,
 running, or finishing, the thread stays `in_progress` (unless a person set
@@ -608,7 +665,7 @@ kept in the next isolated child PR:
 | `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only            |
 | `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports    |
 | `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime        |
-| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload            |
+| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
 | `acp-bridge` + `cli/src/acp-integration/` | Private daemon-to-host launch control                  |
 
 ### 5.1 Local review correction — committed and verified
@@ -787,11 +844,11 @@ queued and running work.
 
 Production surface status:
 
-| State | Piece |
-| --- | --- |
-| Implemented and exercised on the happy path | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Web Shell, transcript slices, cancellation UI |
-| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay |
-| Not implemented pending product decision | channel delivery for the four notification events (§9.12) |
+| State                                          | Piece                                                                                                                        |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Implemented and exercised on the happy path    | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Web Shell, transcript slices, cancellation UI |
+| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay                                     |
+| Not implemented pending product decision       | channel delivery for the four notification events (§9.12)                                                                    |
 
 The daemon owner is scoped to one workspace runtime generation, not merely its
 bridge object. Once that generation drains or is replaced, its keepalive stops
@@ -947,19 +1004,19 @@ gap. Scheduled and external-event triggers are absent but the cron scheduler and
 channel workers already exist to carry them. Board views, labels, search and
 cross-issue references have no equivalent.
 
-| Capability                       | Target reach | Note                                                                                             |
-| -------------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
+| Capability                       | Target reach | Note                                                                                                                                    |
+| -------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, concurrent runs, and accepted mid-run steering observed; forced delivery miss remains unproved |
-| Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified |
-| Skills                           | ~70%         | carried by the agent definition                                                                  |
-| Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                            |
-| Triggers                         | ~50%         | assignment and `@`; scheduled and external events unconnected                                    |
-| Work items                       | ~40%         | assignable item with conversation and status; no board, labels or search                         |
-| Notifications                    | ~40%         | four events to existing channels; no inbox                                                       |
-| Multiple surfaces                | ~30%         | Web Shell and desktop shell                                                                      |
-| Projects                         | ~15%         | a workspace is one cwd                                                                           |
-| Multi-user, self-hosting         | ~5%          | single user, single machine                                                                      |
-| Producing code changes           | 0%           | decision 1                                                                                       |
+| Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified                                      |
+| Skills                           | ~70%         | carried by the agent definition                                                                                                         |
+| Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                                                                   |
+| Triggers                         | ~50%         | assignment and `@`; scheduled and external events unconnected                                                                           |
+| Work items                       | ~40%         | assignable item with conversation and status; no board, labels or search                                                                |
+| Notifications                    | ~40%         | four events to existing channels; no inbox                                                                                              |
+| Multiple surfaces                | ~30%         | Web Shell and desktop shell                                                                                                             |
+| Projects                         | ~15%         | a workspace is one cwd                                                                                                                  |
+| Multi-user, self-hosting         | ~5%          | single user, single machine                                                                                                             |
+| Producing code changes           | 0%           | decision 1                                                                                                                              |
 
 As a target product, roughly 35-40%. That number mixes two unlike things: Multica is a
 multi-user server product (Go, Postgres, tenancy, self-hosting) and this is a
@@ -1133,8 +1190,9 @@ whether #9402 becomes the seed of a later adapter.
 
 ## 10. Out of scope
 
-Real OS-process isolation and cross-machine agents (#10078's session-boundary
-decision and #10247 §5's stalled wiring choice); durable history after a thread
+Cross-machine and non-Qwen agents (#10078's session-boundary decision and
+#10247 §5's stalled wiring choice) — local per-agent process isolation is now
+§1, not out of scope; durable history after a thread
 is deleted; remote and cloud runtimes; multi-user permissions; and agents that
 write code, which decision 1 defers until isolation is settled.
 
