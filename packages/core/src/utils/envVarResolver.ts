@@ -17,6 +17,7 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  * value is baked into hook commands, URLs or MCP configs before child-env
  * sanitization ever applies. Their placeholders are preserved exactly like
  * an unset variable's.
+ * `${session_id}` is also reserved for per-request custom header expansion.
  *
  * @param value - The string that may contain environment variable placeholders
  * @returns The string with environment variables resolved
@@ -33,7 +34,7 @@ export function resolveEnvVarsInString(
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
-    if (isInternalSecretEnvVar(varName)) {
+    if (match === '${session_id}' || isInternalSecretEnvVar(varName)) {
       return match;
     }
     if (customEnv && typeof customEnv[varName] === 'string') {

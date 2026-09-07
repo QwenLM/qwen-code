@@ -2634,7 +2634,7 @@ export class Config {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
       allowDynamicHeaderValues:
-        params.outboundCorrelation?.allowDynamicHeaderValues ?? false,
+        params.outboundCorrelation?.allowDynamicHeaderValues === true,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),

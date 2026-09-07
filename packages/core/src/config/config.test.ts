@@ -9385,6 +9385,22 @@ describe('Server Config (config.ts)', () => {
         );
       },
     );
+
+    it('only enables dynamic header values for boolean true', () => {
+      for (const value of [undefined, false, 'false', 1, {}, []]) {
+        const outboundCorrelation = {
+          allowDynamicHeaderValues: value,
+        } as unknown as ConfigParameters['outboundCorrelation'];
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundAllowDynamicHeaderValues()).toBe(false);
+      }
+
+      const config = new Config({
+        ...baseParams,
+        outboundCorrelation: { allowDynamicHeaderValues: true },
+      });
+      expect(config.getOutboundAllowDynamicHeaderValues()).toBe(true);
+    });
   });
 
   describe('UseRipgrep Configuration', () => {

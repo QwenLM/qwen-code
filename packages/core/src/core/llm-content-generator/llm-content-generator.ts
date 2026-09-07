@@ -32,6 +32,7 @@ import { buildSessionIdHeaders } from '../outbound-session-id.js';
 import {
   expandDynamicHeaders,
   hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
 } from '../outbound-dynamic-headers.js';
 
 const debugLogger = createDebugLogger('GEMINI');
@@ -90,6 +91,7 @@ export class LlmContentGenerator implements ContentGenerator {
     // ones. `buildHttpOptions` supplies the placeholder-bearing entries
     // per request instead, so the literal never reaches the client.
     const allCustomHeaders = contentGeneratorConfig?.customHeaders;
+    if (cliConfig) warnIfDynamicHeadersDisabled(allCustomHeaders, cliConfig);
     const staticEntries = Object.entries(allCustomHeaders ?? {}).filter(
       ([, value]) => typeof value !== 'string' || !hasDynamicPlaceholder(value),
     );
@@ -141,11 +143,8 @@ export class LlmContentGenerator implements ContentGenerator {
       ...httpOptions,
       headers: {
         ...httpOptions?.headers,
-        // Existing merge order for this path is
-        // customHeaders > correlation; keep it.
-        ...sessionHeaders,
         ...dynamicHeaders,
-        // (dynamicHeaders last: they are customHeaders entries.)
+        ...sessionHeaders,
       },
     };
   }
