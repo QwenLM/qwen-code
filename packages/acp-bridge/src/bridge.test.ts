@@ -38410,7 +38410,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         'steer-idle',
         { queueOnly: true },
       ),
-    ).toEqual({ accepted: false });
+    ).toEqual({ accepted: false, reason: 'session_idle' });
     expect(promptCalls).toBe(0);
     expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     expect(
@@ -38449,7 +38449,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         'public-idle',
         { rejectIfIdle: true },
       ),
-    ).toEqual({ accepted: false });
+    ).toEqual({ accepted: false, reason: 'session_idle' });
     expect(promptCalls).toBe(0);
     expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();

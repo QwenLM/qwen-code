@@ -230,10 +230,11 @@ export function mergeRestoredPromptText(current: string, text: string): string {
 }
 
 type RefreshPendingPromptsResult =
-  | 'refreshed'
-  | 'skipped'
-  | 'superseded'
-  | 'failed';
+  | {
+      status: 'refreshed';
+      pendingPrompts: readonly DaemonPendingPromptSummary[];
+    }
+  | { status: 'skipped' | 'superseded' | 'failed' };
 
 function areQueuedPromptsEqual(
   left: readonly QueuedPrompt[],
@@ -373,6 +374,36 @@ function toStoreFiles(
     name: file.name,
     mimeType: file.media_type || 'text/plain',
   }));
+}
+
+// The daemon renders an image-only prompt with this placeholder
+// (`extractPromptText` in packages/acp-bridge/src/bridge.ts), so a local row
+// whose text is empty can only bind to it through this value.
+const IMAGE_ONLY_PROMPT_TEXT = '[image]';
+
+function pendingPromptTextsMatch(localText: string, serverText: string) {
+  return (
+    localText === serverText ||
+    (localText.trim().length === 0 && serverText === IMAGE_ONLY_PROMPT_TEXT)
+  );
+}
+
+/**
+ * Whether a local row still in flight is the same message as a server-side
+ * prompt. Attachments normally rule a text match out, because the daemon's
+ * summary loses them; a row resubmitted after an idle rejection may bind
+ * anyway, since this hook is the one that put it back on the ordinary path.
+ */
+function matchesUnboundSubmittingRow(item: QueuedPrompt, text: string) {
+  return (
+    !item.serverPromptId &&
+    item.serverState === 'submitting' &&
+    ((item.images?.length ?? 0) === 0 ||
+      item.resubmittedAfterIdleRejection === true) &&
+    ((item.files?.length ?? 0) === 0 ||
+      item.resubmittedAfterIdleRejection === true) &&
+    pendingPromptTextsMatch(item.text, text)
+  );
 }
 
 export interface UseQueuedPromptsResult {
@@ -576,6 +607,8 @@ export function useQueuedPrompts({
           return false;
         }
         if (!p.serverPromptId) return true;
+        if (removingServerPromptIdsRef.current.has(p.serverPromptId))
+          return false;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
@@ -640,13 +673,8 @@ export function useQueuedPrompts({
           };
           continue;
         }
-        const submittingMatches = next.filter(
-          (p) =>
-            !p.serverPromptId &&
-            p.serverState === 'submitting' &&
-            (p.images?.length ?? 0) === 0 &&
-            (p.files?.length ?? 0) === 0 &&
-            p.text === serverPrompt.text,
+        const submittingMatches = next.filter((p) =>
+          matchesUnboundSubmittingRow(p, serverPrompt.text),
         );
         if (submittingMatches.length === 1) {
           const submittingIndex = next.indexOf(submittingMatches[0]!);
@@ -703,20 +731,22 @@ export function useQueuedPrompts({
     async (
       targetSessionId = sessionId,
     ): Promise<RefreshPendingPromptsResult> => {
-      if (!connected || !targetSessionId) return 'skipped';
-      if (latestSessionIdRef.current !== targetSessionId) return 'skipped';
+      if (!connected || !targetSessionId) return { status: 'skipped' };
+      if (latestSessionIdRef.current !== targetSessionId)
+        return { status: 'skipped' };
       const ownerToken = ownerTokenRef.current;
       const requestSeq = ++refreshRequestSeqRef.current;
       try {
         const result = await sessionActions.getPendingPrompts({
           sessionId: targetSessionId,
         });
-        if (requestSeq !== refreshRequestSeqRef.current) return 'superseded';
+        if (requestSeq !== refreshRequestSeqRef.current)
+          return { status: 'superseded' };
         if (
           !isCurrentOwnerTokenRef.current(ownerToken) ||
           latestSessionIdRef.current !== targetSessionId
         ) {
-          return 'skipped';
+          return { status: 'skipped' };
         }
         syncServerQueuedPrompts(
           result.pendingPrompts.filter(
@@ -724,10 +754,13 @@ export function useQueuedPrompts({
           ),
           targetSessionId,
         );
-        return 'refreshed';
+        return {
+          status: 'refreshed',
+          pendingPrompts: result.pendingPrompts,
+        };
       } catch (error) {
         console.warn('Failed to refresh pending prompts', error);
-        return 'failed';
+        return { status: 'failed' };
       }
     },
     [connected, sessionActions, sessionId, syncServerQueuedPrompts],
@@ -961,7 +994,7 @@ export function useQueuedPrompts({
       const waitingIds = applyMidTurnSnapshot(
         snapshot,
         targetSessionId,
-        pendingResult === 'refreshed',
+        pendingResult.status === 'refreshed',
       );
       pruneMissingMidTurnRows(waitingIds, targetSessionId);
       return snapshot;
@@ -1277,13 +1310,8 @@ export function useQueuedPrompts({
               (item) => item.midTurnMessageId === promptId,
             ) ??
             pendingMidTurnPrompt ??
-            queuedPromptsRef.current.find(
-              (item) =>
-                !item.serverPromptId &&
-                item.serverState === 'submitting' &&
-                (item.images?.length ?? 0) === 0 &&
-                (item.files?.length ?? 0) === 0 &&
-                item.text === eventText,
+            queuedPromptsRef.current.find((item) =>
+              matchesUnboundSubmittingRow(item, eventText),
             );
           if (prompt) {
             if (prompt.onComplete) {
@@ -1386,6 +1414,7 @@ export function useQueuedPrompts({
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       let admissionStarted = false;
+      let refreshedInBody = false;
 
       return sessionActions
         .submitPrompt(prompt.text, {
@@ -1399,7 +1428,7 @@ export function useQueuedPrompts({
             admissionStarted = true;
           },
         })
-        .then((result) => {
+        .then(async (result) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
             !isCurrentOwnerTokenRef.current(ownerToken) ||
@@ -1465,7 +1494,108 @@ export function useQueuedPrompts({
             displayedServerPromptIdsRef.current.delete(result.promptId);
             return;
           }
-          if (!latestSessionActiveRef.current) {
+          if (
+            prompt.resubmittedAfterIdleRejection &&
+            latestSessionActiveRef.current &&
+            !localMessageAppended
+          ) {
+            const refresh = await refreshPendingPrompts(targetSessionId);
+            refreshedInBody = refresh.status === 'refreshed';
+            if (
+              !isCurrentOwnerTokenRef.current(ownerToken) ||
+              latestSessionIdRef.current !== targetSessionId
+            ) {
+              return;
+            }
+            const localRowExists = queuedPromptsRef.current.some(
+              (item) => item.id === localId,
+            );
+            if (!localRowExists) {
+              // removePendingPrompt aborts a prompt the daemon already runs,
+              // and a snapshot that never arrived proves nothing, so only a
+              // snapshot listing the prompt as still queued licenses removing
+              // it; the started event echoes it in every other case.
+              const queuedInSnapshot =
+                refresh.status === 'refreshed' &&
+                refresh.pendingPrompts.some(
+                  (p) => p.promptId === result.promptId && p.state === 'queued',
+                );
+              if (
+                !queuedInSnapshot ||
+                displayedServerPromptIdsRef.current.has(result.promptId)
+              ) {
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+                return;
+              }
+              removingServerPromptIdsRef.current.add(result.promptId);
+              sessionActions
+                .removePendingPrompt(result.promptId, {
+                  sessionId: targetSessionId,
+                })
+                .then(
+                  (removeResult) => {
+                    if (removeResult.removed) {
+                      const next = queuedPromptsRef.current.filter(
+                        (item) => item.serverPromptId !== result.promptId,
+                      );
+                      queuedPromptsRef.current = next;
+                      setQueuedPrompts(next);
+                    } else {
+                      void refreshPendingPrompts(targetSessionId);
+                    }
+                  },
+                  () => {
+                    void refreshPendingPrompts(targetSessionId);
+                  },
+                )
+                .finally(() => {
+                  removingServerPromptIdsRef.current.delete(result.promptId);
+                });
+              return;
+            }
+            const bound = queuedPromptsRef.current.find(
+              (item) => item.serverPromptId === result.promptId,
+            );
+            if (bound?.serverState === 'queued') {
+              if (bound.id !== localId) {
+                const next = queuedPromptsRef.current.filter(
+                  (item) => item.id !== localId,
+                );
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+              }
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              return;
+            }
+            if (refresh.status !== 'refreshed') {
+              const startedOrCompleted =
+                displayedServerPromptIdsRef.current.has(result.promptId) ||
+                pendingStartedByPromptIdRef.current.has(result.promptId) ||
+                completedPromptIdsRef.current.has(result.promptId);
+              if (startedOrCompleted) {
+                if (!localMessageAppended) {
+                  appendLocalQueuedPrompt(prompt, result.promptId);
+                }
+                const next = queuedPromptsRef.current.filter(
+                  (item) => item.id !== localId,
+                );
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+              }
+              return;
+            }
+          }
+          if (
+            !latestSessionActiveRef.current ||
+            prompt.resubmittedAfterIdleRejection
+          ) {
             if (!localMessageAppended) {
               appendLocalQueuedPrompt(prompt, result.promptId);
             }
@@ -1531,6 +1661,7 @@ export function useQueuedPrompts({
         })
         .finally(() => {
           if (
+            !refreshedInBody &&
             isCurrentOwnerTokenRef.current(ownerToken) &&
             latestSessionIdRef.current === targetSessionId
           ) {
@@ -1866,15 +1997,21 @@ export function useQueuedPrompts({
               completionCallbacksRef.current.delete(midTurnMessageId);
               pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               const next = queuedPromptsRef.current.filter(
-                (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
+                (prompt) =>
+                  prompt.midTurnMessageId !== midTurnMessageId &&
+                  prompt.id !== restoreAdmission.id,
               );
               // The daemon rejected the insert outright, so nothing of it is
-              // queued server-side. If the turn has meanwhile ended, send the
-              // message through the ordinary path (or hold it while a Goal
-              // runs) instead of dropping it.
+              // queued server-side. Its idle verdict can precede the UI update;
+              // use the ordinary path (or hold it while a Goal runs) in either
+              // case instead of dropping it. Keep the UI-idle term beside
+              // `reason`: daemons older than that field omit it, and a
+              // rejection with another cause can still land after the turn
+              // ends.
               if (
                 targetIsCurrent() &&
-                latestRawStreamingStateRef.current === 'idle'
+                (result.reason === 'session_idle' ||
+                  latestRawStreamingStateRef.current === 'idle')
               ) {
                 const shouldHold =
                   holdQueuedPromptsLocallyRef.current ||
@@ -1883,7 +2020,13 @@ export function useQueuedPrompts({
                   ...restoreAdmission,
                   midTurnState: undefined,
                   midTurnMessageId: undefined,
-                  ...(shouldHold ? {} : { serverState: 'submitting' as const }),
+                  ...(shouldHold
+                    ? {}
+                    : {
+                        serverState: 'submitting' as const,
+                        resubmittedAfterIdleRejection:
+                          result.reason === 'session_idle',
+                      }),
                   onComplete,
                   onAdmitted,
                 };
@@ -2341,7 +2484,7 @@ export function useQueuedPrompts({
         completionCallbacksRef.current.delete(target.serverPromptId);
         const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return true;
-        if (refreshResult === 'failed') {
+        if (refreshResult.status === 'failed') {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
             isRemoving: false,
@@ -2361,7 +2504,7 @@ export function useQueuedPrompts({
         });
         const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
-        if (refreshResult !== 'refreshed') {
+        if (refreshResult.status !== 'refreshed') {
           restoreQueuedPrompts([target]);
         }
         reportError(error, fallback);
@@ -2653,11 +2796,12 @@ export function useQueuedPrompts({
             'isInserting' | 'midTurnState' | 'midTurnMessageId' | 'serverState'
           >
         >,
+        serverSaidIdle = false,
       ): boolean => {
         const submitAtIdle =
           isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
           insertOwnerMatches() &&
-          !latestSessionActiveRef.current &&
+          (serverSaidIdle || !latestSessionActiveRef.current) &&
           !writeBlockedRef.current &&
           !holdQueuedPromptsLocallyRef.current;
         const nextFlags = {
@@ -2670,7 +2814,11 @@ export function useQueuedPrompts({
           const pendingPrompt = queuedPromptsRef.current.find(
             (item) => item.id === prompt.id,
           );
-          if (pendingPrompt) submitPendingPrompt(pendingPrompt);
+          if (pendingPrompt)
+            submitPendingPrompt({
+              ...pendingPrompt,
+              resubmittedAfterIdleRejection: serverSaidIdle,
+            });
         }
         return submitAtIdle;
       };
@@ -2746,10 +2894,13 @@ export function useQueuedPrompts({
       }
       if (!isCurrentInsertion()) return;
       if (!result.accepted) {
-        const submitted = recoverAfterSettledInsert({
-          isInserting: false,
-          midTurnMessageId: undefined,
-        });
+        const submitted = recoverAfterSettledInsert(
+          {
+            isInserting: false,
+            midTurnMessageId: undefined,
+          },
+          result.reason === 'session_idle',
+        );
         if (!submitted && insertOwnerMatches()) {
           reportError(
             new Error('Queued message was not accepted for insertion'),

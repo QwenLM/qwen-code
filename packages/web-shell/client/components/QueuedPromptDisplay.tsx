@@ -133,6 +133,7 @@ export interface QueuedPrompt {
   onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
+  resubmittedAfterIdleRejection?: boolean;
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
   midTurnFailedAction?: 'delete' | 'edit';

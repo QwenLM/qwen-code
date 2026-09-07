@@ -244,6 +244,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       pendingPrompts: [],
     });
     sdkMock.actions.removeMidTurnMessage.mockResolvedValue({ removed: true });
+    sdkMock.actions.removePendingPrompt.mockResolvedValue({ removed: true });
   });
 
   afterEach(() => {
@@ -1239,6 +1240,53 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('does not echo a reasonless rejection the daemon starts itself', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        // No `reason`: an older daemon, or a rejection with another cause.
+        return Promise.resolve({ accepted: false });
+      },
+    );
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'prompt-1',
+          text: 'reasonless fallback',
+          queuedAt: Date.now(),
+          state: 'running',
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('reasonless fallback');
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      // Only the daemon's started event may echo this message. The UI-idle
+      // guess that triggered the fallback does not say the daemon started it,
+      // so the row stays visible until the events settle it.
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'reasonless fallback',
+          serverPromptId: 'prompt-1',
+          serverState: 'running',
+        }),
+      ]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('preserves file annotations when a live-state insert falls back', async () => {
     const fileText = '@docs/notes.txt';
     const text = `${fileText} explain this`;
@@ -1423,6 +1471,752 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       ];
       await harness.render({ streamingState: 'responding' });
       expect(onComplete).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    'falls back on server idle before the UI settles: media=%s',
+    async (withMedia) => {
+      let rejectAdmission: (() => void) | undefined;
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+        (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+          new Promise((resolve) => {
+            opts?.onAdmissionStarted?.();
+            rejectAdmission = () =>
+              resolve({ accepted: false, reason: 'session_idle' });
+          }),
+      );
+      const images = withMedia
+        ? [{ data: 'aGVsbG8=', media_type: 'image/png' }]
+        : undefined;
+      sdkMock.actions.submitPrompt.mockImplementationOnce(() => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'follow-up after server idle',
+              queuedAt: Date.now(),
+              state: withMedia ? ('running' as const) : ('queued' as const),
+              ...(withMedia
+                ? {
+                    content: [
+                      {
+                        type: 'image',
+                        data: 'aGVsbG8=',
+                        mimeType: 'image/png',
+                      },
+                    ],
+                  }
+                : {}),
+            },
+          ],
+        });
+        return Promise.resolve({ promptId: 'prompt-1' });
+      });
+      const harness = createHarness();
+      try {
+        await harness.render({
+          streamingState: 'responding',
+          sessionHasActivePrompt: true,
+        });
+        for (let i = 0; i < 3; i++) {
+          await act(async () => {
+            await Promise.resolve();
+          });
+        }
+        sdkMock.actions.getPendingPrompts.mockClear();
+        sdkMock.actions.removePendingPrompt.mockClear();
+        await act(async () => {
+          harness.result().enqueuePrompt('follow-up after server idle', images);
+        });
+        expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledOnce();
+        await act(async () => {
+          rejectAdmission?.();
+          for (let i = 0; i < 4; i++) await Promise.resolve();
+        });
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+        expect(sdkMock.actions.getPendingPrompts).toHaveBeenCalledOnce();
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+          'follow-up after server idle',
+          expect.objectContaining({ sessionId: 'session-a', images }),
+        );
+        if (withMedia) {
+          expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+            'media-1',
+            { sessionId: 'session-a' },
+          );
+          expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+          expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+            'follow-up after server idle',
+            [{ data: 'aGVsbG8=', mimeType: 'image/png' }],
+            { promptId: 'prompt-1' },
+            undefined,
+          );
+          expect(harness.result().queuedPrompts).toEqual([]);
+        } else {
+          expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+          expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+          expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+          expect(harness.result().queuedPrompts).toEqual([
+            expect.objectContaining({
+              text: 'follow-up after server idle',
+              serverPromptId: 'prompt-1',
+              serverState: 'queued',
+            }),
+          ]);
+        }
+        expect(harness.reportError).not.toHaveBeenCalled();
+        await harness.render({
+          streamingState: 'idle',
+          sessionHasActivePrompt: false,
+        });
+        for (let i = 0; i < 3; i++) {
+          await act(async () => {
+            await Promise.resolve();
+          });
+        }
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+        if (withMedia) {
+          expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+          expect(harness.result().queuedPrompts).toEqual([]);
+        } else {
+          expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+          expect(harness.result().queuedPrompts).toEqual([
+            expect.objectContaining({
+              text: 'follow-up after server idle',
+              serverPromptId: 'prompt-1',
+              serverState: 'queued',
+            }),
+          ]);
+        }
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it('keeps an image fallback queued when the daemon does not start it immediately', async () => {
+    let rejectAdmission: (() => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+        new Promise((resolve) => {
+          opts?.onAdmissionStarted?.();
+          rejectAdmission = () =>
+            resolve({ accepted: false, reason: 'session_idle' });
+        }),
+    );
+    sdkMock.actions.submitPrompt.mockImplementationOnce(() => {
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'queued image fallback',
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+          },
+        ],
+      });
+      return Promise.resolve({ promptId: 'prompt-1' });
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      sdkMock.actions.getPendingPrompts.mockClear();
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('queued image fallback', [
+            { data: 'aGVsbG8=', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        rejectAdmission?.();
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'queued image fallback',
+          images: [{ data: 'aGVsbG8=', media_type: 'image/png' }],
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('binds an image-only idle fallback through the daemon placeholder text', async () => {
+    let rejectAdmission: (() => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+        new Promise((resolve) => {
+          opts?.onAdmissionStarted?.();
+          rejectAdmission = () =>
+            resolve({ accepted: false, reason: 'session_idle' });
+        }),
+    );
+    sdkMock.actions.submitPrompt.mockImplementationOnce(() => {
+      sdkMock.actions.getPendingPrompts.mockResolvedValue({
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            // The daemon renders an image-only prompt with this placeholder, so
+            // it is the only key the empty local text can bind through.
+            text: '[image]',
+            content: [
+              { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+            ],
+            queuedAt: Date.now(),
+            state: 'queued' as const,
+          },
+        ],
+      });
+      return Promise.resolve({ promptId: 'prompt-1' });
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('', [{ data: 'aGVsbG8=', media_type: 'image/png' }]);
+      });
+      await act(async () => {
+        rejectAdmission?.();
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: '',
+          images: [{ data: 'aGVsbG8=', media_type: 'image/png' }],
+          serverPromptId: 'prompt-1',
+          serverState: 'queued',
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('drops the local duplicate when two identical idle fallbacks queue', async () => {
+    let resolveFirst: ((value: { promptId: string }) => void) | undefined;
+    let resolveSecond: ((value: { promptId: string }) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.submitPrompt
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('continue');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('continue');
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(2);
+      // Neither local row can be told apart by text, so the refresh binds
+      // neither and materializes one row per daemon prompt; each submit body
+      // then has to drop its own unbound duplicate, or the message shows twice
+      // and no later refresh can clear the copy that never bound.
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockResolvedValue({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'continue',
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+            },
+            {
+              promptId: 'prompt-2',
+              text: 'continue',
+              queuedAt: Date.now(),
+              state: 'queued' as const,
+            },
+          ],
+        });
+        resolveFirst?.({ promptId: 'prompt-1' });
+        resolveSecond?.({ promptId: 'prompt-2' });
+        for (let i = 0; i < 6; i++) await Promise.resolve();
+      });
+      const rows = harness.result().queuedPrompts;
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.serverPromptId).sort()).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      expect(rows.every((row) => row.serverState === 'queued')).toBe(true);
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps an idle fallback submitting when its confirmation snapshot fails', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockRejectedValueOnce(
+          new Error('pending snapshot unavailable'),
+        );
+        harness.result().enqueuePrompt('uncertain fallback');
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'uncertain fallback',
+          serverState: 'submitting',
+          resubmittedAfterIdleRejection: true,
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each(['holdQueuedPromptsLocally', 'writeBlocked', 'sessionId'] as const)(
+    'does not submit an idle rejection across %s changes',
+    async (changedOption) => {
+      let rejectAdmission: (() => void) | undefined;
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+        (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+          new Promise((resolve) => {
+            opts?.onAdmissionStarted?.();
+            rejectAdmission = () =>
+              resolve({ accepted: false, reason: 'session_idle' });
+          }),
+      );
+      const harness = createHarness();
+      try {
+        await harness.render({ streamingState: 'responding' });
+        await act(async () => {
+          harness.result().enqueuePrompt('keep this follow-up');
+        });
+        await harness.render({
+          streamingState: 'responding',
+          [changedOption]: changedOption === 'sessionId' ? 'session-b' : true,
+        });
+        await act(async () => {
+          rejectAdmission?.();
+        });
+        expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+        expect(harness.reportError).not.toHaveBeenCalled();
+        if (changedOption === 'sessionId') {
+          expect(harness.result().queuedPrompts).toEqual([]);
+        } else {
+          expect(harness.result().queuedPrompts).toEqual([
+            expect.objectContaining({
+              text: 'keep this follow-up',
+              midTurnMessageId: undefined,
+              midTurnState: undefined,
+            }),
+          ]);
+        }
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it('submits an explicit insert rejected because the session became idle', async () => {
+    let rejectAdmission: (() => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+        new Promise((resolve) => {
+          opts?.onAdmissionStarted?.();
+          rejectAdmission = () =>
+            resolve({ accepted: false, reason: 'session_idle' });
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('held follow-up');
+      });
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: false,
+      });
+      let insertion!: Promise<void>;
+      act(() => {
+        insertion = harness.result().insertQueuedPrompt(1);
+      });
+      await act(async () => {
+        rejectAdmission?.();
+        await insertion;
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'held follow-up',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'held follow-up',
+        undefined,
+        { promptId: 'prompt-1' },
+        undefined,
+      );
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not append a delayed idle fallback after the session changes', async () => {
+    let resolvePending: ((value: { pendingPrompts: [] }) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePending = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        sessionId: 'session-a',
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolvePending = resolve;
+            }),
+        );
+        harness.result().enqueuePrompt('delayed fallback');
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      await harness.render({
+        sessionId: 'session-b',
+        streamingState: 'responding',
+      });
+      await act(async () => {
+        resolvePending?.({ pendingPrompts: [] });
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('removes a delayed idle fallback cleared before its snapshot arrives', async () => {
+    let resolvePending:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'queued';
+          }>;
+        }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolvePending = resolve;
+            }),
+        );
+        harness.result().enqueuePrompt('cleared fallback');
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      await act(async () => {
+        resolvePending?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'cleared fallback',
+              queuedAt: Date.now(),
+              state: 'queued',
+            },
+          ],
+        });
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).toHaveBeenCalledWith(
+        'prompt-1',
+        { sessionId: 'session-a' },
+      );
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not remove a delayed idle fallback that started before its snapshot', async () => {
+    let resolvePending:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'running';
+          }>;
+        }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolvePending = resolve;
+            }),
+        );
+        harness.result().enqueuePrompt('started fallback');
+        await Promise.resolve();
+      });
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: 'prompt-1',
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: 'prompt-1',
+              text: 'started fallback',
+            },
+          },
+        ]);
+      });
+      await act(async () => {
+        resolvePending?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'started fallback',
+              queuedAt: Date.now(),
+              state: 'running',
+            },
+          ],
+        });
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not abort a cleared delayed fallback the snapshot reports running', async () => {
+    let resolvePending:
+      | ((value: {
+          pendingPrompts: Array<{
+            promptId: string;
+            text: string;
+            queuedAt: number;
+            state: 'running';
+          }>;
+        }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    const onComplete = vi.fn();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolvePending = resolve;
+            }),
+        );
+        harness
+          .result()
+          .enqueuePrompt('running fallback', undefined, undefined, onComplete);
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      await act(async () => {
+        resolvePending?.({
+          pendingPrompts: [
+            {
+              promptId: 'prompt-1',
+              text: 'running fallback',
+              queuedAt: Date.now(),
+              state: 'running',
+            },
+          ],
+        });
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      // The daemon already runs this prompt: removing it would abort a live
+      // turn, so the cleared row is left to the started/completed events.
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: { sessionId: 'session-a', promptId: 'prompt-1' },
+          },
+        ]);
+      });
+      expect(onComplete).toHaveBeenCalledOnce();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not remove a cleared delayed fallback whose confirmation snapshot fails', async () => {
+    let rejectPending: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false, reason: 'session_idle' });
+      },
+    );
+    sdkMock.actions.removePendingPrompt.mockClear();
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        sdkMock.actions.getPendingPrompts.mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectPending = reject;
+            }),
+        );
+        harness.result().enqueuePrompt('uncertain clear');
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      act(() => {
+        harness.result().clearQueuedPrompts();
+      });
+      await act(async () => {
+        rejectPending?.(new Error('pending snapshot unavailable'));
+        for (let i = 0; i < 3; i++) await Promise.resolve();
+      });
+      // A snapshot that never arrived proves nothing about the prompt's state,
+      // so the cleared row must not be removed server-side: the daemon may
+      // already be running it, and removal would abort that turn.
+      expect(sdkMock.actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(harness.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }

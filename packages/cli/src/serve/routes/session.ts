@@ -7940,9 +7940,13 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
-  // daemon; rejected requests were not admitted. Synchronous — the bridge only
-  // mutates its in-memory session queues.
+  // Returns `{ accepted, messageId?, reason? }`; `reason` is `'session_idle'`
+  // when an open session had nothing queued or running, which lets a client
+  // resubmit as an ordinary prompt instead of reporting a failure. Every other
+  // rejection cause — closing, attachment budget, mismatched `messageId`, full
+  // queue — omits it. Accepted requests are owned by the daemon; rejected
+  // requests were not admitted. Synchronous — the bridge only mutates its
+  // in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. It bounds how much a single

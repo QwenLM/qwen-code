@@ -3766,11 +3766,17 @@ export interface DaemonSessionBtwResult {
 /**
  * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
  * when the message is owned by the daemon, either in the running turn's queue
- * or promoted into the normal prompt FIFO.
+ * or promoted into the normal prompt FIFO. On a rejection, `reason` is
+ * `'session_idle'` when an open session had nothing queued or running, so the
+ * caller can resubmit the message as an ordinary prompt; it is absent on
+ * older daemons and on every other rejection cause (queue full, closing
+ * session, attachment budget, mismatched `messageId`), so callers must keep
+ * their own idle detection alongside it.
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
   messageId?: string;
+  reason?: 'session_idle';
 }
 
 export interface DaemonRemoveMidTurnMessageResult {
