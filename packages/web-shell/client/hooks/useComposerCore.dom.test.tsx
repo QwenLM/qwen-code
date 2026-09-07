@@ -2243,8 +2243,11 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
   function pressChipKey(key: string, init?: KeyboardEventInit): KeyboardEvent {
     const view = latest!.viewRef.current!;
-    // Real keydowns are cancelable; tests observe `defaultPrevented` to tell
-    // "handled (swallowed)" from "fell through".
+    // Real keydowns are cancelable so `defaultPrevented` is observable at
+    // all. Note it only discriminates for keys CodeMirror does not bind with
+    // `preventDefault` — the default keymap prevents Backspace/Delete
+    // unconditionally, so the flag is meaningful here only for other keys
+    // (e.g. the printable-key test below).
     const event = new KeyboardEvent('keydown', {
       key,
       code: key,
@@ -2493,10 +2496,11 @@ describe('useComposerCore attachment chip deletion keys', () => {
   });
 
   it('ignores modified Backspace/Delete so editing chords cannot destroy attachment chips', async () => {
-    // Every modifier disjunct in the fallback's guard is witnessed here:
-    // Ctrl/Cmd+Backspace (delete-to-line-start), Shift+Delete (cut), and
-    // Alt+Backspace (delete-word) are ordinary editing chords that must
-    // reach their own bindings, not destroy the chip.
+    // Every modifier disjunct in the fallback's guard is witnessed against
+    // both keys: Ctrl/Cmd+Backspace (delete-to-line-start), Cmd/Ctrl+Delete
+    // (delete-group), Shift+Delete (cut), and Alt+Backspace (delete-word)
+    // are ordinary editing chords that must reach their own bindings, not
+    // destroy the chip.
     await mount();
     const file = new File(['png'], 'photo.png', { type: 'image/png' });
 
@@ -2504,6 +2508,8 @@ describe('useComposerCore attachment chip deletion keys', () => {
 
     pressChipKey('Backspace', { ctrlKey: true });
     pressChipKey('Delete', { metaKey: true });
+    pressChipKey('Backspace', { metaKey: true });
+    pressChipKey('Delete', { ctrlKey: true });
     pressChipKey('Backspace', { shiftKey: true });
     pressChipKey('Delete', { shiftKey: true });
     pressChipKey('Backspace', { altKey: true });

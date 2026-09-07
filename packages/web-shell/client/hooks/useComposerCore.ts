@@ -113,6 +113,31 @@ import {
   type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
+// On Android Chrome the composer mounts the CodeMirror backend whenever the
+// `(hover: none) and (pointer: coarse)` media query does not match (tablets,
+// DeX with a mouse) or via the `?composer=codemirror` escape hatch. There,
+// CodeMirror swallows the real Backspace/Enter keydown and re-dispatches a
+// synthetic event carrying only `{key, keyCode}`: no repeat flag and no
+// modifier state survive (@codemirror/view InputState.keydown +
+// delayAndroidKey). Every guard in the attachment fallback below would see a
+// plain Backspace there, so a held key would drain every chip (~30/s, no
+// undo) and a single Ctrl+Backspace would destroy one. The flags are
+// undeliverable on that platform, so the keyboard fallback stays off and the
+// chips remain removable through their close buttons.
+// On Android Chrome the composer mounts the CodeMirror backend whenever the
+// `(hover: none) and (pointer: coarse)` media query does not match (tablets,
+// DeX with a mouse) or via the `?composer=codemirror` escape hatch. There,
+// CodeMirror swallows the real Backspace/Enter keydown and re-dispatches a
+// synthetic event carrying only `{key, keyCode}`: no repeat flag and no
+// modifier state survive (@codemirror/view InputState.keydown +
+// delayAndroidKey). Every guard in the attachment fallback below would see a
+// plain Backspace there, so a held key would drain every chip (~30/s, no
+// undo) and a single Ctrl+Backspace would destroy one. The flags are
+// undeliverable on that platform, so the keyboard fallback stays off and the
+// chips remain removable through their close buttons.
+export const isAndroidCodeMirrorComposer = /\bAndroid\b/.test(
+  navigator.userAgent,
+);
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
 [data-web-shell-tooltip-portal] {
@@ -2970,6 +2995,7 @@ export function useComposerCore(
         // only on an otherwise-empty composer: with text present, Backspace
         // at position 0 stays a no-op and Delete keeps deleting characters.
         any: (view, event) => {
+          if (isAndroidCodeMirrorComposer) return false;
           if (!event || (event.key !== 'Backspace' && event.key !== 'Delete')) {
             return false;
           }
