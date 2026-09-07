@@ -139,6 +139,7 @@ export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
+  SessionResetPendingError,
   WorkspaceDrainingError,
   BridgeChannelQuarantinedError,
   InvalidRewindTargetError,
