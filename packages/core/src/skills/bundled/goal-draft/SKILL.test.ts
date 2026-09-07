@@ -138,6 +138,54 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('Never invent paths, IDs, or commands');
   });
 
+  it('bounds drafting reads and avoids invented audit quotas', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain('Stop exploring once those are grounded');
+    expect(body).toContain(
+      'do not audit the implementation, reproduce failures, run builds or tests, install dependencies, or start services',
+    );
+    expect(body).toContain('Usually 3–5 Done-when checks suffice');
+    expect(body).toContain('Do not add checks just to reach a count');
+    expect(body).toContain('preserve explicit user requirements');
+    expect(body).toContain('Zero defects is a valid result');
+    expect(body).toContain('never require a positive defect count');
+    expect(body).toContain(
+      'Do not invent minimum scenario counts, evidence-file counts, or exploration-round quotas',
+    );
+  });
+
+  it('withholds an actionable hand-off while essential information is missing', () => {
+    const { body } = loadGoalDraftSkill();
+    const gate = body.indexOf(
+      '**If any `<TODO: …>` or essential decision remains**',
+    );
+    const readyHandoff = body.indexOf('Then hand off, and nothing else:');
+
+    expect(body).toContain(
+      'use a recommended default only for nonessential choices',
+    );
+    expect(body).toContain(
+      'unresolved edit-versus-replace choice stays `<TODO: …>`',
+    );
+    expect(gate).toBeGreaterThan(body.indexOf('## Step 5'));
+    expect(gate).toBeLessThan(readyHandoff);
+    expect(body.slice(gate, readyHandoff)).toContain('Needs clarification');
+    expect(body.slice(gate, readyHandoff)).toContain(
+      'Do not call `propose_goal` or print a runnable `/goal set` or `/goal edit` line',
+    );
+    expect(body.slice(gate, readyHandoff)).toContain('Stop here');
+  });
+
+  it('describes the prose budget as an agreement rather than a runtime limit', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain('not a runtime-enforced turn or wall-clock limit');
+    expect(body).toContain('changes the Goal token budget');
+    expect(body).toContain('Preserve a user-specified budget');
+    expect(body).toContain('mark the default `[ASSUMPTION]` in Context');
+  });
+
   it('fixes the objective contract labels and keeps the hand-off on one line', () => {
     const { body } = loadGoalDraftSkill();
 
@@ -189,7 +237,11 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('acknowledge it in one sentence and end the turn');
     // The text hand-off survives for headless runs and disabled tools.
     expect(body).toContain(
-      '**Otherwise** (headless, the tool is disabled, or a Goal is active)',
+      '**Otherwise** (Web Shell or another ACP client, headless, the tool is disabled, or a Goal is active)',
+    );
+    expect(body).toContain('the draft has not been applied');
+    expect(body).toContain(
+      'Do not promise a dialog in Web Shell or other ACP sessions',
     );
   });
 
