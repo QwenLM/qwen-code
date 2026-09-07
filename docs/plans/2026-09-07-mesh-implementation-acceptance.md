@@ -131,6 +131,8 @@ successor. Accepted-but-unconsumed input survives restart and is replayed once;
 late callbacks are attempt-guarded. Stored running work is resumed once and a
 second failure becomes terminal. The hidden host binding is replaced only
 after the resume promise definitively rejects, never merely on its timeout.
+An aggregate child-review report carries the review summary's source run id,
+so the parent wake remains auditable across the system-authored hop.
 Mesh reuses the existing three-minute workflow watchdog, including its
 tool-in-flight suspension, and requeues the first stalled attempt. Per the
 demo-first instruction, no local tests, lint, typecheck, build, or CI wait was

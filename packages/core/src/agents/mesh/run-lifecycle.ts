@@ -325,15 +325,19 @@ export async function applyAggregateStatus(
 
   if (resolution.status === 'in_review') {
     if (next.parentThreadId && !alreadyReported('child_in_review')) {
+      const summary = next.messages[next.messages.length - 1];
       next = enqueue(
         next,
         {
           kind: 'parent_report',
+          ...(summary?.sourceRunId
+            ? { causedByRunId: summary.sourceRunId }
+            : {}),
           payload: {
             event: 'child_in_review',
             threadId: next.id,
             parentThreadId: next.parentThreadId,
-            summaryMessageId: next.messages[next.messages.length - 1]?.id,
+            summaryMessageId: summary?.id,
           },
         },
         now,
