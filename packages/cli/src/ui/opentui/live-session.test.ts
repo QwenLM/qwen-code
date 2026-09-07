@@ -1066,9 +1066,22 @@ describe('livePromptEvents', () => {
       args: {},
     });
     const recordMidTurnUserMessage = vi.fn();
-    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
-      recordMidTurnUserMessage,
-    });
+    const addHistory = vi.fn();
+    const config = {
+      ...createFakeConfig(sendMessageStream, undefined, undefined, {
+        recordMidTurnUserMessage,
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory,
+        isInitialized: () => true,
+        getChat: () => ({
+          getGenerationConfig: () => ({
+            tools: [{ functionDeclarations: [] }],
+          }),
+        }),
+      }),
+    } as unknown as Config;
     const controller = new AbortController();
     const restoreSteering = vi.fn();
     atMocks.abortAfter = () => controller.abort();
@@ -1093,6 +1106,19 @@ describe('livePromptEvents', () => {
     expect(events.filter((e) => e.type === 'user')).toEqual([]);
     // The resolved hop does not ride the dead signal: no continuation send.
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // The batch itself completed before the abort, so its responses must
+    // still be paired with their calls (R5-4): without the history write the
+    // next send's orphan repair tells the model the successful tool failed
+    // and invites a retry.
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 't1')).toBe(
+      true,
+    );
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {

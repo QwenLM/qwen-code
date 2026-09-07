@@ -974,6 +974,13 @@ export async function* livePromptEvents(
           // signal, so recording here would commit a mid-turn user message the
           // model never saw (and /resume would replay it as the user's words).
           options?.restoreSteering?.(texts);
+          // The batch completed normally, so its responses must still reach
+          // history (all-cancelled sibling above): without the write the next
+          // send's orphan repair tells the model a successful tool failed and
+          // invites a retry (R5-4).
+          if (responseParts.length > 0) {
+            await client.addHistory({ role: 'user', parts: responseParts });
+          }
           return;
         }
         // U-32 (ink accept() :3352-3358): record each surviving message so a
