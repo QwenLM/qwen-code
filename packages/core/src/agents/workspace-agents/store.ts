@@ -158,20 +158,6 @@ export function isValidAgentName(value: unknown): value is string {
   return typeof value === 'string' && AGENT_NAME_PATTERN.test(value);
 }
 
-/**
- * Absent is valid: an agent that has never been started has no body yet. A
- * half-written binding is not — it would name a session that may not exist,
- * and the dispatcher would treat a stale handle as a live one.
- */
-function isValidAgentRuntime(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!isRecord(value)) return false;
-  if (value['mode'] !== 'local') return false;
-  return (
-    value['sessionId'] === undefined || isNonEmptyString(value['sessionId'])
-  );
-}
-
 function isValidAgent(value: unknown): value is WorkspaceAgent {
   if (!isRecord(value)) return false;
   return (
@@ -198,7 +184,6 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
       isFiniteTimestamp(value['retiredAt'])) &&
     (value['maxConcurrentRuns'] === undefined ||
       isPositiveInteger(value['maxConcurrentRuns'])) &&
-    isValidAgentRuntime(value['runtime']) &&
     (value['runtimeId'] === undefined || isNonEmptyString(value['runtimeId']))
   );
 }

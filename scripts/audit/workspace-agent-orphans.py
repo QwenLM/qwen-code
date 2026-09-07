@@ -91,13 +91,56 @@ orphans = [
     if n not in BASELINE and not (prod[n] - {o})
 ]
 
+failed = False
 print(f'{len(exports)} exports in the workspace-agents scope, '
       f'{len(BASELINE)} accepted in the baseline')
-if not orphans:
+if orphans:
+    failed = True
+    print(f'\n{len(orphans)} seam(s) with no production caller:\n')
+    for n, o, nt in orphans:
+        print(f'  {n:<34} {o}' +
+              (f'  <-- ALIVE ONLY IN TESTS ({nt})' if nt else '  (unused entirely)'))
+else:
     print('OK: no unexplained orphan.')
-    sys.exit(0)
-print(f'\n{len(orphans)} seam(s) with no production caller:\n')
-for n, o, nt in orphans:
-    print(f'  {n:<34} {o}' +
-          (f'  <-- ALIVE ONLY IN TESTS ({nt})' if nt else '  (unused entirely)'))
-sys.exit(1)
+
+
+# --- second sweep: fields declared on a stored record that nothing uses ------
+# A field only a validator mentions is a decoration, not a seam. `runtime` was
+# exactly that: declared, validated, never written, never read, and it read as
+# a working runtime binding to anyone reviewing the type.
+
+RECORD_FILES = ['packages/core/src/agents/workspace-agents/types.ts']
+FIELD_BASELINE = {
+    'runtimeId': 'reserved by #11222 for later runtime adapters; has a round-trip test',
+    'schemaVersion': 'written by every record constructor via a spread',
+}
+
+field_orphans = []
+for rel in RECORD_FILES:
+    text = (ROOT / rel).read_text()
+    for m in re.finditer(r'^  (\w+)\??:\s', text, re.M):
+        name = m.group(1)
+        if name in FIELD_BASELINE:
+            continue
+        users = set()
+        for f, t in [(r, (ROOT / r).read_text()) for r in
+                     sorted({*prod.get(name, set()), *tests.get(name, set())})]:
+            if f == rel:
+                continue
+            # A validator naming the field in a string key is not a user.
+            if re.search(r'\b' + re.escape(name) + r'\b(?!\'\])', t):
+                users.add(f)
+        real = {u for u in users if '.test.' not in u}
+        if not real:
+            field_orphans.append((name, rel, len(users)))
+
+if field_orphans:
+    failed = True
+    print(f'\n{len(field_orphans)} record field(s) nothing reads or writes:\n')
+    for name, rel, nt in field_orphans:
+        print(f'  {name:<34} {rel}' +
+              (f'  <-- only tests ({nt})' if nt else '  (validator only)'))
+else:
+    print('OK: no orphan record field.')
+
+sys.exit(1 if failed else 0)

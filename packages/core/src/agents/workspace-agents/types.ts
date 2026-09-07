@@ -112,20 +112,6 @@ export interface WorkspaceAgent {
    */
   retiredAt?: number;
   /**
-   * The background agent carrying this identity's long-lived body, once it has
-   * been started. Its transcript is this agent's memory across every thread.
-   * Absent until the first dispatch.
-   */
-  /**
-   * Where this identity's body runs.
-   *
-   * A discriminated union from the first version so a remote or cloud runtime
-   * can be added without a migration, matching Multica's `runtime_mode`. Local
-   * means one session process on this machine; `sessionId` is absent until it
-   * has been started, and is the only handle anything needs to reach the body.
-   */
-  runtime?: { mode: 'local'; sessionId?: string };
-  /**
    * How many threads this agent may work at once. Absent means 1.
    *
    * Multica's `max_concurrent_tasks`. Serial was a consequence of an agent
