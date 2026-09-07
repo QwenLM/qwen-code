@@ -185,6 +185,36 @@ pub struct ObservationRevisionResult {
     pub cache_estimate_bytes: usize,
 }
 
+impl ObservationRevisionResult {
+    pub fn render_full_with_action_tokens(
+        &self,
+        mut token_for: impl FnMut(usize) -> String,
+    ) -> String {
+        if self.nodes.is_empty() {
+            return "Full accessibility state: no elements.".to_owned();
+        }
+        let lines = self
+            .nodes
+            .iter()
+            .map(|node| {
+                let mut rendered = format!(
+                    " {}[{}] {}",
+                    "  ".repeat(node.depth),
+                    node.element_id,
+                    node.body
+                );
+                if let Some(index) = node.actionable_index {
+                    rendered.push_str(" element_token=");
+                    rendered.push_str(&token_for(index));
+                }
+                rendered
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Full accessibility state:\n{lines}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationRevisionError {
     EmptyLineageId,
@@ -1554,6 +1584,22 @@ mod tests {
         assert_eq!(result.cache_estimate_bytes, 0);
         assert!(!result.text.contains("element_token="));
         assert_eq!(lineage.retained_revision_count(), 0);
+    }
+
+    #[test]
+    fn unretained_full_can_render_current_snapshot_tokens() {
+        let mut lineage = lineage(4);
+        let result = lineage
+            .observe_unretained_full(
+                vec![node("button", 0, "button", Some(7))],
+                FullResyncReason::IdentityUnavailable,
+            )
+            .unwrap();
+
+        let rendered = result.render_full_with_action_tokens(|index| format!("snapshot:{index}"));
+
+        assert!(!result.text.contains("element_token="));
+        assert!(rendered.contains("[0] button element_token=snapshot:7"));
     }
 
     #[test]
