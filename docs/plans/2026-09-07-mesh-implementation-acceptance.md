@@ -118,6 +118,17 @@ This proves the demo steps 1-5 only. The forced delivery miss, 12-turn
 ping-pong, daemon reaper/reload observation, and bare-mode exposure remain
 unrun, so the full step-7 gate is not yet claimed.
 
+**Direct steering and concurrency observation (2026-09-07).** In thread
+`th_6c12d77c-7d8a-4cd5-a535-2030a4c06d45`, a human post made while Alice's run
+was `running` coalesced into that same run. Its delivery id appeared in both
+`acceptedMessageIds` and `consumedMessageIds`, and Alice's final review included
+the newly requested `/etc` result. In thread
+`th_7aee128a-78f3-44be-80a9-ebb676937de6`, Alice and Bob entered `running` 138
+ms apart, posted separately attributed reviews, completed independently, and
+the aggregate thread reached `in_review`. This proves the accepted direct-input
+path and concurrent agents on one shared thread; it does not prove the forced
+enqueue-miss recovery path.
+
 ### Step 8 — Dispatcher reliability
 
 Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stale host-session binding replacement after a definitive resume failure; stall sweeper; full outbox replay on startup.
