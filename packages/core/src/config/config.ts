@@ -676,14 +676,20 @@ export interface OutboundSessionIdHeaderSettings {
    */
   enabled?: boolean;
   /**
-   * Header name to set, e.g. `x-opencode-session`. Must be a valid
-   * HTTP token (letters, digits, `-`); an invalid name is ignored with
+   * Header name to set, e.g. `x-opencode-session`. Must match the
+   * conservative HTTP token subset accepted by
+   * `core/outbound-session-id.ts` (letters, digits, `.`, `_`, `-`,
+   * starting with a letter or digit); an invalid name is ignored with
    * a debug warning rather than sent. Default: `session_id`.
    */
   headerName?: string;
   /**
    * Exact hostnames (no wildcards) that may receive the header, e.g.
-   * `["opencode.ai"]`. HTTPS only. Matching is case-insensitive.
+   * `["opencode.ai"]`. HTTPS only. Matching is case-insensitive and
+   * ignores the port; internationalized names must be listed in
+   * punycode, because the request hostname is compared as parsed.
+   * Only the initial destination is checked — a listed host that
+   * redirects elsewhere forwards the header with it.
    * Default: empty — with `enabled: true` but no hosts, nothing is
    * sent (fail-closed rather than "all hosts").
    */

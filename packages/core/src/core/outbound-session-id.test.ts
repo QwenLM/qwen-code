@@ -294,4 +294,49 @@ describe('outbound session ID — user-configured header', () => {
       buildSessionIdHeaders(config('', OPENCODE), 'https://opencode.ai/v1'),
     ).toEqual({});
   });
+
+  // The opt-in branch ships off; the built-in first-party branch ships
+  // on. A Config that predates the new getter must not be able to turn
+  // the shipping-on branch off by throwing — the four provider suites
+  // build exactly such partial `as unknown as Config` doubles.
+  it('keeps the built-in header when Config has no sessionIdHeader getter', () => {
+    const legacyConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+    } as unknown as Config;
+
+    expect(
+      buildSessionIdHeaders(
+        legacyConfig,
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      ),
+    ).toEqual({ [SESSION_ID_HEADER]: 'session-1' });
+    expect(
+      buildSessionIdHeaders(legacyConfig, 'https://opencode.ai/zen/go/v1'),
+    ).toEqual({});
+  });
+
+  it('treats settings with no enabled field as off', () => {
+    expect(
+      buildSessionIdHeaders(
+        config('session-1', {
+          headerName: 'x-opencode-session',
+          trustedHosts: ['opencode.ai'],
+        }),
+        'https://opencode.ai/zen/go/v1',
+      ),
+    ).toEqual({});
+  });
+
+  it('emits one header when the configured name only differs in case', () => {
+    expect(
+      buildSessionIdHeaders(
+        config('session-1', {
+          enabled: true,
+          headerName: 'Session_ID',
+          trustedHosts: ['routify-pub.alibaba-inc.com'],
+        }),
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      ),
+    ).toEqual({ [SESSION_ID_HEADER]: 'session-1' });
+  });
 });

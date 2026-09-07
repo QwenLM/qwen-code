@@ -22,6 +22,10 @@ export const SESSION_ID_HEADER_HOSTS: readonly string[] = [
 // smuggle a second header, out of the configured value.
 const VALID_HEADER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+// An invalid header name is a static misconfiguration, so warn once per
+// distinct name rather than on every request to the trusted host.
+const warnedInvalidHeaderNames = new Set<string>();
+
 type FetchLike = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -37,6 +41,58 @@ function requestUrl(input: string | URL | Request): URL | undefined {
   }
 }
 
+/**
+ * The user-configured header name to send to `hostname`, or `undefined`
+ * when the opt-in feature is off, the host is not trusted, or the name
+ * is unusable.
+ *
+ * Never throws. `outboundCorrelation.sessionIdHeader` ships OFF, and the
+ * built-in first-party branch ships ON — so this function is kept
+ * structurally unable to affect that branch, including by raising on a
+ * `Config` collaborator that predates `getOutboundSessionIdHeaderSettings`.
+ */
+function configuredSessionHeaderName(
+  config: Config,
+  hostname: string,
+): string | undefined {
+  try {
+    const settings = config.getOutboundSessionIdHeaderSettings();
+    // Explicitly `=== true`, not `!== false`: a settings object that
+    // reaches here without an `enabled` field is treated as OFF. The
+    // Config getter already gates on the flag; this re-check exists to
+    // fail closed if that gate is ever refactored away, which it only
+    // does if the absent case is off too.
+    if (settings?.enabled !== true) return undefined;
+
+    // Host match before name validation: a misconfigured header name
+    // must not log on every outbound HTTPS request, only on the ones
+    // actually destined for a host the user listed.
+    const trusted = (settings.trustedHosts ?? []).some(
+      (host) => host.trim().toLowerCase() === hostname,
+    );
+    if (!trusted) return undefined;
+
+    const headerName = (settings.headerName ?? SESSION_ID_HEADER).trim();
+    if (!VALID_HEADER_NAME.test(headerName)) {
+      if (!warnedInvalidHeaderNames.has(headerName)) {
+        warnedInvalidHeaderNames.add(headerName);
+        debugLogger.warn(
+          `Ignoring outboundCorrelation.sessionIdHeader.headerName "${headerName}": not a valid HTTP header name.`,
+        );
+      }
+      return undefined;
+    }
+    return headerName;
+  } catch (error) {
+    debugLogger.warn(
+      `Unable to resolve outboundCorrelation.sessionIdHeader: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
 export function buildSessionIdHeaders(
   config: Config,
   destination: string | URL | Request,
@@ -48,31 +104,13 @@ export function buildSessionIdHeaders(
     }
     const hostname = url.hostname.toLowerCase();
 
+    // Note: both allowlists are checked against the *initial* request
+    // destination only. Standard fetch redirect behavior applies after
+    // that, so a listed host can forward the header elsewhere by
+    // redirecting — see the threat model in
+    // docs/design/2026-09-03-outbound-session-id-header.md.
     const builtIn = SESSION_ID_HEADER_HOSTS.includes(hostname);
-
-    // User-configured branch (`outboundCorrelation.sessionIdHeader`):
-    // exact-host allowlist, HTTPS only, disabled by default. `enabled`
-    // is re-checked here even though the Config getter already gates on
-    // it — this is a security-relevant send path, so it fails closed
-    // against a settings object that says off. An invalid header name
-    // skips this branch only — the built-in one still runs.
-    const settings = config.getOutboundSessionIdHeaderSettings();
-    let configuredHeader: string | undefined;
-    if (settings && settings.enabled !== false) {
-      const headerName = (settings.headerName ?? SESSION_ID_HEADER).trim();
-      if (!VALID_HEADER_NAME.test(headerName)) {
-        debugLogger.warn(
-          `Ignoring outboundCorrelation.sessionIdHeader.headerName "${headerName}": not a valid HTTP header name.`,
-        );
-      } else {
-        const trustedHosts = (settings.trustedHosts ?? [])
-          .map((host) => host.trim().toLowerCase())
-          .filter((host) => host.length > 0);
-        if (trustedHosts.includes(hostname)) {
-          configuredHeader = headerName;
-        }
-      }
-    }
+    const configuredHeader = configuredSessionHeaderName(config, hostname);
 
     if (!builtIn && configuredHeader === undefined) {
       return {};
@@ -85,7 +123,13 @@ export function buildSessionIdHeaders(
     if (builtIn) {
       headers[SESSION_ID_HEADER] = sessionId;
     }
-    if (configuredHeader !== undefined) {
+    // Header names are case-insensitive on the wire, so a configured
+    // name that only differs in case from the built-in one would be the
+    // same header — emit it once rather than as two record entries.
+    if (
+      configuredHeader !== undefined &&
+      !(builtIn && configuredHeader.toLowerCase() === SESSION_ID_HEADER)
+    ) {
       headers[configuredHeader] = sessionId;
     }
     return headers;
