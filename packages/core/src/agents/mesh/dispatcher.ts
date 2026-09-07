@@ -39,23 +39,24 @@ import type { MeshAgent, Thread, ThreadEvent, ThreadRun } from './types.js';
 /** What the runtime says about an agent's long-lived body. */
 export type MeshBodyState =
   | { kind: 'absent' }
-  | { kind: 'resident' }
   | { kind: 'paused' }
-  | { kind: 'cold' }
+  | { kind: 'completed' }
   | { kind: 'running'; threadId?: string };
 
 /**
- * How a body is brought back for the next turn. The four map onto the four
- * runtime entry points, which are genuinely different operations rather than
- * one with a flag: a resident continuation reuses the live chat, a resume
- * restarts a paused entry, a revive rebuilds from the transcript, and a launch
- * builds the persona from scratch.
+ * How a body is brought back for the next turn.
+ *
+ * Three, not four. Writing the production adapter showed that "continue the
+ * resident chat" and "revive from the transcript" are not a choice the
+ * dispatcher can make: the registry decides, because only it knows whether a
+ * resident runtime is still attached, and it already reports the fallback as a
+ * typed outcome. A dispatcher that picked between them would be guessing at
+ * state it cannot see, and would cold-revive a body that was still resident.
+ * What the dispatcher does choose is which of the three genuinely distinct
+ * entry points applies: build the persona from scratch, restart a paused
+ * entry, or continue a completed one.
  */
-export type MeshStartAction =
-  | 'launch'
-  | 'continue_resident'
-  | 'resume'
-  | 'revive';
+export type MeshStartAction = 'launch' | 'resume' | 'continue_completed';
 
 export type MeshStartResult =
   | { status: 'started'; sessionId: string; transcriptStartOffset?: number }
@@ -142,12 +143,10 @@ function actionFor(state: MeshBodyState): MeshStartAction | undefined {
   switch (state.kind) {
     case 'absent':
       return 'launch';
-    case 'resident':
-      return 'continue_resident';
     case 'paused':
       return 'resume';
-    case 'cold':
-      return 'revive';
+    case 'completed':
+      return 'continue_completed';
     default:
       return undefined;
   }

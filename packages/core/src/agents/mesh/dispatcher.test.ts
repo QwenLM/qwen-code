@@ -211,9 +211,8 @@ describe('dispatchOnce', () => {
     await seedQueued();
     for (const [state, action] of [
       [{ kind: 'absent' }, 'launch'],
-      [{ kind: 'resident' }, 'continue_resident'],
       [{ kind: 'paused' }, 'resume'],
-      [{ kind: 'cold' }, 'revive'],
+      [{ kind: 'completed' }, 'continue_completed'],
     ] as const) {
       const driver = port({ state });
       await withMeshStoreTransaction(PROJECT_ROOT, async (transaction) => {

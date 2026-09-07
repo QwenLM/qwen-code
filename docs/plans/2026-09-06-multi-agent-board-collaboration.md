@@ -371,8 +371,8 @@ dispatcher (daemon)
        false → atomically detach/rebook unaccepted ids
        drain → correlated EXTERNAL_MESSAGE records consumed ids
     running on ANOTHER thread → leave queued; expose active thread
-    idle → completed+resident: continue; completed+cold: revive;
-           paused: resume; unbound: launch
+    idle → unbound: launch; paused: resume; completed: continue
+           (the registry decides hot vs transcript and reports which)
        capacity → leave queued; expose capacity_wait
        accepted → startRun + record prompt watermark/transcript start
        failed   → terminal failed(failureStage=launch); release queue slot
@@ -535,6 +535,7 @@ starts an agent yet):
 | `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers        |
 | `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only           |
 | `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports   |
+| `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime       |
 
 ### 5.1 Local review correction — committed and verified
 
