@@ -217,6 +217,8 @@ export type {
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
+  ArtifactImageRenderer,
+  WebShellArtifactCustomization,
   WebShellIconSource,
   WebShellTaskInfo,
   WebShellUserMessagePart,

@@ -1,0 +1,140 @@
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { ReactNode } from 'react';
+import { useWebShellCustomization } from '../../customization';
+import csvIcon from '../../assets/artifacts/csv.svg';
+import fileIcon from '../../assets/artifacts/file.svg';
+import htmlIcon from '../../assets/artifacts/html.svg';
+import imageIcon from '../../assets/artifacts/image.svg';
+import linkIcon from '../../assets/artifacts/link.svg';
+import mdIcon from '../../assets/artifacts/md.svg';
+import pdfIcon from '../../assets/artifacts/pdf.svg';
+import spreadsheetIcon from '../../assets/artifacts/spreadsheet.svg';
+import videoIcon from '../../assets/artifacts/video.svg';
+import wordIcon from '../../assets/artifacts/word.svg';
+import { normalizeArtifactMimeType } from './artifactUtils';
+
+export type ArtifactIconKind =
+  | 'csv'
+  | 'file'
+  | 'html'
+  | 'image'
+  | 'link'
+  | 'md'
+  | 'pdf'
+  | 'spreadsheet'
+  | 'video'
+  | 'word';
+
+const ICONS: Readonly<Record<ArtifactIconKind, string>> = {
+  csv: csvIcon,
+  file: fileIcon,
+  html: htmlIcon,
+  image: imageIcon,
+  link: linkIcon,
+  md: mdIcon,
+  pdf: pdfIcon,
+  spreadsheet: spreadsheetIcon,
+  video: videoIcon,
+  word: wordIcon,
+};
+
+const KIND_ICONS: Readonly<Record<string, ArtifactIconKind>> = {
+  csv: 'csv',
+  html: 'html',
+  image: 'image',
+  link: 'link',
+  markdown: 'md',
+  md: 'md',
+  pdf: 'pdf',
+  spreadsheet: 'spreadsheet',
+  video: 'video',
+  word: 'word',
+};
+
+const EXTENSION_ICONS: Readonly<Record<string, ArtifactIconKind>> = {
+  avif: 'image',
+  bmp: 'image',
+  csv: 'csv',
+  doc: 'word',
+  docm: 'word',
+  docx: 'word',
+  dotx: 'word',
+  gif: 'image',
+  htm: 'html',
+  html: 'html',
+  ico: 'image',
+  jpeg: 'image',
+  jpg: 'image',
+  md: 'md',
+  markdown: 'md',
+  mdx: 'md',
+  mov: 'video',
+  mp4: 'video',
+  ods: 'spreadsheet',
+  odt: 'word',
+  pdf: 'pdf',
+  png: 'image',
+  svg: 'image',
+  webm: 'video',
+  webp: 'image',
+  xls: 'spreadsheet',
+  xlsb: 'spreadsheet',
+  xlsm: 'spreadsheet',
+  xlsx: 'spreadsheet',
+};
+
+export function getArtifactIconKind(
+  artifact?: DaemonSessionArtifact,
+): ArtifactIconKind {
+  if (!artifact) return 'file';
+
+  const name = artifact.workspacePath ?? artifact.url ?? artifact.title;
+  const extension = name.split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase();
+  if (extension && EXTENSION_ICONS[extension]) {
+    return EXTENSION_ICONS[extension];
+  }
+
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType === 'text/csv') return 'csv';
+  if (mimeType.includes('spreadsheet') || mimeType.includes('ms-excel')) {
+    return 'spreadsheet';
+  }
+  if (
+    mimeType.includes('wordprocessingml') ||
+    mimeType === 'application/msword'
+  ) {
+    return 'word';
+  }
+  if (mimeType === 'text/html') return 'html';
+  if (mimeType === 'text/markdown') return 'md';
+  return KIND_ICONS[artifact.kind] ?? 'file';
+}
+
+export function ArtifactIcon({
+  artifact,
+  className,
+}: {
+  artifact?: DaemonSessionArtifact;
+  className?: string;
+}): ReactNode {
+  const { artifact: customization } = useWebShellCustomization();
+  const customIcon = artifact
+    ? customization?.renderImage?.(artifact)
+    : undefined;
+  if (customIcon !== null && customIcon !== undefined && customIcon !== false) {
+    return customIcon;
+  }
+
+  const kind = getArtifactIconKind(artifact);
+  return (
+    <img
+      className={className}
+      src={ICONS[kind]}
+      data-artifact-icon={kind}
+      alt=""
+    />
+  );
+}

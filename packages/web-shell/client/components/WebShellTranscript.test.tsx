@@ -168,6 +168,7 @@ describe('WebShellTranscript contract', () => {
   it('provides visual customization without enabling interactive mode', () => {
     const renderToolHeaderExtra = vi.fn();
     const renderAssistantTurnFooter = vi.fn();
+    const artifact = { renderImage: vi.fn() };
     mount(
       <WebShellTranscript
         blocks={[]}
@@ -178,6 +179,7 @@ describe('WebShellTranscript contract', () => {
         collapseCompletedTurns={false}
         markdownTableMode="advanced"
         composerTagIcons={{ file: '/file.svg' }}
+        artifact={artifact}
         renderToolHeaderExtra={renderToolHeaderExtra}
         renderAssistantTurnFooter={renderAssistantTurnFooter}
       />,
@@ -195,6 +197,7 @@ describe('WebShellTranscript contract', () => {
       collapseCompletedTurns: false,
       markdownTableMode: 'advanced',
       composerTagIcons: { file: '/file.svg' },
+      artifact,
       renderToolHeaderExtra,
       renderAssistantTurnFooter,
     });

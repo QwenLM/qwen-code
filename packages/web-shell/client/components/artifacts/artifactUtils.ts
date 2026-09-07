@@ -10,6 +10,34 @@ export function artifactKindLabel(
 ): string {
   const ext = pathExtension(workspacePath);
   switch (ext) {
+    case '.htm':
+    case '.html':
+      return 'HTML';
+    case '.md':
+    case '.markdown':
+    case '.mdx':
+      return 'Markdown';
+    case '.pdf':
+      return 'PDF';
+    case '.avif':
+    case '.bmp':
+    case '.gif':
+    case '.ico':
+    case '.jpeg':
+    case '.jpg':
+    case '.png':
+    case '.svg':
+    case '.webp':
+      return 'Image';
+    case '.mov':
+    case '.mp4':
+    case '.webm':
+      return 'Video';
+    case '.m4a':
+    case '.mp3':
+    case '.ogg':
+    case '.wav':
+      return 'Audio';
     case '.doc':
     case '.docx':
     case '.docm':
@@ -119,7 +147,8 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
 }
 
 function pathExtension(workspacePath?: string): string {
-  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
+  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
+  const name = path.split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
@@ -128,7 +157,10 @@ export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType
     ? artifactType
-    : artifactKindLabel(artifact.kind, artifact.workspacePath);
+    : artifactKindLabel(
+        artifact.kind,
+        artifact.workspacePath ?? artifact.url ?? artifact.title,
+      );
 }
 
 export function formatArtifactSize(sizeBytes: number | undefined): string {
