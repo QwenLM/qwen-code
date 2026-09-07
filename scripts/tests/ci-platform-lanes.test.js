@@ -695,10 +695,26 @@ describe('GitHub helper tests', () => {
       '.github/scripts/ci-runner-routing.test.mjs',
       '.github/scripts/assign-pr-owner.test.mjs',
       '.github/scripts/ci-disk-pressure.test.mjs',
+      '.github/scripts/resolve-health.test.mjs',
     ];
     for (const suite of yamlSuites) {
       expect(depFreeSuites, suite).not.toContain(suite);
       expect(fullSuites, suite).toContain(suite);
+    }
+    // ...and the same rule derived from the files, so the list above cannot
+    // fall behind them. A suite that reaches for anything but a `node:`
+    // builtin needs `npm ci` to have run, whatever this list happens to say:
+    // `resolve-health.test.mjs` was added to HELPER_TESTS importing `yaml`
+    // and sat outside the list until a review noticed.
+    const bareImport = /^\s*import\s[^'"]*from\s+['"]([^'".][^'"]*)['"]/gm;
+    for (const suite of fullSuites) {
+      const source = readFileSync(suite, 'utf8');
+      const needsInstall = [...source.matchAll(bareImport)].some(
+        (m) => !m[1].startsWith('node:'),
+      );
+      if (needsInstall) {
+        expect(depFreeSuites, suite).not.toContain(suite);
+      }
     }
     // The fast lane must consume the dep-free list, not the full one. Select
     // it by its GATE, never by the list it already consumes: a step that
