@@ -775,7 +775,17 @@ jobs:
     steps:
       - *checkout_release_workflow_scripts
 
+      # The notifier is the one job that must survive whatever broke the
+      # others, and the extraction gave it a dependency it did not have at
+      # base: a checkout of `github.workflow_sha`, plus a shell script that a
+      # syntax error or a dropped exec bit can take out wholesale. Neither the
+      # checkout nor the runner is allowed to swallow the report, so this step
+      # runs regardless, absorbs its own failure, and hands off to the inline
+      # fallback below.
       - name: 'Create Issue on Failure'
+        id: 'notify'
+        if: "${{ always() }}"
+        continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
@@ -790,3 +800,21 @@ jobs:
           INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
           PUBLISH_RESULT: '${{ needs.publish.result }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh notify-failure'
+
+      # Inline on purpose: this runs precisely when the trusted checkout or the
+      # extracted runner is what failed, so it may not depend on either. It
+      # files a plain issue with no reuse, labelling or autofix dispatch —
+      # scheduled autofix scans issues, and a duplicate beats silence.
+      - name: 'File a fallback failure issue'
+        if: "${{ always() && steps.notify.outcome != 'success' }}"
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          echo "::warning::Primary notifier did not succeed; filing a fallback issue."
+          gh issue create --repo "${GH_REPO}" \
+            --title "Release Failed for ${RELEASE_TAG} on $(date -u +%Y-%m-%d)" \
+            --label 'type/bug' \
+            --body "The release workflow failed and the primary failure notifier did not run to completion. Run: ${DETAILS_URL}" 

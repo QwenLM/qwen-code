@@ -475,7 +475,12 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    expect(workflow.split('\n').length).toBeLessThan(800);
+    // 830, raised from 800 for the notify_failure fallback: that job may not
+    // depend on the trusted checkout or the extracted runner, because it is
+    // the job that reports their failure, so its last-resort issue filing is
+    // deliberately inline. Every other step stays under the per-step cap
+    // below, which is the rule that actually keeps logic out of the YAML.
+    expect(workflow.split('\n').length).toBeLessThan(830);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
