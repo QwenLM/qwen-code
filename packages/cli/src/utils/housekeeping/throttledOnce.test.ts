@@ -196,4 +196,42 @@ describe('runThrottledOnce', () => {
     expect(fs.statSync(markerPath).isDirectory()).toBe(true);
     expect(fs.existsSync(lockPath)).toBe(false);
   });
+
+  it('creates the lock directory when it does not exist yet', async () => {
+    const qwenDir = path.join(tempDir, 'qwen-dir');
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      {
+        name: 'test',
+        markerPath: path.join(qwenDir, '.marker'),
+        lockPath: path.join(qwenDir, '.marker.lock'),
+      },
+      task,
+    );
+
+    expect(result).toEqual({ status: 'completed' });
+    expect(task).toHaveBeenCalledOnce();
+    const stat = fs.statSync(qwenDir);
+    expect(stat.isDirectory()).toBe(true);
+    // No group/other access, per the ~/.qwen/ convention. Asserting the
+    // absence of those bits rather than an exact mode keeps this umask-proof.
+    expect(stat.mode & 0o077).toBe(0);
+  });
+
+  // Regression: this mkdir used to pass `recursive: true`. On a bind mount
+  // whose source directory was deleted, the mountpoint still stats as a
+  // directory but rejects creates with ENOENT, and Node's recursive mkdir
+  // retries the parent forever without ever settling its promise — wedging the
+  // housekeeping chain and spinning a core per orphaned CI sandbox container.
+  it('never asks for a recursive mkdir', async () => {
+    const task = vi.fn(async () => {});
+
+    await runThrottledOnce({ name: 'test', markerPath, lockPath }, task);
+
+    expect(fsPromises.mkdir).toHaveBeenCalled();
+    for (const [, options] of vi.mocked(fsPromises.mkdir).mock.calls) {
+      expect(options).not.toMatchObject({ recursive: true });
+    }
+  });
 });
