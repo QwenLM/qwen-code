@@ -651,11 +651,13 @@ describe('SessionOverviewPanel', () => {
         (state) => !!state?.querySelector('[data-web-shell-session-loading]'),
       ),
     ).toEqual([false, false, true, false]);
-    expect(states[0]?.querySelector('svg')).not.toBeNull();
-    expect(states[1]?.querySelector('svg')).not.toBeNull();
-    expect(states[0]?.querySelector('svg')?.innerHTML).not.toBe(
-      states[1]?.querySelector('svg')?.innerHTML,
-    );
+    expect(
+      states[0]?.querySelector('svg.lucide-shield-question-mark'),
+    ).not.toBeNull();
+    expect(
+      states[1]?.querySelector('svg.lucide-circle-question-mark'),
+    ).not.toBeNull();
+    expect(states[3]?.querySelector('svg.lucide-circle')).not.toBeNull();
   });
 
   it('opens the owning session on row click and selects only with the checkbox', () => {
@@ -672,13 +674,145 @@ describe('SessionOverviewPanel', () => {
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
+  it('keeps text selection in the overview without navigating', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    selection.addRange(range);
+    try {
+      act(() => click(cell));
+      expect(onOpenSession).not.toHaveBeenCalled();
+      const title = titleTrigger(rows()[0]!);
+      act(() =>
+        title.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, detail: 1 }),
+        ),
+      );
+      expect(onOpenSession).not.toHaveBeenCalled();
+      act(() => title.click());
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+      onOpenSession.mockClear();
+    } finally {
+      selection.removeAllRanges();
+    }
+    act(() => click(cell));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+  });
+
+  it('keeps an inline rename draft when clicking a plain row cell', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      cell.dispatchEvent(mouseDown);
+      if (!mouseDown.defaultPrevented) input.blur();
+    });
+    act(() => click(cell));
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it.each([false, true])(
+    'keeps only one details popover when hovering after click (same row: %s)',
+    async (sameRow) => {
+      sessionsState.sessions = [
+        session('a', { displayName: 'Alpha' }),
+        session('b', { displayName: 'Bravo' }),
+      ];
+      vi.useFakeTimers();
+      try {
+        render();
+        await act(async () =>
+          click(rowActionButton(rows()[0]!, 'Details for Alpha')),
+        );
+        const target = titleTrigger(rows()[sameRow ? 0 : 1]!);
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        const dialogs = document.querySelectorAll('[role="dialog"]');
+        expect(dialogs).toHaveLength(1);
+        expect(dialogs[0]?.getAttribute('aria-label')).toBe(
+          sameRow ? 'Alpha' : 'Bravo',
+        );
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(100);
+        });
+        expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+        expect(onOpenSession).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'closes details when live state removes its anchor through a %s',
+    async (mode) => {
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        ...Array.from({ length: 10 }, (_, i) =>
+          session(`idle-${i}`, { displayName: `Idle ${i}` }),
+        ),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find((candidate) =>
+        candidate.textContent?.includes('Target'),
+      )!;
+      await act(async () => click(rowActionButton(row, 'Details for Target')));
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).not.toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    },
+  );
+
   it('keeps the title keyboard-focusable for opening a session', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     const title = titleTrigger(rows()[0]!);
     expect(title.tagName).toBe('BUTTON');
     act(() => click(title));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
@@ -745,6 +879,27 @@ describe('SessionOverviewPanel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('uses compatibility status reports for running details', async () => {
+    sessionsState.sessions = [
+      session('report-run', { displayName: 'Report run' }),
+    ];
+    statusState.report = {
+      full: {
+        sessions: [statusSession('report-run', { hasActivePrompt: true })],
+      },
+    };
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Report run')),
+    );
+    expect(
+      rows()[0]!.querySelector('[data-web-shell-session-status]')?.textContent,
+    ).toBe('Running');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Running');
+    expect(dialog?.textContent).not.toContain('Idle');
   });
 
   it('keeps the session ID out of the table and offers a details button', async () => {
@@ -821,6 +976,16 @@ describe('SessionOverviewPanel', () => {
       titleCell?.querySelector('[data-web-shell-session-workspace]')
         ?.textContent,
     ).toBe('w');
+    expect(
+      titleCell
+        ?.querySelector('[data-web-shell-session-workspace]')
+        ?.getAttribute('title'),
+    ).toBe('/w');
+    expect(
+      titleCell
+        ?.querySelector('[data-web-shell-session-git]')
+        ?.getAttribute('title'),
+    ).toBe('feature/a-very-long-branch-name');
     expect(titleCell?.querySelector('a')?.textContent).toBe('#123 +2');
     expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
@@ -912,7 +1077,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
     act(() => click(titleTrigger(beta)));
-    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('b1', '/wsB');
   });
 
   it('keeps equal session ids in different workspaces independent', async () => {
@@ -967,6 +1132,7 @@ describe('SessionOverviewPanel', () => {
     render({ onOpenSplit: vi.fn() });
     const labels = ['Archive', 'Delete', 'Open in new tab', 'Open in split'];
     expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
     expect(footerButton('Next')).not.toBeNull();
     act(() => click(rowCheckbox(rows()[0]!)));
     expect(onOpenSession).not.toHaveBeenCalled();
@@ -978,6 +1144,7 @@ describe('SessionOverviewPanel', () => {
     }
     act(() => click(rowCheckbox(rows()[0]!)));
     expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
     expect(footerButton('Next')).not.toBeNull();
   });
 
@@ -1279,7 +1446,7 @@ describe('SessionOverviewPanel', () => {
       primary.querySelector('[data-web-shell-session-workspace]')?.textContent,
     ).toBe('w');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
   });
 
@@ -1341,10 +1508,11 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toContain('Alpha');
     expect(rowTitles()).toContain('Beta');
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     expect(trigger.closest('th')).toBeNull();
     expect(trigger.textContent).toContain('All workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
     expect(trigger.querySelector('.lucide-funnel')).not.toBeNull();
     act(() => click(trigger));
     const filterPanel = document.querySelector(
@@ -1360,6 +1528,8 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(main));
     expect(rowTitles()).toEqual(['Beta']);
+    expect(trigger.textContent).toContain('1/2 workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
 
     const payments = document.querySelector(
       '#session-overview-workspace-1',
@@ -1369,7 +1539,7 @@ describe('SessionOverviewPanel', () => {
       container!.querySelector('[data-slot="data-table-empty"]')?.textContent,
     ).toContain('No data');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
 
     const all = document.querySelector(
@@ -1402,7 +1572,7 @@ describe('SessionOverviewPanel', () => {
       ),
     );
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
   });
 
@@ -1423,7 +1593,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude /wsB through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const payments = document.querySelector(
@@ -1450,7 +1620,7 @@ describe('SessionOverviewPanel', () => {
     );
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Beta']);
   });
@@ -1472,7 +1642,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude the primary workspace through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const main = document.querySelector(
@@ -1496,7 +1666,7 @@ describe('SessionOverviewPanel', () => {
     rerender();
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Alpha']);
   });

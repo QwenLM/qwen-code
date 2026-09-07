@@ -439,6 +439,13 @@ function SessionOverviewPanelInner({
     Set<string>
   >(() => new Set());
   const [workspaceFilterOpen, setWorkspaceFilterOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState<{
+    identity: string;
+    click: boolean;
+  } | null>(null);
+  // Stable column renderers keep the hover anchor mounted as details change.
+  const detailsOpenRef = useRef(detailsOpen);
+  detailsOpenRef.current = detailsOpen;
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<SessionCard[] | null>(
@@ -523,19 +530,34 @@ function SessionOverviewPanelInner({
     [searchedCards, statusFilter],
   );
   const sessionDetailsProps = useCallback(
-    (card: SessionCard) => ({
-      session: {
-        ...sessionByIdentity.get(getSessionIdentity(card)),
-        sessionId: card.sessionId,
-        workspaceCwd: card.workspaceCwd,
-        hasActivePrompt: card.status === 'running',
-        isWaitingForPermission: card.status === 'needsApproval',
-        isWaitingForUserQuestion: card.status === 'askUserQuestion',
-      },
-      label: card.label,
-      time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
-      completedUnread: false,
-    }),
+    (card: SessionCard, click = false) => {
+      const identity = getSessionIdentity(card);
+      return {
+        openOnClick: click,
+        open:
+          detailsOpenRef.current?.identity === identity &&
+          detailsOpenRef.current.click === click,
+        onOpenChange: (open: boolean) =>
+          setDetailsOpen((current) =>
+            open
+              ? { identity, click }
+              : current?.identity === identity && current.click === click
+                ? null
+                : current,
+          ),
+        session: {
+          ...sessionByIdentity.get(getSessionIdentity(card)),
+          sessionId: card.sessionId,
+          workspaceCwd: card.workspaceCwd,
+          hasActivePrompt: card.status === 'running',
+          isWaitingForPermission: card.status === 'needsApproval',
+          isWaitingForUserQuestion: card.status === 'askUserQuestion',
+        },
+        label: card.label,
+        time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
+        completedUnread: false,
+      };
+    },
     [sessionByIdentity, t],
   );
 
@@ -991,6 +1013,7 @@ function SessionOverviewPanelInner({
       prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 },
     );
     setRowSelection({});
+    setDetailsOpen(null);
   }, [excludedWorkspaceCwds, searchQuery, statusFilter]);
   useEffect(() => {
     const validIds = new Set(filteredCards.map(getSessionIdentity));
@@ -1094,6 +1117,11 @@ function SessionOverviewPanelInner({
                         data-web-shell-session-title
                         onClick={(event) => {
                           event.stopPropagation();
+                          if (
+                            event.detail > 0 &&
+                            window.getSelection()?.isCollapsed === false
+                          )
+                            return;
                           onOpenSession(card.sessionId, card.workspaceCwd);
                         }}
                       >
@@ -1118,6 +1146,7 @@ function SessionOverviewPanelInner({
                 <span
                   className="max-w-[40%] truncate"
                   data-web-shell-session-workspace
+                  title={card.workspaceCwd}
                 >
                   {workspaceLabelForCwd(
                     card.workspaceCwd,
@@ -1130,6 +1159,7 @@ function SessionOverviewPanelInner({
                     <span
                       className="min-w-0 truncate"
                       data-web-shell-session-git
+                      title={card.gitBranch}
                     >
                       {card.gitBranch}
                     </span>
@@ -1168,6 +1198,7 @@ function SessionOverviewPanelInner({
                 status === 'idle' && 'text-muted-foreground',
               )}
               data-web-shell-session-status={status}
+              title={t(`sessionsOverview.status.${status}`)}
             >
               {status === 'running' ? (
                 <span
@@ -1223,7 +1254,7 @@ function SessionOverviewPanelInner({
           const canExport = canExportCard(card);
           return (
             <div className="flex items-center justify-center gap-1 [&_button]:cursor-pointer">
-              <SessionDetailsTooltip {...sessionDetailsProps(card)} openOnClick>
+              <SessionDetailsTooltip {...sessionDetailsProps(card, true)}>
                 <Button
                   type="button"
                   variant="ghost"
@@ -1353,6 +1384,14 @@ function SessionOverviewPanelInner({
     getRowId: getSessionIdentity,
     autoResetPageIndex: false,
   });
+  const visibleRows = table.getRowModel().rows;
+  useEffect(() => {
+    setDetailsOpen((current) =>
+      current && !visibleRows.some((row) => row.id === current.identity)
+        ? null
+        : current,
+    );
+  }, [visibleRows]);
   const selectedCards = table
     .getSortedRowModel()
     .rows.filter((row) => row.getIsSelected())
@@ -1414,6 +1453,16 @@ function SessionOverviewPanelInner({
     return () => observer.disconnect();
   }, [filteredCards.length, pagination.pageSize]);
 
+  const workspaceFilterLabel =
+    excludedWorkspaceCwds.size === 0
+      ? t('sessionsOverview.workspaceAll')
+      : t('sessionsOverview.workspacesSelected', {
+          count: workspaceOptions.filter(
+            (option) => !excludedWorkspaceCwds.has(option.cwd),
+          ).length,
+          total: workspaceOptions.length,
+        });
+
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative w-full max-w-[300px]">
@@ -1442,18 +1491,11 @@ function SessionOverviewPanelInner({
                   excludedWorkspaceCwds.has(option.cwd),
                 ) && 'text-primary',
               )}
-              aria-label={t('sessionsOverview.workspaceFilter')}
+              aria-label={`${t('sessionsOverview.workspaceFilter')}: ${workspaceFilterLabel}`}
               title={t('sessionsOverview.workspaceFilter')}
             >
               <FunnelIcon />
-              {excludedWorkspaceCwds.size === 0
-                ? t('sessionsOverview.workspaceAll')
-                : t('sessionsOverview.workspacesSelected', {
-                    count: workspaceOptions.filter(
-                      (option) => !excludedWorkspaceCwds.has(option.cwd),
-                    ).length,
-                    total: workspaceOptions.length,
-                  })}
+              {workspaceFilterLabel}
             </Button>
           </PopoverTrigger>
           <PopoverContent
@@ -1538,7 +1580,22 @@ function SessionOverviewPanelInner({
   );
 
   return (
-    <div ref={panelRef} className={styles.panel} data-web-shell-session-panel>
+    <div
+      ref={panelRef}
+      className={styles.panel}
+      data-web-shell-session-panel
+      onMouseDownCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          editingCard &&
+          event.button === 0 &&
+          target.closest('[data-web-shell-session-table-viewport] tr') &&
+          !target.closest('button, a, input')
+        ) {
+          event.preventDefault();
+        }
+      }}
+    >
       {/* Search, workspace filter, and manual refresh. */}
       {toolbar}
       <div
@@ -1595,9 +1652,11 @@ function SessionOverviewPanelInner({
           }
           className={styles.tableViewport}
           rowClassName="cursor-pointer"
-          onRowClick={(row) =>
-            onOpenSession(row.original.sessionId, row.original.workspaceCwd)
-          }
+          onRowClick={(row) => {
+            if (editingCard || window.getSelection()?.isCollapsed === false)
+              return;
+            onOpenSession(row.original.sessionId, row.original.workspaceCwd);
+          }}
           data-web-shell-session-table-viewport
         />
       </TooltipProvider>

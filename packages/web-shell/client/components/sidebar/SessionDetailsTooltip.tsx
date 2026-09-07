@@ -31,8 +31,10 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
-  worktreeOnly?: boolean;
+  workspaceLabel?: string;
   openOnClick?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   children: ReactElement;
 }
 
@@ -41,13 +43,17 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
-  worktreeOnly = false,
+  workspaceLabel,
   openOnClick = false,
+  open: controlledOpen,
+  onOpenChange,
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
   );
@@ -56,12 +62,10 @@ export function SessionDetailsTooltip({
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLElement | null>(null);
+  const copyButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
   const collisionBoundary = open
-    ? resolveSessionDetailsCollisionBoundary(
-        anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
-          anchorRef.current?.closest<HTMLElement>('aside') ??
-          null,
-      )
+    ? resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
   const branch = session.worktree?.branch ?? session.branch?.name;
@@ -101,7 +105,11 @@ export function SessionDetailsTooltip({
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
     setCopyStatus('idle');
-  }, [session.sessionId]);
+    if (!open) {
+      window.clearTimeout(openTimerRef.current);
+      window.clearTimeout(closeTimerRef.current);
+    }
+  }, [session.sessionId, open]);
 
   const cancelClose = () => window.clearTimeout(closeTimerRef.current);
   const openAfterDelay = () => {
@@ -113,6 +121,7 @@ export function SessionDetailsTooltip({
   const close = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
+    restoreFocusRef.current = true;
     setOpen(false);
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
@@ -124,8 +133,10 @@ export function SessionDetailsTooltip({
     closeTimerRef.current = window.setTimeout(close, 100);
   };
   const handleOpenChange = (nextOpen: boolean) => {
-    if (nextOpen) setOpen(true);
-    else close();
+    if (nextOpen) {
+      restoreFocusRef.current = false;
+      setOpen(true);
+    } else close();
   };
 
   return (
@@ -159,7 +170,7 @@ export function SessionDetailsTooltip({
       )}
       <PopoverContent
         side="right"
-        align={worktreeOnly ? 'center' : 'start'}
+        align="start"
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={8}
@@ -168,41 +179,46 @@ export function SessionDetailsTooltip({
         role="dialog"
         aria-label={label}
         onOpenAutoFocus={(event) => {
-          if (!openOnClick) event.preventDefault();
+          if (!openOnClick) {
+            event.preventDefault();
+            return;
+          }
+          requestAnimationFrame(() => {
+            copyButtonRef.current?.scrollIntoView({ block: 'nearest' });
+          });
         }}
         onPointerEnter={openOnClick ? undefined : cancelClose}
+        onCloseAutoFocus={(event) => {
+          if (!restoreFocusRef.current) event.preventDefault();
+        }}
         onPointerLeave={openOnClick ? undefined : closeAfterDelay}
         onClick={(event) => event.stopPropagation()}
         className={`${styles.sessionDetailsTooltip} max-h-(--radix-popover-content-available-height)`}
       >
-        <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto">
-          {!worktreeOnly && (
-            <>
-              <div className={styles.sessionDetailsHeader}>
-                <span
-                  className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
-                >
-                  {label}
-                </span>
-                {time && (
-                  <span className={styles.sessionDetailsTime}>{time}</span>
-                )}
-              </div>
-              <div className={styles.sessionDetailsRow}>
-                <FolderClosedIcon aria-hidden="true" />
-                <span
-                  className="!whitespace-normal break-all"
-                  title={folderPath}
-                >
-                  {folderPath}
-                </span>
-              </div>
-            </>
-          )}
+        <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain">
+          <div className={styles.sessionDetailsHeader}>
+            <span
+              className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
+            >
+              {label}
+            </span>
+            {time && <span className={styles.sessionDetailsTime}>{time}</span>}
+          </div>
+          <div className={styles.sessionDetailsRow}>
+            <FolderClosedIcon aria-hidden="true" />
+            <span
+              className="!whitespace-normal break-all"
+              title={workspaceLabel ?? folderPath}
+            >
+              {workspaceLabel ?? folderPath}
+            </span>
+          </div>
           {branch && (
             <div className={styles.sessionDetailsRow}>
               <GitBranchIcon aria-hidden="true" />
-              <span title={branch}>{branch}</span>
+              <span className="!whitespace-normal break-all" title={branch}>
+                {branch}
+              </span>
             </div>
           )}
           {prs.map((pr, index) => {
@@ -261,71 +277,68 @@ export function SessionDetailsTooltip({
               </div>
             );
           })}
-          {!worktreeOnly && (
-            <>
-              <div className={styles.sessionDetailsRow}>
-                <RadioTowerIcon aria-hidden="true" />
-                <span>{status}</span>
-              </div>
-              <div className={styles.sessionDetailsIdRow}>
-                <span
-                  className="!whitespace-normal break-all"
-                  data-web-shell-session-id
-                  title={session.sessionId}
-                >
-                  {session.sessionId}
-                </span>
-                <button
-                  type="button"
-                  tabIndex={openOnClick ? undefined : -1}
-                  className={styles.sessionDetailsCopyButton}
-                  data-web-shell-session-id-copy
-                  aria-label={t('sidebar.copySessionId')}
-                  title={t('sidebar.copySessionId')}
-                  onClick={() => {
-                    const copyAttempt = ++copyAttemptRef.current;
-                    void writeClipboardText(session.sessionId)
-                      .then(() => {
+          <div className={styles.sessionDetailsRow}>
+            <RadioTowerIcon aria-hidden="true" />
+            <span>{status}</span>
+          </div>
+          <div className={styles.sessionDetailsIdRow}>
+            <span
+              className="!whitespace-normal break-all"
+              data-web-shell-session-id
+              title={session.sessionId}
+            >
+              {session.sessionId}
+            </span>
+            <button
+              type="button"
+              ref={copyButtonRef}
+              tabIndex={openOnClick ? undefined : -1}
+              className={styles.sessionDetailsCopyButton}
+              data-web-shell-session-id-copy
+              aria-label={t('sidebar.copySessionId')}
+              title={t('sidebar.copySessionId')}
+              onClick={() => {
+                const copyAttempt = ++copyAttemptRef.current;
+                void writeClipboardText(session.sessionId)
+                  .then(() => {
+                    if (copyAttemptRef.current === copyAttempt) {
+                      setCopyStatus('copied');
+                      window.clearTimeout(copyResetTimerRef.current);
+                      copyResetTimerRef.current = window.setTimeout(() => {
                         if (copyAttemptRef.current === copyAttempt) {
-                          setCopyStatus('copied');
-                          window.clearTimeout(copyResetTimerRef.current);
-                          copyResetTimerRef.current = window.setTimeout(() => {
-                            if (copyAttemptRef.current === copyAttempt) {
-                              setCopyStatus('idle');
-                            }
-                          }, 2000);
+                          setCopyStatus('idle');
                         }
-                      })
-                      .catch(() => {
-                        if (copyAttemptRef.current === copyAttempt) {
-                          setCopyStatus('failed');
-                        }
-                      });
-                  }}
-                >
-                  {copyStatus === 'copied' ? (
-                    <CheckIcon aria-hidden="true" />
-                  ) : (
-                    <CopyIcon aria-hidden="true" />
-                  )}
-                </button>
-                <span
-                  className={
-                    copyStatus === 'copied'
-                      ? 'sr-only'
-                      : styles.sessionDetailsCopied
-                  }
-                  aria-live="polite"
-                >
-                  {copyStatus === 'copied'
-                    ? t('sidebar.sessionIdCopied')
-                    : copyStatus === 'failed'
-                      ? t('sidebar.copySessionIdFailed')
-                      : ''}
-                </span>
-              </div>
-            </>
-          )}
+                      }, 2000);
+                    }
+                  })
+                  .catch(() => {
+                    if (copyAttemptRef.current === copyAttempt) {
+                      setCopyStatus('failed');
+                    }
+                  });
+              }}
+            >
+              {copyStatus === 'copied' ? (
+                <CheckIcon aria-hidden="true" />
+              ) : (
+                <CopyIcon aria-hidden="true" />
+              )}
+            </button>
+            <span
+              className={
+                copyStatus === 'copied'
+                  ? 'sr-only'
+                  : styles.sessionDetailsCopied
+              }
+              aria-live="polite"
+            >
+              {copyStatus === 'copied'
+                ? t('sidebar.sessionIdCopied')
+                : copyStatus === 'failed'
+                  ? t('sidebar.copySessionIdFailed')
+                  : ''}
+            </span>
+          </div>
         </div>
       </PopoverContent>
     </Popover>

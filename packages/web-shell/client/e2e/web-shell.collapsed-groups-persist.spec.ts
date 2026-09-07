@@ -111,23 +111,32 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     await expect(copyAction).toBeVisible();
   }
 
-  const titleMetrics = await title.evaluate((element) => {
-    const style = window.getComputedStyle(element);
-    return {
+  for (const value of [
+    title,
+    details.getByTitle(scenario.workspaceCwd, { exact: true }),
+    details.locator('[data-web-shell-session-id]'),
+    details.getByTitle(
+      'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports',
+      { exact: true },
+    ),
+  ]) {
+    const metrics = await value.evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
-      lineHeight: Number.parseFloat(style.lineHeight),
+      lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
-    };
-  });
-  expect(titleMetrics.clientHeight).toBeGreaterThan(titleMetrics.lineHeight);
-  expect(titleMetrics.scrollHeight).toBeLessThanOrEqual(
-    titleMetrics.clientHeight + 1,
-  );
-  expect(titleMetrics.scrollWidth).toBeLessThanOrEqual(
-    titleMetrics.clientWidth + 1,
-  );
+    }));
+    expect(metrics.clientHeight).toBeGreaterThan(metrics.lineHeight);
+    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
+  }
+  expect(
+    await copyAction.evaluate((button) => {
+      const scroller = button.closest('[role="dialog"]')!.firstElementChild!;
+      return getComputedStyle(scroller).overscrollBehaviorY;
+    }),
+  ).toBe('contain');
   await copyAction.click();
   await expect(details).toContainText('Session ID copied');
   await expectDetailsInsideRoot(webShellRoot, details);
@@ -160,8 +169,10 @@ async function expectDetailsInsideRoot(
 function createOrganizedScenario(
   currentSessionDisplayName = 'E2E Harness Session',
 ): WebShellDaemonScenario {
-  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
-  const sessionId = 'web-shell-e2e-session';
+  const workspaceCwd =
+    '/tmp/qwen-web-shell-e2e/workspaces/feature-session-details/packages/web-shell/client/components/sidebar';
+  const sessionId =
+    'web-shell-e2e-session-with-a-long-id-that-wraps-across-multiple-lines';
   return createWebShellDaemonScenario({
     workspaceCwd,
     sessionId,
@@ -193,6 +204,10 @@ function createOrganizedScenario(
         createdAt: '2026-07-03T00:00:00.000Z',
         updatedAt: '2026-07-03T00:00:00.000Z',
         displayName: currentSessionDisplayName,
+        branch: {
+          name: 'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports',
+          baseBranch: 'main',
+        },
         clientCount: 1,
         hasActivePrompt: false,
         groupId: null,

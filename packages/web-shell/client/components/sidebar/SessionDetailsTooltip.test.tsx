@@ -146,6 +146,9 @@ describe('SessionDetailsTooltip', () => {
         details.dispatchEvent(new Event('pointerout', { bubbles: true }));
         copy.click();
       });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
       expect(writeText).toHaveBeenCalledExactlyOnceWith('click-details');
       expect(onRowClick).not.toHaveBeenCalled();
       expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
@@ -200,6 +203,39 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('preserves the standalone workspace label from the sidebar', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'standalone',
+                workspaceCwd: '/internal/fallback',
+              }}
+              label="Standalone"
+              time=""
+              completedUnread={false}
+              workspaceLabel="No workspace"
+            >
+              <button type="button">Standalone</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('No workspace');
+      expect(details?.textContent).not.toContain('/internal/fallback');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('shows the bound pull request as a link', async () => {

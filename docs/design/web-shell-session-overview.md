@@ -21,11 +21,15 @@ uses only its Git-specific variant.
 - Reuse the sidebar details popover on title hover. Provide an explicit
   details button for keyboard and touch users. Keep PR/issue links and ID
   copying inside the popover, with events isolated from row navigation.
+  Only one overview details popover is open at a time. Long values wrap in
+  an internally scrolling surface; keyboard focus stays visible when it opens.
 - Make the popover status agree with the overview's derived live state,
   including older daemons that provide pending approvals via status reports.
 - Open a session when its row or title is clicked. Checkboxes exclusively
   control selection; existing rename/export/archive/delete controls keep their
   behavior. Show batch actions only when a selection exists.
+  Dragging to select text does not navigate. Clicking a plain cell during an
+  inline rename preserves the draft; Enter saves and Escape cancels.
 - Keep the existing shared table and portal primitives. Popovers must stay
   within the Web Shell boundary and preserve React 18 ref forwarding.
 
