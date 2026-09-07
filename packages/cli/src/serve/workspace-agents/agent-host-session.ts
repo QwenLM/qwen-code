@@ -10,6 +10,8 @@ import {
   releaseAgentHostSession,
   type WorkspaceAgent,
   type WorkspaceAgentLaunchResult,
+  dispatchOnce,
+  type DispatchRecord,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
@@ -29,7 +31,13 @@ interface AgentHostBridge {
   ): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   launchWorkspaceAgent: AcpSessionBridge['launchWorkspaceAgent'];
-  dispatchAgentRuns?: AcpSessionBridge['dispatchAgentRuns'];
+  // Dispatch reads and writes sessions, which live in this process's bridge,
+  // so the loop runs here rather than being forwarded into a child. The ACP
+  // round trip existed only because the bodies used to be background agents
+  // inside one host process.
+  sendPrompt: AcpSessionBridge['sendPrompt'];
+  listWorkspaceSessions: AcpSessionBridge['listWorkspaceSessions'];
+  cancelSession: AcpSessionBridge['cancelSession'];
 }
 
 export interface AgentHostSessionOwner {
@@ -38,7 +46,7 @@ export interface AgentHostSessionOwner {
     agent: WorkspaceAgent,
     prompt: string,
   ): Promise<WorkspaceAgentLaunchResult>;
-  dispatch(): ReturnType<AcpSessionBridge['dispatchAgentRuns']>;
+  dispatch(): Promise<{ records: DispatchRecord[] }>;
   tick(): Promise<void>;
   stop(): void;
 }
@@ -55,6 +63,7 @@ export function startAgentHostSessionOwner(options: {
   const intervalMs = options.intervalMs ?? DEFAULT_AGENT_KEEPALIVE_INTERVAL_MS;
   const resumeTimeoutMs =
     options.resumeTimeoutMs ?? DEFAULT_AGENT_RESUME_TIMEOUT_MS;
+  const port = createSessionDispatchPort({ bridge, workspaceCwd });
   let ensuring: Promise<string> | undefined;
   let reviving:
     | {
@@ -151,9 +160,11 @@ export function startAgentHostSessionOwner(options: {
     const workspace = await readAgentWorkspace(workspaceCwd);
     assertGenerationOpen();
     if (!workspace.hostSessionId) return;
-    const sessionId = await ensureResident();
+    // The host still holds the workspace claim, so exactly one daemon
+    // dispatches; it no longer holds the agents themselves.
+    await ensureResident();
     assertGenerationOpen();
-    await bridge.dispatchAgentRuns?.(sessionId);
+    await dispatchOnce(workspaceCwd, port);
   };
 
   let running = false;
@@ -191,12 +202,9 @@ export function startAgentHostSessionOwner(options: {
       return bridge.launchWorkspaceAgent(sessionId, agent.id, prompt);
     },
     async dispatch() {
-      if (!bridge.dispatchAgentRuns) {
-        throw new Error('Dispatch is unavailable in this runtime.');
-      }
-      const sessionId = await ensureResident();
+      await ensureResident();
       assertGenerationOpen();
-      return bridge.dispatchAgentRuns(sessionId);
+      return { records: await dispatchOnce(workspaceCwd, port) };
     },
     tick,
     stop,
