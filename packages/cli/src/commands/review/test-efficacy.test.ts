@@ -38,6 +38,7 @@ import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   writeFileSync,
   appendFileSync,
   symlinkSync,
@@ -773,6 +774,65 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('REFUSES an include whose `..` the kernel resolves through a symlink', () => {
+    // The other half of the test above, and the one that makes the `dangling`
+    // bucket safe to drop anything at all. `<repo>/.git/link` is a symlink and
+    // `include.path = link/../evil.cfg` names a payload one level ABOVE the
+    // link's target: git concatenates and lets the kernel resolve, so it reads
+    // that payload, while a lexical collapse looks for `.git/evil.cfg`, finds
+    // nothing, and files a file git really reads as missing. Measured end to
+    // end: git's merged read lists `filter.evil.smudge`, the collapsed screen
+    // answered `filters: []`, and a restore-shaped checkout executed it.
+    //
+    // So this fixture is indistinguishable from the one above to anything that
+    // resolves paths the way Node's `resolve()` does, and the two must come out
+    // opposite: that one proceeds, this one refuses.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-lexdiv-e2e-'));
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-lexdiv-out-')),
+    );
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-lexdiv-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      const canary = join(canaryDir, 'PWNED-lexdiv');
+      // The payload sits ABOVE the symlink's target, so only kernel resolution
+      // of `..` reaches it. It passes content through: a filter that returns
+      // nothing empties the file and the checkout fails for an unrelated
+      // reason, which reads as a refusal the screen never made.
+      mkdirSync(join(outside, 'sub'), { recursive: true });
+      writeFileSync(
+        join(outside, 'evil.cfg'),
+        `[filter "evil"]\n\tsmudge = touch ${canary}; cat\n`,
+      );
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=evil\n');
+      asCheckout(dir);
+      symlinkSync(join(outside, 'sub'), join(dir, '.git', 'link'));
+      execFileSync(
+        'git',
+        ['config', '--add', 'include.path', 'link/../evil.cfg'],
+        { cwd: dir },
+      );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      // Damage: the smudge never ran, which is the whole claim.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
     }
   });
 

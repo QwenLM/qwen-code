@@ -2129,6 +2129,65 @@ describe('filterCommandsIn — the include walk', () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+
+  it('follows an include whose `..` the KERNEL resolves through a symlink, not lexically', () => {
+    // `<dir>/link` is a symlink, and `include.path = link/../evil.cfg` names a
+    // payload ONE LEVEL ABOVE the link's target. git concatenates and lets the
+    // kernel resolve, so it reads that payload; a lexical collapse — `resolve()`
+    // or `join()`, and plain `realpathSync` too, which normalizes before
+    // consulting a symlink — looks for `<dir>/evil.cfg` instead, finds nothing,
+    // and files a file git really reads as MISSING. Measured both ways: git's
+    // own merged read lists the payload's `filter.evil.smudge` while the
+    // collapsed walk answered `filters: []` with the payload in `dangling`, and
+    // a restore-shaped checkout then executed it on the host.
+    //
+    // That is the entrance the `dangling` bucket opened. The divergence itself
+    // predates it, but `unread` is refused by every consumer while `dangling`
+    // is the one answer a checkout site may drop — so moving this case between
+    // the two buckets is what turned a refusal into a certification of clean
+    // over a filter nobody read.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-lexdiv-')));
+    try {
+      mkdirSync(join(outside, 'sub'), { recursive: true });
+      writeFileSync(
+        join(outside, 'evil.cfg'),
+        '[filter "evil"]\n\tsmudge = cat\n',
+      );
+      symlinkSync(join(outside, 'sub'), join(dir, 'link'));
+      writeFileSync(
+        join(dir, 'config'),
+        '[include]\n\tpath = link/../evil.cfg\n',
+      );
+
+      const screen = filterCommandsIn(dir, dir);
+      expect(screen.filters).toEqual(['filter.evil.smudge']);
+      // The point of the fix: this is NOT a missing target, so it must not land
+      // in the one bucket a checkout site is allowed to drop.
+      expect(screen.dangling).toEqual([]);
+      expect(screen.unread).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('files a resolution failure that is NOT ENOENT as unread, so a checkout site refuses on it', () => {
+    // `dangling` is the only answer a caller may drop, so ENOENT has to be the
+    // only way in. The shape that decides it is `ENAMETOOLONG` — a short
+    // spelled path whose RESOLVED path exceeds PATH_MAX, where `realpathSync`
+    // throws and git still reads the file — but that fixture is PATH_MAX-sized
+    // and so platform-sized (1024 on macOS, 4096 on Linux). This pins the errno
+    // gate with a symlink loop instead: deterministic, and it fails resolution
+    // for a reason that is not "absent". A bare `catch` here filed every errno
+    // as missing, which is how the gate came to be load-bearing.
+    symlinkSync('loop', join(dir, 'loop'));
+    writeFileSync(join(dir, 'config'), '[include]\n\tpath = loop\n');
+
+    const screen = filterCommandsIn(dir, dir);
+    expect(screen.filters).toEqual([]);
+    expect(screen.dangling).toEqual([]);
+    expect(screen.unread).toHaveLength(1);
+    expect(screen.unread[0]).toContain('could not be resolved');
+  });
 });
 
 describe('sanitizedGitEnv', () => {

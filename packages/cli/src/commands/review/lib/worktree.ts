@@ -302,9 +302,14 @@ export interface FilterScreen {
  * (measured). Each target is resolved the way git resolves it — `~/`
  * against `$HOME`, a relative path against the directory of the path git
  * OPENED for the including file (its spelled path, not its realpath: a
- * symlinked `.git/config` includes beside the link, measured) — and read
- * with the same single spawn, recursively, under a visited set keyed by
- * realpath, git's own nesting limit, and this screen's file cap. An
+ * symlinked `.git/config` includes beside the link, measured), and
+ * CONCATENATED rather than normalized, so a `..` in the value is resolved by
+ * the kernel through whatever symlink precedes it exactly as git's own open
+ * resolves it — a lexical collapse lands on a different file, and because
+ * `dangling` is the one answer a checkout caller may drop, filing that other
+ * file as missing certifies clean over a payload git really reads (measured)
+ * — and read with the same single spawn, recursively, under a visited set
+ * keyed by realpath, git's own nesting limit, and this screen's file cap. An
  * `includeIf` is followed whether or not its condition holds today: the
  * screen answers what the file can deliver, not what it delivers this
  * minute. Every spawn runs with the common dir as cwd, so a target that
@@ -384,15 +389,37 @@ export function filterCommandsIn(
   const visit = (file: string, depth: number, via: string | null): void => {
     let real: string;
     try {
-      real = realpathSync(file);
-    } catch {
+      // `.native`, on the spelled path. The JS resolver normalizes `..`
+      // lexically before consulting a symlink, so on a raw spelling it throws
+      // ENOENT over a file the kernel — and therefore git — resolves fine;
+      // measured, `realpathSync` throws where `realpathSync.native` answers the
+      // payload. The key still has to be a realpath, so that one file reached
+      // by two spellings is read once under `MAX_INCLUDE_FILES`.
+      real = realpathSync.native(file);
+    } catch (e) {
       // A candidate that is not there is the normal case (no per-worktree
       // config, no linked worktrees) and stays silent. An include target that
       // is not there is recorded apart from `unread`, because git ignores it
       // and so does the checkout a caller is about to authorise — see
       // `FilterScreen.dangling` for what refusing on it cost.
+      //
+      // ENOENT is the ONLY route into that bucket, and the errno is the whole
+      // gate: `dangling` is the one answer a caller may drop, so every other
+      // failure to resolve has to stay a refusal. `ENAMETOOLONG` is the shape
+      // that decides it — a short spelled path whose RESOLVED path exceeds
+      // PATH_MAX, where this throws and git still reads the file. `EACCES` and
+      // `ELOOP` are not entrances either way, because git fatals 128 on them
+      // and the read below refuses too, but they are filed as refusals rather
+      // than left to that second gate.
       if (via !== null) {
-        dangling.add(`${via} -> ${file} (missing — git ignores it)`);
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT') {
+          dangling.add(`${via} -> ${file} (missing — git ignores it)`);
+        } else {
+          unread.add(
+            `${via} -> ${file} (could not be resolved: ${code ?? 'unknown'} — not screened)`,
+          );
+        }
       }
       return;
     }
@@ -443,15 +470,28 @@ export function filterCommandsIn(
       let target: string;
       if (value.startsWith('~/')) {
         // git expands `~` from $HOME (expand_user_path), not from passwd;
-        // the fallback is for an environment with no HOME at all.
-        target = join(process.env['HOME'] || homedir(), value.slice(2));
+        // the fallback is for an environment with no HOME at all. Concatenated
+        // rather than `join`ed, for the reason the relative branch gives.
+        target = `${process.env['HOME'] || homedir()}${sep}${value.slice(2)}`;
       } else if (value.startsWith('~')) {
         unread.add(
           `${key} -> ${value} (another user's home — not resolved here)`,
         );
         continue;
       } else {
-        target = resolve(dirname(file), value);
+        // CONCATENATED, not `resolve()`d and not `join()`d: both collapse `..`
+        // lexically, before any symlink is consulted, and git does not. With
+        // `<gitdir>/link` a symlink, `include.path = link/../evil.config`
+        // reaches a payload ONE LEVEL ABOVE the link's target — the kernel
+        // resolves `..` against that target's parent — while a lexical collapse
+        // looks for `<gitdir>/evil.config`, finds nothing, and files a file git
+        // really reads as missing. Measured against this screen: git's own
+        // merged read lists the payload's `filter.evil.smudge` while the
+        // collapsed walk answered `filters: []`, and a restore-shaped checkout
+        // then executed it on the host. Absolute values pass through
+        // unnormalized for the same reason: `resolve()` collapses `..` inside
+        // them too.
+        target = isAbsolute(value) ? value : `${dirname(file)}${sep}${value}`;
       }
       visit(target, depth + 1, `${key} (in ${file})`);
     }
