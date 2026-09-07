@@ -6,7 +6,7 @@
 
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
@@ -1987,23 +1987,85 @@ export class WebViewProvider {
         handle.dispose();
       }
       try {
+        const canonicalWorkspaceCwd = existsSync(workspaceCwd)
+          ? realpathSync.native(workspaceCwd)
+          : workspaceCwd;
         const runtime = await this.daemonProcess.start(
           resolveQwenCliEntryPath(
             this.extensionUri,
             this.context.extensionMode,
           ),
-          workspaceCwd,
+          canonicalWorkspaceCwd,
         );
         const serializedSessionId = getRestorableDaemonSessionId(
           this.messageHandler.getCurrentConversationId(),
         );
-        const viewSessionId = this.isViewHost
-          ? getRestorableDaemonSessionId(
-              this.context.workspaceState.get<string>(
-                webShellSessionStateKey(workspaceCwd),
-              ),
-            )
-          : undefined;
+        let viewSessionId: string | undefined;
+        if (this.isViewHost) {
+          // Ids persisted before this canonicalization are keyed by the
+          // folder's raw (symlinked) spelling. Read that entry once so
+          // upgrading does not silently start a fresh sidebar conversation —
+          // and retire it in the same bootstrap. The only writer
+          // (`webShellSessionChanged`) keys off the canonical spelling the
+          // payload below carries, so an alias entry left behind is never
+          // overwritten or cleared: a session the user has since cleared would
+          // be resurrected by the fallback on every later bootstrap, with no
+          // action able to clear it again.
+          const canonicalKey = webShellSessionStateKey(canonicalWorkspaceCwd);
+          const canonicalSessionId =
+            this.context.workspaceState.get<string>(canonicalKey);
+          const legacyKey = webShellSessionStateKey(workspaceCwd);
+          const legacySessionId =
+            canonicalWorkspaceCwd !== workspaceCwd
+              ? this.context.workspaceState.get<string>(legacyKey)
+              : undefined;
+          if (legacySessionId !== undefined) {
+            // Move the id rather than dropping it: the canonical key's only
+            // other writer (`webShellSessionChanged`) does not run until the
+            // shell has attached, so retiring the alias first would lose the
+            // binding for good if this bootstrap is interrupted before the
+            // echo. Both writes are best-effort — neither is needed for this
+            // bootstrap, whose id comes from the fallback below, and a
+            // rejecting `Memento.update` (locked `state.vscdb`, full disk,
+            // read-only profile) must not abort a bootstrap whose daemon has
+            // already started. Leaving the alias entry behind is safe because
+            // the next bootstrap reads it and retries the migration.
+            const migrated = getRestorableDaemonSessionId(legacySessionId);
+            const migrationSettled =
+              canonicalSessionId === undefined && migrated !== undefined
+                ? await this.context.workspaceState
+                    .update(canonicalKey, migrated)
+                    .then(
+                      () => true,
+                      (error: unknown) => {
+                        logger.warn(
+                          '[WebViewProvider] Failed to migrate legacy web-shell session key:',
+                          error,
+                        );
+                        return false;
+                      },
+                    )
+                : true;
+            if (migrationSettled) {
+              await this.context.workspaceState
+                .update(legacyKey, undefined)
+                .then(
+                  () => undefined,
+                  (error: unknown) => {
+                    logger.warn(
+                      '[WebViewProvider] Failed to retire legacy web-shell session key:',
+                      error,
+                    );
+                  },
+                );
+            }
+          }
+          // The fallback binds an id to a folder's *spelling* rather than to
+          // folder identity, so it is only sound as this one-shot migration.
+          viewSessionId = getRestorableDaemonSessionId(
+            canonicalSessionId ?? legacySessionId,
+          );
+        }
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
@@ -2012,7 +2074,16 @@ export class WebViewProvider {
           data: {
             ...runtime,
             clientId: this.daemonClientId,
-            workspaceCwd,
+            workspaceCwd: canonicalWorkspaceCwd,
+            // The daemon matches workspaces by canonical path, but every
+            // `activeEditorChanged` sender posts VS Code's raw
+            // `editor.document.uri.fsPath`, which keeps the folder's symlinked
+            // spelling. The webview needs both to relativize the active file:
+            // with only the canonical one the prefix strip misses and the
+            // prompt silently degrades from `@src/foo.ts` to `@foo.ts`.
+            ...(canonicalWorkspaceCwd !== workspaceCwd
+              ? { editorWorkspaceCwd: workspaceCwd }
+              : {}),
             hostKind: this.isViewHost ? 'view' : 'panel',
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },
