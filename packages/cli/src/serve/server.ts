@@ -33,6 +33,7 @@ import type {
   ChannelWorkerSetResult,
   ChannelWorkerStopResult,
 } from './channel-worker-manager.js';
+import { apiProfileGate } from './api-profile.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -2106,6 +2107,22 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
+  // API profile gate (`--api-profile=minimal`): 404 everything outside the
+  // partner-facing REST subset. One middleware instead of a conditional on
+  // each of the ~65 route registrations below — the goal is narrowing the
+  // authorization and contract surface, not saving startup work, so the routes
+  // are still registered and simply become unreachable.
+  //
+  // Placed AFTER `authenticate` so unauthenticated callers get a uniform 401
+  // and cannot enumerate the enabled surface by diffing 401 against 404, and
+  // BEFORE the post-auth `/health` registration so a non-loopback (or
+  // `--require-auth`) deployment gates that behind the profile too. `full`
+  // installs nothing.
+  const apiProfileMiddleware = apiProfileGate(opts.apiProfile);
+  if (apiProfileMiddleware) {
+    app.use(apiProfileMiddleware);
+  }
+
   if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
     // `/health` AFTER `bearerAuth` so probes must carry the token.
@@ -2261,6 +2278,7 @@ export function createServeApp(
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
+    apiProfile: opts.apiProfile,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
   });

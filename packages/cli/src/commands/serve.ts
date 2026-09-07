@@ -5,6 +5,10 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+// Value import, unlike the deferred serve module below: `api-profile.ts`
+// compiles to a module with no imports of its own (its express references are
+// type-only), so it costs nothing on the non-serve startup paths.
+import { API_PROFILES, type ApiProfile } from '../serve/api-profile.js';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
 import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
@@ -211,6 +215,7 @@ interface ServeArgs {
   'tls-cert'?: string;
   'tls-key'?: string;
   web: boolean;
+  'api-profile': ApiProfile;
   open: boolean;
   'open-with-auth': boolean;
   'local-control': boolean;
@@ -376,6 +381,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: true,
         description:
           'Serve the Web Shell UI at the daemon root path. Use --no-web for an API-only daemon.',
+      })
+      .option('api-profile', {
+        choices: API_PROFILES,
+        default: 'full' as const,
+        description:
+          'HTTP surface to expose. `full` serves every route (what the Web Shell drives). ' +
+          '`minimal` serves only the partner-facing REST subset documented in ' +
+          'docs/developers/qwen-serve-openapi.yaml and answers 404 elsewhere.',
       })
       .option('open', {
         type: 'boolean',
@@ -879,6 +892,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        apiProfile: argv['api-profile'],
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),
