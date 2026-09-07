@@ -514,6 +514,16 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const formatTerminalStreamError = (error: unknown): string => {
+      const errorText = parseAndFormatApiError(
+        error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${errorText}\n`);
+      }
+      return errorText;
+    };
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
@@ -2379,6 +2389,7 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
+        let terminalApiError: string | undefined;
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
@@ -2467,17 +2478,11 @@ export async function runNonInteractive(
             loopDetected = true;
           }
           if (event.type === LlmEventType.Error) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            if (outputFormat === OutputFormat.TEXT) {
-              process.stderr.write(`${errorText}\n`);
-            }
-            // The adapter (JSON) or stderr (TEXT) has already reported the
-            // formatted error. Reuse the terminal failure path without
-            // formatting or printing the message a second time.
-            throw new AlreadyReportedError(errorText);
+            // Do not throw from inside the async-generator loop. Closing the
+            // iterator early skips provider post-yield bookkeeping. Remember
+            // the failure, drain the stream naturally, then route it through
+            // the terminal failure path below.
+            terminalApiError ??= formatTerminalStreamError(event.value.error);
           }
         }
         captureActiveInteractionOwner();
@@ -2485,6 +2490,10 @@ export async function runNonInteractive(
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
+
+        if (terminalApiError) {
+          throw new AlreadyReportedError(terminalApiError);
+        }
 
         if (loopDetected) {
           return emitLoopDetectedResult();
@@ -2725,6 +2734,7 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
+              let itemTerminalApiError: string | undefined;
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
               const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
@@ -2781,23 +2791,21 @@ export async function runNonInteractive(
                   loopDetected = true;
                 }
                 if (event.type === LlmEventType.Error) {
-                  const errorText = parseAndFormatApiError(
+                  // Match the main loop: drain provider post-yield work before
+                  // surfacing the terminal error.
+                  itemTerminalApiError ??= formatTerminalStreamError(
                     event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
                   );
-                  if (outputFormat === OutputFormat.TEXT) {
-                    process.stderr.write(`${errorText}\n`);
-                  }
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
-                  throw new AlreadyReportedError(errorText);
                 }
               }
               captureActiveInteractionOwner();
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
+
+              if (itemTerminalApiError) {
+                throw new AlreadyReportedError(itemTerminalApiError);
+              }
 
               if (loopDetected) {
                 return;
@@ -3210,6 +3218,13 @@ export async function runNonInteractive(
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      // A caller-supplied adapter belongs to a persistent host (for example
+      // the stream-json SDK session). The result above completes this turn;
+      // process-level error handling would run global exit cleanup and tear
+      // down the reusable Config. Let the host observe the rejection instead.
+      if (!ownsAdapter) {
+        throw error;
       }
       await handleError(error, config);
     } finally {

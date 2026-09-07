@@ -68,7 +68,10 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  registerCleanup,
+} from './utils/cleanup.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
@@ -5152,6 +5155,14 @@ describe('runNonInteractive', () => {
     async (format, drain) => {
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
       setupMetricsMock();
+      let now = 1_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      let streamDrained = false;
+      const unhandledRejections: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        unhandledRejections.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandledRejection);
       const errorMessage = 'messages: text content blocks must be non-empty';
       const finished: ServerLlmStreamEvent = {
         type: LlmEventType.Finished,
@@ -5175,35 +5186,48 @@ describe('runNonInteractive', () => {
           createStreamFromEvents([finished]),
         );
       }
+      const terminalErrorStream = async function* () {
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'failed-attempt-tool',
+            name: 'test-tool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'api-error-status',
+          },
+        } satisfies ServerLlmStreamEvent;
+        now += 25;
+        yield {
+          type: LlmEventType.Error,
+          value: { error: { message: errorMessage } },
+        } satisfies ServerLlmStreamEvent;
+        streamDrained = true;
+      };
       mockLlmClient.sendMessageStream
-        .mockReturnValueOnce(
-          createStreamFromEvents([
-            {
-              type: LlmEventType.ToolCallRequest,
-              value: {
-                callId: 'failed-attempt-tool',
-                name: 'test-tool',
-                args: {},
-                isClientInitiated: false,
-                prompt_id: 'api-error-status',
-              },
-            },
-            {
-              type: LlmEventType.Error,
-              value: { error: { message: errorMessage } },
-            },
-          ]),
-        )
+        .mockReturnValueOnce(terminalErrorStream())
         .mockImplementation(() => createStreamFromEvents([finished]));
       mockCoreExecuteToolCall.mockResolvedValue({
         responseParts: [{ text: 'unexpected execution' }],
       });
 
-      await expect(
-        runNonInteractive(mockConfig, mockSettings, 'test', 'api-error-status'),
-      ).rejects.toThrow(
-        format === OutputFormat.JSON ? 'process.exit(1) called' : errorMessage,
-      );
+      try {
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'api-error-status',
+          ),
+        ).rejects.toThrow(
+          format === OutputFormat.JSON
+            ? 'process.exit(1) called'
+            : errorMessage,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
       const stdout = processStdoutSpy.mock.calls
         .map((call) => String(call[0]))
         .join('');
@@ -5222,13 +5246,50 @@ describe('runNonInteractive', () => {
         is_error: true,
         subtype: 'error_during_execution',
       });
+      expect(results[0].duration_api_ms).toBeGreaterThan(0);
       expect(JSON.stringify(results[0])).toContain(errorMessage);
+      expect(streamDrained).toBe(true);
+      expect(unhandledRejections).toEqual([]);
       expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
         drain ? 2 : 1,
       );
     },
   );
+
+  it('does not run process exit cleanup for a caller-owned adapter error', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const cleanup = vi.fn();
+    const unregisterCleanup = registerCleanup(cleanup);
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    const errorMessage = 'temporary provider failure';
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: errorMessage } },
+        },
+      ]),
+    );
+
+    try {
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'session-error', {
+          adapter,
+        }),
+      ).rejects.toThrow(errorMessage);
+      expect(cleanup).not.toHaveBeenCalled();
+      const results = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => JSON.parse(line).type === 'result');
+      expect(results).toHaveLength(1);
+    } finally {
+      unregisterCleanup();
+    }
+  });
 
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);

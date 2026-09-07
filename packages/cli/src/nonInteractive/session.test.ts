@@ -1330,18 +1330,39 @@ describe('runNonInteractiveStreamJson', () => {
   });
 
   it('handles error from processUserMessage', async () => {
-    const userMessage = createUserMessage('Test message');
+    const initRequest = createControlRequest('initialize');
+    const failedMessage = createUserMessage('First message');
+    const nextMessage = createUserMessage('Second message');
 
     const error = new Error('Processing error');
-    runNonInteractiveMock.mockRejectedValue(error);
+    runNonInteractiveMock
+      .mockImplementationOnce((...args: unknown[]) => {
+        const options = args[4] as {
+          adapter: { emitResult: (result: { isError: boolean }) => void };
+        };
+        options.adapter.emitResult({ isError: true });
+        return Promise.reject(error);
+      })
+      .mockResolvedValueOnce(undefined);
 
     mockInputReader.read = async function* () {
-      yield userMessage;
+      yield initRequest;
+      yield failedMessage;
+      yield nextMessage;
     };
 
     await runNonInteractiveStreamJson(config, '');
 
-    // Error should be caught and handled gracefully
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(runNonInteractiveMock).toHaveBeenNthCalledWith(
+      2,
+      config,
+      expect.any(Object),
+      'Second message',
+      expect.stringContaining('test-session'),
+      expect.objectContaining({ adapter: mockOutputAdapter }),
+    );
   });
 
   it('handles stream error gracefully', async () => {

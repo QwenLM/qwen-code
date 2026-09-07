@@ -22,15 +22,17 @@ import { writeStderrLine } from './stdioHelpers.js';
 const debugLogger = createDebugLogger('CLI_ERRORS');
 
 /**
- * Marker thrown when a producer has already formatted the error message and
- * written it to stderr — the downstream `handleError` should propagate the
- * exit code without printing or reformatting again.
+ * Marker thrown when a producer has already formatted and emitted the error
+ * message on its active output channel. The downstream `handleError` should
+ * propagate the exit code without formatting it again.
  *
  * The non-interactive runner uses this when an upstream API error event
- * arrives mid-stream: it formats with parseAndFormatApiError, writes once,
- * and then throws. Without this marker, handleError would call
+ * arrives mid-stream: text mode writes it to stderr, while structured modes
+ * send it through their output adapter, and then the runner throws. Without
+ * this marker, handleError would call
  * parseAndFormatApiError a second time on the (now formatted) Error.message,
- * yielding "[API Error: [API Error: ...]]" plus a duplicate stderr line.
+ * yielding "[API Error: [API Error: ...]]" and potentially duplicating the
+ * active output channel's report.
  */
 export class AlreadyReportedError extends Error {
   /** Exit code to surface — defaults to 1 for generic upstream failures. */
@@ -145,11 +147,10 @@ export async function handleError(
   config: Config,
   customErrorCode?: string | number,
 ): Promise<never> {
-  // Producers that already wrote a formatted message to stderr (see
-  // AlreadyReportedError above) should not be reprinted or reformatted here.
-  // In TEXT mode this short-circuits straight to a clean re-throw; in JSON
-  // mode we still emit the structured payload exactly once so machine
-  // consumers don't lose the error.
+  // Producers marked with AlreadyReportedError already emitted the formatted
+  // message on their active output channel, so do not format it again here.
+  // JSON mode still emits its structured stderr exit payload; text and
+  // stream-json rethrow without another user-facing error body.
   if (error instanceof AlreadyReportedError) {
     if (config.getOutputFormat() === OutputFormat.JSON) {
       const formatter = new JsonFormatter();
