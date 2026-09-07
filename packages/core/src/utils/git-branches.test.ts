@@ -599,6 +599,39 @@ describe('gitCreateBranch rollback (R12)', () => {
     const branches = git(dir, 'branch', '--format=%(refname:short)');
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
   });
+
+  it('preserves a branch advanced by a failing post-checkout hook', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const beforeHead = headSha(dir);
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      [
+        '#!/bin/sh',
+        'echo hook-change >> hook.txt',
+        'git add hook.txt',
+        'git commit --no-verify -q -m "hook commit"',
+        'git rev-parse HEAD > hook-sha',
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow(
+      /branch "topic" was not deleted/,
+    );
+
+    expect(currentBranch(dir)).toBe(before);
+    expect(headSha(dir)).toBe(beforeHead);
+    const hookSha = read(dir, 'hook-sha').trim();
+    expect(git(dir, 'rev-parse', 'refs/heads/topic').trim()).toBe(hookSha);
+    expect(git(dir, 'log', '-1', '--format=%s', 'topic').trim()).toBe(
+      'hook commit',
+    );
+  });
 });
 
 describe('gitPush', () => {

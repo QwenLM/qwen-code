@@ -422,6 +422,13 @@ export async function gitCreateBranch(
     args.push(startPoint);
   }
   args.push('--');
+  const expectedTip = (
+    await runGit(
+      cwd,
+      ['rev-parse', '--verify', `${startPoint || 'HEAD'}^{commit}`],
+      env,
+    ).catch(() => '')
+  ).trim();
   // `git checkout -b` creates the ref and switches HEAD before running the
   // post-checkout hook. If that hook fails the call throws even though the
   // workspace is already on the new branch; capture the previous HEAD so we
@@ -447,16 +454,64 @@ export async function gitCreateBranch(
       ).catch(() => '')
     ).trim();
     if (nowOn === name) {
-      if (originalRef) {
-        await runGit(cwd, ['checkout', originalRef, '--'], env).catch(() => {});
-      } else if (originalCommit) {
-        await runGit(
-          cwd,
-          ['checkout', '--detach', originalCommit, '--'],
-          env,
-        ).catch(() => {});
+      let rollbackError: unknown;
+      let branchDeleted = false;
+      try {
+        // Recovery must not run repository hooks again. A side-effecting
+        // post-checkout hook could otherwise mutate the original branch.
+        const rollbackArgs = originalRef
+          ? ['-c', 'core.hooksPath=', 'checkout', originalRef, '--']
+          : originalCommit
+            ? [
+                '-c',
+                'core.hooksPath=',
+                'checkout',
+                '--detach',
+                originalCommit,
+                '--',
+              ]
+            : undefined;
+        if (rollbackArgs) {
+          await runGit(cwd, rollbackArgs, env);
+        }
+
+        const branchTip = expectedTip
+          ? (
+              await runGit(
+                cwd,
+                ['rev-parse', '--verify', `refs/heads/${name}`],
+                env,
+              ).catch(() => '')
+            ).trim()
+          : '';
+        // A hook may have advanced the branch, or the starting tip may not
+        // be verifiable (for example, an unborn HEAD). Preserve it rather
+        // than risking deletion of user-created history.
+        if (rollbackArgs && expectedTip && branchTip === expectedTip) {
+          await runGit(cwd, ['branch', '-D', name], env);
+          branchDeleted = true;
+        }
+      } catch (rollbackErr) {
+        rollbackError = rollbackErr;
       }
-      await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
+
+      const originalMessage = err instanceof Error ? err.message : String(err);
+      if (rollbackError) {
+        const rollbackMessage =
+          rollbackError instanceof Error
+            ? rollbackError.message
+            : String(rollbackError);
+        throw new Error(
+          `${originalMessage}; failed to roll back branch "${name}": ${rollbackMessage}`,
+          { cause: err },
+        );
+      }
+      if (!branchDeleted) {
+        throw new Error(
+          `${originalMessage}; branch "${name}" was not deleted because its ref changed or could not be verified`,
+          { cause: err },
+        );
+      }
     }
     throw err;
   }
