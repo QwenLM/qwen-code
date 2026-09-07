@@ -57,7 +57,6 @@ interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
   includeSourceIdentity?: boolean;
   safeToolProjection?: boolean;
-  recordedToolStatus?: boolean;
 }
 
 interface BackgroundAgentTaskUpdate {
@@ -699,7 +698,6 @@ export function transcriptBlocksToDaemonMessages(
         const projectedToolCall = daemonToolBlockToToolCall(
           toolBlock,
           safeToolProjection,
-          options.recordedToolStatus === true,
         );
         const backgroundAgentUpdate = backgroundAgentTaskUpdates.get(
           projectedToolCall.callId,
@@ -1232,7 +1230,6 @@ function getString(
 function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
-  recordedToolStatus: boolean,
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block, safeToolProjection);
   const executionMode = safeToolProjection
@@ -1259,9 +1256,7 @@ function daemonToolBlockToToolCall(
     block.status === 'cancelled' ||
     block.status === 'canceled';
   const forceBackgroundPending =
-    isBackgroundAgent &&
-    !recordedToolStatus &&
-    (!safeToolProjection || !isComplete);
+    isBackgroundAgent && (!safeToolProjection || !isComplete);
 
   return {
     callId: block.toolCallId,

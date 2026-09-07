@@ -956,6 +956,29 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), sourceBlockIds: ['b1'] },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), sourceBlockIds: ['b2'] },
+        toolMsg('g2'),
+        asstMsg('a2'),
+        { ...userMsg('u3'), sourceBlockIds: ['b3'] },
+        toolMsg('g3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(
+      [...c.querySelectorAll<HTMLElement>('[data-source-block-ids="b2"]')].map(
+        (row) => row.dataset.messageRowKey,
+      ),
+    ).toEqual(['msg:u2', 'tc:tc-u2']);
+  });
+
   it('locates frozen virtual rows without leaving a recentering target behind', () => {
     const ref = createRef<MessageListHandle>();
     const c = mount(

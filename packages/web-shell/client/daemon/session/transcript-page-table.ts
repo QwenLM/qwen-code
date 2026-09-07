@@ -209,6 +209,11 @@ export class HistoricalTranscriptPageTable {
     this.touch(rangeId);
   }
 
+  clearSelection(): void {
+    this.selectedRangeId = undefined;
+    this.selectedPageId = undefined;
+  }
+
   setViewportAnchor(viewportId: string, pageId?: string): void {
     if (pageId === undefined) {
       this.viewportPins.delete(viewportId);
@@ -1000,6 +1005,7 @@ export class HistoricalTranscriptPageTable {
         .filter(
           (range) =>
             range.id !== activeRangeId &&
+            range.id !== this.selectedRangeId &&
             !range.pageIds.some((id) =>
               [...this.viewportPins.values()].includes(id),
             ),
@@ -1058,6 +1064,7 @@ export class HistoricalTranscriptPageTable {
       const removable = edges.find(
         (pageId) =>
           pageId !== targetPageId &&
+          pageId !== this.selectedPageId &&
           pageId !== admittedBoundary?.pageId &&
           ![...this.viewportPins.values()].includes(pageId!),
       );

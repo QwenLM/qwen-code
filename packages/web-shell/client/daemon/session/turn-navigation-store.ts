@@ -255,6 +255,8 @@ export function createDaemonTurnNavigationStore(
   }
 
   function publish(update: Partial<DaemonTurnNavigationSnapshot> = {}): void {
+    const selected = 'selected' in update ? update.selected : snapshot.selected;
+    if (selected?.location?.view !== 'historical') pageTable.clearSelection();
     const table = pageTable.getSnapshot();
     const legacyRanges = table.ranges.filter(
       (range): range is HistoricalTranscriptRange => 'anchorTurnId' in range,

@@ -2,9 +2,8 @@
 
 ## Status and decision
 
-Implemented locally, 2026-09-07; build and focused verification passed.
-Independent native review remains incomplete: its unattended run timed out
-after ten minutes without a verdict. Independent review is still required.
+Implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208),
+2026-09-07. Review and verification status are tracked on that PR.
 Implementation started on `1a86cd6c5`. User approved the compatibility variant:
 keep `HistoricalTranscriptRange` and the legacy navigation snapshot unchanged;
 expose sequential ranges through an additional viewport snapshot/command surface
@@ -46,20 +45,20 @@ arbitrarily long backward-only gap.
 
 Paths below are relative to `packages/web-shell/client/`.
 
-| Area                                                                                | Verified behavior                                                                                       | Design consequence                                                                                   |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `App.tsx:894`, `:3188`, `:3814`                                                     | Structural live snapshots feed the outer App; `LiveMessageList` projects streaming updates separately.  | Preserve this split and live update throttling.                                                      |
-| `App.tsx:935`                                                                       | The live wrapper updates `messagesRef` and calls the host transcript callback.                          | Historical visibility must not change host callback semantics.                                       |
-| `App.tsx:4073`, `:6455`, `:6488`, `:6603`                                           | Messages/blocks also drive output associations, permissions, Todo, workflow, and task activity.         | Keep business/control consumers on live data.                                                        |
-| `hooks/useMessages.ts:70`, `:380`                                                   | Source block identity is already retained; the hook also reconciles background agents over the network. | Use the pure localized adapter for history, not a second live hook.                                  |
-| `components/MessageList.tsx:2887`, `:3263`                                          | Grouping, metrics, collapse, and the local timeline assume contiguous input.                            | Project one continuous range; do not use a synthetic message to hide a gap between unrelated ranges. |
-| `components/MessageList.tsx:3448`, `:4168`, `:4590`                                 | Session reset, virtual rows, and prepend restoration already exist.                                     | Extend their view identity and anchor contracts instead of replacing the virtualizer.                |
-| `components/MessageList.tsx:3820`, `:5130`                                          | Quiet-period reload and new-message events can enable bottom following.                                 | Historical mode must suppress both behaviors.                                                        |
-| `components/MessageList.tsx:2855`, `:5400`; `App.tsx:13094`                         | Edit/rewind uses a locally counted user-turn index.                                                     | Never enable these actions for a historical fragment.                                                |
-| `components/ChatPane.tsx:1354`                                                      | Split panes have a separate MessageList consumer and provider.                                          | Share the integration adapter, not viewport state.                                                   |
-| `components/SubagentDetail.tsx:204`; `WebShellTranscript.tsx:275`                   | Other consumers include a child session and a provider-free public renderer.                            | MessageList must remain usable without navigation context.                                           |
-| `daemon/session/DaemonSessionProvider.tsx:4277`                                     | Legacy history loads prepend into the live store and update repair checkpoints.                         | Leave this as the compatibility path; capable built-in views use page-table admission.               |
-| `daemon/session/transcript-page-table.ts:176`, `:833` in `turn-navigation-store.ts` | Page selection is available only through turn lookup; gap recovery rereads a turn anchor.               | Add viewport pinning and a non-turn bootstrap origin for sequential browsing.                        |
+| Area                                                                                                      | Verified behavior                                                                                      | Design consequence                                                                                   |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `App.tsx:894`, `:3188`, `:3814`                                                                           | Structural live snapshots feed the outer App; `LiveMessageList` projects streaming updates separately. | Preserve this split and live update throttling.                                                      |
+| `App.tsx:935`                                                                                             | The live wrapper updates `messagesRef` and calls the host transcript callback.                         | Historical visibility must not change host callback semantics.                                       |
+| `App.tsx:4073`, `:6455`, `:6488`, `:6603`                                                                 | Messages/blocks also drive output associations, permissions, Todo, workflow, and task activity.        | Keep business/control consumers on live data.                                                        |
+| `adapters/localizedMessages.ts` (`transcriptBlocksToLocalizedMessages`); `hooks/useTranscriptViewport.ts` | The localized adapter retains source identity without live background-agent reconciliation.            | Use the pure localized adapter for history, not a second live hook.                                  |
+| `components/MessageList.tsx:2887`, `:3263`                                                                | Grouping, metrics, collapse, and the local timeline assume contiguous input.                           | Project one continuous range; do not use a synthetic message to hide a gap between unrelated ranges. |
+| `components/MessageList.tsx:3448`, `:4168`, `:4590`                                                       | Session reset, virtual rows, and prepend restoration already exist.                                    | Extend their view identity and anchor contracts instead of replacing the virtualizer.                |
+| `components/MessageList.tsx:3820`, `:5130`                                                                | Quiet-period reload and new-message events can enable bottom following.                                | Historical mode must suppress both behaviors.                                                        |
+| `components/MessageList.tsx:2855`, `:5400`; `App.tsx:13094`                                               | Edit/rewind uses a locally counted user-turn index.                                                    | Never enable these actions for a historical fragment.                                                |
+| `components/ChatPane.tsx:1354`                                                                            | Split panes have a separate MessageList consumer and provider.                                         | Share the integration adapter, not viewport state.                                                   |
+| `components/artifacts/SubagentDetail.tsx:204`; `components/WebShellTranscript.tsx:275`                    | Other consumers include a child session and a provider-free public renderer.                           | MessageList must remain usable without navigation context.                                           |
+| `daemon/session/DaemonSessionProvider.tsx:4277`                                                           | Legacy history loads prepend into the live store and update repair checkpoints.                        | Leave this as the compatibility path; capable built-in views use page-table admission.               |
+| `daemon/session/transcript-page-table.ts:176`, `:833` in `turn-navigation-store.ts`                       | Page selection is available only through turn lookup; gap recovery rereads a turn anchor.              | Add viewport pinning and a non-turn bootstrap origin for sequential browsing.                        |
 
 The #11143 comparison identified useful interest in rendered identity, but the
 current `sourceBlockIds` projection already supports the first integration.
@@ -91,14 +90,13 @@ SSE changes must not rerun it. Project the entire contiguous range together so
 tool relationships can cross a page boundary, but never across a range boundary.
 Discard derived projections when their pages leave the cache.
 
-Historical tool projection must preserve recorded terminal status without a
-background-agent status poll. The current default pure adapter can force a
-completed background agent back to pending (`transcriptToMessages.ts:1258`).
-Add a narrow recorded-status option consumed by the historical projection while
-retaining normal tool payload/detail projection. Do not simply enable
-`safeToolProjection`: that also removes tool content and changes input/output
-projection. Other callers retain their current behavior. Recorded nonterminal
-tools are labelled as snapshot state, not as proof of a currently running task.
+Historical tools use the existing pure projection without a background-agent
+status poll, retaining normal tool payloads and details. A completed background
+launch tool records successful launch, not the agent's eventual completion.
+Only an in-range background notification supplies the agent's terminal status
+and end time. Without it, the agent remains nonterminal snapshot state, not
+proof that it is currently running. Do not enable `safeToolProjection`: that
+also removes tool content and changes input/output projection.
 
 Keep App/ChatPane live messages as the input to session-wide business logic.
 Only row-local display data, such as historical output cards, use the historical
@@ -366,8 +364,8 @@ change from that PR only when a test demonstrates a missing identity consumer.
 | Existing locale resources                                                    | Boundary, retry, invalidation and return-to-latest labels.                                  |
 | `client/e2e/` (relative to package root)                                     | Focused browser regression spec using existing Playwright setup.                            |
 
-Also update `adapters/transcriptToMessages.ts` and its tests for recorded-status
-projection without changing live reconciliation or discarding historical tool details.
+Verify the pure adapter's launch-only and in-range notification projections
+without changing live reconciliation or discarding historical tool details.
 
 No changes to `packages/core`, `packages/cli`, or `packages/sdk-typescript` are
 planned. No new library or global CSS rewrite. New controls reuse shared UI
@@ -391,8 +389,9 @@ The following requirements remain committed even when that local file is absent:
 - First-visible parallel-agent, collapsed-turn and output rows resolve to an
   exact retained page; multiple embedded viewports do not overwrite each other's
   reading pin or leak pins after unmount.
-- Recorded completed/failed/cancelled background agents stay terminal even when
-  the selected window lacks their completion notification; details remain readable.
+- Background-agent launch records remain nonterminal without an in-range
+  completion notification; terminal status and end time come from that
+  notification when available. Tool details remain readable in both cases.
 - Stream, approve a live request, update Todo/tasks, and queue a prompt while
   history is visible. Live callbacks continue; historical rows do not act live.
 - Reconnect, rewind, snapshot loss, source switch, and split-pane changes reject

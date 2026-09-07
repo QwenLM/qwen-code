@@ -153,6 +153,106 @@ function indexPage(
 }
 
 describe('createDaemonTurnNavigationStore', () => {
+  it('protects the legacy selected page when opening a sequential viewport', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+    getTranscriptPage
+      .mockResolvedValueOnce(transcriptPage('turn-0'))
+      .mockResolvedValueOnce(transcriptPage(['history-before-live']));
+    const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+    await ready(store, client);
+    const location = await store.locateOrdinal(0);
+    expect(store.getSnapshot().selected).toMatchObject({
+      status: 'ready',
+      location,
+    });
+    expect(store.getSnapshot().historicalPages.has(location.pageId!)).toBe(
+      true,
+    );
+
+    await expect(
+      store.openBeforeLive('live', { isCurrent: () => true }),
+    ).rejects.toThrow('window is full');
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.selected).toMatchObject({ status: 'ready', location });
+    expect(snapshot.historicalPages.has(location.pageId!)).toBe(true);
+  });
+
+  it('retains a viewport-pinned legacy selection under sequential capacity pressure', async () => {
+    const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+    getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0']));
+    getTranscriptPage
+      .mockResolvedValueOnce(transcriptPage('turn-0'))
+      .mockResolvedValueOnce(transcriptPage(['history-before-live']));
+    const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+    await ready(store, client);
+    const location = await store.locateOrdinal(0);
+    store.setViewportAnchor('legacy-view', location.pageId);
+
+    await expect(
+      store.openBeforeLive('live', { isCurrent: () => true }),
+    ).rejects.toThrow('window is full');
+
+    expect(store.getSnapshot().historicalPages.has(location.pageId!)).toBe(
+      true,
+    );
+    expect(store.getSnapshot().selected).toMatchObject({
+      status: 'ready',
+      location,
+    });
+  });
+
+  it.each([false, true])(
+    'releases a historical selection after moving to live with viewport pin=%s',
+    async (viewportPinned) => {
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0', 'turn-1']));
+      getTranscriptPage
+        .mockResolvedValueOnce(transcriptPage('turn-0'))
+        .mockResolvedValue(transcriptPage(['history-before-live']));
+      const store = createDaemonTurnNavigationStore({ maxHistoricalPages: 1 });
+      await ready(store, client);
+      const historical = await store.locateOrdinal(0);
+      if (viewportPinned) {
+        store.setViewportAnchor('historical-reader', historical.pageId);
+      }
+      store.observeLiveBlocks([userBlock('live-1', 'turn-1')]);
+      const live = await store.locateOrdinal(1);
+      expect(live).toMatchObject({ view: 'live', blockId: 'live-1' });
+      expect(store.getSnapshot().selected).toMatchObject({
+        status: 'ready',
+        location: live,
+      });
+
+      if (viewportPinned) {
+        await expect(
+          store.openBeforeLive('turn-1', { isCurrent: () => true }),
+        ).rejects.toThrow('window is full');
+        expect(store.getViewportSnapshot().pages.has(historical.pageId!)).toBe(
+          true,
+        );
+        store.setViewportAnchor('historical-reader');
+      }
+
+      const rangeId = await store.openBeforeLive('turn-1', {
+        isCurrent: () => true,
+      });
+
+      expect(store.getViewportSnapshot().pages.size).toBe(1);
+      expect(store.getViewportSnapshot().pages.has(historical.pageId!)).toBe(
+        false,
+      );
+      expect(store.getViewportSnapshot().ranges).toMatchObject([
+        { id: rangeId, beforeRecordId: 'turn-1' },
+      ]);
+      expect(store.getSnapshot().selected).toMatchObject({
+        status: 'ready',
+        location: live,
+      });
+    },
+  );
+
   it('keeps the frozen viewport identity on disconnect but retires it for a new owner', async () => {
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
     getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));

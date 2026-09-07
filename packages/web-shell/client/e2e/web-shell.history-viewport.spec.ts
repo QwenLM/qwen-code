@@ -41,6 +41,7 @@ async function readingAnchor(viewport: Locator) {
     )!;
     return {
       source: row.dataset.sourceBlockIds!.split(',')[0],
+      rowKey: row.dataset.messageRowKey,
       offset: row.getBoundingClientRect().top - top,
     };
   });
@@ -75,7 +76,7 @@ async function moveReadingPosition(
 }
 
 for (const pageRecords of [16, 200]) {
-  test(`history viewport preserves the reading row across bounded ${pageRecords}-record pages`, async ({
+  test(`history viewport preserves the reading row across bounded ${pageRecords}-record pages @smoke`, async ({
     page,
     baseURL,
   }) => {
@@ -213,9 +214,11 @@ for (const pageRecords of [16, 200]) {
                     '[data-source-block-ids]',
                   ),
                 ].find((row) =>
-                  row.dataset.sourceBlockIds
-                    ?.split(',')
-                    .includes(anchor.source),
+                  anchor.rowKey
+                    ? row.dataset.messageRowKey === anchor.rowKey
+                    : row.dataset.sourceBlockIds
+                        ?.split(',')
+                        .includes(anchor.source),
                 );
                 return row
                   ? Math.abs(

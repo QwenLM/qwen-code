@@ -22,6 +22,7 @@ import { useI18n } from '../i18n';
 
 interface ReadingAnchor {
   source: string;
+  rowKey?: string;
   offset: number;
   callId?: string;
 }
@@ -53,6 +54,7 @@ export const TranscriptViewport = forwardRef<
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
+  const entryDirection = useRef<'older' | 'newer'>('older');
   const lastView = useRef(viewport.viewKey);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
@@ -82,6 +84,7 @@ export const TranscriptViewport = forwardRef<
         row.getBoundingClientRect().top < top + scroll.clientHeight,
     );
     let source = row?.dataset.sourceBlockIds?.split(',')[0];
+    const rowKey = row?.dataset.messageRowKey;
     let callId: string | undefined;
     if (row && row.getBoundingClientRect().top < top) {
       const child = [
@@ -103,7 +106,12 @@ export const TranscriptViewport = forwardRef<
     }
     if (!source || !row) return undefined;
     pin(source);
-    return { source, callId, offset: row.getBoundingClientRect().top - top };
+    return {
+      source,
+      rowKey,
+      callId,
+      offset: row.getBoundingClientRect().top - top,
+    };
   }, [historical, pin, rows, scroller, toolSources]);
   useImperativeHandle(
     ref,
@@ -146,6 +154,9 @@ export const TranscriptViewport = forwardRef<
           : undefined;
         const row =
           child ??
+          (saved.rowKey
+            ? rows().find((row) => row.dataset.messageRowKey === saved.rowKey)
+            : undefined) ??
           rows().find((row) =>
             row.dataset.sourceBlockIds?.split(',').includes(saved.source),
           );
@@ -160,7 +171,10 @@ export const TranscriptViewport = forwardRef<
           );
           if (message) list.current?.scrollToMessage(message.id, saved.callId);
         }
-      } else if (changedView) scroll.scrollTop = scroll.scrollHeight;
+      } else if (changedView) {
+        scroll.scrollTop =
+          entryDirection.current === 'newer' ? 0 : scroll.scrollHeight;
+      }
       capture();
       if (--remaining > 0) frame = requestAnimationFrame(restore);
       else {
@@ -177,7 +191,13 @@ export const TranscriptViewport = forwardRef<
 
   const load = (direction: 'older' | 'newer') => {
     anchor.current = capture();
+    entryDirection.current = direction;
     void viewport.load(direction);
+  };
+  const handleScrollIntent = () => {
+    scrollIntent.current += 1;
+    if (!loading) anchor.current = undefined;
+    restoring.current = false;
   };
   const boundaryButton = (direction: 'older' | 'newer') => {
     const boundary = viewport.range?.[direction];
@@ -203,21 +223,9 @@ export const TranscriptViewport = forwardRef<
     <div
       ref={root}
       className="flex min-h-0 flex-1 flex-col"
-      onWheelCapture={() => {
-        scrollIntent.current += 1;
-        anchor.current = undefined;
-        restoring.current = false;
-      }}
-      onPointerDownCapture={() => {
-        scrollIntent.current += 1;
-        anchor.current = undefined;
-        restoring.current = false;
-      }}
-      onKeyDownCapture={() => {
-        scrollIntent.current += 1;
-        anchor.current = undefined;
-        restoring.current = false;
-      }}
+      onWheelCapture={handleScrollIntent}
+      onPointerDownCapture={handleScrollIntent}
+      onKeyDownCapture={handleScrollIntent}
       onScrollCapture={() => {
         if (restoring.current) return;
         const current = capture();

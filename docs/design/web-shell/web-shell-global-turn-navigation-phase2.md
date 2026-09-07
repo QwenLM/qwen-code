@@ -3,7 +3,8 @@
 ## Status
 
 Phase 2A merged in [#11054](https://github.com/QwenLM/qwen-code/pull/11054);
-Phase 2B proposed in the
+Phase 2B implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208),
+following the
 [historical viewport integration design](web-shell-global-turn-navigation-phase2b.md).
 Original proposal: 2026-09-04. Builds on
 `web-shell-global-turn-navigation.md` (Phase 1 merged as #10751) and the
@@ -50,8 +51,9 @@ today:
   its completeness is coupled to transcript retention.
 
 Phase 2A builds the two stores and headless random-read API without changing
-the visible transcript. Phase 2B migrates existing sequential pagination;
-Phase 3 wires the visible random-jump UI.
+the visible transcript. Phase 2B adds a historical viewport over the same page
+table while preserving the legacy sequential path. Phase 3 wires the visible
+random-jump rail.
 
 ## Consumed contract (Phase 1, shipped)
 
@@ -197,7 +199,7 @@ as a generic transient index failure.
 ## Non-goals (Phase 3 and later)
 
 - Rail virtualization, rail selection UX, keyboard navigation, jump-to-latest
-  visual integration, and real-browser E2E.
+  visual integration, and real-browser random-jump E2E.
 - Server or SDK protocol changes. (Two known non-blocking Phase 1 follow-ups —
   ACP-path `atRecordId` length parity with the route's 200-char cap, and a
   pinning test for the two-record anchored-expansion case — are tracked

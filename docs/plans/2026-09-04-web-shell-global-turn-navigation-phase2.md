@@ -1,6 +1,6 @@
 # Web Shell global turn navigation Phase 2 implementation plan
 
-- Status: In progress — Phase 2A implemented; Phase 2B pending
+- Status: Phase 2A merged in #11054; Phase 2B implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208)
 - Date: 2026-09-04
 - Base: `cf44c778c0775d640560143828d851fa30dbd893`
 - Tracks: [#10750](https://github.com/QwenLM/qwen-code/issues/10750)
@@ -10,7 +10,7 @@
 **2026-09-06 update:** Phase 2A merged as #11054. The
 [Phase 2B viewport design](../design/web-shell/web-shell-global-turn-navigation-phase2b.md)
 supersedes this plan's sequential-history migration, public-history-hook
-replacement, and blanket UI/browser-test deferrals. It proposes a separate
+replacement, and blanket UI/browser-test deferrals. It implements a separate
 historical viewport for built-in main/split views, retains legacy public hook
 semantics, and moves minimal scrolling/boundary UI into Phase 2B. The original
 sections below are retained as historical rationale, not competing requirements.

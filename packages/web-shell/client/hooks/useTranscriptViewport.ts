@@ -63,13 +63,10 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   );
   const messages = useMemo(
     () =>
-      transcriptBlocksToLocalizedMessages(blocks, t, false, true).map(
-        (message) => {
-          if ('isStreaming' in message)
-            return { ...message, isStreaming: false };
-          return message;
-        },
-      ),
+      transcriptBlocksToLocalizedMessages(blocks, t).map((message) => {
+        if ('isStreaming' in message) return { ...message, isStreaming: false };
+        return message;
+      }),
     [blocks, t],
   );
   const toolSources = useMemo(() => {
@@ -142,6 +139,8 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   );
 
   const liveBoundary = store.captureLiveBoundary();
+  const available =
+    navigation.mode === 'ready' || navigation.mode === 'loading';
   return {
     messages: range ? messages : liveMessages,
     toolSources,
@@ -152,11 +151,12 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
     range,
     loading,
     error,
-    enabled:
-      navigation.mode !== 'legacy' &&
-      (!!range || !!liveBoundary.beforeRecordId),
+    enabled: !!range || (available && !!liveBoundary.beforeRecordId),
     canOpen:
-      navigation.mode !== 'legacy' && state.connected && liveBoundary.reachable,
+      available &&
+      state.connected &&
+      liveBoundary.reachable &&
+      !!liveBoundary.beforeRecordId,
     connected: state.connected,
     canContinueLive:
       !!range &&

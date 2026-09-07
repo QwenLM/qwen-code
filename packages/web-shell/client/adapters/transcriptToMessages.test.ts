@@ -192,8 +192,8 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
-  it('preserves recorded terminal background status without dropping tool detail', () => {
-    const block = toolBlock('agent-history', 'agent-1', 'completed', 20, {
+  it('does not treat a historical background launch as agent completion', () => {
+    const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
       toolName: 'agent',
       rawInput: { prompt: 'inspect history' },
       rawOutput: {
@@ -201,26 +201,68 @@ describe('transcriptBlocksToDaemonMessages', () => {
         status: 'background',
         result: 'kept detail',
       },
+      updatedAt: 1005,
     });
-    const live = transcriptBlocksToDaemonMessages([block]);
-    const recorded = transcriptBlocksToDaemonMessages([block], {
-      recordedToolStatus: true,
+    const messages = transcriptBlocksToDaemonMessages([block]);
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'pending',
+      startTime: 1000,
+      endTime: undefined,
+      args: { prompt: 'inspect history' },
+      rawOutput: { result: 'kept detail' },
     });
-    expect(live[0]).toMatchObject({
-      role: 'tool_group',
-      tools: [{ status: 'pending' }],
-    });
-    expect(recorded[0]).toMatchObject({
-      role: 'tool_group',
-      tools: [
-        {
-          status: 'completed',
-          args: { prompt: 'inspect history' },
-          rawOutput: { result: 'kept detail' },
-        },
-      ],
-    });
+    expect(tool?.endTime).toBeUndefined();
   });
+
+  it.each(['completed', 'failed'] as const)(
+    'uses an in-range background notification for historical %s status',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+          toolName: 'agent',
+          rawInput: { prompt: 'inspect history' },
+          rawOutput: {
+            type: 'task_execution',
+            status: 'background',
+            result: 'kept detail',
+          },
+          updatedAt: 1005,
+        }),
+        textBlock(
+          'agent-result',
+          'assistant',
+          `agent ${status}`,
+          60000,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                taskId: 'task-1',
+                toolUseId: 'agent-1',
+                status,
+              },
+            },
+          },
+        ),
+      ]);
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({
+        status,
+        startTime: 1000,
+        endTime: 60000,
+        args: { prompt: 'inspect history' },
+        rawOutput: { result: 'kept detail' },
+      });
+    },
+  );
 
   it('preserves user source metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
