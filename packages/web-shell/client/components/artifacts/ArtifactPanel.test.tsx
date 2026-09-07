@@ -70,6 +70,7 @@ const {
       },
       client: {
         workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+        readSessionArtifactContent: vi.fn(),
       },
     },
   };
@@ -81,6 +82,10 @@ vi.mock(
     ...(await importOriginal()),
     useActions: () => mockActions,
     useWorkspace: () => mockWorkspace,
+    useConnection: () => ({
+      sessionId: 'active-session',
+      clientId: 'active-viewer',
+    }),
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
@@ -227,7 +232,11 @@ function linkArtifact(): DaemonSessionArtifact {
 
 function artifactPanel(
   artifact: DaemonSessionArtifact,
-  owner: { workspaceCwd: string; workspaceId: string } | null = {
+  owner: {
+    workspaceCwd: string;
+    workspaceId: string;
+    sourceSessionId?: string;
+  } | null = {
     workspaceCwd: '/primary',
     workspaceId: 'primary-id',
   },
@@ -648,6 +657,82 @@ async function flush() {
 }
 
 describe('ArtifactPanel code review artifacts', () => {
+  it('reads a saved artifact from the panel tab source session', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Source session</h1>',
+    );
+    await act(async () =>
+      root.render(
+        artifactPanel(
+          {
+            ...linkArtifact(),
+            kind: 'html',
+            storage: 'published',
+            metadata: { artifactType: 'web_preview_snapshot' },
+          },
+          {
+            workspaceCwd: '/primary',
+            workspaceId: 'primary-id',
+            sourceSessionId: 'original-session',
+          },
+        ),
+      ),
+    );
+    expect(
+      mockWorkspace.client.readSessionArtifactContent,
+    ).toHaveBeenCalledWith('original-session', linkArtifact().id, {
+      clientId: undefined,
+      signal: expect.any(AbortSignal),
+    });
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Source session');
+  });
+
+  it('uses the artifact format icon in the panel tab', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    expect(
+      container.querySelector('[role="tab"] [data-artifact-icon="link"]'),
+    ).not.toBeNull();
+  });
+
+  it('marks overflowing panel tab titles for hover scrolling', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+
+    const tab = container.querySelector<HTMLElement>('[role="tab"]')!;
+    const title = tab.querySelector<HTMLElement>(
+      '[data-web-shell-session-title]',
+    )!;
+    Object.defineProperty(title, 'clientWidth', { value: 80 });
+    Object.defineProperty(title.firstElementChild, 'scrollWidth', {
+      value: 180,
+    });
+    act(() =>
+      tab.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+    );
+
+    expect(title.hasAttribute('data-web-shell-title-overflow')).toBe(true);
+    expect(
+      title.style.getPropertyValue('--session-title-scroll-distance'),
+    ).toBe('100px');
+  });
+
   it('fails closed when an artifact tab has no workspace owner', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: 'PRIMARY_WORKSPACE_SECRET',
@@ -2667,6 +2752,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle?.querySelector('.lucide-expand')).not.toBeNull();
     act(() => {
       toggle?.click();
     });
@@ -2685,6 +2771,7 @@ describe('ArtifactPanel fullscreen toggle', () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle?.querySelector('.lucide-shrink')).not.toBeNull();
   });
 
   it('omits the toggle when fullscreen is unsupported', () => {

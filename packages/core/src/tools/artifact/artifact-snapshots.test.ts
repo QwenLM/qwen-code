@@ -79,6 +79,9 @@ describe('saved Artifact versions', () => {
       'https://example.com/latest',
     );
     for (const override of [
+      { source: 'client' },
+      { toolName: 'record_artifact' },
+      { source: 'tool', toolName: 'record_artifact' },
       { managedId: '../outside' },
       { metadata: { artifactType: 'web_preview_snapshot' } },
       { storage: 'external_url' as const },

@@ -16,6 +16,7 @@ describe('Web Shell sandbox framing', () => {
     expect(csp).toContain('frame-src http: https:');
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain("media-src 'self' data:");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain(
       "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",

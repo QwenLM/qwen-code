@@ -54,7 +54,8 @@ publication has its saved-version card, avoiding two indistinguishable outputs.
 This saves self-contained Artifact deliveries, not arbitrary live websites or
 the transient state of a user's browser. Live URL preview remains available
 and labeled as live. The Artifact tool already requires inline dependencies;
-common relative resource dependencies must also be rejected. Interactive state
+its existing best-effort validator is unchanged. The offline viewer blocks network
+resources at runtime; this feature does not bundle external dependencies. Interactive state
 starts from the delivered HTML when reopening a saved version.
 
 Snapshot descriptors use existing session artifact retention and its 200-record

@@ -93,6 +93,9 @@ describe('ArtifactTool', () => {
       /^[0-9a-f]{64}$/,
     );
 
+    expect(res.artifacts?.[1]?.metadata?.['publishedUrl']).toBe(
+      res.artifacts?.[0]?.url,
+    );
     const published = res.resultFilePaths?.[0];
     expect(published).toBeTruthy();
     const html = await fs.readFile(published!, 'utf8');
@@ -135,10 +138,14 @@ describe('ArtifactTool', () => {
     const file = await writeFragment('page.html', '<p>Published</p>');
     vi.stubEnv('QWEN_RUNTIME_DIR', file);
     const result = await tool.build({ file_path: file }).execute(signal);
-    expect(result.error?.message).toContain(
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
       'historical version could not be saved',
     );
     expect(result.artifacts).toHaveLength(1);
+    expect(await fs.readFile(result.resultFilePaths![0], 'utf8')).toContain(
+      '<p>Published</p>',
+    );
     expect(result.llmContent).toContain('Published artifact');
   });
 

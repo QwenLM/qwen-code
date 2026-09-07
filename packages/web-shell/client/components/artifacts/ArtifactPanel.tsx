@@ -18,14 +18,14 @@ import {
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
+  ExpandIcon,
   GaugeIcon,
   GlobeIcon,
   ImageIcon,
-  Maximize2Icon,
   MessageCirclePlusIcon,
-  Minimize2Icon,
   PanelRightIcon,
   PlusIcon,
+  ShrinkIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   NetworkIcon,
@@ -92,6 +92,8 @@ import {
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
+import { ArtifactIcon } from './ArtifactIcon';
+import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
@@ -551,9 +553,18 @@ export function ArtifactPanel({
                   aria-selected={tab.id === activeTab?.id}
                   className={styles.tab}
                   onClick={() => onSelectTab(tab.id)}
+                  onMouseEnter={(event) =>
+                    measureSessionTitleScroll(event.currentTarget)
+                  }
+                  onFocus={(event) =>
+                    measureSessionTitleScroll(event.currentTarget)
+                  }
                   title={tab.title}
                 >
-                  <span className={styles.tabIcon} aria-hidden="true">
+                  <span
+                    className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
+                    aria-hidden="true"
+                  >
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
                     ) : tab.kind === 'workflow' ? (
@@ -568,7 +579,14 @@ export function ArtifactPanel({
                         strokeWidth={1.6}
                       />
                     ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
-                      <TabArtifactIcon />
+                      <ArtifactIcon
+                        artifact={artifacts.find(
+                          (artifact) =>
+                            'artifactId' in tab &&
+                            artifact.id === tab.artifactId,
+                        )}
+                        className={styles.tabIconSvg}
+                      />
                     ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
                       <TabSubagentIcon />
                     ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
@@ -607,7 +625,12 @@ export function ArtifactPanel({
                       <TabScheduledTaskIcon />
                     )}
                   </span>
-                  <span className={styles.tabTitle}>{tab.title}</span>
+                  <span
+                    className={styles.tabTitle}
+                    data-web-shell-session-title
+                  >
+                    <span className={styles.tabTitleInner}>{tab.title}</span>
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -706,9 +729,9 @@ export function ArtifactPanel({
               )}
             >
               {fullscreen ? (
-                <Minimize2Icon className={styles.toolbarIcon} aria-hidden />
+                <ShrinkIcon className={styles.toolbarIcon} aria-hidden />
               ) : (
-                <Maximize2Icon className={styles.toolbarIcon} aria-hidden />
+                <ExpandIcon className={styles.toolbarIcon} aria-hidden />
               )}
             </button>
           )}
@@ -1219,33 +1242,6 @@ function TabReviewIcon() {
         d="M9 16h6"
         stroke="currentColor"
         strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function TabArtifactIcon() {
-  return (
-    <svg
-      className={styles.tabIconSvg}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-    >
-      <rect
-        x="6"
-        y="4"
-        width="12"
-        height="16"
-        rx="2"
-        stroke="currentColor"
-        strokeWidth="1.8"
-      />
-      <path
-        d="M9 10h6M9 14h4"
-        stroke="currentColor"
-        strokeWidth="1.8"
         strokeLinecap="round"
       />
     </svg>

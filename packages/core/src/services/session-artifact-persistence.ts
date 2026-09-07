@@ -120,7 +120,9 @@ export function getWebPreviewSnapshotId(
     !/^[0-9a-f]{64}$/.test(sha256) ||
     (artifact.source !== undefined &&
       (artifact.source !== 'tool' ||
-        artifact.toolName?.toLowerCase() !== 'artifact'))
+        artifact.toolName?.toLowerCase() !== 'artifact')) ||
+    (artifact.toolName !== undefined &&
+      artifact.toolName.toLowerCase() !== 'artifact')
   )
     return undefined;
   try {

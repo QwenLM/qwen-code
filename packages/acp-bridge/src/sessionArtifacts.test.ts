@@ -6224,6 +6224,7 @@ describe('SessionArtifactStore', () => {
         ).href,
         metadata: {
           artifactType: 'web_preview_snapshot',
+          publishedUrl: 'https://example.com/latest',
           'qwen.published.sha256': 'a'.repeat(64),
         },
       })),
@@ -6237,6 +6238,9 @@ describe('SessionArtifactStore', () => {
       })),
     )!;
     expect(rebuilt.artifacts).toHaveLength(2);
+    expect(rebuilt.artifacts[0]?.metadata?.['publishedUrl']).toBe(
+      'https://example.com/latest',
+    );
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const restored = new SessionArtifactStore({
       sessionId,

@@ -33,7 +33,7 @@ function savedArtifact(version: number): DaemonSessionArtifact {
   };
 }
 
-test('offline HTML remains interactive but cannot navigate out of its parent', async ({
+test('@smoke offline HTML remains interactive but cannot navigate out of its parent', async ({
   page,
 }) => {
   const requests: string[] = [];
@@ -47,14 +47,21 @@ test('offline HTML remains interactive but cannot navigate out of its parent', a
     if (!address || typeof address === 'string')
       throw new Error('No target port');
     const destination = `http://127.0.0.1:${address.port}/leak?content=private`;
-    const html = `<style>body{background:rgb(12, 34, 56)}</style><img alt="Embedded" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><button id="count">Count: 0</button><button id="parent">Probe parent</button><button id="navigate">Navigate</button><script>let n=0;document.querySelector('#count').onclick=()=>document.querySelector('#count').textContent='Count: '+(++n);document.querySelector('#parent').onclick=()=>{try{parent.document.body.textContent='Escaped'}catch{document.querySelector('#parent').textContent='Blocked'}};document.querySelector('#navigate').onclick=()=>window['location']['href']=${JSON.stringify(destination)}</script>`;
+    const html = `<style>body{background:rgb(12, 34, 56)}</style><img alt="Embedded" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><audio preload="auto" src="data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA=="></audio><button id="count">Count: 0</button><button id="parent">Probe parent</button><button id="navigate">Navigate</button><script>let n=0;document.querySelector('#count').onclick=()=>document.querySelector('#count').textContent='Count: '+(++n);document.querySelector('#parent').onclick=()=>{try{parent.document.body.textContent='Escaped'}catch{document.querySelector('#parent').textContent='Blocked'}};document.querySelector('#navigate').onclick=()=>window['location']['href']=${JSON.stringify(destination)}</script>`;
     const violations: string[] = [];
     page.on('console', (message) => {
       if (message.text().includes('Content Security Policy'))
         violations.push(message.text());
     });
+    const response = await page.goto('/e2e/composer-layout-harness.html');
+    expect(response?.headers()['content-security-policy']).toContain(
+      "default-src 'self'",
+    );
+    expect(response?.headers()['content-security-policy']).toContain(
+      "media-src 'self' data:",
+    );
     await page.setContent(
-      '<meta http-equiv="Content-Security-Policy" content="frame-src http: https:"><iframe title="Offline preview" sandbox="allow-scripts"></iframe>',
+      '<iframe title="Offline preview" sandbox="allow-scripts"></iframe>',
     );
     await page.locator('iframe').evaluate(
       (frame, document) => {
@@ -80,6 +87,13 @@ test('offline HTML remains interactive but cannot navigate out of its parent', a
           .evaluate((img) => (img as HTMLImageElement).naturalWidth),
       )
       .toBe(1);
+    await expect
+      .poll(() =>
+        content
+          .locator('audio')
+          .evaluate((audio) => (audio as HTMLAudioElement).readyState),
+      )
+      .toBeGreaterThan(0);
     await content.getByRole('button', { name: 'Probe parent' }).click();
     await expect(
       content.getByRole('button', { name: 'Blocked' }),
@@ -161,7 +175,9 @@ test('opens each saved delivery after closing and reloading, with inline interac
     .frameLocator('iframe[title="Saved webpage version"]')
     .frameLocator('iframe');
   for (const version of [1, 2, 1]) {
-    await transcript.locator(`button[title="Page version ${version}"]`).click();
+    await transcript
+      .locator(`[title="Page version ${version}"] > button`)
+      .click();
     await expect(frame.getByRole('heading')).toHaveText(`Version ${version}`);
     await frame.getByRole('button', { name: 'Count: 0' }).click();
     await expect(frame.getByRole('button')).toHaveText('Count: 1');
@@ -187,9 +203,10 @@ test('opens each saved delivery after closing and reloading, with inline interac
   expect(
     reads.filter((version, index) => reads[index - 1] !== version),
   ).toEqual(['1', '2', '1']);
+  expect(reads.length).toBeLessThanOrEqual(8);
   expect(liveRequests).toEqual([]);
   missing = true;
-  await transcript.locator('button[title="Page version 1"]').click();
+  await transcript.locator('[title="Page version 1"] > button').click();
   await expect(
     page.locator('[data-web-shell-saved-preview] [role="alert"]'),
   ).toContainText('missing or has changed');

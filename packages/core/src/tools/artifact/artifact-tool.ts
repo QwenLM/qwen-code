@@ -269,7 +269,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
         llmContent: message,
         returnDisplay: message,
         artifacts,
-        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+        resultFilePaths: filePath ? [filePath] : undefined,
       };
     }
     const llmContent = `Published artifact "${title}" to ${url} and saved a separate local HTML version for this turn. Share or open this URL to view the latest interactive page. Re-run Artifact with the same file path to update it; earlier saved versions remain unchanged.`;

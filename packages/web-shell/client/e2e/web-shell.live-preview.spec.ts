@@ -15,6 +15,7 @@ import {
 let fixture: ViteDevServer;
 let fixtureDir: string;
 let fixtureUrl: string;
+const fixtureReferrers: Array<string | undefined> = [];
 
 test.beforeAll(async () => {
   fixtureDir = await realpath(
@@ -22,12 +23,14 @@ test.beforeAll(async () => {
   );
   await writeFile(
     join(fixtureDir, 'index.html'),
-    '<!doctype html><input aria-label="App input"><p id="message"></p><p id="storage"></p><script type="module" src="/app.js"></script>',
+    '<!doctype html><input aria-label="App input"><p id="message"></p><p id="storage"></p><p id="referrer"></p><button id="popup">Probe popup</button><script type="module" src="/app.js"></script>',
   );
   await writeFile(
     join(fixtureDir, 'app.js'),
     `import { message } from './message.js';
 document.querySelector('#message').textContent = message;
+document.querySelector('#referrer').textContent = document.referrer || 'empty';
+document.querySelector('#popup').onclick = () => document.querySelector('#popup').textContent = window.open('/popup') === null ? 'Blocked popup' : 'Opened popup';
 localStorage.setItem('preview-module', 'working');
 document.querySelector('#storage').textContent = localStorage.getItem('preview-module');
 if (import.meta.hot) import.meta.hot.accept('./message.js', (module) => {
@@ -49,6 +52,8 @@ if (import.meta.hot) import.meta.hot.accept('./message.js', (module) => {
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
             const url = new URL(req.url ?? '/', 'http://localhost');
+            if (url.pathname === '/')
+              fixtureReferrers.push(req.headers.referer);
             const target = url.searchParams.get('target') ?? '';
             if (url.pathname === '/redirect') {
               res.writeHead(302, { Location: target });
@@ -97,21 +102,42 @@ test.beforeEach(async ({ page }, testInfo) => {
       userTextEvent('Build a webpage.', { id: 1 }),
       toolCallEvent(
         'record-preview',
-        'record_artifact',
+        'Artifact',
         { title: 'Historical webpage', url: fixtureUrl },
         { id: 2, rawOutput: { recorded: true } },
       ),
       assistantTextEvent('The webpage is ready.', { id: 3 }),
       turnCompleteEvent('build-webpage', { id: 4 }),
       userTextEvent('Change the heading.', { id: 5 }),
-      assistantTextEvent('The heading has changed.', { id: 6 }),
-      turnCompleteEvent('update-webpage', { id: 7 }),
+      toolCallEvent(
+        'record-link',
+        'record_artifact',
+        { title: 'Recorded link', url: fixtureUrl },
+        { id: 6, rawOutput: { recorded: true } },
+      ),
+      assistantTextEvent('The heading has changed.', { id: 7 }),
+      turnCompleteEvent('update-webpage', { id: 8 }),
     ],
     artifacts: [
       {
-        id: 'historical-webpage',
+        id: 'recorded-link',
         kind: 'link',
         storage: 'external_url',
+        source: 'tool',
+        status: 'available',
+        title: 'Recorded link',
+        url: fixtureUrl,
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        toolCallId: 'record-link',
+        toolName: 'record_artifact',
+      },
+      {
+        id: 'historical-webpage',
+        kind: 'html',
+        storage: 'published',
         source: 'tool',
         status: 'available',
         title: 'Historical webpage',
@@ -121,7 +147,7 @@ test.beforeEach(async ({ page }, testInfo) => {
         createdAt: '2026-09-07T00:00:00.000Z',
         updatedAt: '2026-09-07T00:00:00.000Z',
         toolCallId: 'record-preview',
-        toolName: 'record_artifact',
+        toolName: 'Artifact',
       },
     ],
   });
@@ -163,6 +189,13 @@ test('runs modules, storage and HMR, preserves tabs, and restores settings', asy
   const app = appFrame(page);
   await expect(app.locator('#message')).toHaveText('Before update');
   await expect(app.locator('#storage')).toHaveText('working');
+  await expect(app.locator('#referrer')).toHaveText('empty');
+  expect(fixtureReferrers.length).toBeGreaterThan(0);
+  expect(fixtureReferrers.every((value) => value === undefined)).toBe(true);
+  await app.getByRole('button', { name: 'Probe popup', exact: true }).click();
+  await expect(
+    app.getByRole('button', { name: 'Blocked popup', exact: true }),
+  ).toBeVisible();
   await app.getByRole('textbox', { name: 'App input' }).fill('Keep this state');
   await writeFile(
     join(fixtureDir, 'message.js'),
@@ -242,7 +275,7 @@ test('rejects unsafe URLs and preserves the working preview after invalid input'
   }
 });
 
-test('blocks direct redirects and script navigation, and protects host descendants', async ({
+test('@smoke blocks direct redirects and script navigation, and protects host descendants', async ({
   page,
 }, testInfo) => {
   const violations: string[] = [];
@@ -267,22 +300,36 @@ test('blocks direct redirects and script navigation, and protects host descendan
     expect(targetRequests).toHaveLength(0);
   }
   violations.length = 0;
+  const protectedTarget = `${fixtureUrl}/unframeable`;
+  const protection = await page.request.get(protectedTarget);
+  expect(protection.headers()['content-security-policy']).toBe(
+    "frame-ancestors 'none'",
+  );
   await openPreview(
     page,
-    `${fixtureUrl}/nested?target=${encodeURIComponent(target)}`,
+    `${fixtureUrl}/nested?target=${encodeURIComponent(protectedTarget)}`,
   );
   await expect
     .poll(() =>
       violations.some((message) => message.includes('frame-ancestors')),
     )
     .toBe(true);
-  expect(page.frames().some((frame) => frame.url() === target)).toBe(false);
+  expect(page.frames().some((frame) => frame.url() === protectedTarget)).toBe(
+    false,
+  );
 });
 
 test('keeps the external fallback available for frame-blocked applications', async ({
   page,
 }) => {
+  const violations: string[] = [];
+  page.on('console', (message) => violations.push(message.text()));
   await openPreview(page, `${fixtureUrl}/unframeable`);
+  await expect
+    .poll(() =>
+      violations.some((message) => message.includes('frame-ancestors')),
+    )
+    .toBe(true);
   await expect(page.getByText('Blank page?', { exact: false })).toBeVisible();
   await expect(
     page.getByRole('link', { name: 'Open externally' }),
@@ -303,7 +350,7 @@ test('reopens a live webpage from its historical message after closing the tab a
     await expect(
       transcript.getByText('Historical webpage', { exact: true }),
     ).toBeVisible();
-    await transcript.getByRole('button', { name: 'Open', exact: true }).click();
+    await transcript.locator('[title="Historical webpage"] > button').click();
     await expect(appFrame(page).locator('#storage')).toHaveText('working');
     await expect(page.getByText('Live page.', { exact: false })).toBeVisible();
     await page
@@ -317,4 +364,24 @@ test('reopens a live webpage from its historical message after closing the tab a
     ).toBeVisible();
     await page.reload();
   }
+});
+
+test('recorded links open metadata without automatically loading a live frame', async ({
+  page,
+}) => {
+  await page
+    .getByRole('button', { name: 'Close Web preview', exact: true })
+    .click();
+  await page
+    .locator('[data-web-shell-message-list] [title="Recorded link"] > button')
+    .click();
+  await expect(
+    page.getByRole('tab', { name: 'Recorded link', exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('iframe[title="Web preview frame"]')).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole('link', { name: 'Open link', exact: true }),
+  ).toHaveAttribute('href', fixtureUrl);
 });

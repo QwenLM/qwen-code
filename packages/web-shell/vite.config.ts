@@ -90,7 +90,22 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
-    headers: { 'Content-Security-Policy': "frame-ancestors 'self'" },
+    headers: {
+      'Content-Security-Policy': [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' data:",
+        "connect-src 'self'",
+        "worker-src 'self' blob:",
+        "base-uri 'none'",
+        'frame-src http: https:',
+        "frame-ancestors 'self'",
+      ].join('; '),
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       '/health': daemonProxy,

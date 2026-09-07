@@ -24,12 +24,31 @@ describe('web preview URLs', () => {
     'https://shell.example/path',
     'http://shell.example/path',
     'http://localhost:4170/path',
+    'http://127.0.0.1:4170/path',
+    'http://127.12.0.3:4170/path',
+    'http://0.0.0.0:4170/path',
+    'http://localhost.:4170/path',
+    'https://shell.example./path',
     'http://[::1]:3000',
     'http://*.example',
     "http://example;script-src'unsafe-inline'",
   ])('rejects unsafe or unsupported URL %s', (value) => {
     expect(parse(value)).toBeUndefined();
   });
+
+  it.each(['127.0.0.1', '0.0.0.0', '[::1]'])(
+    'protects a daemon configured as %s',
+    (host) => {
+      expect(
+        parseWebPreviewUrl(
+          'http://localhost:4170',
+          'https://shell.example',
+          `http://${host}:4170`,
+        ),
+      ).toBeUndefined();
+      expect(parse('http://127.0.0.1:3000')?.port).toBe('3000');
+    },
+  );
 
   it('rejects a non-default-port HTTPS upgrade into the daemon', () => {
     expect(
@@ -53,6 +72,12 @@ describe('web preview URLs', () => {
     expect(document.indexOf('Content-Security-Policy')).toBeLessThan(
       document.indexOf('<iframe'),
     );
+    expect(document).toContain(
+      'sandbox="allow-scripts allow-same-origin allow-forms"',
+    );
+    expect(document).toContain('referrerpolicy="no-referrer"');
+    expect(document).toContain('<meta name="referrer" content="no-referrer">');
+    expect(document).not.toContain('allow-popups');
     expect(document).not.toContain('allow-top-navigation');
     expect(document).not.toContain('<script>');
   });

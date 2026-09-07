@@ -76,27 +76,16 @@ export function validateSelfContained(fragment: string): string | null {
     return `Artifact must be self-contained — found an external reference (${truncate(extResource[0])}). Inline scripts/styles and embed assets as data: URIs.`;
   }
 
-  for (const tag of scan.matchAll(
-    /<(?:script|img|video|audio|source|input|iframe|embed|track|link)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi,
-  )) {
-    for (const reference of tag[0].matchAll(
-      /\s(?:src|srcset|poster|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
-    )) {
-      const value = (reference[1] ?? reference[2] ?? reference[3] ?? '').trim();
-      if (!/^(?:data:|#)/i.test(value)) {
-        return `Artifact must be self-contained — found a resource dependency (${truncate(reference[0])}). Inline scripts/styles and embed assets as data: URIs so saved versions remain available.`;
-      }
-    }
-  }
-
   const jsUri = /\b(?:href|src)\s*=\s*["']?\s*javascript\s*:/i.exec(scan);
   if (jsUri) {
     return `Artifact must be self-contained — found a javascript: URI (${truncate(jsUri[0])}). Use inline <script> blocks instead.`;
   }
 
   const extScript =
-    /\b(?:fetch|WebSocket|XMLHttpRequest)\s*\(\s*["']/i.exec(scan) ??
-    /\bimport\s*\(\s*["']/i.exec(scan) ??
+    /\b(?:fetch|WebSocket|XMLHttpRequest)\s*\(\s*["']\s*(?:https?|wss?):\/\//i.exec(
+      scan,
+    ) ??
+    /\bimport\s*\(\s*["'](?:https?:)?\/\//i.exec(scan) ??
     /\bwindow\.open\s*\(/i.exec(scan) ??
     /\blocation\.\w+\s*[=(]/i.exec(scan) ??
     /\bnavigator\.sendBeacon\s*\(\s*["']\s*(?:https?:)?\/\//i.exec(scan);
@@ -117,14 +106,6 @@ export function validateSelfContained(fragment: string): string | null {
     /(?:@import\s+(?:url\()?|url\()\s*["']?\s*(?:https?:)?\/\//i.exec(scan);
   if (extCss) {
     return `Artifact must be self-contained — found an external CSS reference (${truncate(extCss[0])}). Inline CSS and embed fonts/images as data: URIs.`;
-  }
-  for (const reference of scan.matchAll(
-    /(?:@import\s+|url\(\s*)(?:"([^"]*)"|'([^']*)'|([^\s)]+))/gi,
-  )) {
-    const value = reference[1] ?? reference[2] ?? reference[3] ?? '';
-    if (!/^(?:data:|#)/i.test(value)) {
-      return `Artifact must be self-contained — found a CSS dependency (${truncate(reference[0])}). Inline CSS and embed fonts/images as data: URIs.`;
-    }
   }
 
   return null;

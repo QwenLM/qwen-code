@@ -12,10 +12,10 @@ and external opening. The server continues to run through the existing terminal
 or shell tool.
 
 Preview history belongs to the conversation, independently of the viewing
-panel. Opening a recorded HTTP/HTTPS webpage artifact from a turn opens its URL
-in the preview when the feature is enabled. Closing the panel or its tab does
-not remove the artifact card; users can reopen it from the original message.
-Use the existing `record_artifact` tool to associate an output with its turn.
+panel. Opening an Artifact-published HTTP/HTTPS webpage from a turn opens its URL
+in the preview when the feature is enabled. Ordinary `record_artifact` links
+open metadata with an external action. Closing the panel or its tab does not
+remove the artifact card; users can reopen it from the original message.
 Manually entering an address in the panel does not create a transcript record.
 
 These are historical entry points to a live URL, not frozen website versions.

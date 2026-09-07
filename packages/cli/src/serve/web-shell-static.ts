@@ -29,6 +29,7 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
+  "media-src 'self' data:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>

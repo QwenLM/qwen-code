@@ -2,7 +2,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { SavedWebPreview } from './SavedWebPreview';
 
@@ -32,12 +35,12 @@ const artifact = (id: string): DaemonSessionArtifact => ({
   updatedAt: '2026-09-07T00:00:00.000Z',
   metadata: { artifactType: 'web_preview_snapshot' },
 });
-function view(id: string) {
+function view(id: string, sourceSessionId = 'original-session') {
   return (
     <I18nProvider language="en">
       <SavedWebPreview
         artifact={artifact(id)}
-        sourceSessionId="original-session"
+        sourceSessionId={sourceSessionId}
       />
     </I18nProvider>
   );
@@ -46,6 +49,7 @@ afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
   readContent.mockReset();
+  vi.restoreAllMocks();
 });
 
 describe('SavedWebPreview', () => {
@@ -68,7 +72,7 @@ describe('SavedWebPreview', () => {
     });
     const firstSignal = readContent.mock.calls[0]![2].signal as AbortSignal;
     expect(readContent).toHaveBeenCalledWith('original-session', 'one', {
-      clientId: 'viewer',
+      clientId: undefined,
       signal: firstSignal,
     });
     await act(async () => {
@@ -99,7 +103,13 @@ describe('SavedWebPreview', () => {
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
-    readContent.mockRejectedValue(new Error('missing'));
+    readContent.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'artifact_snapshot_unavailable' },
+        'missing',
+      ),
+    );
     await act(async () => {
       root.render(view('missing'));
     });
@@ -108,5 +118,41 @@ describe('SavedWebPreview', () => {
     );
     expect(container.querySelector('iframe')).toBeNull();
     expect(readContent).toHaveBeenCalledTimes(1);
+  });
+  it('uses the active session identity locally and memoizes unchanged HTML', async () => {
+    container = document.createElement('div');
+    root = createRoot(container);
+    readContent.mockResolvedValue('<h1>Local</h1>');
+    const parse = vi.spyOn(DOMParser.prototype, 'parseFromString');
+    await act(async () => root.render(view('local', 'active-session')));
+    expect(readContent.mock.calls[0]![2].clientId).toBe('viewer');
+    expect(parse).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(view('local', 'active-session')));
+    expect(readContent).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    new DaemonHttpError(503, {}, 'busy'),
+    new DaemonHttpError(
+      404,
+      { code: 'session_not_found' },
+      'session unavailable',
+    ),
+    new Error('timeout'),
+  ])('retries transient failures: %s', async (error) => {
+    container = document.createElement('div');
+    root = createRoot(container);
+    readContent
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce('<h1>Recovered</h1>');
+    await act(async () => root.render(view('recover')));
+    expect(container.textContent).toContain('Could not load');
+    expect(container.textContent).not.toContain('missing or has changed');
+    const retry = container.querySelector('button')!;
+    expect(retry.textContent).toBe('Try again');
+    await act(async () => retry.click());
+    expect(readContent).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('iframe')!.srcdoc).toContain('Recovered');
   });
 });

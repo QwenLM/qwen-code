@@ -3,6 +3,20 @@ export interface WebPreviewState {
   viewport: 'desktop' | 'mobile';
 }
 
+function protectedOrigin(url: URL): string {
+  const normalized = new URL(url);
+  normalized.hostname = normalized.hostname.replace(/\.$/, '');
+  if (
+    normalized.hostname === 'localhost' ||
+    normalized.hostname === '[::1]' ||
+    normalized.hostname === '0.0.0.0' ||
+    /^127\./.test(normalized.hostname)
+  ) {
+    normalized.hostname = 'localhost';
+  }
+  return normalized.origin;
+}
+
 export function parseWebPreviewUrl(
   input: string,
   shellUrl: string,
@@ -14,20 +28,21 @@ export function parseWebPreviewUrl(
       !['http:', 'https:'].includes(url.protocol) ||
       url.username ||
       url.password ||
+      url.hostname.endsWith('.') ||
       !/^[a-z0-9._-]+$/i.test(url.hostname)
     ) {
       return;
     }
     const protectedOrigins = [
-      new URL(shellUrl).origin,
-      new URL(daemonUrl, shellUrl).origin,
+      protectedOrigin(new URL(shellUrl)),
+      protectedOrigin(new URL(daemonUrl, shellUrl)),
     ];
     const upgraded = new URL(url);
     upgraded.protocol = 'https:';
     // CSP HTTP sources also permit HTTPS upgrades.
     if (
-      protectedOrigins.includes(url.origin) ||
-      protectedOrigins.includes(upgraded.origin)
+      protectedOrigins.includes(protectedOrigin(url)) ||
+      protectedOrigins.includes(protectedOrigin(upgraded))
     ) {
       return;
     }
