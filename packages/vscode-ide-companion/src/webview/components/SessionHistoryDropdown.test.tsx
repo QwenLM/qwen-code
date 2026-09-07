@@ -91,11 +91,20 @@ describe('SessionHistoryDropdown search', () => {
       searchQuery: strings('session.untitled'),
     });
 
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-session-id]'),
+    );
+    expect(rows.map((row) => row.dataset.sessionId)).toEqual([
+      'missing-title',
+      'empty-title',
+    ]);
     expect(
-      Array.from(container.querySelectorAll('[data-session-id]'), (row) =>
-        row.getAttribute('data-session-id'),
+      rows.map(
+        (row) =>
+          row.querySelector<HTMLElement>('span:not(.qwen-session-row-actions)')
+            ?.textContent,
       ),
-    ).toEqual(['missing-title', 'empty-title']);
+    ).toEqual([strings('session.untitled'), strings('session.untitled')]);
   });
 });
 
