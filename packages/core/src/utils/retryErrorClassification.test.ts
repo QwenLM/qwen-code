@@ -459,16 +459,83 @@ describe('classifyRetryError', () => {
     // The same upstream failure can arrive with the provider's JSON body pasted
     // into the message rather than on SDK properties. With no `:HTTP_STATUS/`
     // marker there is no status to classify on, so the request id in the body
-    // is the only evidence that the provider traced the failure.
+    // is the only evidence that the provider traced the failure. It arrives
+    // inside an SSE frame, so it carries the same kind the sibling branches give
+    // an SSE-delivered provider error.
     const error = new Error(
       'id:1\nevent:error\ndata:{"request_id":"req-stream","code":"KeyError","message":"upstream failed"}',
     );
 
     expect(classifyRetryError(error)).toMatchObject({
-      kind: 'provider',
+      kind: 'sse-provider',
       diagnosis: 'retryable',
       reason: 'upstream-error-without-status',
       requestId: 'req-stream',
+    });
+  });
+
+  it('fails fast on a permanent provider code even when the request is traced', () => {
+    // A request id decides upstream vs. local, not transient vs. permanent.
+    // Moderation, credential/billing and malformed-request rejections arrive
+    // after the 200 on a streaming call, so no status is left to fail fast on —
+    // without this they would walk the whole production ladder for a verdict
+    // that was never going to change.
+    const codes = [
+      'content_filter',
+      'data_inspection_failed',
+      // The same rejection the pipeline re-throws out of the provider's body.
+      'DataInspectionFailed',
+      'InvalidApiKey',
+      'Arrearage',
+      'invalid_request_error',
+      'InvalidParameter',
+    ];
+
+    for (const code of codes) {
+      expect(classifyRetryError({ code, requestID: 'req-1' })).toMatchObject({
+        diagnosis: 'fail-fast',
+        reason: 'permanent-provider-code',
+        providerCode: code,
+      });
+    }
+  });
+
+  it('keeps an unrecognised upstream code retryable', () => {
+    // The point of the branch: the next gateway bug should not have to be
+    // taught to the classifier before it stops killing turns.
+    expect(
+      classifyRetryError({ code: 'KeyError', requestID: 'req-1' }),
+    ).toMatchObject({
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+    });
+  });
+
+  it('treats an empty request id as no request id', () => {
+    // `headers.get('x-request-id')` yields '' for a header that is present but
+    // empty — legal HTTP, and what a proxy emits when the upstream set none. An
+    // error the provider never traced must not open the retry gate.
+    expect(
+      classifyRetryError({ code: 'KeyError', requestID: '' }),
+    ).toMatchObject({
+      kind: 'unknown',
+      diagnosis: 'unknown',
+      reason: 'unclassified',
+    });
+  });
+
+  it('treats an empty request id scraped from the message as no request id', () => {
+    // The same rule on the other reader: the rate-limit details scrape a
+    // provider body out of the message and do not reject an empty id, so the
+    // merge has to fall through it rather than coalesce onto it.
+    const error = new Error(
+      'id:1\nevent:error\ndata:{"request_id":"","code":"KeyError","message":"upstream failed"}',
+    );
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'unknown',
+      diagnosis: 'unknown',
+      reason: 'unclassified',
     });
   });
 
@@ -497,7 +564,7 @@ describe('classifyRetryError', () => {
 
   it('keeps a definitive HTTP status authoritative over a request id', () => {
     // A traced 4xx is still a permanent client error: the status block runs
-    // before the status-less upstream branch, so it cannot become retryable.
+    // before the status-less branches, so it cannot become retryable.
     expect(
       classifyRetryError({
         status: 400,
@@ -510,6 +577,28 @@ describe('classifyRetryError', () => {
       diagnosis: 'fail-fast',
       reason: 'client-error',
       statusCode: 400,
+    });
+  });
+
+  it('keeps a provider-traced socket cut transport-classified over a request id', () => {
+    // The transport branch runs first, and that ordering is load-bearing:
+    // isRetryableStreamTransportError admits mid-stream replay only on
+    // `kind === 'transport'` plus an allow-listed code, so reclassifying a
+    // traced socket cut as a provider error would silently disable replay,
+    // continuation recovery, and Anthropic's release of deferred tool calls
+    // while the whole suite stayed green. `transportCode` is asserted because
+    // that predicate reads it, and no request id is asserted because the
+    // transport return deliberately does not spread the provider fields.
+    const error = Object.assign(new Error('upstream failed'), {
+      requestID: 'req-1',
+      cause: Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }),
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'transport-error',
+      transportCode: 'ECONNRESET',
     });
   });
 
@@ -598,12 +687,22 @@ describe('isFallbackEligible', () => {
   });
 
   it('returns false for a status-less upstream error', () => {
-    // Retryable but with no HTTP status, so there is no capacity signal: the
-    // retries stay on the primary model instead of switching to a fallback.
-    expect(
-      isFallbackEligible(
-        classifyRetryError({ code: 'KeyError', requestID: 'req-stream' }),
-      ),
-    ).toBe(false);
+    // The property under test is "retryable, yet still not fallback-eligible":
+    // with no HTTP status there is no capacity signal, so retries stay on the
+    // primary model. Anchored to the classification as well as the predicate —
+    // asserting `false` alone cannot discriminate, because a status-less error
+    // classified `unknown` is not fallback-eligible either.
+    const classification = classifyRetryError({
+      code: 'KeyError',
+      requestID: 'req-stream',
+    });
+
+    expect(classification).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+    });
+    expect(classification.statusCode).toBeUndefined();
+    expect(isFallbackEligible(classification)).toBe(false);
   });
 });

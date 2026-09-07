@@ -488,7 +488,31 @@ describe('retryWithBackoff', () => {
       maxAttempts: 3,
       initialDelayMs: 10,
     });
+    // Advance past every backoff step so a regression that retries fails on the
+    // call count instead of hanging until the test timeout.
+    await vi.advanceTimersByTimeAsync(1000);
     await expect(promise).rejects.toThrow('No API key configured');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not retry a permanent provider code even when the request is traced', async () => {
+    // Moderation and credential rejections arrive inside an already-200 stream,
+    // so no HTTP status is left to fail fast on. Re-sending the identical
+    // request cannot succeed, and walking the production ladder for it costs
+    // about eighty seconds.
+    const mockFn = vi.fn(async () => {
+      throw Object.assign(new Error('Content filtered'), {
+        code: 'data_inspection_failed',
+        requestID: 'req-1',
+      });
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(promise).rejects.toThrow('Content filtered');
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
 

@@ -40,11 +40,12 @@ export interface RetryErrorClassification {
  * Classifies retry-related failures.
  *
  * The result is primarily diagnostic — it labels the observed error shape for
- * logging. It also feeds two control decisions: a `'retryable'` diagnosis opens
- * the status-less retry gate — `defaultShouldRetry` and LlmChat's stream
- * predicate both retry what they cannot match on an HTTP status — and a
- * `'fail-fast'` diagnosis keeps a permanent error (e.g. allocated-quota
- * exhaustion surfacing as HTTP 429) out of the unbounded persistent loop.
+ * logging. It also drives control: `isRetryableUpstreamError` below turns a
+ * `'retryable'` diagnosis into the retry verdict for every error an HTTP status
+ * cannot decide, and both retry gates end there; a `'fail-fast'` diagnosis keeps
+ * a permanent error (e.g. allocated-quota exhaustion surfacing as HTTP 429) out
+ * of the unbounded persistent loop; and `isFallbackEligible` reads the status
+ * recorded here to decide model fallback.
  */
 export function classifyRetryError(
   error: unknown,
@@ -64,7 +65,11 @@ export function classifyRetryError(
   const providerCode = details.providerCode ?? providerFields.providerCode;
   const providerMessage =
     details.providerMessage ?? providerFields.providerMessage;
-  const requestId = details.requestId ?? providerFields.requestId;
+  // `||`, not `??`: an empty string is not an identifier. The SDK stamps
+  // `requestID` from `headers.get('x-request-id')`, which yields '' for a
+  // header that is present but empty, and a request id now decides a retry
+  // verdict below — so '' must fall through the same way undefined does.
+  const requestId = details.requestId || providerFields.requestId;
   const common = {
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(providerCode !== undefined ? { providerCode } : {}),
@@ -179,21 +184,45 @@ export function classifyRetryError(
     };
   }
 
+  // Mirrors the two returns above: an error that arrived inside an SSE frame
+  // carries the same kind whichever branch classifies it, so triage can filter
+  // on one label for "delivered by the stream".
+  const statuslessKind: RetryErrorKind =
+    details.transport === 'sse' ? 'sse-provider' : 'provider';
+
+  // With no status left to read, permanence has to come off the provider body:
+  // a moderation rejection necessarily arrives after the 200, and a gateway can
+  // relay a credential or malformed-request rejection the same way. Nothing
+  // above can fail fast on them, and re-sending the identical request can never
+  // succeed.
+  if (isPermanentProviderCode(providerCode)) {
+    return {
+      kind: statuslessKind,
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+      ...common,
+    };
+  }
+
   // An upstream error body that carries the provider's own request id but no
   // HTTP status. The OpenAI SDK builds exactly this shape when a gateway pushes
   // `{"error": {...}}` into an already-200 SSE stream —
   // `new APIError(undefined, data.error, undefined, response.headers)` — so the
-  // status never reaches us and a server-side failure (observed in the wild as
-  // `code: 'KeyError'`, `message: "'id'"`) falls through to 'unknown' and kills
-  // the turn on the first attempt, while a socket cut above is retried. The id
-  // can equally arrive inside a provider JSON body embedded in the message.
+  // status never reaches us, and a server-side failure (observed in the wild as
+  // `code: 'KeyError'`, `message: "'id'"`) would otherwise fall through to
+  // 'unknown' and kill the turn on the first attempt while a socket cut above
+  // is retried. The id can equally arrive inside a provider JSON body embedded
+  // in the message.
   //
-  // Only a request id opens this gate. Local permanent failures carry a string
-  // `code` but no request id (`MISSING_API_KEY`, `invalid_config`, MCP's
-  // numeric JSON-RPC codes), so they stay unclassified and still fail fast.
+  // Only a request id opens this gate, and only for a code the list above does
+  // not already know as permanent. Local failures carry a string `code` but no
+  // request id (`MISSING_API_KEY`, `invalid_config`, MCP's numeric JSON-RPC
+  // codes), so they stay unclassified and are not retried. An unrecognised
+  // upstream code stays retryable on purpose: the next gateway bug should not
+  // have to be taught to this file before it stops killing turns.
   if (requestId !== undefined) {
     return {
-      kind: 'provider',
+      kind: statuslessKind,
       diagnosis: 'retryable',
       reason: 'upstream-error-without-status',
       ...common,
@@ -262,6 +291,23 @@ function isAllocatedQuotaExceeded(providerCode?: string): boolean {
   return providerCode === 'Throttling.AllocationQuota';
 }
 
+// Provider codes that mean "this exact request can never succeed": content
+// moderation, credentials/billing, and a malformed request. Moderation
+// necessarily happens after the provider has already sent 200, so there is no
+// HTTP status to fail fast on, and a gateway can relay the other two the same
+// way. Separators are optional and case is ignored because the same rejection
+// reaches this classifier both ways — `data_inspection_failed` and
+// `DataInspectionFailed`.
+const PERMANENT_PROVIDER_CODE_PATTERN =
+  /^(?:data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|invalid[_-]?request[_-]?error|invalid[_-]?parameter)$/i;
+
+function isPermanentProviderCode(providerCode?: string): boolean {
+  return (
+    providerCode !== undefined &&
+    PERMANENT_PROVIDER_CODE_PATTERN.test(providerCode)
+  );
+}
+
 interface ProviderFields {
   providerCode?: string;
   providerMessage?: string;
@@ -296,15 +342,13 @@ function getProviderFields(error: unknown): ProviderFields {
       : rawCode;
   // `requestID` is the OpenAI SDK's spelling — it stamps the response's
   // `x-request-id` header onto every APIError, including the status-less ones
-  // built from a mid-stream error event.
-  const requestId =
-    typeof source.request_id === 'string'
-      ? source.request_id
-      : typeof source.requestId === 'string'
-        ? source.requestId
-        : typeof source.requestID === 'string'
-          ? source.requestID
-          : undefined;
+  // built from a mid-stream error event. That header can be present and empty,
+  // and this value now decides a retry verdict, so '' counts as absent.
+  const requestId = firstNonEmptyString(
+    source.request_id,
+    source.requestId,
+    source.requestID,
+  );
   const providerMessage =
     typeof source.message === 'string' &&
     (!(error instanceof Error) ||
@@ -339,4 +383,35 @@ export function isFallbackEligible(
     classification.diagnosis !== 'fail-fast' &&
     classification.diagnosis !== 'unknown'
   );
+}
+
+/**
+ * The retry verdict for an error the callers' own HTTP-status checks cannot
+ * decide: provider rate-limit codes with no status, transport failures, and
+ * status-less upstream bodies.
+ *
+ * Both retry gates end here — `defaultShouldRetry` for the non-streaming and
+ * drain-inside-the-call paths, and LlmChat's inline stream predicate — so the
+ * status-less policy is written once. Kept in this module rather than in
+ * `retry.ts` because the package barrel re-exports that file, and this policy
+ * is not public API.
+ */
+export function isRetryableUpstreamError(
+  error: unknown,
+  extraRetryErrorCodes?: readonly number[],
+): boolean {
+  return (
+    isRateLimitError(error, extraRetryErrorCodes) ||
+    classifyRetryError(error, { extraRetryErrorCodes }).diagnosis ===
+      'retryable'
+  );
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value) {
+      return value;
+    }
+  }
+  return undefined;
 }

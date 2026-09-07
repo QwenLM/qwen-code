@@ -44,6 +44,7 @@ import {
 import {
   classifyRetryError,
   isFallbackEligible,
+  isRetryableUpstreamError,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator, InputModalities } from './contentGenerator.js';
@@ -125,7 +126,10 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
 } from './prompts.js';
-import { isRetryableStreamTransportError } from './stream-transport-retry.js';
+import {
+  isRetryableStatuslessUpstreamError,
+  isRetryableStreamTransportError,
+} from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -3468,7 +3472,17 @@ export class LlmChat {
               });
             }
 
-            // Replay only curated socket-level failures before any
+            // Both stream-recovery mechanisms below admit a curated
+            // socket-level failure and a status-less upstream failure the
+            // provider traced with its own request id. The latter is what a
+            // gateway error frame pushed into an already-200 stream produces,
+            // and it can only be decided here: retryWithBackoff resolved when
+            // the stream was established, before a single frame was parsed.
+            const isRetryableStreamCut =
+              isRetryableStreamTransportError(classification) ||
+              isRetryableStatuslessUpstreamError(classification);
+
+            // Replay only those failures before any
             // content (non-thought output) has reached callers.
             // Thinking-only output does not block the replay: such an
             // attempt persists nothing (error-path persistence
@@ -3479,7 +3493,7 @@ export class LlmChat {
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamTransportError(classification) &&
+              isRetryableStreamCut &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3540,13 +3554,13 @@ export class LlmChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
-            const canContinueAfterTransportCut =
-              isRetryableStreamTransportError(classification) &&
+            const canContinueAfterStreamCut =
+              isRetryableStreamCut &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
-            if (canContinueAfterTransportCut) {
+            if (canContinueAfterStreamCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
               // Everything delivered so far — across earlier continuation
@@ -3579,7 +3593,7 @@ export class LlmChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError(classification)) {
+            if (isRetryableStreamCut) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
@@ -4616,23 +4630,12 @@ export class LlmChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
-        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
-        // predicate does not silently drop them — the default path checks these
-        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
-        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
-
-        // Errors carrying no HTTP status would otherwise fall through every
-        // predicate above: transient network errors (ECONNRESET, ETIMEDOUT, …)
-        // and upstream error bodies the provider traced with its own request id
-        // (a gateway `{"error": …}` pushed into an already-200 SSE stream).
-        if (
-          classifyRetryError(error, { extraRetryErrorCodes }).diagnosis ===
-          'retryable'
-        ) {
-          return true;
-        }
-
-        return false;
+        // Everything an HTTP status cannot decide — provider rate-limit codes
+        // (e.g. DashScope), transport failures (ECONNRESET, ETIMEDOUT, …), and
+        // upstream error bodies the provider traced with its own request id.
+        // Shared with defaultShouldRetry, which a custom predicate like this
+        // one bypasses, so the two paths cannot drift apart.
+        return isRetryableUpstreamError(error, extraRetryErrorCodes);
       },
       authType,
       extraRetryErrorCodes,

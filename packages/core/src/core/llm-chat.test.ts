@@ -9689,6 +9689,67 @@ describe('LlmChat', async () => {
         }
       });
 
+      it('continues from the delivered text when a status-less upstream error cuts the stream', async () => {
+        // A gateway error frame is not a socket cut, but once answer text has
+        // reached the caller the two have the same constraint: replaying would
+        // duplicate what is already on screen, so the only recovery left is to
+        // keep the delivered text and ask the model to resume from it.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('<html><body>');
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('</body></html>', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-upstream-statusless-continuation',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+
+          // Both halves reach the caller, in order and exactly once — the
+          // no-duplication invariant the replay gate exists to protect.
+          const delivered = events
+            .filter((event) => event.type === StreamEventType.CHUNK)
+            .map(
+              (event) =>
+                (event as { value: GenerateContentResponse }).value
+                  .candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+            )
+            .join('');
+          expect(delivered).toBe('<html><body></body></html>');
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('stitches the delivered text into durable history', async () => {
         // Without the merge, history would keep only the continuation half and
         // every later turn (plus /compress and --resume) would see an answer
@@ -11059,64 +11120,136 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
-    it('retries a mid-stream upstream error that carries no HTTP status', async () => {
-      // A gateway that pushes `{"error":{"code":"KeyError","message":"'id'"}}`
-      // into an already-200 SSE stream reaches us as an APIError with no status
-      // and the response's x-request-id. Drive the real inline
-      // shouldRetryOnError predicate through the retryWithBackoff options and
-      // assert it retries instead of failing the turn on the first attempt.
-      const upstreamError = Object.assign(new Error("'id'"), {
-        code: 'KeyError',
-        requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
-      });
+    it('replays a status-less upstream error thrown mid-stream', async () => {
+      // The shape the incident actually produced: the gateway pushes
+      // `{"error":{"code":"KeyError","message":"'id'"}}` into an already-200 SSE
+      // stream and the SDK throws it from inside the lazy iterator — after
+      // retryWithBackoff has resolved the established stream. It is therefore
+      // the mid-stream replay gate that must catch it, not the establishment
+      // predicate, and the generator below throws on its first next() so the
+      // error arrives where the real one does.
+      vi.useFakeTimers();
+      try {
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
 
-      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
-        try {
-          return await apiCall();
-        } catch (error) {
-          expect(options?.shouldRetryOnError?.(error)).toBe(true);
-          return apiCall();
-        }
-      });
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw upstreamError;
 
-      vi.mocked(mockContentGenerator.generateContentStream)
-        .mockRejectedValueOnce(upstreamError)
-        .mockResolvedValueOnce(
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'Recovered from upstream KeyError' }],
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered from upstream KeyError' }],
+                    },
+                    finishReason: 'STOP',
                   },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-midstream',
         );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-upstream-statusless-retry',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retries = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retries).toHaveLength(1);
+        // A replay, not a continuation: nothing had reached the caller, so the
+        // request is re-sent from scratch instead of resumed from partial text.
+        expect(
+          retries[0]!.type === StreamEventType.RETRY &&
+            retries[0]!.isContinuation,
+        ).toBeFalsy();
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered from upstream KeyError',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
       }
+    });
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        2,
-      );
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Recovered from upstream KeyError',
-        ),
-      ).toBe(true);
+    it('propagates a permanent provider rejection delivered mid-stream', async () => {
+      // The mirror image of the replay above. A moderation or credential
+      // rejection arrives the same way — inside an already-200 stream, traced
+      // with a request id, no HTTP status — but re-sending the identical
+      // request can never succeed, so the widened gate must not adopt it.
+      vi.useFakeTimers();
+      try {
+        const permanentError = Object.assign(new Error('Content filtered'), {
+          code: 'data_inspection_failed',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw permanentError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          // Consumed only if the gate wrongly adopts the rejection: the replay
+          // would land here and appear to succeed, so a regression reports as a
+          // call count rather than as a hang.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'must not be delivered' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-permanent-midstream',
+        );
+        let events: StreamEvent[] = [];
+        let caughtError: unknown;
+        try {
+          events = await collectStreamWithFakeTimers(stream, 5_000);
+        } catch (error) {
+          caughtError = error;
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(String(caughtError)).toContain('Content filtered');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {

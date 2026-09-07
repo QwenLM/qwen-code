@@ -27,3 +27,18 @@ export function isRetryableStreamTransportError(
     RETRYABLE_STREAM_TRANSPORT_CODES.has(classification.transportCode)
   );
 }
+
+/**
+ * True when the provider traced a failure with its own request id but no HTTP
+ * status survived — a gateway error frame pushed into an already-200 SSE
+ * stream, which the OpenAI SDK surfaces with neither a status nor a socket
+ * code. This needs its own predicate instead of a wider
+ * `RETRYABLE_STREAM_TRANSPORT_CODES`: that set is socket-only by contract, and
+ * the Anthropic generator shares the predicate over it to decide whether
+ * deferred tool-call chunks may be released.
+ */
+export function isRetryableStatuslessUpstreamError(
+  classification: RetryErrorClassification,
+): boolean {
+  return classification.reason === 'upstream-error-without-status';
+}
