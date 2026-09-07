@@ -606,6 +606,15 @@ function sameContent(a, b) {
   return readFileSync(a).equals(readFileSync(b));
 }
 
+// Nothing was read from this file: no registration of either kind and no
+// assertion, which is what the instrument reports for a shape it does not
+// parse and for a file that declares nothing alike.
+function isEmptySurface(c) {
+  return (
+    c.declared === 0 && c.enabledTitles.length === 0 && c.disabled.length === 0
+  );
+}
+
 // Two counts describe the same CHARGEABLE surface: the assertion totals
 // and the enabled-registration multiset. Nothing else is compared, because
 // nothing else can be charged -- `enabled` is the count of `test:` keys in
@@ -700,16 +709,23 @@ export function measure({ path, tip, pre, events = [] }) {
       // "Moved" means the measured SURFACE moved, not the bytes: main
       // appending a comment to a file an earlier round deleted contributes
       // no coverage, and reading it as a contribution would re-charge that
-      // deletion in every round main happens to touch the file. For a file
-      // whose surface this instrument cannot read at all -- the Python and
-      // Rust shapes, judged by the deletion arm alone -- "the surface did
-      // not move" is unmeasurable rather than false, so movement falls back
-      // to the bytes; otherwise main growing such a file mid-round could
-      // never put it back in the baseline and its deletion would be free.
+      // deletion in every round main happens to touch the file.
+      //
+      // When BOTH sides measure to nothing, that reading is unavailable --
+      // an empty surface is what this instrument reports for a file it
+      // cannot parse as well as for a file that declares nothing -- so
+      // movement falls back to the bytes. The test is what was MEASURED,
+      // never the extension: a `.test.ts` that registers nothing measures
+      // exactly like a `.py`, and keying on the extension would leave its
+      // deletion free. The cost of the fallback is that main touching such
+      // a file at all reads as a contribution, so a file an earlier round
+      // deleted is charged again; that is fail-closed and one ack entry
+      // answers it, where the alternative loses the deletion arm -- the
+      // only arm these shapes have.
       const beforeCount = countFile(ev.before, path);
       const afterCount = countFile(ev.after, path);
       const readable =
-        beforeCount.language !== 'other' || afterCount.language !== 'other';
+        !isEmptySurface(beforeCount) || !isEmptySurface(afterCount);
       const moved =
         !baseHolds ||
         (readable

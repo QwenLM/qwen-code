@@ -26679,6 +26679,80 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- a `.test.ts` the instrument reads NOTHING from, grown by main
+    //    while the round keeps an earlier round's deletion. An empty
+    //    measured surface is the same reading for a file that declares
+    //    nothing as for a shape the parser does not know, so the byte
+    //    fallback has to engage on the extension the parser DOES know too.
+    'preround-absent-main-grows-zero-surface-ts': {
+      onMain: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/z.test.ts': [WT_IMPORT, '// type-level fixtures live here'],
+      },
+      files: {},
+      seed: ['git rm -q pkg/z.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/z.test.ts': [
+            WT_IMPORT,
+            '// type-level fixtures live here',
+            '// and a second note',
+          ],
+        }),
+        'git commit -qam main-grows-z',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/z.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main moves only DISABLED registrations on a file an earlier round
+    //    deleted. A skipped test is no coverage and reaches no signal, so
+    //    it is not a contribution and the old deletion is not re-charged.
+    'preround-absent-main-adds-skip': {
+      onMain: { 'pkg/a.test.ts': WT_BASE, 'pkg/x.test.ts': WT_BASE },
+      files: {},
+      seed: ['git rm -q pkg/x.test.ts'],
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/x.test.ts': [...WT_BASE, ...testB('it.skip')],
+        }),
+        'git commit -qam main-adds-skip',
+      ],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        'git rm -q -f --ignore-unmatch pkg/x.test.ts',
+        'git commit -qm keep-our-deletion',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- a criss-cross whose two candidate bases disagree about whether the
+    //    file EXISTS, not about its content. Refused like any other
+    //    disagreement: which base git picks would decide the verdict.
+    'crisscross-bases-disagree-presence': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm m1-deletes'],
+      round: [
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git add -A pkg && git commit -qm keep-ours',
+        'git checkout -q main',
+        'git merge -q --no-edit --no-commit origin/feature || true',
+        'git rm -q -f --ignore-unmatch pkg/a.test.ts',
+        'git commit -qm m2',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm main-restores',
+        'git push -q origin main',
+        'git checkout -q feature',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add -A pkg && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
     'main-directory-swap': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -27810,6 +27884,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'test file deleted',
       );
       expect(empty.rejection).toContain('pkg/e.test.ts');
+      // ...and the fallback keys on what was MEASURED, not on the
+      // extension: a `.test.ts` the parser reads nothing from measures
+      // exactly like a `.py`.
+      const zeroTs = rejectsWeakening(
+        'preround-absent-main-grows-zero-surface-ts',
+        'test file deleted',
+      );
+      expect(zeroTs.rejection).toContain('pkg/z.test.ts');
+      // Main moving only DISABLED registrations is no coverage and reaches
+      // no signal, so it does not put the file back in the baseline.
+      acceptsWithoutCharge('preround-absent-main-adds-skip');
       // Two equally valid merge bases holding the SAME blob cannot change
       // the verdict, so the file is measured...
       acceptsWithoutCharge('crisscross-bases-agree');
@@ -27819,6 +27904,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(crossed.status).toBe(1);
       expect(crossed.rejection).toContain('test surface could not be measured');
       expect(crossed.rejection).toContain('pkg/a.test.ts');
+      // ...including when they disagree about whether the file EXISTS,
+      // which an identity that could not tell "no blob" from "absent"
+      // would read as agreement.
+      const crossedPresence = runGate({
+        weaken: 'crisscross-bases-disagree-presence',
+      });
+      expect(crossedPresence.status).toBe(1);
+      expect(crossedPresence.rejection).toContain(
+        'test surface could not be measured',
+      );
       // ...but a path MAIN also added during the round is the baseline's,
       // and dropping it after the merge is the round's deletion.
       const addAdd = rejectsWeakening(

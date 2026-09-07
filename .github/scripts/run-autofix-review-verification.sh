@@ -1090,12 +1090,16 @@ fi
 # the phantom credit absorb its own removal exactly. Main's ADDITIONS are
 # never clamped: they raise the baseline whatever the merge kept, or a
 # round that drops what main added during the round gets that removal for
-# free. Presence is a running state, not a reading of the newest event:
-# main holding the file and having moved its measurable surface puts the
-# file in the baseline, and main deleting it takes it out only when the
-# merge adopted that deletion. For a file whose surface this instrument
-# cannot read -- the Python and Rust shapes -- movement is read from the
-# bytes, since "the surface did not move" is unmeasurable there.
+# free. Presence is a running state, not a reading of the newest event.
+# Main ADDING the path puts the file in the baseline; so does main moving
+# its measured surface; main deleting it takes it out only when the merge
+# adopted that deletion. Where both sides MEASURE to nothing -- the Python
+# and Rust shapes, and equally a JS file that declares nothing -- movement
+# is read from the bytes instead, since "the surface did not move" is
+# unmeasurable there. That reads main touching such a file at all as a
+# contribution, so a file an earlier round deleted is charged again: one
+# ack entry answers it, where the alternative is losing the deletion arm,
+# the only arm those shapes have.
 # What none of this can see is identity: main removing one assertion while
 # the resolution puts it back and drops a different one nets to zero, the
 # same way an assertion moved within a file always has.
@@ -1293,10 +1297,11 @@ weaken_auto_blob() {
   weaken_bases="$(git merge-base --all "${c}^" "${c}^${mp}" 2> /dev/null)" || weaken_bases=''
   while IFS= read -r weaken_b; do
     [[ -n "${weaken_b}" ]] || continue
-    # Compared through weaken_blob, the very reader the measurement uses:
-    # a path that is a tree, a gitlink or missing is "no blob" to all of
-    # them alike, and an identity that told those apart would refuse a
-    # tie-break that cannot change the verdict.
+    # Compared through weaken_blob, the very reader the measurement uses,
+    # rather than a second identity built beside it: one reader cannot
+    # drift from the other about what counts as holding the file. Absent
+    # and present are told apart by weaken_seen_set, not by the path being
+    # empty -- an empty path IS the absent case.
     weaken_bi=$(( weaken_bi + 1 ))
     weaken_b="$(weaken_blob "${weaken_b}" "${f}" "${tag}.mb${weaken_bi}")" || return 1
     if [[ -z "${weaken_seen_set}" ]]; then
