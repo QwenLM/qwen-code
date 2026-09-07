@@ -28,6 +28,9 @@ let workspaceClient: {
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
+let waitingSessions: Set<string>;
+const scrollPaneIntoView = vi.fn();
+const confirmApproval = vi.fn();
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
@@ -87,6 +90,14 @@ vi.mock('../hooks/useScopedSessions', () => ({
 
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
+    const sessionId = props.sessionSummary?.sessionId;
+    const pending = waitingSessions.has(sessionId);
+    const { onApprovalChange } = props;
+    React.useEffect(() => {
+      if (!sessionId) return;
+      onApprovalChange?.(sessionId, pending);
+      return () => onApprovalChange?.(sessionId, false);
+    }, [sessionId, pending, onApprovalChange]);
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
@@ -94,6 +105,7 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
+        data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
         data-hidden={props.hidden ? 'true' : 'false'}
         data-report-catalog-turn-completion={
@@ -103,6 +115,14 @@ vi.mock('./ChatPane', () => ({
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
         <span data-testid="pane-title">{props.title}</span>
+        <input aria-label={`Draft ${props.title}`} />
+        {pending && (
+          <div data-testid="pane-approval">
+            <button tabIndex={0} onClick={confirmApproval}>
+              Approve
+            </button>
+          </div>
+        )}
         {props.renderHeaderActions && (
           <span data-testid="pane-header-slot">
             {props.renderHeaderActions({
@@ -132,6 +152,10 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
+  waitingSessions = new Set();
+  confirmApproval.mockClear();
+  scrollPaneIntoView.mockClear();
+  Element.prototype.scrollIntoView = scrollPaneIntoView;
   connectionState = {
     sessionId: 's3',
     capabilities: { features: [] },
@@ -210,6 +234,68 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
+  it('tracks pointer and keyboard activity without activating a hovered pane', () => {
+    render({ sessionIds: ['s1', 's2'] });
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    act(() =>
+      panes()[1].dispatchEvent(new Event('pointerover', { bubbles: true })),
+    );
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    act(() =>
+      panes()[1].dispatchEvent(new Event('pointerdown', { bubbles: true })),
+    );
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(true);
+    act(() => panes()[0].querySelector('input')!.focus());
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    expect(panes()[1].hasAttribute('data-pane-active')).toBe(false);
+  });
+
+  it('cycles hidden pending panes, focuses approval and preserves drafts without confirming', () => {
+    waitingSessions = new Set(['s2', 's3']);
+    render({ sessionIds: ['s1', 's2', 's3'] });
+    const draft = panes()[0].querySelector('input')!;
+    draft.value = 'keep this draft';
+    act(() =>
+      panes()[0]
+        .querySelector<HTMLButtonElement>('[data-testid="pane-maximize"]')!
+        .click(),
+    );
+    const pendingButton = container!.querySelector<HTMLButtonElement>(
+      '[title="Go to the next session awaiting input"]',
+    )!;
+    expect(pendingButton.textContent).toBe('2 awaiting input');
+    act(() => pendingButton.click());
+    expect(panes()[1].getAttribute('data-maximized')).toBe('true');
+    expect(document.activeElement).toBe(
+      panes()[1].querySelector('[data-testid="pane-approval"] button'),
+    );
+    act(() => pendingButton.click());
+    expect(panes()[2].getAttribute('data-maximized')).toBe('true');
+    expect(document.activeElement).toBe(
+      panes()[2].querySelector('[data-testid="pane-approval"] button'),
+    );
+    expect(confirmApproval).not.toHaveBeenCalled();
+    expect(scrollPaneIntoView).toHaveBeenCalledTimes(2);
+    expect(panes()[0].querySelector('input')).toBe(draft);
+    expect(draft.value).toBe('keep this draft');
+  });
+
+  it('drops pending and active state when a controlled pane is removed', () => {
+    waitingSessions = new Set(['s2']);
+    render({ sessionIds: ['s1', 's2'] });
+    act(() => panes()[1].querySelector('input')!.focus());
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView sessionIds={['s1']} onExit={() => {}} />
+        </I18nProvider>,
+      ),
+    );
+    expect(panes()).toHaveLength(1);
+    expect(panes()[0].hasAttribute('data-pane-active')).toBe(true);
+    expect(container!.textContent).not.toContain('awaiting input');
+  });
+
   it('renders one pane per initial session, each under its own provider', () => {
     render({ sessionIds: ['s1', 's2'] });
     expect(panes()).toHaveLength(2);

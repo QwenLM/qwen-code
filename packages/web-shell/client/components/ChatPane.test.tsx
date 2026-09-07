@@ -527,6 +527,81 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('reports tool and question waiting state while hidden and clears it on unmount', () => {
+    const onApprovalChange = vi.fn();
+    const props = { hidden: true, onApprovalChange };
+    render(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    pendingPermission = null;
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+    pendingPermission = {
+      id: 'ask-1',
+      rawInput: { questions: [{ question: 'pick', options: [] }] },
+    };
+    rerender(props);
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      true,
+    );
+    expect(submitPermission).not.toHaveBeenCalled();
+    act(() => root!.unmount());
+    root = null;
+    expect(onApprovalChange).toHaveBeenLastCalledWith(
+      connectionState.sessionId,
+      false,
+    );
+  });
+
+  it('reuses title details without including actions and dismisses them when hidden', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        title: 'Pane details',
+        sessionSummary: {
+          sessionId: 'session-details',
+          workspaceCwd: '/work/split-project',
+          branch: { name: 'codex/split', baseBranch: 'main' },
+        },
+        onToggleMaximize: vi.fn(),
+      };
+      render(props);
+      const title = container!.querySelector('[data-slot="popover-anchor"]')!;
+      expect(title.textContent).toBe('Pane details');
+      expect(title.querySelector('button')).toBeNull();
+      const composerFocus = document.createElement('input');
+      container!.append(composerFocus);
+      composerFocus.focus();
+      await act(async () => {
+        title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'split-project',
+      );
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'codex/split',
+      );
+      expect(document.activeElement).toBe(composerFocus);
+      rerender({ ...props, hidden: true });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
     connectionState.supportedCommands = { workflowsEnabled: true };
     messagesState = [

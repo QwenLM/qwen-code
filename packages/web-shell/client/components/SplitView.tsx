@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -161,6 +168,26 @@ export function SplitView({
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [activePaneId, setActivePaneId] = useState(paneIds[0]);
+  const [pendingPaneIds, setPendingPaneIds] = useState<Set<string>>(new Set());
+  const [approvalFocusId, setApprovalFocusId] = useState<string | null>(null);
+  const panesRef = useRef<HTMLDivElement>(null);
+  const activeId = paneIds.includes(activePaneId ?? '')
+    ? activePaneId
+    : paneIds[0];
+  const pendingIds = paneIds.filter((id) => pendingPaneIds.has(id));
+  const handleApprovalChange = useCallback(
+    (sessionId: string, pending: boolean) => {
+      setPendingPaneIds((current) => {
+        if (current.has(sessionId) === pending) return current;
+        const next = new Set(current);
+        if (pending) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+    },
+    [],
+  );
   // Which pane, if any, is maximized to fill the whole split. Purely visual and
   // ephemeral (not deep-linked via `?split=`, like the dialog fullscreen toggle
   // it mirrors): the other panes stay mounted and streaming, just hidden.
@@ -260,6 +287,7 @@ export function SplitView({
       // Reveal the freshly added pane rather than leaving it hidden behind a
       // still-maximized one.
       setMaximizedPaneId(null);
+      setActivePaneId(sessionId);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
@@ -304,8 +332,33 @@ export function SplitView({
   );
 
   const toggleMaximize = useCallback((sessionId: string) => {
+    setActivePaneId(sessionId);
     setMaximizedPaneId((current) => (current === sessionId ? null : sessionId));
   }, []);
+
+  const goToPendingPane = () => {
+    const currentIndex = pendingIds.indexOf(activeId ?? '');
+    const nextId = pendingIds[(currentIndex + 1) % pendingIds.length];
+    if (!nextId) return;
+    setActivePaneId(nextId);
+    if (maximizedPaneId) setMaximizedPaneId(nextId);
+    setApprovalFocusId(nextId);
+  };
+
+  useLayoutEffect(() => {
+    if (!approvalFocusId) return;
+    const pane = Array.from(panesRef.current?.children ?? []).find(
+      (element) =>
+        element.getAttribute('data-pane-session-id') === approvalFocusId,
+    );
+    pane?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const approvalTarget =
+      pane?.querySelector<HTMLElement>(
+        '[data-testid="pane-approval"] [tabindex="0"]',
+      ) ?? pane?.querySelector<HTMLElement>('[data-web-shell-ask-panel]');
+    approvalTarget?.focus({ preventScroll: true });
+    setApprovalFocusId(null);
+  }, [approvalFocusId]);
 
   // Maximize only makes sense against another pane, so drop it whenever it no
   // longer can hold: the maximized pane left the set (closed here, or removed by
@@ -371,6 +424,16 @@ export function SplitView({
         <span className={styles.count}>
           {t('splitView.count', { count: paneIds.length })}
         </span>
+        {pendingIds.length > 0 && (
+          <button
+            type="button"
+            className={styles.pendingButton}
+            onClick={goToPendingPane}
+            title={t('splitView.nextPending')}
+          >
+            {t('splitView.pendingCount', { count: pendingIds.length })}
+          </button>
+        )}
         <div className={styles.addWrap} ref={addWrapRef}>
           <button
             type="button"
@@ -414,7 +477,7 @@ export function SplitView({
         </div>
       </header>
 
-      <div className={styles.panes}>
+      <div className={styles.panes} ref={panesRef}>
         {paneIds.length === 0 ? (
           <div className={styles.empty}>{t('splitView.empty')}</div>
         ) : (
@@ -427,7 +490,18 @@ export function SplitView({
             return (
               <div
                 className={styles.paneSlot}
+                data-pane-session-id={sessionId}
                 data-pane-hidden={isHidden ? '' : undefined}
+                onPointerDownCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
+                onFocusCapture={(event) => {
+                  if (event.currentTarget.contains(event.target as Node)) {
+                    setActivePaneId(sessionId);
+                  }
+                }}
                 // Include the resolved workspace in the key on a multi-workspace
                 // daemon so a pane whose workspace resolves only after mount (e.g.
                 // a `?split=` deep link) remounts under the right workspace rather
@@ -486,6 +560,11 @@ export function SplitView({
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
+                      sessionSummary={allSessions.find(
+                        (session) => session.sessionId === sessionId,
+                      )}
+                      isActive={activeId === sessionId}
+                      onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}
                       reportCatalogTurnCompletion={
                         sessionId !== currentSessionId ||

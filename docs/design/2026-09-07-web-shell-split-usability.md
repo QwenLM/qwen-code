@@ -1,0 +1,46 @@
+# Web Shell split-view usability
+
+The split view is intended for large displays and multiple monitors. Keep its
+equal-width horizontal row, full-height transcripts, independent session
+providers, six-pane limit, add/close controls, back navigation, maximize/restore,
+and existing per-tab session persistence. Additional layout modes, width dragging,
+and moving sessions between windows are outside this change.
+
+Three small improvements make the existing view easier to use without adding a
+toolbar row or reducing transcript height:
+
+- Reuse the sidebar's session-details popover on the pane title. Keep its delayed
+  pointer hover, copy control, workspace, branch, PR/issue links, and status. Open
+  below the title and constrain it to the Web Shell root. Header action buttons
+  remain outside the hover target. Hovering must not focus or activate a pane.
+- Mark the last clicked or keyboard-focused pane with an inset line in its
+  existing header. Adding, closing, and maximizing panes keep this selection
+  valid; selection does not change keyboard routing or focus by itself.
+- Show a pending-session count in the existing toolbar only while a pane awaits
+  tool approval or a user answer. Clicking cycles through waiting panes in row
+  order, reveals a hidden maximized sibling when needed, scrolls the row to the
+  target, and focuses its approval controls. It never submits a response.
+
+`ChatPane` already derives its pending tool/question request from its own
+transcript. Report that boolean to `SplitView` with a stable callback, including
+cleanup when the session changes or unmounts. The parent counts only currently
+open panes, including hidden siblings. Do not infer waiting state from the
+session-list running flag or introduce another daemon subscription.
+
+`SplitView` passes session-list metadata to the pane; its live running state
+comes from the pane's existing active-prompt bridge. Until metadata is available,
+retain the native title fallback. Extend
+`SessionDetailsTooltip` with bottom placement while preserving the sidebar's
+right placement and scoped portal behavior. Keep the shared details markup and
+styling, with no duplicate tooltip implementation.
+
+Affected areas are `SplitView`, `ChatPane`, the shared sidebar details popover,
+their CSS and focused tests, English/Chinese labels, and the split-view browser
+regression suite. No daemon protocol, persistence format, package API, or layout
+breakpoint changes are required. There are no open design questions.
+
+Validation covers delayed hover without focus theft, action-button exclusion,
+active-pane pointer/keyboard selection, pending tool and question transitions,
+hidden-pane navigation, draft retention, and existing add/close/maximize/reload
+behavior. The CLI baseline and browser-test environment limitations are recorded
+in `.qwen/e2e-tests/web-shell-split-usability.md`.

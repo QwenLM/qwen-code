@@ -28,6 +28,7 @@ interface SessionDetailsTooltipProps {
   time: string;
   completedUnread: boolean;
   worktreeOnly?: boolean;
+  side?: 'right' | 'bottom';
   children: ReactElement;
 }
 
@@ -37,6 +38,7 @@ export function SessionDetailsTooltip({
   time,
   completedUnread,
   worktreeOnly = false,
+  side = 'right',
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
@@ -52,7 +54,9 @@ export function SessionDetailsTooltip({
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(
-        anchorRef.current?.closest<HTMLElement>('aside') ?? null,
+        anchorRef.current?.closest<HTMLElement>('aside') ??
+          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+          null,
       )
     : null;
   const folderPath = session.workspaceCwd;
@@ -134,7 +138,7 @@ export function SessionDetailsTooltip({
         {children}
       </PopoverAnchor>
       <PopoverContent
-        side="right"
+        side={side}
         align={worktreeOnly ? 'center' : 'start'}
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
