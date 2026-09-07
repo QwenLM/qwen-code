@@ -222,6 +222,97 @@ describe('EmbeddedApp host wiring', () => {
     });
   });
 
+  it('relativizes the active file across a symlinked workspace', async () => {
+    await renderApp();
+
+    // The daemon matches workspaces by canonical path while every
+    // `activeEditorChanged` sender posts VS Code's raw `uri.fsPath`, so the
+    // bootstrap carries both spellings of a symlinked folder.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrap',
+            data: {
+              baseUrl: 'http://localhost:4141',
+              clientId: 'client-1',
+              workspaceCwd: '/private/workspace',
+              editorWorkspaceCwd: '/workspace',
+              hostKind: 'view',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'activeEditorChanged',
+            data: {
+              fileName: 'editor.ts',
+              filePath: '/workspace/nested/editor.ts',
+            },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        sessionId?: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    // A bare `@editor.ts` is what the prefix strip degrades to when the two
+    // sides sit in different path spaces; the agent then resolves it against
+    // the workspace root and finds nothing, or the wrong sibling.
+    await expect(
+      prepareSubmit({ prompt: 'Explain this', inputAnnotations: [] }),
+    ).resolves.toEqual({
+      prompt: '@nested/editor.ts Explain this',
+      inputAnnotations: [
+        expect.objectContaining({
+          type: 'reference',
+          reference: expect.objectContaining({
+            value: '/workspace/nested/editor.ts',
+            serialized: '@nested/editor.ts',
+          }),
+        }),
+      ],
+    });
+
+    // The file picker produces a true workspace-relative annotation value, so
+    // the dedup has to see the same string or it attaches the file twice.
+    const pickerAnnotation = {
+      type: 'reference',
+      start: 0,
+      end: '@nested/editor.ts'.length,
+      text: '@nested/editor.ts',
+      reference: {
+        id: 'picker:nested/editor.ts',
+        kind: 'file',
+        label: 'editor.ts',
+        value: 'nested/editor.ts',
+        serialized: '@nested/editor.ts',
+      },
+    };
+    await expect(
+      prepareSubmit({
+        prompt: 'Explain this',
+        inputAnnotations: [pickerAnnotation],
+      }),
+    ).resolves.toEqual({
+      prompt: 'Explain this',
+      inputAnnotations: [pickerAnnotation],
+    });
+  });
+
   it('keeps an authenticated session visible when auth is cancelled', async () => {
     await renderApp();
     const { container } = mounted[mounted.length - 1];
