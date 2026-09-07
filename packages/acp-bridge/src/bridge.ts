@@ -122,6 +122,7 @@ import {
   InvalidRewindTargetError,
   PromptDeadlineExceededError,
   BridgeChannelQuarantinedError,
+  BridgeRuntimeRecyclingError,
   McpAuthenticationInProgressError,
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
@@ -1055,9 +1056,10 @@ interface ChannelInfo {
    * `killAllSync` must still find the channel during the SIGTERM
    * grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels`
    * holds the dying entry until `channel.exited` fires (OS-level
-   * reap); `isDying` is the "available-for-new-spawns" half of the
-   * two-bit (alive, dying) state.
+   * reap). Draining generations retain their Session owners but cannot accept
+   * fresh work; dying generations are unavailable while the OS reaps them.
    */
+  state: 'active' | 'draining' | 'dying';
   isDying: boolean;
   /** Existing sessions stay usable, but no fresh session work may enter. */
   isQuarantined: boolean;
@@ -2749,7 +2751,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | { channel: ChannelInfo; reason: BridgeChannelUnavailableReason }
     | undefined => {
     for (const ci of aliveChannels) {
-      if (ci.isDying) continue;
+      if (ci.state !== 'active') continue;
       if (ci.isQuarantined) {
         return { channel: ci, reason: 'restore_cleanup_failed' };
       }
@@ -3004,8 +3006,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // same-workspace attach under `single` scope reuses). Thread-scope
   // sessions add to `byId` but don't displace `defaultEntry`.
   let defaultEntry: SessionEntry | undefined;
-  // `channelInfo` is the SINGLE attach-available channel. Cleared
-  // ONLY by the `channel.exited` handler (see below) when the OS
+  // `channelInfo` is the newest generation. It is attach-available only while
+  // active, and is cleared ONLY by its `channel.exited` handler when the OS
   // reaps the underlying child process. Teardown initiators
   // (`killSession` last-session-leaving — via `startIdleTimer` ->
   // `killChannelWithLog` / `reapPendingEmptyChannel`,
@@ -3694,11 +3696,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     context: string,
   ): Promise<void> {
-    if (ci.isDying) return;
+    if (ci.state === 'dying') return;
     if (hasNoSessionWork(ci)) {
       await killChannelWithLog(ci, context);
       return;
     }
+    if (ci.state === 'draining') return;
+    ci.state = 'draining';
+    if (channelInfo === ci) cancelIdleTimer();
     ci.retireWhenSessionsDrain = true;
     writeStderrLine(
       `qwen serve: ${context}; deferring channel retirement until ${ci.sessionIds.size} active session(s) drain`,
@@ -4493,8 +4498,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // would either hang or land the caller with a sessionId that
     // immediately 404s on every follow-up.
     cancelIdleTimer();
-    if (channelInfo && !channelInfo.isDying) return channelInfo;
+    if (channelInfo?.state === 'active') return channelInfo;
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
+    if (aliveChannels.size >= 2) throw new BridgeRuntimeRecyclingError();
 
     const promise = (async () => {
       const privateParentCapability = randomBytes(32).toString('base64url');
@@ -4554,7 +4560,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // instead of throwing. Surface that ambiguity loudly.
           (sessionId) => {
             if (sessionId) return byId.get(sessionId);
-            if (channelInfo && channelInfo.sessionIds.size > 1) {
+            if (sessionIds.size > 1) {
               throw new Error(
                 'BridgeClient: ACP call without sessionId on a ' +
                   'multi-session channel cannot be routed — workspace=' +
@@ -4648,9 +4654,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               .catch(() => undefined);
           },
           opts.onChannelDelivery,
-          () =>
-            channelInfo?.sessionIds === sessionIds &&
-            channelInfo.sessionSpawnsInFlight > 0,
+          () => (infoRef.current?.sessionSpawnsInFlight ?? 0) > 0,
           () => liveScreenContextCaptureHandler,
           () => liveTaskToolRequestHandler,
           () => liveSpeakToUserHandler,
@@ -4738,7 +4742,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionCleanupFailed: false,
         transportFailed: false,
         transportFailureInitiatedTeardown: false,
-        isDying: false,
+        state: 'active',
+        get isDying() {
+          return this.state === 'dying';
+        },
+        set isDying(value) {
+          if (value) this.state = 'dying';
+        },
         isQuarantined: false,
         handshakeComplete: false,
       };
@@ -5128,10 +5138,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }),
           onFailure: failChannelLiveness,
           isActive: () =>
-            channelInfo === info &&
-            aliveChannels.has(info) &&
-            !info.isDying &&
-            !shuttingDown,
+            aliveChannels.has(info) && !info.isDying && !shuttingDown,
         });
       }
       telemetry.metrics?.channelLifecycle('spawn');
@@ -5348,7 +5355,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
     const channelPath =
-      channelInfo && !channelInfo.isDying
+      channelInfo?.state === 'active'
         ? 'reused'
         : inFlightChannelSpawn
           ? 'joined'
@@ -6107,7 +6114,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
 
   const liveChannelInfo = (): ChannelInfo | undefined => {
-    if (!channelInfo || channelInfo.isDying) return undefined;
+    if (channelInfo?.state !== 'active') return undefined;
     return channelInfo;
   };
 
@@ -9430,7 +9437,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     isChannelLive() {
-      return !!liveChannelInfo();
+      return Array.from(aliveChannels).some(
+        (candidate) => candidate.state !== 'dying',
+      );
     },
 
     getWorkspaceRuntimeLifecycleSnapshot() {
@@ -9447,7 +9456,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       const starting = inFlightChannelSpawn !== undefined;
       const stopping = Array.from(aliveChannels).some(
-        (candidate) => candidate.isDying,
+        (candidate) => candidate.state !== 'active',
       );
       const reservedWork =
         runtimeOperationReservations > 0 ||
@@ -9474,6 +9483,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         runtimeEpoch: runtimeLive ? runtimeEpoch : sourceRuntimeEpoch,
         activeWork,
       };
+    },
+
+    async requestRuntimeRecycle(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const owner = channelInfoForEntry(entry);
+      if (!owner || owner.state === 'dying') {
+        throw new SessionNotFoundError(sessionId);
+      }
+      await retireChannelAfterSessionsDrain(
+        owner,
+        `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
+      );
+      if (!owner.isDying) await ensureChannel();
     },
 
     get pendingPermissionCount() {

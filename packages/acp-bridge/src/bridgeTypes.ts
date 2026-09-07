@@ -2465,6 +2465,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
 
+  /**
+   * Stop admitting fresh work to the generation that owns `sessionId` and
+   * prepare a replacement without moving existing Sessions between children.
+   */
+  requestRuntimeRecycle?(sessionId: string): Promise<void>;
+
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 

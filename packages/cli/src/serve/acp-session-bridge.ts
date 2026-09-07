@@ -141,6 +141,7 @@ export {
   SessionBusyError,
   WorkspaceDrainingError,
   BridgeChannelQuarantinedError,
+  BridgeRuntimeRecyclingError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
