@@ -289,6 +289,60 @@ it('clamps an outsized Retry-After to the retry ceiling', async () => {
   expect(container.textContent).toBe('Connected ');
 });
 
+it('floors a zero Retry-After at one second', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '0' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(999);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('floors an already-past HTTP-date Retry-After', async () => {
+  vi.useFakeTimers();
+  const past = new Date(Date.now() - 60_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: past }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('falls back to the fixed delay for an unparsable Retry-After', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: 'soon' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(1_999);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
 it('leaves the submit button enabled once the token form is up', async () => {
   vi.stubGlobal(
     'fetch',
