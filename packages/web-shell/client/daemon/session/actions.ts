@@ -2091,12 +2091,17 @@ export function createDaemonSessionActions({
         if (opts?.silent && isTransientSessionReadError(error)) {
           throw error;
         }
+        // Route through noticeForSession so the dedupe registry stays
+        // session-scoped, and only register dedupe keys while this session is
+        // still live, so a stale in-flight failure neither toasts for a
+        // session the user left nor suppresses the current session's notice.
+        const live = sessionRef.current === session;
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Load context usage failed',
           error,
           'load_context_usage',
-          opts?.silent
+          opts?.silent && live
             ? {
                 dispatchedNoticeKeys: silentHardFailureNoticeKeys,
                 noticeOnceKey: getActionErrorNoticeKey(

@@ -623,6 +623,49 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).toHaveBeenCalledTimes(1);
   });
 
+  it('clears the silent context usage dedupe registry on session teardown', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const addNotice = vi.fn((notice) => notice);
+    sessionA.contextUsage.mockRejectedValue(new Error('bad response'));
+    sessionB.contextUsage.mockRejectedValue(new Error('bad response'));
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: sessionA,
+    });
+
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+    await actions.clearSession();
+    sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+
+    expect(addNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it('records a notice per non-silent context usage hard failure', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.contextUsage
+      .mockRejectedValueOnce(new Error('bad response'))
+      .mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+      'bad response',
+    );
+    await expect(actions.getContextUsage({ detail: true })).rejects.toThrow(
+      'bad response',
+    );
+    expect(addNotice).toHaveBeenCalledTimes(2);
+  });
+
   it('does not report a silent context usage error for a name-only transport error', async () => {
     const addNotice = vi.fn();
     const session = createMockSession('session-a');

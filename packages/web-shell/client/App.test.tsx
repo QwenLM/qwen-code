@@ -4752,6 +4752,68 @@ describe('task activity key', () => {
     }
   });
 
+  it('settles the split latch on a terminal capabilities error', async () => {
+    // A capabilities blip re-arms the latch through the controlled effect;
+    // the terminal error state must settle again so reclaim still runs.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0s2': {
+          open: true,
+          activeTabId: 'file:OTHER.md',
+          tabs: [
+            {
+              id: 'file:OTHER.md',
+              kind: 'file',
+              title: 'OTHER.md',
+              workspacePath: 'OTHER.md',
+            },
+            {
+              id: 'context-usage:other-session',
+              kind: 'context_usage',
+              title: 'Orphan context usage',
+              sessionId: 'other-session',
+              closeWithPane: true,
+            },
+          ],
+        },
+      }),
+    );
+    const { rerender } = renderApp({ splitSessionIds: ['pane-session'] });
+    await flush();
+    mockWorkspace.status = 'error';
+    mockConnection.sessionId = 's2';
+    try {
+      rerender({ splitSessionIds: ['pane-session'] });
+      await flush();
+      expect(
+        document.body.querySelector('button[title="Orphan context usage"]'),
+      ).toBeNull();
+      const persisted = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      );
+      expect(
+        persisted['/tmp/project\0s2'].tabs.map((tab: { id: string }) => tab.id),
+      ).toEqual(['file:OTHER.md']);
+      // Dropping the controlled prop afterwards must not re-strand it.
+      rerender({});
+      await flush();
+      const persistedAfter = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      );
+      expect(
+        persistedAfter['/tmp/project\0s2'].tabs.map(
+          (tab: { id: string }) => tab.id,
+        ),
+      ).toEqual(['file:OTHER.md']);
+    } finally {
+      mockWorkspace.status = 'connected';
+      mockConnection.sessionId = 'session-1';
+    }
+  });
+
   it('keeps pane tabs while an earlier classification resolves under a newer one', async () => {
     mockWorkspace.capabilities = {
       ...mockWorkspace.capabilities,
@@ -4832,6 +4894,18 @@ describe('task activity key', () => {
         ),
       );
     });
+    await flush();
+    // The owning classification settles and lands ['other-pane'], so the
+    // settled sweep must reclaim the now-orphan pane tab and persist it.
+    const persistedAfterSettle = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    );
+    expect(
+      persistedAfterSettle['/tmp/project\0session-1'].tabs.map(
+        (tab: { id: string }) => tab.id,
+      ),
+    ).toEqual(['file:README.md']);
   });
 
   it('closes the panel when the reclaim empties the restored tab list', async () => {

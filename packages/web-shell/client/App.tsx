@@ -4506,6 +4506,16 @@ export function App({
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
   ] = useState(initialArtifactPanelOpen);
+  const resetEmptyArtifactPanel = useCallback(() => {
+    setArtifactPanelOpen(false);
+    setArtifactPanelFullscreen(false);
+    setSuppressArtifactDockOpenAnimation(false);
+    setActiveArtifactPanelTabId(null);
+    setReviewChanges([]);
+    setSelectedReviewPath(null);
+    setArtifactPanelExtraArtifacts([]);
+    setPaneArtifactSnapshots(new Map());
+  }, []);
   const [waitForSubagentPanelAnimation, setWaitForSubagentPanelAnimation] =
     useState(false);
   // In-tree portal target for the docked panel (display:contents keeps the
@@ -6063,13 +6073,9 @@ export function App({
       );
       setArtifactPanelTabs(activatedTabs);
       if (reclaimEmptiedPanel) {
-        // The reclaim removed every restored tab; mirror the reset
-        // closeArtifactPanelTabs applies so an empty docked panel is not
-        // persisted as open and reopened on every later load.
-        setArtifactPanelOpen(false);
-        setArtifactPanelFullscreen(false);
-        setSuppressArtifactDockOpenAnimation(false);
-        setActiveArtifactPanelTabId(null);
+        // The reclaim removed every restored tab; apply the canonical empty
+        // panel reset so no stale panel state is persisted as open.
+        resetEmptyArtifactPanel();
       } else {
         setSuppressArtifactDockOpenAnimation(restoredOpen);
         setArtifactPanelOpen(artifactPanelOpenRef.current);
@@ -6107,6 +6113,7 @@ export function App({
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
     logicalSessionKey,
+    resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
     webTerminalAvailable,
@@ -6451,14 +6458,7 @@ export function App({
         const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
         if (nextTabs.length === tabs.length) return tabs;
         if (nextTabs.length === 0) {
-          setArtifactPanelOpen(false);
-          setArtifactPanelFullscreen(false);
-          setSuppressArtifactDockOpenAnimation(false);
-          setActiveArtifactPanelTabId(null);
-          setReviewChanges([]);
-          setSelectedReviewPath(null);
-          setArtifactPanelExtraArtifacts([]);
-          setPaneArtifactSnapshots(new Map());
+          resetEmptyArtifactPanel();
           return nextTabs;
         }
         if (
@@ -6486,7 +6486,11 @@ export function App({
         return nextTabs;
       });
     },
-    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+    [
+      hydratePendingArtifactPanelTab,
+      hydrateRestoredAttachmentTab,
+      resetEmptyArtifactPanel,
+    ],
   );
   const closeArtifactPanelTab = useCallback(
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
@@ -8388,7 +8392,13 @@ export function App({
       setSplitViewSettled(true);
       return;
     }
-    if (!workspaceCapabilitiesReady) return;
+    if (!workspaceCapabilitiesReady) {
+      // A terminal capabilities error means no classification can start, so
+      // the split decision is final here; a merely pending load must not
+      // settle, or the latch would license the premature drop it prevents.
+      if (workspace.status === 'error') setSplitViewSettled(true);
+      return;
+    }
     if (!projectFeaturesAvailable) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
@@ -8426,6 +8436,7 @@ export function App({
     effectiveSessionContext,
     projectFeaturesAvailable,
     sanitizeSplitSessionIds,
+    workspace.status,
     workspaceCapabilitiesReady,
   ]);
   const handleSplitPanesChange = useCallback(
