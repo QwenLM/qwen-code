@@ -230,9 +230,9 @@ import {
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
   runWithAgentRunContext,
-  type AgentRunContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { parsePromptAgentRun } from './agent-run-meta.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -248,7 +248,6 @@ import {
   type ActiveWorkHoldV1,
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
-  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -1584,60 +1583,6 @@ function commitChannelDeliveryResponseBlock(
     if (capture?.channelDelivery) capture.channelDelivery.finalText = finalText;
     if (capture?.turnResult) capture.turnResult.finalText = finalText;
   }
-}
-
-/**
- * The workspace-agent run this prompt is a turn of, if it is one.
- *
- * The bridge strips this key from every caller and re-injects it only from the
- * daemon dispatcher's request context, so reaching here means the daemon said
- * it. Validated field by field anyway: a frame built from a half-formed record
- * would name a thread that may not be the one the envelope describes, and the
- * thread tools would act on it.
- */
-function parsePromptAgentRun(
-  params: PromptRequest,
-): AgentRunContext | undefined {
-  const meta = (params as { _meta?: Record<string, unknown> })._meta;
-  const value = meta?.[DAEMON_AGENT_RUN_META_KEY];
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const run = value as Record<string, unknown>;
-  const text = (key: string): string | undefined =>
-    typeof run[key] === 'string' && (run[key] as string).length > 0
-      ? (run[key] as string)
-      : undefined;
-  const workspaceId = text('workspaceId');
-  const agentId = text('agentId');
-  const runId = text('runId');
-  const threadId = text('threadId');
-  const rootThreadId = text('rootThreadId');
-  const attempt = run['attempt'];
-  if (
-    !workspaceId ||
-    !agentId ||
-    !runId ||
-    !threadId ||
-    !rootThreadId ||
-    typeof attempt !== 'number' ||
-    !Number.isInteger(attempt) ||
-    attempt < 1
-  ) {
-    return undefined;
-  }
-  const through = run['contextThroughSequence'];
-  return {
-    workspaceId,
-    agentId,
-    runId,
-    threadId,
-    rootThreadId,
-    attempt,
-    ...(typeof through === 'number' && Number.isInteger(through)
-      ? { contextThroughSequence: through }
-      : {}),
-  };
 }
 
 function parsePromptChannelDelivery(
