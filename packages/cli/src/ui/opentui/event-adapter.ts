@@ -782,6 +782,8 @@ export type GoalSnapshotLike = {
     status?: string;
     turnCount?: number;
     activeTimeMs?: number;
+    tokensUsed?: number;
+    tokenBudget?: number;
     lastReason?: string;
   } | null;
   activity?: string;
