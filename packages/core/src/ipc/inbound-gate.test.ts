@@ -17,6 +17,7 @@ import {
   type InboundPolicy,
   type PolicyScope,
 } from './inbound-gate.js';
+import type { PeerControllerIdentity } from './peer-controllers.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
 
 interface Harness {
@@ -25,6 +26,8 @@ interface Harness {
   delivered: PeerUserFrame[];
   /** `selfSent` as the gate reported it to `deliver`, per delivery. */
   deliveredAsSelfSent: boolean[];
+  /** The controller grant the gate reported to `deliver`, per delivery. */
+  deliveredControllers: Array<PeerControllerIdentity | undefined>;
   statuses: Array<{ msgId: string; status: string }>;
   heldChanges: number;
   setMode: (mode: ApprovalMode | null) => void;
@@ -46,9 +49,11 @@ function harness(
     policy?: InboundPolicy;
     heldExpiryMs?: number | null;
     scope?: PolicyScope;
+    isControllerValid?: (id: string) => boolean;
   } = {},
 ): Harness {
-  let mode: ApprovalMode | null = initial.mode ?? ApprovalMode.DEFAULT;
+  let mode: ApprovalMode | null =
+    initial.mode === undefined ? ApprovalMode.DEFAULT : initial.mode;
   let policy: unknown = initial.policy;
   let heldExpiryMs: number | null =
     initial.heldExpiryMs === undefined
@@ -61,6 +66,7 @@ function harness(
   let scopeThrows = false;
   const delivered: PeerUserFrame[] = [];
   const deliveredAsSelfSent: boolean[] = [];
+  const deliveredControllers: Array<PeerControllerIdentity | undefined> = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
   const state = { heldChanges: 0 };
   let deliveryFails = false;
@@ -82,10 +88,14 @@ function harness(
       if (scopeThrows) throw new Error('scope getter exploded');
       return scope;
     },
+    ...(initial.isControllerValid
+      ? { isControllerValid: initial.isControllerValid }
+      : {}),
     deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
       delivered.push(frame);
       deliveredAsSelfSent.push(origin.selfSent);
+      deliveredControllers.push(origin.controller);
     },
     reportStatus: (frame, status) =>
       statuses.push({ msgId: frame.msgId, status }),
@@ -98,6 +108,7 @@ function harness(
     gate,
     delivered,
     deliveredAsSelfSent,
+    deliveredControllers,
     statuses,
     setHeldExpiryMs: (next) => {
       heldExpiryMs = next;
@@ -1103,6 +1114,195 @@ describe('self-sent messages (child token)', () => {
   });
 });
 
+describe('controller grants', () => {
+  const VOICE: PeerControllerIdentity = { id: 'c_0123abcd', label: 'voice' };
+  const viaController = { selfSent: false, controller: VOICE };
+
+  it('accepts a message a peer would be held for', () => {
+    // No `fromMode` at all: an external program has no review class to
+    // assert, and under parity alone this is held for every receiver.
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const f = frame();
+    expect(h.gate.admit(f, viaController)).toBe('accept');
+    expect(h.delivered).toEqual([f]);
+    expect(h.deliveredControllers).toEqual([VOICE]);
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
+  });
+
+  it('accepts into either review class', () => {
+    for (const mode of [
+      ApprovalMode.DEFAULT,
+      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
+    ]) {
+      const h = harness({ mode });
+      expect(h.gate.admit(frame(), viaController)).toBe('accept');
+    }
+  });
+
+  it('does not depend on the receiver mode being known', () => {
+    // Parity cannot speak for an unrecognized mode, but a grant is not a
+    // parity judgement: the user authorized this program directly.
+    const h = harness({ mode: null });
+    expect(h.gate.admit(frame(), viaController)).toBe('accept');
+  });
+
+  it('yields to an explicit hold and keeps the grant on the entry', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
+    const f = frame();
+    expect(h.gate.admit(f, viaController)).toBe('held');
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      controller: VOICE,
+    });
+    expect(h.gate.getHeld()[0].selfSent).toBeUndefined();
+  });
+
+  it('yields to an explicit refuse', () => {
+    const h = harness({ policy: 'refuse' });
+    const f = frame();
+    expect(h.gate.admit(f, viaController)).toBe('refused');
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'refused' }]);
+  });
+
+  it('fails closed when the configured policy is invalid', () => {
+    const h = harness();
+    h.setRawPolicy('invalid');
+    expect(h.gate.admit(frame(), viaController)).toBe('held');
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'policy-unreadable',
+      controller: VOICE,
+    });
+  });
+
+  it('keeps its origin through a manual approval', () => {
+    // Releasing a parked message has to rebuild the envelope it would
+    // have had on arrival, controller attribution included.
+    const h = harness({ policy: 'hold' });
+    const f = frame();
+    h.gate.admit(f, viaController);
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.deliveredControllers).toEqual([VOICE]);
+    expect(h.deliveredAsSelfSent).toEqual([false]);
+  });
+
+  it('keeps its origin through a re-evaluation', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
+    const f = frame();
+    h.gate.admit(f, viaController);
+    h.setPolicy(undefined);
+    expect(h.gate.reevaluate('setting cleared')).toBe(1);
+    expect(h.delivered).toEqual([f]);
+    expect(h.deliveredControllers).toEqual([VOICE]);
+  });
+
+  it('forgets a revoked grant before automatic re-evaluation', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
+    const f = frame();
+    h.gate.admit(f, viaController);
+
+    expect(h.gate.forgetController(VOICE.id)).toBe(1);
+    expect(h.gate.getHeld()).toMatchObject([{ cause: 'explicit-setting' }]);
+    expect(h.gate.getHeld()[0].controller).toBeUndefined();
+
+    h.setPolicy(undefined);
+    expect(h.gate.reevaluate('setting cleared')).toBe(0);
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+  });
+
+  it('forgets every invalid id removed with the same credential', () => {
+    let isValid = true;
+    const h = harness({
+      policy: 'hold',
+      isControllerValid: () => isValid,
+    });
+    const other: PeerControllerIdentity = {
+      id: 'c_9999ffff',
+      label: 'voice alias',
+    };
+    h.gate.admit(frame(), viaController);
+    h.gate.admit(frame(), { selfSent: false, controller: other });
+
+    isValid = false;
+    expect(h.gate.forgetController(VOICE.id)).toBe(2);
+    expect(h.gate.getHeld()).toHaveLength(2);
+    expect(h.gate.getHeld().every((entry) => !entry.controller)).toBe(true);
+  });
+
+  it('forgets a grant that is no longer valid before automatic re-evaluation', () => {
+    let isValid = true;
+    const h = harness({
+      mode: ApprovalMode.DEFAULT,
+      policy: 'hold',
+      isControllerValid: () => isValid,
+    });
+    const f = frame();
+    h.gate.admit(f, viaController);
+
+    isValid = false;
+    h.setPolicy(undefined);
+    expect(h.gate.reevaluate('setting cleared')).toBe(0);
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+    expect(h.gate.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('does not attribute a manually approved message to an invalid grant', () => {
+    let isValid = true;
+    const h = harness({
+      policy: 'hold',
+      isControllerValid: () => isValid,
+    });
+    const f = frame();
+    h.gate.admit(f, viaController);
+
+    isValid = false;
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.delivered).toEqual([f]);
+    expect(h.deliveredControllers).toEqual([undefined]);
+  });
+
+  it('keeps its origin when re-evaluation changes only the hold cause', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
+    const f = frame();
+    h.gate.admit(f, viaController);
+    h.throwOnPolicy();
+    expect(h.gate.reevaluate('policy became unreadable')).toBe(0);
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'policy-unreadable',
+      controller: VOICE,
+    });
+  });
+
+  it('is decided by the transport, never by the frame', () => {
+    // Nothing a sender can write into a frame names a grant; the
+    // identity is a separate argument the inbox supplies from the auth
+    // line. Omitting it means an ordinary peer.
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const f = frame({
+      fromName: 'voice',
+      from: '/tmp/voice.sock',
+    } as Partial<PeerUserFrame>);
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
+    expect(h.gate.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('ranks below an explicit setting but above parity', () => {
+    // The order that matters: `hold` beats the grant, and the grant
+    // beats a class mismatch.
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }), viaController)).toBe(
+      'accept',
+    );
+    h.setPolicy('hold');
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }), viaController)).toBe(
+      'held',
+    );
+  });
+});
+
 describe('held message expiry', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1342,9 +1542,7 @@ describe('held message expiry', () => {
     // Park both under an unknown mode, then resolve it to one that
     // releases exactly one of them: `bypass` is accepted by an auto-edit
     // receiver, `prompting` is still held on the mode mismatch.
-    // `harness({ mode: null })` would coalesce back to DEFAULT.
-    const h = harness({ heldExpiryMs: 60_000 });
-    h.setMode(null);
+    const h = harness({ mode: null, heldExpiryMs: 60_000 });
     const older = frame({ fromMode: 'bypass' });
     expect(h.gate.admit(older)).toBe('held');
     vi.advanceTimersByTime(10_000);
