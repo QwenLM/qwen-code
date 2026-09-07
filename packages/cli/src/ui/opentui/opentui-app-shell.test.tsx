@@ -778,6 +778,27 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('dispatches a slash command instead of running it as shell at idle (U-33)', async () => {
+    render(
+      <OpenTuiApp
+        config={CONFIG}
+        settings={SETTINGS}
+        logger={null}
+        commands={[] as readonly SlashCommand[]}
+        getSessionStats={getSessionStats}
+        streaming={false}
+      />,
+    );
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('/help');
+    expect(mocks.state.handledTexts).toEqual(['/help']);
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+  });
+
   it('holds a second shell submission and quit aborts every command', async () => {
     const signals: AbortSignal[] = [];
     mocks.state.executeUserShell.mockImplementation(((
