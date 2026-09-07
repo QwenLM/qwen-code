@@ -391,12 +391,8 @@ function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
     deps?.liveConversationWorkspace
       ? {
           ...deps,
-          conversationRuntimeOwnershipFactory:
-            deps.conversationRuntimeOwnershipFactory ??
-            (() => ({
-              acquire: vi.fn(async () => ({ reclaimed: false })),
-              release: vi.fn(async () => false),
-            })),
+          checkLegacyConversationOwner:
+            deps.checkLegacyConversationOwner ?? vi.fn(async () => undefined),
         }
       : deps,
   );
@@ -41894,8 +41890,17 @@ describe('Live Appshot server integration', () => {
       pushAudio: vi.fn(() => true),
       dispose: vi.fn(),
     } as unknown as LiveSessionCoordinator;
+    const stableBaseDir = path.join(tmp, 'stable');
+    const { writeLiveDiscoveryFile } = await import('./live/discovery.js');
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: process.pid,
+      instanceNonce: coordinator.daemonInstanceNonce,
+    });
     const app = createServeApp(baseOpts, undefined, {
       workspaceRegistry: registry,
+      liveDiscoveryStableBaseDir: stableBaseDir,
       liveConversationWorkspace: conversationWorkspace,
       liveCoordinator: coordinator,
       liveSessionCoordinator,
@@ -41905,6 +41910,8 @@ describe('Live Appshot server integration', () => {
     return {
       app,
       coordinator,
+      stableBaseDir,
+      liveSessionCoordinator,
       conversationWorkspace,
       preheat,
       getWorkspaceToolsStatus,
@@ -41932,6 +41939,72 @@ describe('Live Appshot server integration', () => {
       },
     };
   }
+
+  it.each(['live', 'dead'] as const)(
+    'refuses a foreign %s publisher for Live while standalone remains available',
+    async (ownerState) => {
+      const setup = await setupAppshotProbe();
+      try {
+        setup.connectHost('host_live_appshot_foreign_gate');
+        await vi.waitFor(() =>
+          expect(setup.coordinator.getStatus().available).toBe(true),
+        );
+        const captureHandler = setup.captureHandler;
+        expect(captureHandler).toEqual(expect.any(Function));
+        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const discovery = await import('./live/discovery.js');
+        const assertPublisher = vi.spyOn(
+          discovery,
+          'assertLiveDiscoveryPublisher',
+        );
+        const locator = discovery.getLiveDiscoveryPath(setup.stableBaseDir);
+        const original = JSON.parse(await fsp.readFile(locator, 'utf8'));
+        const foreignPid = ownerState === 'live' ? process.ppid : 2_147_483_647;
+        expect(foreignPid).not.toBe(process.pid);
+        if (ownerState === 'live')
+          expect(() => process.kill(foreignPid, 0)).not.toThrow();
+        else
+          expect(() => process.kill(foreignPid, 0)).toThrow(
+            expect.objectContaining({ code: 'ESRCH' }),
+          );
+        const foreignBytes = `${JSON.stringify({
+          ...original,
+          protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+          pid: foreignPid,
+          instanceNonce: 'foreign_live_publisher_nonce_0001',
+        })}\n`;
+        await fsp.writeFile(locator, foreignBytes);
+
+        const response = await request(setup.app)
+          .post('/live/start')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(assertPublisher).toHaveBeenCalledWith(setup.stableBaseDir, {
+          pid: process.pid,
+          instanceNonce: setup.coordinator.daemonInstanceNonce,
+        });
+        expect(response.status).toBe(503);
+        expect(response.body).toMatchObject({
+          code: 'conversation_runtime_in_use',
+          retryable: true,
+          error: 'The Conversations runtime is owned by another daemon.',
+        });
+        expect(setup.coordinator.getStatus().callId).toBeUndefined();
+        expect(setup.liveSessionCoordinator.start).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+        const sessions = await request(setup.app)
+          .get('/standalone/sessions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(sessions.status).toBe(200);
+        expect(sessions.body.sessions).toEqual([]);
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+      } finally {
+        await setup.cleanup();
+      }
+    },
+  );
 
   it.each([
     {

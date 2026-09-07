@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
+import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
 
@@ -122,6 +123,51 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('renders generic parameter content even when it equals the title', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-input',
+        kind: 'permission',
+        requestId: 'request-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const preview = container!.querySelector('pre');
+    expect(preview?.textContent).toBe('{}');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby')
+      ?.split(' ');
+    expect(describedBy).toContain(preview?.id);
+    pressKey(container!.querySelector('[role="alertdialog"]')!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-input',
+      'reject',
+    );
+  });
+
+  it('keeps the complete literal parameter body available without interpreting markup', () => {
+    const input = {
+      content: '<b>' + '😀'.repeat(3970) + '\n LAST_CHARACTER </b>  ',
+    };
+    render(undefined, {
+      ...request,
+      title: 'Save',
+      contentIsInput: true,
+      content: [{ type: 'text', text: JSON.stringify(input, null, 2) }],
+    });
+    const preview = container!.querySelector('pre');
+    expect(JSON.parse(preview?.textContent ?? '')).toEqual(input);
+    expect(preview?.querySelector('b')).toBeNull();
+  });
+
   it('explains Shell commands through session generation', async () => {
     const generateContent = vi.fn(async function* () {
       yield {
