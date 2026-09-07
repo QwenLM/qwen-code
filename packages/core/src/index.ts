@@ -148,6 +148,11 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  // `applySkillHooks` is deliberately not exported: it is the one entry point
+  // whose caller must apply the folder-trust gate itself, and skipping that
+  // gate is how #11067 happened. Callers outside this module use
+  // `applySkillSideEffects`, which applies the gate for them.
+  applySkillSideEffects,
   canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
@@ -363,6 +368,7 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';

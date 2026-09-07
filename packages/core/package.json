@@ -45,11 +45,24 @@
       "types": "./dist/src/utils/no-follow-open.d.ts",
       "import": "./dist/src/utils/no-follow-open.js"
     },
+    "./storage": {
+      "types": "./dist/src/config/storage.d.ts",
+      "import": "./dist/src/config/storage.js"
+    },
+    "./atomicFileWrite": {
+      "types": "./dist/src/utils/atomicFileWrite.d.ts",
+      "import": "./dist/src/utils/atomicFileWrite.js"
+    },
+    "./debugLogger": {
+      "types": "./dist/src/utils/debugLogger.d.ts",
+      "import": "./dist/src/utils/debugLogger.js"
+    },
     "./conversationsRuntimeMarker": {
       "types": "./dist/src/utils/conversations-runtime-marker.d.ts",
       "import": "./dist/src/utils/conversations-runtime-marker.js"
     },
     "./package.json": "./package.json",
+    "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
     "./src/*": "./src/*"
   },

@@ -23,6 +23,7 @@ export {
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
 export {
   isSessionLevelNotFound,
@@ -244,6 +245,7 @@ export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  GOAL_PAUSE_REASON_COMMAND,
   isDaemonContentHash,
   requireWorkspaceCwd,
 } from './types.js';

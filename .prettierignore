@@ -23,3 +23,15 @@ Thumbs.db
 packages/vscode-ide-companion/schemas/settings.schema.json
 packages/cli/src/services/insight/templates/insightTemplate.ts
 packages/cua-driver/
+# The rest of eslint.config.js's global ignores, for the same reasons it
+# gives. scripts/codemod/fixtures is the load-bearing one: those files are
+# "intentionally non-idiomatic ink input/output", so normalising them to
+# house style would corrupt the very data the codemod tests assert on.
+scripts/codemod/fixtures/
+packages/live-host/
+packages/desktop-shell/runtime/
+# Vendored from mobile-next/mobile-mcp and carries its own eslint config, so
+# reformatting it to house style only widens the diff against upstream on the
+# next sync. eslint.config.js already ignores packages/mobile-mcp/** for the
+# same reason; .prettierignore had cua-driver but not its sibling.
+packages/mobile-mcp/

@@ -30,7 +30,10 @@ test('MDX is executable content, never docs_only', () => {
   assert.equal(classifyChangedFiles(['docs/guide.mdx']), 'full');
   assert.equal(classifyChangedFiles(['docs/guide.MDX']), 'full');
   assert.equal(classifyChangedFiles(['README.mdx']), 'full');
-  assert.equal(classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']), 'full');
+  assert.equal(
+    classifyChangedFiles(['docs/usage.md', 'docs/guide.mdx']),
+    'full',
+  );
 });
 
 test('falls back to full for root docs names used as directories', () => {
@@ -49,6 +52,18 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   for (const file of GITHUB_CI_ONLY_FILES) {
     assert.equal(classifyChangedFiles([file]), 'github_ci_only');
   }
+});
+
+test('keeps yaml-dependent helper suites on the full profile', () => {
+  // web-shell-visuals-publish.test.mjs statically imports `yaml`, so the
+  // dependency-free github_ci_only lane can never execute it; downgrading a
+  // PR that only edits that suite would green-light it without running it.
+  assert.equal(
+    classifyChangedFiles([
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
+    ]),
+    'full',
+  );
 });
 
 test('falls back to full for case-mismatched GitHub CI helper paths', () => {
