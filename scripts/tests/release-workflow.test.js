@@ -877,6 +877,18 @@ describe('release workflow', () => {
     // remedy as workspace_tests: a runtime knob. The static default moved
     // 30 -> 60 on the pricing evidence its lane comment records (#11121);
     // the build default stays a fleet-load call for the operator.
+    // Value format, relocated here from the release.yml lane comment this diff
+    // condensed to one line: the knob is free text under a name ending in
+    // MINUTES and takes a bare positive integer. `1h` is an expression error —
+    // GitHub never creates the job and the run blames 'a workflow file issue'
+    // instead of naming the variable — while `70 minutes` silently means 70,
+    // because fromJSON keeps the leading number and drops the rest. The
+    // aggregate still fails closed on a lane that never ran, so a bad value
+    // refuses a release rather than shipping one unvalidated. `0` is not 'no
+    // limit' either: the string '0' is truthy in a GitHub `||`, so the knob
+    // wins over the fallback and GitHub then ignores the zero bound it was
+    // handed. quality_static, quality_build and workspace_tests all share this
+    // contract, so it lives beside the assertions that pin their expressions.
     expect(releaseYaml.jobs.quality_static['timeout-minutes']).toBe(
       "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
     );
