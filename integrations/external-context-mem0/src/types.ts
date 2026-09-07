@@ -11,8 +11,7 @@ export type AuthenticationKind =
 
 export type ScopeLocation = 'json' | 'json.filters' | 'query' | 'omit';
 
-export interface InstanceConfigV2 {
-  schemaVersion: 2;
+interface InstanceConfigBase {
   dialectPath: string;
   endpoint: {
     origin: string;
@@ -26,6 +25,17 @@ export interface InstanceConfigV2 {
     appId?: string;
   };
   timeoutMs: number;
+}
+
+export interface InstanceConfigV2 extends InstanceConfigBase {
+  schemaVersion: 2;
+}
+
+export interface InstanceConfigV3 extends InstanceConfigBase {
+  schemaVersion: 3;
+  autoRecall: {
+    repositoryRoot: string;
+  };
 }
 
 export interface DialectV1 {
@@ -59,6 +69,16 @@ export interface RuntimeConfiguration {
   dialect: DialectV1;
   credential: string;
 }
+
+export interface AutoRecallRuntimeConfiguration {
+  instance: InstanceConfigV3;
+  dialect: DialectV1;
+  credential: string;
+}
+
+export type SearchRuntimeConfiguration =
+  | RuntimeConfiguration
+  | AutoRecallRuntimeConfiguration;
 
 export interface ExternalContextItem {
   id: string;
