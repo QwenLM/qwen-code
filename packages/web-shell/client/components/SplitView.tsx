@@ -196,14 +196,16 @@ export function SplitView({
       setPaneFocusId(activeId ?? null);
     }
   }, [paneIds, activeId, activePaneId]);
+  // Keep report identity stable across parent renders: consumers may store it
+  // in state, which would otherwise retrigger the reporting effect below.
   const pendingIds = useMemo(
     () => paneIds.filter((id) => pendingPaneIds.has(id)),
     [paneIds, pendingPaneIds],
   );
   useEffect(() => {
     onPendingPanesChange?.(pendingIds);
-    return () => onPendingPanesChange?.([]);
   }, [pendingIds, onPendingPanesChange]);
+  useEffect(() => () => onPendingPanesChange?.([]), [onPendingPanesChange]);
   const backButtonRef = useRef<HTMLButtonElement>(null);
   const pendingButtonRef = useRef<HTMLButtonElement | null>(null);
   const setPendingButtonRef = useCallback(

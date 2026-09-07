@@ -31,17 +31,20 @@ let reloadMock: ReturnType<typeof vi.fn>;
 let waitingSessions: Set<string>;
 const scrollPaneIntoView = vi.fn();
 const confirmApproval = vi.fn();
+const PaneSessionContext = React.createContext<string | undefined>(undefined);
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
-    <div
-      data-session={props.sessionId}
-      data-clientid={props.clientId}
-      data-workspace={props.workspaceCwd}
-      data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
-    >
-      {props.children}
-    </div>
+    <PaneSessionContext.Provider value={props.sessionId}>
+      <div
+        data-session={props.sessionId}
+        data-clientid={props.clientId}
+        data-workspace={props.workspaceCwd}
+        data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
+      >
+        {props.children}
+      </div>
+    </PaneSessionContext.Provider>
   ),
   useConnection: () => connectionState,
   // `client` is a stable object; `capabilities` mirrors the connection so a test
@@ -90,8 +93,8 @@ vi.mock('../hooks/useScopedSessions', () => ({
 
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
-    const sessionId = props.sessionSummary?.sessionId;
-    const pending = waitingSessions.has(sessionId);
+    const sessionId = React.useContext(PaneSessionContext);
+    const pending = !!sessionId && waitingSessions.has(sessionId);
     const { onApprovalChange } = props;
     React.useEffect(() => {
       if (!sessionId) return;
@@ -360,6 +363,87 @@ describe('SplitView', () => {
     expect(onPendingPanesChange).toHaveBeenLastCalledWith([]);
   });
 
+  it('reports changed pending panes without clearing the still-pending panes', () => {
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    const sessionIds = ['s1', 's2'];
+    render({ sessionIds, onPendingPanesChange });
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
+    onPendingPanesChange.mockClear();
+    waitingSessions = new Set(['s1', 's2']);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            sessionIds={sessionIds}
+            onExit={() => {}}
+            onPendingPanesChange={onPendingPanesChange}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(onPendingPanesChange).toHaveBeenCalledExactlyOnceWith(['s1', 's2']);
+  });
+
+  it('clears the old report callback before sending pending panes to its replacement', () => {
+    waitingSessions = new Set(['s1']);
+    const oldReport = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPendingPanesChange: oldReport });
+    expect(oldReport).toHaveBeenLastCalledWith(['s1']);
+    oldReport.mockClear();
+    const nextReport = vi.fn(() => {
+      expect(oldReport).toHaveBeenCalledExactlyOnceWith([]);
+    });
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            sessionIds={['s1', 's2']}
+            onExit={() => {}}
+            onPendingPanesChange={nextReport}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(nextReport).toHaveBeenCalledExactlyOnceWith(['s1']);
+    act(() => root!.unmount());
+    root = null;
+    expect(nextReport).toHaveBeenLastCalledWith([]);
+  });
+
+  it('keeps pending reports stable when their parent stores them in state', () => {
+    const onReport = vi.fn();
+    const sessionIds = ['s1', 's2'];
+    function Parent() {
+      const [reportedIds, setReportedIds] = React.useState<string[]>([]);
+      const handleReport = React.useCallback((ids: string[]) => {
+        onReport(ids);
+        // Bound a broken render/effect loop so the regression fails promptly.
+        if (onReport.mock.calls.length > 10) {
+          throw new Error('Pending reports did not settle');
+        }
+        setReportedIds(ids);
+      }, []);
+      return (
+        <I18nProvider language="en">
+          <output>{reportedIds.length}</output>
+          <SplitView
+            sessionIds={sessionIds}
+            onExit={() => {}}
+            onPendingPanesChange={handleReport}
+          />
+        </I18nProvider>
+      );
+    }
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => root!.render(<Parent />));
+    expect(onReport).toHaveBeenCalledExactlyOnceWith([]);
+    act(() => root!.render(<Parent />));
+    expect(onReport).toHaveBeenCalledExactlyOnceWith([]);
+  });
+
   it('stops reporting a crashed pane even though its slot remains', async () => {
     waitingSessions = new Set(['s1']);
     const onPendingPanesChange = vi.fn();
@@ -400,11 +484,26 @@ describe('SplitView', () => {
   });
 
   it('omits title details when the host disables them', () => {
-    render({ sessionIds: ['s1', 's2'], showSessionDetails: false });
+    waitingSessions = new Set(['s1']);
+    const onPendingPanesChange = vi.fn();
+    render({
+      sessionIds: ['s1', 's2'],
+      showSessionDetails: false,
+      onPendingPanesChange,
+    });
     expect(titles()).toEqual(['One', 'Two']);
     expect(
       panes().some((pane) => pane.hasAttribute('data-session-details')),
     ).toBe(false);
+    expect(
+      container!.querySelector(
+        '[title="Go to the next session awaiting input"]',
+      )?.textContent,
+    ).toBe('1 awaiting input');
+    expect(container!.querySelector('[role="status"]')?.textContent).toBe(
+      '1 awaiting input',
+    );
+    expect(onPendingPanesChange).toHaveBeenLastCalledWith(['s1']);
   });
 
   it('renders one pane per initial session, each under its own provider', () => {

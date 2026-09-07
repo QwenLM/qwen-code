@@ -580,9 +580,13 @@ describe('ChatPane', () => {
     );
   });
 
-  it.each([false, true])(
-    'reuses title details without including actions and dismisses them when hidden (multiple workspaces: %s)',
-    async (multiWorkspace) => {
+  it.each([
+    [false, '2026-01-02T00:00:00Z'],
+    [true, '2026-01-02T00:00:00Z'],
+    [false, undefined],
+  ] as const)(
+    'reuses title details without including actions and dismisses them when hidden (multiple workspaces: %s, updatedAt: %s)',
+    async (multiWorkspace, updatedAt) => {
       vi.useFakeTimers();
       try {
         const props = {
@@ -592,7 +596,7 @@ describe('ChatPane', () => {
             sessionId: 'session-details',
             workspaceCwd: '/work/split-project',
             createdAt: '2026-01-01T00:00:00Z',
-            updatedAt: '2026-01-02T00:00:00Z',
+            updatedAt,
             hasActivePrompt: false,
             branch: { name: 'codex/split', baseBranch: 'main' },
           },
@@ -641,7 +645,7 @@ describe('ChatPane', () => {
         ).toContain('Running');
         expect(
           document.querySelector('[role="dialog"]')?.textContent,
-        ).toContain(formatDateTime(props.sessionSummary.updatedAt));
+        ).toContain(formatDateTime(updatedAt ?? '2026-01-01T00:00:00Z'));
         expect(document.activeElement).toBe(composerFocus);
         rerender({ ...props, hidden: true });
         expect(document.querySelector('[role="dialog"]')).toBeNull();

@@ -27782,6 +27782,31 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each([false, true])(
+    'does not rerender App for other split sessions (outer pending: %s)',
+    async (outerPending) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+      });
+      await flush();
+      const report = testState.latestSplitViewProps!.onPendingPanesChange!;
+      const ownerIds = outerPending ? [mockConnection.sessionId!] : [];
+      await act(async () => report(ownerIds));
+      rerender();
+      expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
+      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
+      mockUseDaemonActivePromptBridge.mockClear();
+      for (const ids of [['foreign-session'], ['another-session'], []]) {
+        await act(async () => report([...ownerIds, ...ids]));
+        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('keeps the outer approval notice until a split pane reports its approval', async () => {
     const { container, rerender } = renderApp();
     await flush();
