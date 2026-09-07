@@ -280,7 +280,7 @@ export const DEFAULT_THREAD_AUTO_TURN_BUDGET = 12;
  * thread opened on Monday and revisited on Tuesday: elapsed time is not cost.
  * A run that hangs is the stall sweeper's problem, not the budget's.
  */
-export const DEFAULT_THREAD_TOKEN_BUDGET = 200_000;
+export const DEFAULT_THREAD_TOKEN_BUDGET = 1_000_000;
 
 /** Bound on retained posts per thread. */
 export const MAX_THREAD_MESSAGES = 500;

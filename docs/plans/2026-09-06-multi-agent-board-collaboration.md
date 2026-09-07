@@ -155,9 +155,10 @@ accounted tokens; the 200,000-token gate therefore pre-empted the 12-turn gate.
 Both agents did run concurrently, and a coalesced mid-run delivery was accepted
 and consumed, but the receiving model closed without producing another reply.
 This is an observed acceptance constraint, not evidence that the turn gate is
-broken. A full 12-turn runtime proof needs either a cheaper/minimal model frame
-or an explicit scenario-only token-limit override; changing the product's
-200,000-token ceiling is not implied.
+broken. A later Alice → Bob child → Alice run reached 257,895 accounted
+tokens before the parent continuation, so the default gate was raised to one
+million tokens; a full 12-turn runtime proof still needs a cheaper/minimal model
+frame or an explicit scenario-only token-limit override.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -252,7 +253,7 @@ read-only; a private server or trusted-looking name is not evidence.
 
 | #   | Decision                                                                                                                                                                                                                                                                                                                                      | Consequence                                                                                                                                                                                                         |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 16  | Two gates: **12 unattended agent deliveries per thread / 200k accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
+| 16  | Two gates: **12 unattended agent deliveries per thread / 1M accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                  | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
 | 17  | A child **inherits the parent's current turn count** and charges tokens to the root.                                                                                                                                                                                                                                                          | Creating a child does not mint immediate unattended turns; a child created at the limit may be gated immediately. Later human input resets only the child being supervised.                                         |
 | 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                                                                                           | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
 | 19  | A stuck run, and any run still `running` after a **daemon restart**, is reconciled once. Restart-recovered registry entries are `paused` and use `resumeBackgroundAgent`; completed entries use resident continue or cold revive. A second execution failure is terminal. A launch failure is typed and terminal unless classified transient. | Recovery follows the runtime's actual state machine and replays only work not committed by the delivery watermark; queued launch failures cannot poison the backlog indefinitely.                                   |
@@ -1073,8 +1074,8 @@ remain genuinely open:
    records the active definition content hash and the UI exposes it either way.
 5. **Concurrent token charging.** The workspace lock makes completed charges
    consistent, but token usage becomes known only after a run. Several agents in
-   the same thread tree can already be executing when the root reaches 200k.
-   Decide whether 200k is a hard reservation limit (reserve estimated tokens at
+   the same thread tree can already be executing when the root reaches 1M.
+   Decide whether 1M is a hard reservation limit (reserve estimated tokens at
    booking) or an accounting limit with run-bounded overshoot. The latter is not
    a tight ceiling: one manually crash-replayed run completed at
    `666,749 / 200,000` accounted tokens because no new admission occurred while
