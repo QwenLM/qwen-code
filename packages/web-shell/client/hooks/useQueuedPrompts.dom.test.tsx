@@ -2161,3 +2161,22 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
   });
 });
+
+describe('useQueuedPrompts writer-blocked recovery', () => {
+  it('holds a rejected mid-turn draft until the writer fence clears', async () => {
+    const { actions } = createActions();
+    const enqueue = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValueOnce(
+      enqueue.promise,
+    );
+    const { render } = mount('responding', actions, true, false, false);
+    act(() => latest.enqueuePrompt('queued follow-up'));
+    render('idle', 'session-1', false, true);
+    await act(async () => enqueue.resolve({ accepted: false }));
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', false, true);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', true, false);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+  });
+});

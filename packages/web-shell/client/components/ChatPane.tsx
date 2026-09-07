@@ -93,7 +93,8 @@ import {
   useSessionCatalogController,
   useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
-import { MessageList } from './MessageList';
+import type { MessageListHandle } from './MessageList';
+import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
@@ -512,6 +513,7 @@ export function ChatPane({
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
+  const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,
     onAcceptFollowup,
@@ -750,6 +752,7 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
       // main composer — otherwise an override works on one surface only.
@@ -1352,7 +1355,8 @@ export function ChatPane({
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
             <WorkflowDetailsProvider tasks={sessionTasks}>
-              <MessageList
+              <TranscriptViewport
+                ref={transcriptViewportRef}
                 messages={messages}
                 pendingApproval={pendingToolApproval}
                 loadingTranscript={connection.loadingTranscript}
