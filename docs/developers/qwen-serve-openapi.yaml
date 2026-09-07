@@ -1,4 +1,4 @@
-openapi: 3.1.0
+openapi: '3.1.0'
 
 # ---------------------------------------------------------------------------
 # Scope: this document describes EXACTLY the `--api-profile=minimal` surface.
@@ -17,47 +17,47 @@ openapi: 3.1.0
 # ---------------------------------------------------------------------------
 
 info:
-  title: Qwen Code `qwen serve` REST API (minimal profile)
-  version: v1
+  title: 'Qwen Code `qwen serve` REST API (minimal profile)'
+  version: 'v1'
   description: >-
     The partner-facing REST subset of the Qwen Code daemon: session lifecycle,
-    prompting, the server-sent event stream, permission responses, and
-    read-only workspace context.
+    prompting, the server-sent event stream, permission responses, and read-only
+    workspace context.
 
 
-    Start a daemon with this surface via
-    `qwen serve --no-web --api-profile=minimal --require-auth --token "$QWEN_SERVER_TOKEN"`.
+    Start a daemon with this surface via `qwen serve --no-web
+    --api-profile=minimal --require-auth --token "$QWEN_SERVER_TOKEN"`.
 
 
-    Note that the daemon executes work by spawning `qwen --acp` child
-    processes, so the Qwen Code CLI must be present on the daemon host.
+    Note that the daemon executes work by spawning `qwen --acp` child processes,
+    so the Qwen Code CLI must be present on the daemon host.
   license:
-    name: Apache-2.0
-    url: https://www.apache.org/licenses/LICENSE-2.0
+    name: 'Apache-2.0'
+    url: 'https://www.apache.org/licenses/LICENSE-2.0'
 
 servers:
-  - url: http://127.0.0.1:4170
-    description: Default loopback bind
+  - url: 'http://127.0.0.1:4170'
+    description: 'Default loopback bind'
 
 security:
   - bearerAuth: []
 
 tags:
-  - name: discovery
-    description: Liveness and preflight.
-  - name: session
-    description: Session lifecycle and prompting.
-  - name: permission
-    description: Responses to agent permission requests.
-  - name: workspace
-    description: Read-only workspace context.
+  - name: 'discovery'
+    description: 'Liveness and preflight.'
+  - name: 'session'
+    description: 'Session lifecycle and prompting.'
+  - name: 'permission'
+    description: 'Responses to agent permission requests.'
+  - name: 'workspace'
+    description: 'Read-only workspace context.'
 
 paths:
   /health:
     get:
-      tags: [discovery]
-      operationId: getHealth
-      summary: Liveness probe
+      tags: ['discovery']
+      operationId: 'getHealth'
+      summary: 'Liveness probe'
       description: >-
         On loopback binds without `--require-auth` this route is registered
         before the bearer middleware so in-pod probes need no token. On
@@ -65,20 +65,20 @@ paths:
         like every other route.
       responses:
         '200':
-          description: Daemon is live.
+          description: 'Daemon is live.'
           content:
             application/json:
               schema:
-                type: object
+                type: 'object'
                 additionalProperties: true
         '401':
           $ref: '#/components/responses/Unauthorized'
 
   /capabilities:
     get:
-      tags: [discovery]
-      operationId: getCapabilities
-      summary: Preflight the daemon
+      tags: ['discovery']
+      operationId: 'getCapabilities'
+      summary: 'Preflight the daemon'
       description: >-
         Read this before any other route. Under `apiProfile: "minimal"` the
         `features` array still lists every tag the build supports, but routes
@@ -86,7 +86,7 @@ paths:
         authority on what is reachable.
       responses:
         '200':
-          description: Capability envelope.
+          description: 'Capability envelope.'
           content:
             application/json:
               schema:
@@ -96,9 +96,9 @@ paths:
 
   /session:
     post:
-      tags: [session]
-      operationId: createSession
-      summary: Spawn a new session, or attach to the workspace's existing one
+      tags: ['session']
+      operationId: 'createSession'
+      summary: "Spawn a new session, or attach to the workspace's existing one"
       description: >-
         Send `sessionScope: "thread"` for an independent conversation per
         caller. The default `"single"` scope makes a second same-workspace call
@@ -108,40 +108,40 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              type: 'object'
               properties:
                 cwd:
-                  type: string
+                  type: 'string'
                   description: >-
                     Absolute path matching a registered workspace. Omit to use
                     the primary workspace from `/capabilities.workspaceCwd`.
                 modelServiceId:
-                  type: string
+                  type: 'string'
                   description: >-
                     Back-end model service to route through. A bad value does
                     NOT fail the create — watch for a `model_switch_failed`
                     event on the session stream.
                 sessionScope:
-                  type: string
-                  enum: [single, thread]
+                  type: 'string'
+                  enum: ['single', 'thread']
       responses:
         '200':
-          description: Session created or attached.
+          description: 'Session created or attached.'
           content:
             application/json:
               schema:
-                type: object
-                required: [sessionId, workspaceCwd, attached]
+                type: 'object'
+                required: ['sessionId', 'workspaceCwd', 'attached']
                 properties:
                   sessionId:
-                    type: string
+                    type: 'string'
                   workspaceCwd:
-                    type: string
+                    type: 'string'
                   attached:
-                    type: boolean
+                    type: 'boolean'
                     description: >-
-                      True when a session for that workspace already existed
-                      and is now shared.
+                      True when a session for that workspace already existed and
+                      is now shared.
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -152,7 +152,8 @@ paths:
             Carries `Retry-After`.
           headers:
             Retry-After:
-              schema: { type: integer }
+              schema:
+                type: 'integer'
           content:
             application/json:
               schema:
@@ -162,16 +163,16 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     delete:
-      tags: [session]
-      operationId: closeSession
-      summary: Close a live session
+      tags: ['session']
+      operationId: 'closeSession'
+      summary: 'Close a live session'
       description: >-
         Force-closes even with other clients attached. On-disk persisted
-        sessions are NOT deleted and can be restored with
-        `POST /session/{id}/load`.
+        sessions are NOT deleted and can be restored with `POST
+        /session/{id}/load`.
       responses:
         '204':
-          description: Closed.
+          description: 'Closed.'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -181,9 +182,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: sendPrompt
-      summary: Submit a prompt
+      tags: ['session']
+      operationId: 'sendPrompt'
+      summary: 'Submit a prompt'
       description: >-
         Returns 202 on admission, not on completion. Observe the session's SSE
         stream after `lastEventId` and correlate `turn_complete` / `turn_error`
@@ -193,32 +194,34 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [prompt]
+              type: 'object'
+              required: ['prompt']
               properties:
                 prompt:
-                  type: array
+                  type: 'array'
                   minItems: 1
-                  description: ACP content blocks.
+                  description: 'ACP content blocks.'
                   items:
-                    type: object
+                    type: 'object'
                     additionalProperties: true
                 deadlineMs:
-                  type: integer
+                  type: 'integer'
                   description: >-
-                    Shortens the configured server prompt deadline. Requires
-                    the `prompt_absolute_deadline` capability.
+                    Shortens the configured server prompt deadline. Requires the
+                    `prompt_absolute_deadline` capability.
       responses:
         '202':
-          description: Prompt admitted.
+          description: 'Prompt admitted.'
           content:
             application/json:
               schema:
-                type: object
-                required: [promptId, lastEventId]
+                type: 'object'
+                required: ['promptId', 'lastEventId']
                 properties:
-                  promptId: { type: string }
-                  lastEventId: { type: integer }
+                  promptId:
+                    type: 'string'
+                  lastEventId:
+                    type: 'integer'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -230,15 +233,15 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: cancelPrompt
-      summary: Cancel the active prompt
+      tags: ['session']
+      operationId: 'cancelPrompt'
+      summary: 'Cancel the active prompt'
       description: >-
-        Affects only the currently active prompt. Prompts still queued behind
-        it keep executing.
+        Affects only the currently active prompt. Prompts still queued behind it
+        keep executing.
       responses:
         '204':
-          description: Cancellation sent.
+          description: 'Cancellation sent.'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -248,69 +251,75 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: streamSessionEvents
-      summary: Subscribe to the session event stream (SSE)
+      tags: ['session']
+      operationId: 'streamSessionEvents'
+      summary: 'Subscribe to the session event stream (SSE)'
       description: >-
-        Each `data:` line is the full event envelope
-        `{id?, v, type, data, originatorClientId?}` on one line; the envelope's
-        `type` matches the `event:` line. Pass `Last-Event-ID: 0` on a first
-        subscribe to replay from the oldest retained event, which is how you
-        catch spawn-time events such as `model_switch_failed`.
+        Each `data:` line is the full event envelope `{id?, v, type, data,
+        originatorClientId?}` on one line; the envelope's `type` matches the
+        `event:` line. Pass `Last-Event-ID: 0` on a first subscribe to replay
+        from the oldest retained event, which is how you catch spawn-time events
+        such as `model_switch_failed`.
       parameters:
-        - name: Last-Event-ID
-          in: header
-          required: false
-          schema: { type: string }
-          description: Replay from after this event id. `0` replays everything retained.
-        - name: X-Qwen-Event-Epoch
-          in: header
-          required: false
-          schema: { type: string }
-          description: Pairs the replay cursor with its bus epoch.
-        - name: X-Qwen-Client-Id
-          in: header
-          required: false
-          schema: { type: string }
-        - name: maxQueued
-          in: query
+        - name: 'Last-Event-ID'
+          in: 'header'
           required: false
           schema:
-            type: integer
+            type: 'string'
+          description: 'Replay from after this event id. `0` replays everything retained.'
+        - name: 'X-Qwen-Event-Epoch'
+          in: 'header'
+          required: false
+          schema:
+            type: 'string'
+          description: 'Pairs the replay cursor with its bus epoch.'
+        - name: 'X-Qwen-Client-Id'
+          in: 'header'
+          required: false
+          schema:
+            type: 'string'
+        - name: 'maxQueued'
+          in: 'query'
+          required: false
+          schema:
+            type: 'integer'
             minimum: 16
             maximum: 2048
             default: 256
           description: >-
-            Per-subscriber live frame backlog cap. Raise it for cold
-            reconnects that replay a long history.
-        - name: connectReason
-          in: query
+            Per-subscriber live frame backlog cap. Raise it for cold reconnects
+            that replay a long history.
+        - name: 'connectReason'
+          in: 'query'
           required: false
           schema:
-            type: string
+            type: 'string'
             enum:
               [
-                initial,
-                resume,
-                prompt_restart,
-                stream_end,
-                transport_error,
-                state_resync,
-                unknown,
+                'initial',
+                'resume',
+                'prompt_restart',
+                'stream_end',
+                'transport_error',
+                'state_resync',
+                'unknown',
               ]
       responses:
         '200':
-          description: Event stream.
+          description: 'Event stream.'
           headers:
             X-Qwen-SSE-Stream-Id:
-              schema: { type: string, format: uuid }
+              schema:
+                type: 'string'
+                format: 'uuid'
               description: >-
                 Identifies this physical connection. May be absent on old
                 daemons or stripped by intermediaries; treat lineage as
                 unavailable then.
           content:
             text/event-stream:
-              schema: { type: string }
+              schema:
+                type: 'string'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -322,9 +331,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: getSessionStatus
-      summary: Session runtime status
+      tags: ['session']
+      operationId: 'getSessionStatus'
+      summary: 'Session runtime status'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -337,9 +346,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: getSessionTranscript
-      summary: Conversation transcript
+      tags: ['session']
+      operationId: 'getSessionTranscript'
+      summary: 'Conversation transcript'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -352,9 +361,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: getSessionContext
-      summary: Context window usage
+      tags: ['session']
+      operationId: 'getSessionContext'
+      summary: 'Context window usage'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -367,9 +376,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: exportSession
-      summary: Export the session
+      tags: ['session']
+      operationId: 'exportSession'
+      summary: 'Export the session'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -382,9 +391,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
-      tags: [session]
-      operationId: getPendingPrompts
-      summary: Prompts queued behind the active one
+      tags: ['session']
+      operationId: 'getPendingPrompts'
+      summary: 'Prompts queued behind the active one'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -397,15 +406,15 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: heartbeatSession
-      summary: Keep an idle session alive
-      description: Defers the idle reaper (`--session-idle-timeout-ms`).
+      tags: ['session']
+      operationId: 'heartbeatSession'
+      summary: 'Keep an idle session alive'
+      description: 'Defers the idle reaper (`--session-idle-timeout-ms`).'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
         '204':
-          description: Acknowledged.
+          description: 'Acknowledged.'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -415,15 +424,15 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     patch:
-      tags: [session]
-      operationId: updateSessionMetadata
-      summary: Update session metadata
+      tags: ['session']
+      operationId: 'updateSessionMetadata'
+      summary: 'Update session metadata'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
+              type: 'object'
               additionalProperties: true
       responses:
         '200':
@@ -439,9 +448,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: setSessionModel
-      summary: Switch the model within the bound service
+      tags: ['session']
+      operationId: 'setSessionModel'
+      summary: 'Switch the model within the bound service'
       description: >-
         Distinct from `modelServiceId` on `POST /session`, which selects the
         back-end service rather than the model inside it.
@@ -450,9 +459,10 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              type: 'object'
               properties:
-                modelId: { type: string }
+                modelId:
+                  type: 'string'
               additionalProperties: true
       responses:
         '200':
@@ -468,9 +478,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: loadSession
-      summary: Restore a persisted session and replay its history over SSE
+      tags: ['session']
+      operationId: 'loadSession'
+      summary: 'Restore a persisted session and replay its history over SSE'
       description: >-
         The path id is authoritative; a `sessionId` in the body is ignored.
         Preflight the `session_load` capability.
@@ -479,9 +489,10 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              type: 'object'
               properties:
-                cwd: { type: string }
+                cwd:
+                  type: 'string'
               additionalProperties: true
       responses:
         '200':
@@ -499,17 +510,18 @@ paths:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
-      tags: [session]
-      operationId: resumeSession
-      summary: Resume a persisted session
+      tags: ['session']
+      operationId: 'resumeSession'
+      summary: 'Resume a persisted session'
       requestBody:
         required: false
         content:
           application/json:
             schema:
-              type: object
+              type: 'object'
               properties:
-                cwd: { type: string }
+                cwd:
+                  type: 'string'
               additionalProperties: true
       responses:
         '200':
@@ -528,9 +540,9 @@ paths:
       - $ref: '#/components/parameters/SessionId'
       - $ref: '#/components/parameters/RequestId'
     post:
-      tags: [permission]
-      operationId: respondToSessionPermission
-      summary: Vote on a permission request (session-scoped form)
+      tags: ['permission']
+      operationId: 'respondToSessionPermission'
+      summary: 'Vote on a permission request (session-scoped form)'
       requestBody:
         required: true
         content:
@@ -539,18 +551,18 @@ paths:
               $ref: '#/components/schemas/PermissionVote'
       responses:
         '200':
-          description: Vote accepted (resolved, or recorded toward quorum).
+          description: 'Vote accepted (resolved, or recorded toward quorum).'
           content:
             application/json:
               schema:
-                type: object
+                type: 'object'
                 additionalProperties: true
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/PermissionForbidden'
         '404':
-          description: Unknown requestId — already resolved, or the session is gone.
+          description: 'Unknown requestId — already resolved, or the session is gone.'
           content:
             application/json:
               schema:
@@ -560,9 +572,9 @@ paths:
     parameters:
       - $ref: '#/components/parameters/RequestId'
     post:
-      tags: [permission]
-      operationId: respondToPermission
-      summary: Vote on a permission request
+      tags: ['permission']
+      operationId: 'respondToPermission'
+      summary: 'Vote on a permission request'
       description: >-
         The active mediation policy (`/capabilities.policy.permission`) decides
         who wins. After a resolving vote every connected client sees a
@@ -575,18 +587,18 @@ paths:
               $ref: '#/components/schemas/PermissionVote'
       responses:
         '200':
-          description: Vote accepted (resolved, or recorded toward quorum).
+          description: 'Vote accepted (resolved, or recorded toward quorum).'
           content:
             application/json:
               schema:
-                type: object
+                type: 'object'
                 additionalProperties: true
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/PermissionForbidden'
         '404':
-          description: Unknown requestId — already resolved, or the session is gone.
+          description: 'Unknown requestId — already resolved, or the session is gone.'
           content:
             application/json:
               schema:
@@ -594,9 +606,9 @@ paths:
 
   /workspace/tools:
     get:
-      tags: [workspace]
-      operationId: listWorkspaceTools
-      summary: Tools available in the primary workspace
+      tags: ['workspace']
+      operationId: 'listWorkspaceTools'
+      summary: 'Tools available in the primary workspace'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -605,29 +617,37 @@ paths:
 
   /file:
     get:
-      tags: [workspace]
-      operationId: readFile
-      summary: Read a workspace file as text
+      tags: ['workspace']
+      operationId: 'readFile'
+      summary: 'Read a workspace file as text'
       parameters:
         - $ref: '#/components/parameters/WorkspacePath'
-        - name: line
-          in: query
+        - name: 'line'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 1 }
-          description: First line to return (1-based).
-        - name: limit
-          in: query
+          schema:
+            type: 'integer'
+            minimum: 1
+          description: 'First line to return (1-based).'
+        - name: 'limit'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 1 }
-          description: Maximum number of lines.
-        - name: maxBytes
-          in: query
+          schema:
+            type: 'integer'
+            minimum: 1
+          description: 'Maximum number of lines.'
+        - name: 'maxBytes'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 1, maximum: 262144 }
-        - name: cursor
-          in: query
+          schema:
+            type: 'integer'
+            minimum: 1
+            maximum: 262144
+        - name: 'cursor'
+          in: 'query'
           required: false
-          schema: { type: string }
+          schema:
+            type: 'string'
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -640,19 +660,23 @@ paths:
 
   /file/bytes:
     get:
-      tags: [workspace]
-      operationId: readFileBytes
-      summary: Read a byte range of a workspace file
+      tags: ['workspace']
+      operationId: 'readFileBytes'
+      summary: 'Read a byte range of a workspace file'
       parameters:
         - $ref: '#/components/parameters/WorkspacePath'
-        - name: offset
-          in: query
+        - name: 'offset'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 0 }
-        - name: maxBytes
-          in: query
+          schema:
+            type: 'integer'
+            minimum: 0
+        - name: 'maxBytes'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 1 }
+          schema:
+            type: 'integer'
+            minimum: 1
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -665,9 +689,9 @@ paths:
 
   /stat:
     get:
-      tags: [workspace]
-      operationId: statPath
-      summary: Stat a workspace path
+      tags: ['workspace']
+      operationId: 'statPath'
+      summary: 'Stat a workspace path'
       parameters:
         - $ref: '#/components/parameters/WorkspacePath'
       responses:
@@ -682,9 +706,9 @@ paths:
 
   /list:
     get:
-      tags: [workspace]
-      operationId: listDirectory
-      summary: List a workspace directory
+      tags: ['workspace']
+      operationId: 'listDirectory'
+      summary: 'List a workspace directory'
       parameters:
         - $ref: '#/components/parameters/WorkspacePath'
         - $ref: '#/components/parameters/IncludeIgnored'
@@ -700,23 +724,27 @@ paths:
 
   /glob:
     get:
-      tags: [workspace]
-      operationId: globWorkspace
-      summary: Glob workspace paths
+      tags: ['workspace']
+      operationId: 'globWorkspace'
+      summary: 'Glob workspace paths'
       parameters:
-        - name: pattern
-          in: query
+        - name: 'pattern'
+          in: 'query'
           required: true
-          schema: { type: string }
-        - name: cwd
-          in: query
+          schema:
+            type: 'string'
+        - name: 'cwd'
+          in: 'query'
           required: false
-          schema: { type: string }
+          schema:
+            type: 'string'
         - $ref: '#/components/parameters/IncludeIgnored'
-        - name: maxResults
-          in: query
+        - name: 'maxResults'
+          in: 'query'
           required: false
-          schema: { type: integer, minimum: 1 }
+          schema:
+            type: 'integer'
+            minimum: 1
       responses:
         '200':
           $ref: '#/components/responses/OpaqueJson'
@@ -728,8 +756,8 @@ paths:
 components:
   securitySchemes:
     bearerAuth:
-      type: http
-      scheme: bearer
+      type: 'http'
+      scheme: 'bearer'
       description: >-
         Required on every route when the daemon was started with `--token`,
         `QWEN_SERVER_TOKEN`, or `--require-auth`. On a loopback bind without a
@@ -738,27 +766,31 @@ components:
 
   parameters:
     SessionId:
-      name: id
-      in: path
+      name: 'id'
+      in: 'path'
       required: true
-      schema: { type: string }
+      schema:
+        type: 'string'
     RequestId:
-      name: requestId
-      in: path
+      name: 'requestId'
+      in: 'path'
       required: true
-      schema: { type: string }
+      schema:
+        type: 'string'
     WorkspacePath:
-      name: path
-      in: query
+      name: 'path'
+      in: 'query'
       required: true
-      schema: { type: string }
-      description: Path within a registered workspace.
+      schema:
+        type: 'string'
+      description: 'Path within a registered workspace.'
     IncludeIgnored:
-      name: includeIgnored
-      in: query
+      name: 'includeIgnored'
+      in: 'query'
       required: false
-      schema: { type: boolean }
-      description: Include paths excluded by ignore rules.
+      schema:
+        type: 'boolean'
+      description: 'Include paths excluded by ignore rules.'
 
   responses:
     OpaqueJson:
@@ -769,16 +801,16 @@ components:
       content:
         application/json:
           schema:
-            type: object
+            type: 'object'
             additionalProperties: true
     Unauthorized:
-      description: Missing or invalid bearer token.
+      description: 'Missing or invalid bearer token.'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     BadRequest:
-      description: Malformed request.
+      description: 'Malformed request.'
       content:
         application/json:
           schema:
@@ -786,146 +818,169 @@ components:
     NotFound:
       description: >-
         No such resource. Also returned for every route outside this spec when
-        the daemon runs with `--api-profile=minimal`, with
-        `code: "api_profile_disabled"`.
+        the daemon runs with `--api-profile=minimal`, with `code:
+        "api_profile_disabled"`.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     SessionNotFound:
-      description: No session with that id.
+      description: 'No session with that id.'
       content:
         application/json:
           schema:
             allOf:
               - $ref: '#/components/schemas/Error'
-              - type: object
+              - type: 'object'
                 properties:
-                  sessionId: { type: string }
+                  sessionId:
+                    type: 'string'
     RestoreConflict:
       description: >-
-        A conflicting restore is already in flight
-        (`code: "restore_in_progress"`), or the id is live in another
-        workspace runtime. Carries `Retry-After`.
+        A conflicting restore is already in flight (`code:
+        "restore_in_progress"`), or the id is live in another workspace runtime.
+        Carries `Retry-After`.
       headers:
         Retry-After:
-          schema: { type: integer }
+          schema:
+            type: 'integer'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     PermissionForbidden:
-      description: The active mediation policy rejected this vote.
+      description: 'The active mediation policy rejected this vote.'
       content:
         application/json:
           schema:
             allOf:
               - $ref: '#/components/schemas/Error'
-              - type: object
+              - type: 'object'
                 properties:
                   reason:
-                    type: string
-                    enum: [designated_mismatch, remote_not_allowed]
-                  requestId: { type: string }
-                  sessionId: { type: string }
+                    type: 'string'
+                    enum: ['designated_mismatch', 'remote_not_allowed']
+                  requestId:
+                    type: 'string'
+                  sessionId:
+                    type: 'string'
 
   schemas:
     Error:
-      type: object
+      type: 'object'
       properties:
         error:
-          type: string
-          description: Human-readable message.
+          type: 'string'
+          description: 'Human-readable message.'
         code:
           oneOf:
-            - type: string
-            - type: integer
+            - type: 'string'
+            - type: 'integer'
           description: >-
-            Machine-readable discriminator. JSON-RPC style negative integers
-            are forwarded from the agent on 5xx.
+            Machine-readable discriminator. JSON-RPC style negative integers are
+            forwarded from the agent on 5xx.
         data:
-          description: Error-specific detail forwarded from the agent.
+          description: 'Error-specific detail forwarded from the agent.'
       additionalProperties: true
 
     PermissionVote:
-      type: object
-      required: [outcome]
+      type: 'object'
+      required: ['outcome']
       properties:
         outcome:
           oneOf:
-            - type: object
-              required: [outcome, optionId]
+            - type: 'object'
+              required: ['outcome', 'optionId']
               properties:
-                outcome: { type: string, const: selected }
+                outcome:
+                  type: 'string'
+                  const: 'selected'
                 optionId:
-                  type: string
-                  description: One of the options the agent offered.
-            - type: object
-              required: [outcome]
+                  type: 'string'
+                  description: 'One of the options the agent offered.'
+            - type: 'object'
+              required: ['outcome']
               properties:
-                outcome: { type: string, const: cancelled }
+                outcome:
+                  type: 'string'
+                  const: 'cancelled'
 
     Capabilities:
-      type: object
-      required: [v, mode, features, modelServices]
+      type: 'object'
+      required: ['v', 'mode', 'features', 'modelServices']
       properties:
         v:
-          type: integer
+          type: 'integer'
           const: 1
         apiProfile:
-          type: string
-          enum: [full, minimal]
+          type: 'string'
+          enum: ['full', 'minimal']
           description: >-
-            How much of the HTTP surface this daemon exposes. Absent on
-            daemons predating the option; read that as `full`. Under
-            `minimal`, `features` over-reports what is routable — this spec is
-            the authority.
+            How much of the HTTP surface this daemon exposes. Absent on daemons
+            predating the option; read that as `full`. Under `minimal`,
+            `features` over-reports what is routable — this spec is the
+            authority.
         protocolVersions:
-          type: object
+          type: 'object'
           properties:
-            current: { type: string }
+            current:
+              type: 'string'
             supported:
-              type: array
-              items: { type: string }
-        qwenCodeVersion: { type: string }
-        mode: { type: string }
+              type: 'array'
+              items:
+                type: 'string'
+        qwenCodeVersion:
+          type: 'string'
+        mode:
+          type: 'string'
         features:
-          type: array
-          items: { type: string }
+          type: 'array'
+          items:
+            type: 'string'
         modelServices:
-          type: array
-          items: { type: string }
-          description: Always `[]` in Stage 1.
+          type: 'array'
+          items:
+            type: 'string'
+          description: 'Always `[]` in Stage 1.'
         workspaceCwd:
-          type: string
+          type: 'string'
           description: >-
             Canonical primary workspace path. Omit `cwd` on `POST /session` to
             use it.
         transports:
-          type: array
-          items: { type: string }
+          type: 'array'
+          items:
+            type: 'string'
         policy:
-          type: object
+          type: 'object'
           properties:
             permission:
-              type: string
-              enum: [first-responder, designated, consensus, local-only]
+              type: 'string'
+              enum: ['first-responder', 'designated', 'consensus', 'local-only']
         limits:
-          type: object
+          type: 'object'
           additionalProperties: true
         workspaces:
-          type: array
+          type: 'array'
           items:
-            type: object
+            type: 'object'
             properties:
-              id: { type: string }
-              cwd: { type: string }
-              displayName: { type: string }
-              primary: { type: boolean }
-              trusted: { type: boolean }
-              removable: { type: boolean }
-              kind: { type: string }
+              id:
+                type: 'string'
+              cwd:
+                type: 'string'
+              displayName:
+                type: 'string'
+              primary:
+                type: 'boolean'
+              trusted:
+                type: 'boolean'
+              removable:
+                type: 'boolean'
+              kind:
+                type: 'string'
         supportedLanguages:
-          type: array
-          items: { type: string }
+          type: 'array'
+          items:
+            type: 'string'
       additionalProperties: true

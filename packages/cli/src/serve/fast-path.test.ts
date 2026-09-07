@@ -703,6 +703,7 @@ describe('serve fast path argument parsing', () => {
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
       ['allow-private-auth-base-url', ['--allow-private-auth-base-url']],
+      ['api-profile', ['--api-profile', 'minimal']],
       ['prompt-deadline-ms', ['--prompt-deadline-ms', '1000']],
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
@@ -739,6 +740,7 @@ describe('serve fast path argument parsing', () => {
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      'api-profile',
       'channel',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
