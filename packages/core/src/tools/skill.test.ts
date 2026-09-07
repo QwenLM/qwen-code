@@ -7,7 +7,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { logSkillLaunch, recordSkillInvocation } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
-import type { PartListUnion } from '@google/genai';
+import type { Content, PartListUnion } from '@google/genai';
+import path from 'path';
 import type { ToolResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -40,6 +41,21 @@ type SkillToolWithProtectedMethods = SkillTool & {
 };
 
 // Mock dependencies
+// The resume path's warn/debug split is a behavioural claim (#11180's
+// complaint is that nothing was logged at any level), so the logger has to be
+// observable. Only `createDebugLogger` is replaced; everything else in the
+// module keeps its real implementation.
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn().mockReturnValue(true),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => mockDebugLogger,
+}));
 vi.mock('../skills/skill-manager.js');
 vi.mock('../hooks/registerSkillHooks.js', () => ({
   registerSkillHooks: vi.fn().mockReturnValue(1),
@@ -1190,13 +1206,13 @@ describe('SkillTool', () => {
       expect(llmText2).toContain('Review code for quality and best practices.');
     });
 
-    it('restores loaded Skill state from full bodies in resumed history', () => {
+    it('restores loaded Skill state from full bodies in resumed history', async () => {
       const output = buildSkillLlmContent(
         '/project/.qwen/skills/code-review',
         mockSkills[0].body,
       );
 
-      skillTool.restoreLoadedSkillsFromHistory([
+      await skillTool.restoreLoadedSkillsFromHistory([
         {
           role: 'model',
           parts: [
@@ -1227,13 +1243,241 @@ describe('SkillTool', () => {
       expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
     });
 
-    it('does not restore command output that matches an unrelated cached Skill', () => {
+    describe('re-arming side effects on resume (#11180)', () => {
+      const gatedSkill: SkillConfig = {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/home/user/.qwen/skills/gated-skill/SKILL.md',
+        skillRoot: '/home/user/.qwen/skills/gated-skill',
+        body: 'Gated body.',
+        allowedTools: ['Edit'],
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Shell',
+              hooks: [{ type: 'command', command: './gate.sh' }],
+            },
+          ],
+        } as unknown as SkillConfig['hooks'],
+      };
+
+      /** A resumed history whose only trace of `skill` is one Skill tool call. */
+      const resumedHistory = (skill: SkillConfig): Content[] => [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                args: { skill: skill.name },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'skill-call',
+                name: ToolNames.SKILL,
+                response: {
+                  output: buildSkillLlmContent(
+                    path.dirname(skill.filePath),
+                    skill.body,
+                  ),
+                },
+              },
+            },
+          ],
+        },
+      ];
+
+      beforeEach(() => {
+        vi.mocked(registerSkillHooks).mockClear();
+        vi.mocked(mockSkillManager.listSkills).mockClear();
+        mockDebugLogger.warn.mockClear();
+        mockDebugLogger.debug.mockClear();
+        vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+        vi.mocked(config.getHookSystem).mockReturnValue({
+          getSessionHooksManager: vi.fn().mockReturnValue({}),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+          gatedSkill,
+        ]);
+      });
+
+      it('re-applies side effects for each restored Skill, so a resumed session keeps its gate', async () => {
+        // Session hooks and allow rules are in-memory only, so a resumed
+        // session starts with none. The restored body still carries the
+        // skill's instructions, and the dedup guard answers "already
+        // loaded", so nothing would prompt a re-invocation that
+        // re-registers them — the skill's PreToolUse gate would never fire
+        // again.
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(gatedSkill),
+        );
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+        expect(mockAddSessionAllowRule).toHaveBeenCalledWith('Edit', {
+          trustGated: false,
+        });
+      });
+
+      it('does not re-arm a Skill the user disabled between sessions', async () => {
+        // The disabled skill is still in the resumed history. Both live
+        // paths refuse it before applying anything, so restoring its allow
+        // rules and hooks would silently switch an auto-approval back on
+        // after the user turned it off.
+        vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(gatedSkill),
+        );
+
+        // Bookkeeping still happens — the body is in the restored context,
+        // and the dedup guard has to know about it.
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
+      it('does not re-arm a conditional Skill whose `paths:` activation has not fired', async () => {
+        // `paths:` activation is in-memory too, so the skill starts the
+        // resumed session deactivated and `validateToolParams` would refuse
+        // it as "gated by path-based activation".
+        vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(false);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(gatedSkill),
+        );
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
+      it('does not re-arm a project Skill when the folder is no longer trusted', async () => {
+        // The folder-trust gate is re-applied on this path too: a project
+        // skill's hooks run repo-supplied commands, and resume must not be
+        // a way around the gate that both live paths enforce.
+        const projectSkill: SkillConfig = {
+          ...gatedSkill,
+          level: 'project',
+          filePath: '/project/.qwen/skills/gated-skill/SKILL.md',
+          skillRoot: '/project/.qwen/skills/gated-skill',
+        };
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+          projectSkill,
+        ]);
+        vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(projectSkill),
+        );
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
+      it('does not re-arm a Skill whose SKILL.md changed between sessions', async () => {
+        // The recorded body no longer matches disk, so the skill is not
+        // restored at all — neither the dedup bookkeeping nor its gate.
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory({ ...gatedSkill, body: 'A body from an older edit.' }),
+        );
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
+      it('awaits discovery when the skill cache has not committed yet', async () => {
+        // Nothing sequences restore against the constructor's fire-and-forget
+        // `refreshSkills()`. A cold cache is `null`, not empty, so restore
+        // waits for one refresh instead of declining every Skill in the
+        // history — which for a gate Skill would be exactly #11180 again, with
+        // a debug line as the only trace.
+        vi.mocked(mockSkillManager.getCachedSkills)
+          .mockReturnValueOnce(null)
+          .mockReturnValue([gatedSkill]);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(gatedSkill),
+        );
+
+        expect(mockSkillManager.listSkills).toHaveBeenCalled();
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+      });
+
+      it('warns, not debugs, when the Skill it declined to re-arm declares hooks', async () => {
+        // The level is the whole user-facing signal here: #11180 presented as
+        // a working setup precisely because the gate went missing in silence.
+        // Pin `warn` for a hook-declaring Skill so a future edit cannot
+        // collapse this to `debug` and stay green.
+        vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(gatedSkill),
+        );
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Not restoring skill "gated-skill" on resume: it is disabled',
+          ),
+        );
+        expect(mockDebugLogger.debug).not.toHaveBeenCalled();
+      });
+
+      it('debugs, not warns, when the Skill it declined to re-arm declares no gate', async () => {
+        // `hooks: {}` is truthy, and the parser assigns one for an empty block
+        // and for a block whose event names are all unrecognised. Such a Skill
+        // promised no gate, so warning about its absence would be the phantom
+        // failure `applySkillHooks`'s emptiness check exists to avoid.
+        const hooklessSkill: SkillConfig = {
+          ...gatedSkill,
+          hooks: {} as unknown as SkillConfig['hooks'],
+        };
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+          hooklessSkill,
+        ]);
+        vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(hooklessSkill),
+        );
+
+        expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Not restoring skill "gated-skill" on resume: it is disabled',
+          ),
+        );
+        expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not restore command output that matches an unrelated cached Skill', async () => {
       const output = buildSkillLlmContent(
         '/project/.qwen/skills/code-review',
         mockSkills[0].body,
       );
 
-      skillTool.restoreLoadedSkillsFromHistory([
+      await skillTool.restoreLoadedSkillsFromHistory([
         {
           role: 'model',
           parts: [
