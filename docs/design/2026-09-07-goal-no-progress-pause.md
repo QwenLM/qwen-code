@@ -143,9 +143,11 @@ it, and every surface already renders a paused Goal and its reason.
   mint no fourth continuation; a tool result and a terminal proposal each
   restart the streak; an undelivered turn restarts it; the wind-down hand-off
   neither counts nor clears; a ledger that cannot count and one that throws
-  both leave the bound off; a restored streak is spent by the next measured
-  quiet turn; a resume clears the streak and restores the whole allowance; a
-  failed settle write still shows the stop; a waiting user turn outranks the
-  bound.
-- `.qwen/e2e-tests/2026-09-07-goal-no-progress-pause.md`: an objective the
-  model can only answer in prose, run against the built CLI.
+  both leave the bound off, as does one that answers with something that is
+  not a count; the turn that spends the streak takes no checkpoint; a restored
+  streak is spent by the next measured quiet turn; a resume clears the streak
+  and restores the whole allowance; a failed settle write still shows the
+  stop; a waiting user turn outranks the bound.
+- End to end against a real model, with an objective the model can only answer
+  in prose: the before-and-after transcripts are in this change's pull request
+  under Evidence.

@@ -375,14 +375,19 @@ export function createGoalRuntime(
    *
    * `undefined` is load-bearing here in a way the spend's zero is not: it
    * switches the no-progress bound off instead of asserting that the turn
-   * produced nothing. A ledger that throws says the same thing.
+   * produced nothing. A ledger that throws says the same thing, and so does
+   * one that answers with something that is not a count: reading `NaN` as
+   * zero would spend one of the three turns on a measurement that never
+   * happened.
    */
   const takeTurnToolResults = (turnId: string): number | undefined => {
     const take = options.ledger?.takeGoalTurnToolResults;
     if (!take) return undefined;
     try {
       const results = take.call(options.ledger, turnId);
-      return Number.isFinite(results) ? Math.max(0, Math.floor(results)) : 0;
+      return Number.isFinite(results)
+        ? Math.max(0, Math.floor(results))
+        : undefined;
     } catch {
       return undefined;
     }

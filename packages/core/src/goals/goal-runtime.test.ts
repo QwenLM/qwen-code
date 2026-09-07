@@ -33,6 +33,7 @@ import {
 import { GoalConflictError } from './goal-reducer.js';
 import type {
   GoalCheckpointVerificationResult,
+  GoalCheckpointVerifier,
   GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
@@ -5607,6 +5608,8 @@ describe('goal runtime', () => {
         tokenBudgetGrant?: number;
         countToolResults?: boolean;
         throwOnCount?: boolean;
+        countsNotANumber?: boolean;
+        checkpointVerifier?: GoalCheckpointVerifier;
       } = {},
     ) {
       const journal = fakeGoalJournal(
@@ -5615,6 +5618,7 @@ describe('goal runtime', () => {
       const host = fakeGoalTurnHost();
       const toolResults = new Map<string, number>();
       const spend = new Map<string, number>();
+      let records: readonly RuntimeRecord[] = [];
       const runtime = createGoalRuntime({
         journal,
         ledger: {
@@ -5626,18 +5630,29 @@ describe('goal runtime', () => {
                   if (options.throwOnCount) {
                     throw new Error('ledger unavailable');
                   }
+                  if (options.countsNotANumber) return Number.NaN;
                   const count = toolResults.get(turnId) ?? 0;
                   toolResults.delete(turnId);
                   return count;
                 },
               }),
         },
+        ...(options.checkpointVerifier
+          ? {
+              evidenceSource: fakeEvidenceSource(() => records),
+              verifier: vi.fn(),
+              checkpointVerifier: options.checkpointVerifier,
+            }
+          : {}),
         ...(options.tokenBudgetGrant === undefined
           ? {}
           : { tokenBudgetGrant: options.tokenBudgetGrant }),
       });
       runtime.bindHost(host);
-      return { journal, host, runtime, toolResults, spend };
+      const setEvidence = (next: readonly RuntimeRecord[]) => {
+        records = next;
+      };
+      return { journal, host, runtime, toolResults, spend, setEvidence };
     }
 
     async function finishAutonomousTurn(
@@ -5778,6 +5793,66 @@ describe('goal runtime', () => {
 
       expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
       expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('leaves the bound off when the ledger answers with something that is not a count', async () => {
+      const { host, runtime } = noProgressHarness({ countsNotANumber: true });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn <= GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
+    });
+
+    it('does not checkpoint the turn that spends the streak', async () => {
+      // A checkpoint is work done for the next turn. On the turn that stops
+      // the Goal there is no next turn, and the verifier call would be spent
+      // for nothing.
+      const checkpointVerifier = vi.fn(async () => ({
+        claims: [
+          {
+            proofKind: 'delivered_output' as const,
+            claim: 'The implementation result was delivered.',
+            sourceRefs: ['assistant-evidence-79'],
+          },
+        ],
+      }));
+      const { journal, host, runtime, setEvidence } = noProgressHarness({
+        checkpointVerifier,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        const permit = host.started[turn]!;
+        setEvidence(
+          verifierEvidenceWindow(
+            permit,
+            runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+            80,
+          ),
+        );
+        await finishAutonomousTurn(runtime, permit);
+      }
+
+      expect(checkpointVerifier).toHaveBeenCalledTimes(
+        GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+      );
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'checkpoint',
+        'turn_finished',
+        'checkpoint',
+        'turn_finished',
+        'pause',
+      ]);
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'idle',
+        goal: { status: 'paused' },
+      });
     });
 
     it('carries a restored streak into the turn that spends it', async () => {
