@@ -944,6 +944,7 @@ async function writeThreadUnlocked(
 
 export interface MeshStoreTransaction {
   readonly projectRoot: string;
+  readonly workspaceId: string;
   readAgents(): Promise<MeshAgent[]>;
   writeAgents(agents: readonly MeshAgent[]): Promise<void>;
   readThread(threadId: string): Promise<Thread | undefined>;
@@ -961,6 +962,7 @@ function makeTransaction(
   let workspace = initialWorkspace;
   return {
     projectRoot,
+    workspaceId: workspace.workspaceId,
     readAgents: () => readAgentsUnlocked(projectRoot),
     writeAgents: (agents) => writeAgentsUnlocked(projectRoot, agents),
     readThread: (threadId) => readThreadUnlocked(projectRoot, threadId),
@@ -1124,54 +1126,71 @@ export async function updateThread(
   });
 }
 
+export interface CreateThreadInput {
+  title: string;
+  body?: string;
+  createdBy?: string;
+  assigneeAgentId?: string;
+  parentThreadId?: string;
+}
+
+/**
+ * Creates a thread inside an open transaction.
+ *
+ * Exposed separately so a caller that must create a thread *and* do something
+ * else atomically — assigning it, which books a run — can do both under one
+ * lock. Two transactions would leave a crash window in which an assigned
+ * sub-thread exists with nothing scheduled to work it.
+ */
+export async function createThreadInTransaction(
+  transaction: MeshStoreTransaction,
+  input: CreateThreadInput,
+): Promise<Thread> {
+  const id = generateThreadId();
+  let rootThreadId = id;
+  let autoTurnsUsed = 0;
+  if (input.parentThreadId) {
+    const parent = await transaction.readThread(input.parentThreadId);
+    if (!parent) {
+      throw new Error(`No parent thread with id "${input.parentThreadId}".`);
+    }
+    rootThreadId = parent.rootThreadId;
+    autoTurnsUsed = parent.autoTurnsUsed;
+    const root = await transaction.readThread(rootThreadId);
+    if (!root || root.rootThreadId !== root.id) {
+      throw new Error(`No valid root thread with id "${rootThreadId}".`);
+    }
+  }
+  return transaction.writeThread({
+    schemaVersion: MESH_SCHEMA_VERSION,
+    id,
+    title: input.title,
+    body: input.body ?? '',
+    status: 'open',
+    createdAt: Date.now(),
+    createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
+    rootThreadId,
+    messages: [],
+    runs: [],
+    nextMessageSequence: 1,
+    deliveryByAgent: {},
+    outbox: [],
+    autoTurnsUsed,
+    tokensUsed: 0,
+    ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
+    ...(input.assigneeAgentId
+      ? { assigneeAgentId: input.assigneeAgentId }
+      : {}),
+  });
+}
+
 export async function createThread(
   projectRoot: string,
-  input: {
-    title: string;
-    body?: string;
-    createdBy?: string;
-    assigneeAgentId?: string;
-    parentThreadId?: string;
-  },
+  input: CreateThreadInput,
 ): Promise<Thread> {
-  return withMeshStoreTransaction(projectRoot, async (transaction) => {
-    const id = generateThreadId();
-    let rootThreadId = id;
-    let autoTurnsUsed = 0;
-    if (input.parentThreadId) {
-      const parent = await transaction.readThread(input.parentThreadId);
-      if (!parent) {
-        throw new Error(`No parent thread with id "${input.parentThreadId}".`);
-      }
-      rootThreadId = parent.rootThreadId;
-      autoTurnsUsed = parent.autoTurnsUsed;
-      const root = await transaction.readThread(rootThreadId);
-      if (!root || root.rootThreadId !== root.id) {
-        throw new Error(`No valid root thread with id "${rootThreadId}".`);
-      }
-    }
-    return transaction.writeThread({
-      schemaVersion: MESH_SCHEMA_VERSION,
-      id,
-      title: input.title,
-      body: input.body ?? '',
-      status: 'open',
-      createdAt: Date.now(),
-      createdBy: input.createdBy ?? HUMAN_AUTHOR_ID,
-      rootThreadId,
-      messages: [],
-      runs: [],
-      nextMessageSequence: 1,
-      deliveryByAgent: {},
-      outbox: [],
-      autoTurnsUsed,
-      tokensUsed: 0,
-      ...(input.parentThreadId ? { parentThreadId: input.parentThreadId } : {}),
-      ...(input.assigneeAgentId
-        ? { assigneeAgentId: input.assigneeAgentId }
-        : {}),
-    });
-  });
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    createThreadInTransaction(transaction, input),
+  );
 }
 
 export async function readTokenBudgetThread(
@@ -1277,12 +1296,18 @@ export async function reconcileThreadOutbox(
     transaction: MeshStoreTransaction,
     event: ThreadEvent,
   ) => Promise<void>,
+  /**
+   * Which pending events this pass owns. An event no consumer claims is left
+   * pending rather than acknowledged, so a kind whose consumer does not exist
+   * yet is visibly outstanding instead of silently dropped.
+   */
+  filter: (event: ThreadEvent) => boolean = () => true,
 ): Promise<Thread> {
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     let source = await transaction.readThread(threadId);
     if (!source) throw new Error(`No thread with id "${threadId}".`);
     for (const event of source.outbox) {
-      if (event.status !== 'pending') continue;
+      if (event.status !== 'pending' || !filter(event)) continue;
       const attempted = { ...event, attempts: event.attempts + 1 };
       source = await transaction.writeThread({
         ...source,

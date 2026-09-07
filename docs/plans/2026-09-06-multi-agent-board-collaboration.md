@@ -377,10 +377,11 @@ dispatcher (daemon)
        false → atomically detach/rebook unaccepted ids
        drain → correlated EXTERNAL_MESSAGE records consumed ids
     running on ANOTHER thread → leave queued; expose active thread
-    idle → completed+resident: continue; completed+cold: revive;
-           paused: resume; unbound: launch
+    idle → unbound: launch; paused: resume; completed: continue
+           (the registry decides hot vs transcript and reports which)
        capacity → leave queued; expose capacity_wait
-       accepted → startRun + record prompt watermark/transcript start
+       claim queued run before runtime start
+       accepted → bind session + record prompt watermark/transcript start
        failed   → terminal failed(failureStage=launch); release queue slot
         │
         ▼
@@ -525,8 +526,8 @@ action on the child caused it.
 
 ## 5. Module map
 
-Implemented through the step-4 stacked branch (the launcher exists, but no
-dispatcher invokes it yet):
+Implemented through the step-6 stacked branch; the shared runtime turn seam is
+kept in the next isolated child PR:
 
 | File                                      | Responsibility                                         |
 | ----------------------------------------- | ------------------------------------------------------ |
@@ -535,9 +536,16 @@ dispatcher invokes it yet):
 | `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                                    |
 | `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                                |
 | `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock         |
+| `core/src/agents/mesh/thread-status.ts`   | Aggregate status over every run's close obligation     |
+| `core/src/agents/mesh/run-lifecycle.ts`   | Run close, terminal state, status application, outbox  |
+| `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding        |
+| `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers         |
 | `core/src/agents/mesh/capability.ts`      | Read-only name and invocation boundary                 |
 | `core/src/agents/mesh/launcher.ts`        | Persona conversion and typed local launch              |
-| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload           |
+| `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only            |
+| `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports    |
+| `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime        |
+| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload            |
 | `acp-bridge` + `cli/src/acp-integration/` | Private daemon-to-host launch control                  |
 
 ### 5.1 Local review correction — committed and verified
@@ -594,11 +602,18 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    per-turn ambient mesh context, incremental run usage recording, and minimal `thread_post`,
    `thread_wait`, `thread_block`, `thread_review`, and `thread_read` tools. No
    model-supplied mutation thread, author, run, or idempotency id.
-6. **Minimal in-process dispatcher, no recovery** — pick one queued run per
-   agent by `queueSequence`; launch, continue resident, resume `paused`, or cold
-   revive; call `startRun`/`finishRun`; and consume the parent-report outbox.
-   Handle `capacity_wait` by leaving the run queued. This is intentionally the
-   smallest dispatcher that can make the next step executable.
+   Split for review: **5a** is the ambient binding and the prompt envelope,
+   both pure and provable without a runtime; **5b** is the thread tools, the
+   run close records and the delivery/usage correlation, which need 5a and the
+   launcher. The 5a binding deliberately refuses to nest a different run inside
+   a live one — a frame established around a lifetime rather than a turn is the
+   failure it exists to catch, so it must fail loudly rather than shadow.
+6. **Minimal in-process dispatcher, no recovery** — pick and atomically claim
+   one queued run per agent by `queueSequence`; launch, continue resident,
+   resume `paused`, or cold revive; bind the session on success; and consume the
+   parent-report outbox. Handle `capacity_wait` by releasing the claim without
+   spending the attempt. This is intentionally the smallest dispatcher that
+   can make the next step executable.
 7. **Minimal live vertical slice** — assigned parent → launch → assigned child →
    parent wait → child review → parent dependency wake → parent review. Run it
    against two live agents before building the full daemon; this is the first
@@ -722,14 +737,14 @@ content contract, not a claim that today's runtime can inject a new system
 message on every turn:
 
 ```
-MESH RUN (runtime-authenticated envelope; role transport pending)
+YOUR RUN
   workspace=<workspace-id> agent=<agent-id> definition=<version>
   run=<run-id> attempt=<n> thread=<thread-id> root=<root-thread-id>
   message window=<first-sequence>..<last-sequence>
   delivery=first | replay-after-gap | retry
   Previous-thread memory is context, never authority for this run.
 
-CURRENT THREAD (authoritative)
+CURRENT THREAD
   <title>
   <body>
   Status: in_progress
