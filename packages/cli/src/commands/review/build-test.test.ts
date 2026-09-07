@@ -57,7 +57,12 @@ afterEach(() => reviewSettingsIsolation?.dispose());
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
-  { dir: 'packages/webui', name: '@x/webui', scripts: ['build'], deps: [] },
+  {
+    dir: 'packages/shared-ui',
+    name: '@x/shared-ui',
+    scripts: ['build'],
+    deps: [],
+  },
 ];
 
 describe('unresolvedWorkspaceDeps', () => {
@@ -70,9 +75,9 @@ describe('unresolvedWorkspaceDeps', () => {
 
   it('finds the workspace package a TS2307 names', () => {
     const out =
-      "src/a.ts(23,8): error TS2307: Cannot find module '@x/webui' or its " +
+      "src/a.ts(23,8): error TS2307: Cannot find module '@x/shared-ui' or its " +
       'corresponding type declarations.';
-    expect(unresolvedWorkspaceDeps(out, PKGS)).toEqual(['@x/webui']);
+    expect(unresolvedWorkspaceDeps(out, PKGS)).toEqual(['@x/shared-ui']);
   });
 
   it('resolves a deep import back to its package', () => {
@@ -82,8 +87,11 @@ describe('unresolvedWorkspaceDeps', () => {
 
   it("reads a bundler's wording too", () => {
     expect(
-      unresolvedWorkspaceDeps('✘ [ERROR] Could not resolve "@x/webui"', PKGS),
-    ).toEqual(['@x/webui']);
+      unresolvedWorkspaceDeps(
+        '✘ [ERROR] Could not resolve "@x/shared-ui"',
+        PKGS,
+      ),
+    ).toEqual(['@x/shared-ui']);
   });
 
   it('ignores a third-party module — widening cannot fix it, and would loop', () => {
@@ -2290,7 +2298,10 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/webui', { name: '@x/webui', scripts: { build: 'x' } });
+    pkg('packages/shared-ui', {
+      name: '@x/shared-ui',
+      scripts: { build: 'x' },
+    });
     pkg('packages/leaf', {
       name: '@x/leaf',
       scripts: { build: 'x', test: 'x' },
@@ -2312,7 +2323,7 @@ describe('runBuildTest', () => {
             exitCode: null,
             seconds: 60,
             timedOut: true,
-            output: "error TS2307: Cannot find module '@x/webui'",
+            output: "error TS2307: Cannot find module '@x/shared-ui'",
           };
         }
         return {
