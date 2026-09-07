@@ -1067,37 +1067,35 @@ fi
 #
 # ATTRIBUTION. Each file's round delta is tip - pre-round - main's own
 # contribution. Across a main-derived merge (any parent from the second on
-# that origin/main reaches), main's contribution is the delta from the
-# branch's side to git's auto-merge of main's side onto it (three-way,
-# `git merge-file --ours`: a conflict resolves for the branch, a modify/
-# delete conflict keeps the branch's version, a deletion the result
-# adopted is main's); across a fast-forwarded main commit it is the
-# commit's own delta. So a weakening committed before, during, or after a
-# merge of main measures the same, an assertion moved within a file nets
-# zero whichever commit sequence produced the tip, and main's own delta
-# neither charges nor shields the round. An event that moved nothing for
-# the file (byte-identical or absent on both sides) is not recorded.
-# The model is CLAMPED by what the merge commit actually landed: credit is
-# the part the modelled auto-merge and the landed blob agree on, and only
-# where they agree in sign. Equal, and the clamp is the identity -- the
-# ordinary merge measures as it always did. They diverge exactly when a
-# resolution took neither side whole, and then the clamp cuts both ways: a
-# resolution that DISCARDED main's side credits nothing (a round could
-# otherwise merge with `-s ours` and delete an assertion in the same
-# breath, the phantom credit absorbing it), and a resolution that weakened
-# the file ITSELF is not main's contribution either. What the clamp cannot
-# see is identity: main removing one assertion while the resolution puts
-# it back and drops a different one nets to zero, the same way an assertion
-# moved within a file always has.
-# `--ours` is the attribution MODEL, not a claim about how the round
-# actually resolved: a resolution that took main's side over an edit of
-# the branch's own reads as the round having made that change, which
-# over-charges and is answered by one ack entry. It is deliberate that the
-# error lands on that side -- the alternative models main's side as the
-# round's baseline, which shields a weakening instead of surfacing one --
-# and the one shape where main's side landing over the branch matters,
-# main's file surviving the round's deletion, is measured from the merge
-# base instead.
+# that origin/main reaches), main's contribution is MAIN'S OWN DELTA,
+# measured on main's own side against the merge base; across a
+# fast-forwarded main commit it is the commit's own delta. Never a
+# three-way splice of the two sides: an auto-merge mixes the round's edits
+# into main's contribution and can invent a surface neither side ever had
+# -- an un-skip the round made, spliced with a test main added, produces
+# an enabled registration that existed in no tree and is then charged to
+# somebody. Measuring main where main made it removes that whole class,
+# and it makes the two arms one rule: a modify/delete resolved for main
+# was already measured from the merge base.
+# So a weakening committed before, during, or after a merge of main
+# measures the same, an assertion moved within a file nets zero whichever
+# commit sequence produced the tip, and main's own delta neither charges
+# nor shields the round. An event that moved nothing for the file
+# (byte-identical or absent on both sides) is not recorded.
+#
+# What main did is not always what the merge KEPT, so the contribution is
+# clamped by the blob the merge commit actually landed, measured against
+# the same merge base. Main's REMOVALS are credited only as far as they
+# landed: a round could otherwise merge main, discard its side, and let
+# the phantom credit absorb its own removal exactly. Main's ADDITIONS are
+# never clamped: they raise the baseline whatever the merge kept, or a
+# round that drops what main added during the round gets that removal for
+# free. Presence follows main's side directly: the
+# baseline holds the file when main held it at the newest event, whatever
+# the resolution then did with it.
+# What none of this can see is identity: main removing one assertion while
+# the resolution puts it back and drops a different one nets to zero, the
+# same way an assertion moved within a file always has.
 # Assertions are counted per file; registrations by kind and title as
 # multisets, so un-skipping one test never licenses silencing another,
 # while a brand-new todo/skip registration is the round's own and charges
@@ -1257,21 +1255,22 @@ weaken_blob() {
 # Main's side (parent ${3}) auto-merged onto the branch at merge commit
 # ${1} for file ${2}: print the blob file, or nothing when the auto-merge
 # holds no file.
-# One event, three lines, always: the modelled auto-merge blob, an optional
-# override for the side to compare it AGAINST, and the blob the merge
-# commit actually landed. Empty lines are absent sides.
+# One event, four lines, always: main's own side at the event, the merge
+# base to measure it against, the blob the merge commit actually landed,
+# and whether main held the file at all. Empty lines are absent sides.
 weaken_emit() {
-  printf '%s\n%s\n%s\n' "${1}" "${2}" "${3}"
+  printf '%s\n%s\n%s\n%s\n' "${1}" "${2}" "${3}" "${4}"
 }
-# Three lines, always: the modelled auto-merge, an optional override for
-# the side to compare it AGAINST, and the blob the merge commit actually
-# landed. The counter clamps the modelled contribution by the landed one,
-# so a resolution that discarded main's side credits the round with
-# nothing -- and one that weakened the file itself is still the round's.
+# MAIN's contribution at merge commit ${1} for file ${2}, main being parent
+# ${3}: main's OWN delta, measured on main's own side against the merge
+# base. Never a three-way splice of the two sides -- an auto-merge mixes
+# the round's edits into main's contribution and can invent a surface
+# neither side ever had, which is then credited or charged to somebody.
+# What the merge actually DID with that contribution rides along as the
+# landed blob, and the counter clamps by it.
 weaken_auto_blob() {
-  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p1 p2 base res weaken_rc=0 out="${WEAKEN_TMP}/${4}.auto"
+  local c="${1}" f="${2}" mp="${3}" tag="${4}" mb p2 base res
   mb="$(git merge-base "${c}^" "${c}^${mp}" 2> /dev/null)" || mb=''
-  p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
   p2="$(weaken_blob "${c}^${mp}" "${f}" "${tag}.p2")" || return 1
   res="$(weaken_blob "${c}" "${f}" "${tag}.res")" || return 1
   base=''
@@ -1279,70 +1278,25 @@ weaken_auto_blob() {
     base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
   fi
   if [[ -z "${p2}" ]]; then
-    # Main holds no blob. Never had one: nothing to merge, the branch's side
-    # stands. Deleted it: a deletion the merge result adopted is main's;
-    # keeping the file (a modify/delete conflict resolved for the branch)
-    # leaves the branch's version as the baseline.
+    # Main holds no side here. It DELETED the file only if the base had one
+    # -- and that deletion is main's contribution only when the merge
+    # adopted it; a modify/delete conflict resolved for the branch leaves
+    # the file in the round's hands. Anything else means main never had
+    # this file, and a side main never held contributes nothing.
     if [[ -n "${base}" ]] && ! weaken_is_blob "${c}" "${f}"; then
-      return 0
-    fi
-    [[ -n "${p1}" ]] && weaken_emit "${p1}" '' "${res}"
-    return 0
-  fi
-  if [[ -z "${p1}" ]]; then
-    # The branch holds no blob. Main ADDED the file: it lands, and its whole
-    # surface is main's contribution. The branch deleted it and main edited
-    # it -- a modify/delete conflict: when the resolution kept main's
-    # version the file is back, and main's contribution is its own delta
-    # from the merge base (the second line tells the caller to compare
-    # against the base, since the branch side holds nothing); when the
-    # resolution kept the deletion main moved nothing the round can be
-    # charged or credited for, so no side is printed at all.
-    if [[ -z "${base}" ]]; then
-      weaken_emit "${p2}" '' "${res}"
-    elif weaken_is_blob "${c}" "${f}"; then
-      weaken_emit "${p2}" "${base}" "${res}"
+      weaken_emit '' "${base}" "${res}" '0'
     fi
     return 0
   fi
-  if [[ -z "${base}" ]]; then
-    # Both sides added the file: an add/add conflict, the branch's side
-    # stands.
-    weaken_emit "${p1}" '' "${res}"
-    return 0
-  fi
-  # Conflicts resolve for the branch (--ours), and git reports the number
-  # of conflicts left -- 0 here, since --ours leaves none. A hard failure
-  # is git's negative return, which the shell reports as 255 or above; the
-  # branch's side stands for it. The result's SIZE decides nothing: main
-  # emptying a test file is a legitimately empty clean merge, and reading
-  # emptiness as failure would attribute main's emptying to the round.
-  git merge-file -p --ours "${p1}" "${base}" "${p2}" > "${out}" 2> /dev/null || weaken_rc=$?
-  if (( weaken_rc > 127 )); then
-    # git refused to merge at all -- its negative return, which the shell
-    # reports as 255 (a NUL byte anywhere in the leading bytes makes the
-    # file binary to merge-file). Fall back to git's OWN trivial-merge
-    # rule, not to a fixed side: a side that did not move from the base
-    # contributes nothing, so the other side IS the result, and only a
-    # genuine two-sided change resolves for the branch the way `--ours`
-    # would have. Substituting the branch's side unconditionally would
-    # charge main's own weakening to the round whenever main is the side
-    # that moved.
-    if cmp -s "${p1}" "${base}"; then
-      cp "${p2}" "${out}"
-    else
-      cp "${p1}" "${out}"
-    fi
-  fi
-  weaken_emit "${out}" '' "${res}"
+  weaken_emit "${p2}" "${base}" "${res}" '1'
 }
 # Measure file ${1}: write the manifest (tip, pre-round, and every main
 # event that moved the file) and print the counter's verdict JSON. One
 # name throughout -- a round that renames a test file is measured as the
 # deletion of the old path and a new file at the new one.
 weaken_measure() {
-  local f="${1}" tag="${2}" tip pre before after landed events='' weaken_i c kind mp j=0
-  local weaken_pair weaken_over
+  local f="${1}" tag="${2}" tip pre before after landed holds events='' weaken_i c kind mp j=0
+  local weaken_pair
   tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
   pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
   for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
@@ -1358,24 +1312,37 @@ weaken_measure() {
     j=$(( j + 1 ))
     before="$(weaken_blob "${c}^" "${f}" "${tag}.e${j}.before")" || return 1
     landed=''
+    holds='0'
     if [[ "${kind}" == 'main' ]]; then
+      # A commit main itself has been: its own delta IS main's, and what it
+      # landed is what it holds.
       after="$(weaken_blob "${c}" "${f}" "${tag}.e${j}.after")" || return 1
       landed="${after}"
+      [[ -z "${after}" ]] || holds='1'
     else
       weaken_pair="$(weaken_auto_blob "${c}" "${f}" "${mp}" "${tag}.e${j}")" || return 1
+      if [[ -z "${weaken_pair}" ]]; then
+        # Main held no side and the merge left the file in the round's
+        # hands: no contribution, and nothing that could move the baseline
+        # either. Not an event at all.
+        j=$(( j - 1 ))
+        continue
+      fi
+      # Main's own side, measured against the MERGE BASE -- not against the
+      # branch's side, which is the round's own authorship and already
+      # inside tip - pre-round.
       after="$(sed -n 1p <<< "${weaken_pair}")"
-      # A resolution that landed main's version over the round's deletion
-      # measures main's contribution from the MERGE BASE: the branch side
-      # holds nothing to compare against, and main's own delta is what
-      # survived into the result.
-      weaken_over="$(sed -n 2p <<< "${weaken_pair}")"
-      [[ -z "${weaken_over}" ]] || before="${weaken_over}"
+      before="$(sed -n 2p <<< "${weaken_pair}")"
       landed="$(sed -n 3p <<< "${weaken_pair}")"
+      holds="$(sed -n 4p <<< "${weaken_pair}")"
+      [[ "${holds}" == '1' ]] || holds='0'
     fi
     events+="$(jq -cn --arg b "${before}" --arg a "${after}" --arg l "${landed}" \
+      --argjson h "${holds}" \
       '{before: (if $b == "" then null else $b end),
         after: (if $a == "" then null else $a end),
-        landed: (if $l == "" then null else $l end)}'),"
+        landed: (if $l == "" then null else $l end),
+        mainHolds: ($h == 1)}'),"
   done
   jq -n --arg path "${f}" --arg tip "${tip}" --arg pre "${pre}" --argjson events "[${events%,}]" '
     {path: $path,

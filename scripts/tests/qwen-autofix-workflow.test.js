@@ -25470,6 +25470,129 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // -- BOTH sides add the same path during the round, the resolution
+    //    lands main's file, and the round then deletes it. Main held that
+    //    side, so the baseline holds the file and the deletion is the
+    //    round's: presence reads main's own side, not a three-way model
+    //    whose endpoint happens to equal the branch's.
+    'addadd-takes-main-then-drops': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm main-adds-x',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/x.test.ts && git commit -qm round-adds-x',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/x.test.ts': WT_BASE }),
+        'git add pkg/x.test.ts && git commit -qm resolution-takes-main',
+        'git rm -q pkg/x.test.ts',
+        'git commit -qm drop-x',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the round un-skips a suite, main adds a test INSIDE that suite,
+    //    and the resolution takes main's file verbatim -- so the tip is
+    //    byte-identical to main's and nothing was weakened. A three-way
+    //    splice of the two sides would invent an ENABLED registration that
+    //    existed in no tree and charge the round for disabling it.
+    'merge-takes-main-after-own-unskip': {
+      onMain: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "describe.skip('S', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam main-adds-c',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git commit -qam round-unskips',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "describe.skip('S', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            "  it('c', () => {",
+            '    expect(three()).toBe(3);',
+            '  });',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution-takes-main',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- the resolution removes MORE than main's side did. Credit is
+    //    main's own delta, not the merge's: crediting the larger landed
+    //    removal would shield the round for the difference.
+    'resolution-removes-more-than-main': {
+      onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts && git commit -qm resolution-removes-two',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- main REMOVED while the merge landed an ADDITION: the two moved in
+    //    opposite directions, so main's removal was plainly not taken and
+    //    credits nothing. Crediting the landed addition instead would
+    //    charge the round for one assertion more than it removed.
+    'main-removes-merge-adds': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-removes-one',
+      ],
+      round: [
+        'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
+        'git merge -q --no-edit --no-commit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts && git commit -qm resolution-adds',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        AGENT_COMMIT,
+      ],
+    },
     'main-directory-swap': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -25765,10 +25888,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
     },
     // -- main EMPTIES the file (keeps the path, removes every line) and
-    //    the round touches nothing. The auto-merge result is legitimately
-    //    empty, and emptiness is not a merge-file failure: reading it as
-    //    one would substitute the branch's side and charge main's emptying
-    //    to the round.
+    //    the round touches nothing. Main's own delta is the whole file
+    //    going empty, and the merge landed it, so the round answers for
+    //    nothing.
     'main-empties': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       files: {},
@@ -25778,18 +25900,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       mainMoves: [": > 'pkg/a.test.ts'", 'git commit -qam main-empties'],
       // The branch moves FIRST, so the merge cannot fast-forward: this has
       // to be a real merge commit, or main's side is read straight off the
-      // commit and the auto-merge path is never exercised.
+      // commit and the merge attribution is never exercised.
       round: [
         'echo f2 > f2.txt && git add f2.txt && git commit -qm feature-moves',
         'git merge -q --no-edit origin/main',
         AGENT_COMMIT,
       ],
     },
-    // -- `git merge-file` REFUSES a file carrying a NUL byte (exit 255, no
-    //    output). The branch's own side has to stand in for the auto-merge
-    //    then, or the empty result reads as "main emptied the file" and
-    //    credits the round with the whole baseline surface — masking a
-    //    removal of up to that size. Here main only appends a comment while
+    // -- a file carrying a NUL byte, which git will not merge as text.
+    //    Attribution never asks it to: main's delta is read on main's own
+    //    side, so the measurement is the same as for any other content.
+    //    Here main only appends a comment while the round deletes an
+    //    assertion.
     //    the round deletes an assertion.
     'binary-merge': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
@@ -25869,9 +25991,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
-    // -- the same shape in the binary lane, where the auto-merge cannot be
-    //    computed at all: the result still equals the branch's side, so
-    //    main still contributed nothing.
+    // -- the same shape with unmergeable content: the merge landed
+    //    nothing of main's, so main still contributed nothing.
     'strategy-ours-hole-binary': {
       onMain: { 'pkg/a.test.ts': WT_BASE },
       onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
@@ -25911,12 +26032,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       ],
     },
     // -- binary, BOTH sides moved, and the resolution took MAIN's version.
-    //    The auto-merge cannot be computed, so the model says the branch's
-    //    side stands (`--ours`) and credits main with nothing; the clamp
-    //    cannot raise credit above the model, so main's own removal is
-    //    charged to the round too. That over-charge is the declared error
-    //    direction of the model -- retryable, one ack entry answers it --
-    //    and pinning it keeps the arm that chooses the side honest.
+    //    Main's own delta is measured on main's side and the merge landed
+    //    it whole, so the round -- whose own edit the resolution discarded
+    //    -- is charged for nothing.
     'binary-resolution-takes-main': {
       onMain: { 'pkg/a.test.ts': WT_BASE_PLUS_THREE },
       onMainSeed: ["printf '// \\000\\n' >> 'pkg/a.test.ts'"],
@@ -26433,14 +26551,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // Main deleted the file; the round adopted the deletion.
       acceptsWithoutCharge('merge-delete-freight');
       // Main emptying the file is main's delta, whatever its size: the
-      // auto-merge result for that event is EMPTY, and the attribution
+      // delta for that event is the whole file, and the attribution
       // subtracts it like any other main event.
       acceptsWithoutCharge('main-empties');
-      // ...and when the auto-merge cannot be COMPUTED at all (a NUL byte
-      // makes the file binary and `git merge-file` refuses), the branch's
-      // own side stands in for it. Without that substitution the refusal's
-      // empty output reads as main having emptied the file, and the round's
-      // deletion is credited away instead of charged.
+      // ...and content git cannot merge as text measures the same, because
+      // attribution never merges anything: it reads main's delta on main's
+      // own side.
       const binary = rejectsWeakening(
         'binary-merge',
         'net 1 assertion(s) removed',
@@ -26458,15 +26574,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'net 1 assertion(s) removed',
       );
       expect(bothMoved.rejection).toContain('pkg/a.test.ts');
-      // The model cannot be computed for a binary file, so the branch's
-      // side stands and main's own removal is charged to the round as
-      // well: the declared over-charging direction, pinned so the arm that
-      // picks the side is not free to pick the other one.
-      const tookMain = rejectsWeakening(
-        'binary-resolution-takes-main',
-        'net 2 assertion(s) removed',
+      // Both sides moved and the resolution took MAIN's version, discarding
+      // the round's own edit. Main's delta is measured where main made it,
+      // so the round is charged for nothing -- the older model, which read
+      // main's contribution off a three-way splice, over-charged here.
+      acceptsWithoutCharge('binary-resolution-takes-main');
+      // Main's own delta is measured where MAIN made it, never spliced
+      // with the round's edits: a tip byte-identical to main's file has
+      // weakened nothing, however the round got there.
+      acceptsWithoutCharge('merge-takes-main-after-own-unskip');
+      // Credit is main's delta, not the merge's: a resolution that removed
+      // more than main did is charged for the difference...
+      rejectsWeakening(
+        'resolution-removes-more-than-main',
+        'net 1 assertion(s) removed',
       );
-      expect(tookMain.rejection).toContain('pkg/a.test.ts');
+      // ...and one that moved the OPPOSITE way from main credits nothing,
+      // so the round answers for exactly what it removed.
+      rejectsWeakening('main-removes-merge-adds', 'net 1 assertion(s) removed');
       // Main's ADDITIONS are never clamped by what the merge kept: a round
       // that drops what main landed during the round removed coverage, in
       // every spelling of "drops".
@@ -26492,7 +26617,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // A merge that DISCARDED main's side adopted nothing from it, so
       // nothing is subtracted: the round's own removal stands charged. Both
       // lanes, because the model is what the tip took, not what an
-      // auto-merge would have produced.
+      // main's own side would have produced.
       for (const shape of [
         'strategy-ours-hole',
         'strategy-ours-hole-binary',
@@ -26546,8 +26671,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // ...including when the merge commit TOUCHED that own file: main
       // never held it, so no event may latch it into the baseline.
       acceptsWithoutCharge('own-file-merge-edit-delete');
-      // Main emptied the file: a legitimately empty auto-merge, not a
-      // merge-file failure, so main's delta is main's.
+      // ...but a path MAIN also added during the round is the baseline's,
+      // and dropping it after the merge is the round's deletion.
+      const addAdd = rejectsWeakening(
+        'addadd-takes-main-then-drops',
+        'test file deleted',
+      );
+      expect(addAdd.rejection).toContain('pkg/x.test.ts');
+      // Main emptied the file, and the merge landed it: main's delta is
+      // main's.
       acceptsWithoutCharge('merge-main-empties');
       // Main replaced the file with a DIRECTORY of the same name: a tree
       // at that path is not the file on either side, so the round that

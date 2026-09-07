@@ -635,9 +635,8 @@ export function measure({ path, tip, pre, events = [] }) {
   // the landed blob is what the merge commit holds.
   //
   // Main's ADDITIONS are never clamped. They raise the baseline whatever
-  // the merge kept, for the same reason presence is not clamped below: a
-  // round that drops what main added during the round removed coverage,
-  // and clamping here would hand it that removal for free.
+  // the merge kept, or a round that drops what main added during the round
+  // gets that removal for free.
   //
   // Main's REMOVALS are credited only as far as they landed. Without that
   // a round could merge main, discard its side, and let the phantom credit
@@ -661,12 +660,17 @@ export function measure({ path, tip, pre, events = [] }) {
     return out;
   };
   for (const ev of events) {
-    // An event whose MODEL moved nothing contributed nothing: the clamp
-    // returns 0 for it whatever landed, so the only thing processing it
-    // could still do is latch `baselinePresent` off a side main never
-    // held -- which is how a file the round authored itself would come to
-    // read as baseline coverage.
+    // PRESENCE follows main's own side, not the model's endpoint and not
+    // the merge result: the baseline holds the file when main held it at
+    // this event, whatever the resolution then did with it. Reading it off
+    // a blob main never held is how a file the round authored itself comes
+    // to read as baseline coverage; reading it off the merge result is how
+    // a round discards a test main added and answers for nothing.
+    if (ev.mainHolds !== undefined) baselinePresent = ev.mainHolds;
     if (sameContent(ev.before, ev.after)) continue;
+    if (ev.mainHolds === undefined) {
+      baselinePresent = ev.after !== null && ev.after !== undefined;
+    }
     const landedRef = ev.landed !== undefined ? ev.landed : ev.after;
     const before = countFile(ev.before, path);
     const after = countFile(ev.after, path);
@@ -685,12 +689,6 @@ export function measure({ path, tip, pre, events = [] }) {
       after.enabled - before.enabled,
       landed.enabled - before.enabled,
     );
-    // PRESENCE is not clamped, only the deltas are. The baseline is what
-    // the round had available to weaken -- the pre-round ref plus what main
-    // landed during the round -- and letting the merge RESULT define it
-    // would let a round discard a test main added and answer for nothing,
-    // which is the one thing the deletion signal exists to catch.
-    baselinePresent = ev.after !== null && ev.after !== undefined;
     const modelledTitles = new Map();
     absorb(modelledTitles, before.enabledTitles, after.enabledTitles);
     const landedTitles = new Map();
