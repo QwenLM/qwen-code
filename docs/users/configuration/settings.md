@@ -823,6 +823,23 @@ When both user-level `.env` files define the same variable, the Qwen-specific
 file wins: `<QWEN_HOME>/.env` (or `~/.qwen/.env` when `QWEN_HOME` is unset) is
 loaded before `~/.env`, and existing environment values are not overwritten.
 
+### Standalone update download source
+
+Set `QWEN_UPDATE_BASE_URL` to use a custom HTTPS release root for standalone updates:
+
+```bash
+export QWEN_UPDATE_BASE_URL="https://downloads.example.com/qwen-code"
+qwen update
+```
+
+For version `0.23.0`, the updater downloads the platform archive, `SHA256SUMS`, and `SHA256SUMS.sig` from `<base-url>/v0.23.0/`. Host these files using the same names and directory layout as an official release. Existing checksum and signature checks still apply, including `QWEN_REQUIRE_SIGNATURE=1` when a signature is required.
+
+The URL must use HTTPS and cannot contain credentials, a query string, or a fragment. Surrounding whitespace and trailing slashes are removed. An empty or whitespace-only value preserves the built-in download sources and their fallback order. When a custom root is set, a failed download does not fall back to the built-in sources.
+
+Configure this variable in the launching shell or a user-level `.env` file. It is rejected from project `.env` and `.qwen/.env` files and from the top-level `settings.json` `env` section at every scope. A user-level `.env` value is loaded at startup; restart Qwen Code after changing it.
+
+This setting applies to `qwen update`, `/update`, and automatic standalone updates. It does not change npm registry version discovery. It is separate from the installer's `QWEN_INSTALL_BASE_URL`, which points directly to a version-specific directory.
+
 ## Command-Line Arguments
 
 Arguments passed directly when running the CLI can override other configurations for that specific session.
