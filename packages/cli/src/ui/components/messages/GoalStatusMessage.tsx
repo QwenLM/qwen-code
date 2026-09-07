@@ -10,6 +10,7 @@ import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
+import { formatTokenCount } from '../../statusLinePresets.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
 interface LegacyGoalStatusMessageProps {
@@ -112,6 +113,14 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   }
   if (goal.activeTimeMs > 0) {
     stats.push(formatDuration(goal.activeTimeMs, { hideTrailingZeros: true }));
+  }
+  if (goal.tokensUsed > 0) {
+    const used = formatTokenCount(goal.tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
   }
   const subtitle = stats.length > 0 ? stats.join(' · ') : null;
   const reason =

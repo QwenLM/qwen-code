@@ -2553,6 +2553,7 @@ describe('ChatPane', () => {
       '[aria-label="Maximize pane"]',
     );
     expect(maximizeBtn).not.toBeNull();
+    expect(maximizeBtn!.querySelector('.lucide-expand')).not.toBeNull();
     // A toggle button always exposes its pressed state; not maximized here.
     expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
     act(() =>
@@ -2565,6 +2566,7 @@ describe('ChatPane', () => {
     render({ onToggleMaximize: () => {}, isMaximized: true });
     const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
     expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.querySelector('.lucide-shrink')).not.toBeNull();
     expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
     // The label flips to "restore" — no stale "maximize" affordance remains.
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
