@@ -147,7 +147,6 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
-import { registerMeshRoutes } from './routes/mesh.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -3134,15 +3133,6 @@ export function createServeApp(
     bridge: primaryBridge,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
-  });
-
-  // Agents and threads (the shared-thread surface). Reads resolve each
-  // thread's status here rather than trusting what is on disk, because the
-  // resolver is the definition of a thread's state and a crash can leave a
-  // stale value behind.
-  registerMeshRoutes(app, {
-    boundWorkspace: primaryBoundWorkspace,
-    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
   });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
