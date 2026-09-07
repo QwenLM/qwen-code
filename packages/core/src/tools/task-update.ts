@@ -36,6 +36,7 @@ import {
   getTask,
   listTasks,
   TaskOwnershipError,
+  TaskOwnerChangedError,
   RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
 import { LEADER_NAME, type SwarmTask } from '../agents/team/types.js';
@@ -474,10 +475,33 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           error: { message: refusal },
         };
       }
+      if (
+        existing.status === 'in_progress' &&
+        existingOwner &&
+        existingOwner !== LEADER_NAME &&
+        ownerChanged &&
+        teamManager.validateTaskOwner(existingOwner) === undefined
+      ) {
+        const msg =
+          `Cannot reassign task #${taskId} from "${existingOwner}" while ` +
+          `that teammate is still active. Shut down or release the current ` +
+          `owner before assigning "${explicitOwner}".`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
     }
 
     let task;
     try {
+      const updateOptions =
+        teammateCallerName !== undefined
+          ? { callerName: teammateCallerName }
+          : shouldDispatchAssignment
+            ? { expectedOwner: existingOwner ?? null }
+            : undefined;
       task = await updateTask(
         teamName,
         taskId,
@@ -491,12 +515,13 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           addBlocks: this.params.addBlocks,
           addBlockedBy: this.params.addBlockedBy,
         },
-        teammateCallerName !== undefined
-          ? { callerName: teammateCallerName }
-          : undefined,
+        updateOptions,
       );
     } catch (err) {
-      if (err instanceof TaskOwnershipError) {
+      if (
+        err instanceof TaskOwnershipError ||
+        err instanceof TaskOwnerChangedError
+      ) {
         return {
           llmContent: err.message,
           returnDisplay: err.message,

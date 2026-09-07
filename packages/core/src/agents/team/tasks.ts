@@ -358,6 +358,22 @@ export class TaskOwnershipError extends Error {
   }
 }
 
+export class TaskOwnerChangedError extends Error {
+  constructor(
+    readonly taskId: string,
+    readonly expectedOwner: string | undefined,
+    readonly actualOwner: string | undefined,
+  ) {
+    const label = (owner: string | undefined) => owner ?? 'unassigned';
+    super(
+      `Task #${taskId} owner changed from "${label(expectedOwner)}" to ` +
+        `"${label(actualOwner)}" before this assignment committed. ` +
+        'Retry task_update using the current task state.',
+    );
+    this.name = 'TaskOwnerChangedError';
+  }
+}
+
 /**
  * Update fields on an existing task.
  * Uses file locking for safe concurrent updates.
@@ -369,6 +385,11 @@ export class TaskOwnershipError extends Error {
  * inside the lock — without that, two teammates can both pass a
  * pre-lock guard on an unowned task and have the second writer
  * silently overwrite the first one's claim.
+ *
+ * `opts.expectedOwner`, when present, adds an optimistic ownership
+ * check for leader-side assignment. `null` means the caller observed
+ * an unowned task. A stale assignment is rejected inside the same lock
+ * before any fields are changed.
  */
 export async function updateTask(
   teamName: string,
@@ -383,7 +404,7 @@ export async function updateTask(
     addBlocks?: string[];
     addBlockedBy?: string[];
   },
-  opts?: { callerName?: string },
+  opts?: { callerName?: string; expectedOwner?: string | null },
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -402,6 +423,16 @@ export async function updateTask(
         throw err;
       }
       const task = JSON.parse(raw) as SwarmTask;
+
+      if (opts && 'expectedOwner' in opts) {
+        const expectedOwner = opts.expectedOwner
+          ? sanitizeName(opts.expectedOwner)
+          : undefined;
+        const actualOwner = task.owner ? sanitizeName(task.owner) : undefined;
+        if (expectedOwner !== actualOwner) {
+          throw new TaskOwnerChangedError(taskId, expectedOwner, actualOwner);
+        }
+      }
 
       if (
         opts?.callerName !== undefined &&

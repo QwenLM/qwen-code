@@ -9,7 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TaskUpdateTool } from './task-update.js';
-import { createTask, getTask } from '../agents/team/tasks.js';
+import { createTask, getTask, updateTask } from '../agents/team/tasks.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
@@ -34,10 +34,11 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 let tmpDir: string;
 const TEAM = 'test-team';
 
-function makeConfig(approvalMode = DEFAULT_MODE) {
+function makeConfig(approvalMode = DEFAULT_MODE, teamManager: unknown = null) {
   return {
     getTeamContext: () => ({ teamName: TEAM }),
     getApprovalMode: () => approvalMode,
+    getTeamManager: () => teamManager,
   } as unknown as Config;
 }
 
@@ -208,6 +209,60 @@ describe('TaskUpdateTool', () => {
     expect(result.llmContent).toContain('unowned pending task');
     const reloaded = await getTask(TEAM, task.id);
     expect(reloaded?.status).toBe('completed');
+  });
+
+  it('rejects reassignment while the current owner is active', async () => {
+    const dispatchedOwners: string[] = [];
+    const teamManager = {
+      validateTaskOwner: () => undefined,
+      dispatchAssignedTask: vi.fn(async (task: { owner?: string }) => {
+        if (task.owner) dispatchedOwners.push(task.owner);
+        return true;
+      }),
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Assigned',
+      description: 'desc',
+      owner: 'alice',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(String(result.llmContent)).toContain('still active');
+    expect(dispatchedOwners).toEqual([]);
+    expect((await getTask(TEAM, task.id))?.owner).toBe('alice');
+  });
+
+  it('allows reassignment after the current owner becomes inactive', async () => {
+    const dispatchedOwners: string[] = [];
+    const teamManager = {
+      validateTaskOwner: (owner: string) =>
+        owner === 'alice' ? 'alice is inactive' : undefined,
+      dispatchAssignedTask: vi.fn(async (task: { owner?: string }) => {
+        if (task.owner) dispatchedOwners.push(task.owner);
+        return true;
+      }),
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Recovery',
+      description: 'desc',
+      owner: 'alice',
+    });
+    await updateTask(TEAM, task.id, { status: 'in_progress' });
+
+    const result = await tool
+      .build({ taskId: task.id, owner: 'bob' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(dispatchedOwners).toEqual(['bob']);
+    expect((await getTask(TEAM, task.id))?.owner).toBe('bob');
   });
 
   it('validates required taskId', () => {

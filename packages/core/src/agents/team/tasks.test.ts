@@ -393,6 +393,44 @@ describe('tasks', () => {
       expect(['alice', 'bob']).toContain(final?.owner);
     });
 
+    it('rejects a stale leader assignment when the expected owner changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+      const options = {
+        expectedOwner: null,
+      };
+
+      const results = await Promise.allSettled([
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'alice' },
+          options,
+        ),
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'bob' },
+          options,
+        ),
+      ]);
+
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toBeInstanceOf(Error);
+      expect((rejected[0]!.reason as Error).message).toContain('owner changed');
+      const final = await getTask('team', task.id);
+      expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
     it('lets the leader (no callerName) override an existing owner', async () => {
       const task = await createTask('team', {
         subject: 'Shared',
