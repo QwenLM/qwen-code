@@ -142,7 +142,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
     TranscriptSliceView | undefined
   >();
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | undefined>();
+  const [refreshError, setRefreshError] = useState<string | undefined>();
+  const [actionError, setActionError] = useState<string | undefined>();
+  const error = actionError ?? refreshError;
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
@@ -157,9 +159,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
       setAgents(nextAgents.agents);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
-      setError(undefined);
+      setRefreshError(undefined);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setRefreshError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [client, openId]);
 
@@ -189,11 +191,22 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
   const mutate = useCallback(
     async (action: () => Promise<unknown>) => {
       setPending(true);
+      setActionError(undefined);
       try {
-        await action();
+        const result = await action();
         await refresh();
+        if (
+          result !== null &&
+          typeof result === 'object' &&
+          'dispatchError' in result &&
+          typeof result.dispatchError === 'string'
+        ) {
+          setActionError(
+            `The change was saved, but the agent could not start: ${result.dispatchError}`,
+          );
+        }
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setActionError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setPending(false);
       }
@@ -221,9 +234,10 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
           onReply={() =>
             void mutate(async () => {
               if (!draft.trim()) return;
-              await client.postReply(openId, draft);
+              const result = await client.postReply(openId, draft);
               setDraft('');
               setPreview(undefined);
+              return result;
             })
           }
           onBack={() => {
@@ -240,7 +254,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
               .getRunTranscript(openId, runId)
               .then(setTranscript)
               .catch((cause) =>
-                setError(
+                setActionError(
                   cause instanceof Error ? cause.message : String(cause),
                 ),
               );
@@ -251,8 +265,9 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
           }
           onMarkDone={() =>
             void mutate(async () => {
-              await client.markDone(openId);
+              const result = await client.markDone(openId);
               setTranscript(undefined);
+              return result;
             })
           }
           onAssign={(assignee) =>
@@ -287,6 +302,7 @@ export function ThreadsRoute({ api, onOpenTranscript }: ThreadsRouteProps) {
           void mutate(async () => {
             const created = await client.createThread(input);
             setOpenId(created.id);
+            return created;
           })
         }
       />

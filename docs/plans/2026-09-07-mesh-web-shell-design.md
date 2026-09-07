@@ -170,6 +170,8 @@ Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale:
 
 The composer preview and the post-send result share this table, so a reason reads the same in both places. Missing or invalid agent definitions are not admission reasons: only the runtime loader can know them, and they appear as a typed launch failure on the run row.
 
+A mutation may be durable even when the immediate dispatcher wake fails. The UI says **the change was saved, but the agent could not start**, includes the typed dispatcher error, and keeps that action error visible across background refreshes. It must not report the whole mutation as failed or silently leave a queued run looking merely slow.
+
 Everything else follows from naming the actor and the act: _alice asked a question_, never _Blocked_. One vocabulary end to end — the button that says **Mark done** produces a thread that reads **done**, and `thread_review` surfaces as _submitted for review_ everywhere. Failures state the stage and the fix in the interface's voice and never apologise: **alice's run failed at launch: agent definition "log-reader" is unavailable.** Refusals name the alternative and link it: **this thread has 1 sub-thread that is not done. Finish or close th_91c first.**
 
 ## 7. What step 9 must not do

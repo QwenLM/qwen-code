@@ -217,7 +217,9 @@ future fallback. Marking a thread done now scans its complete descendant tree,
 refuses live children, cancels its own work, and writes the terminal state in
 one workspace transaction, so a racing agent cannot create an open child after
 the check. Repeating the command does not enqueue another `child_done` report.
-This path was source-inspected only.
+The Web Shell also surfaces the dispatcher's typed failure after a mutation as
+"saved, but the agent could not start"; periodic refreshes no longer erase that
+action error a second later. These paths were source-inspected only.
 
 ### Step 10 — Channel notifications
 
