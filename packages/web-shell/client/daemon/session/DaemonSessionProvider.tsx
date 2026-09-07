@@ -133,6 +133,9 @@ import type {
   DaemonSessionOwnerGuard,
   DaemonSessionProviderProps,
   DaemonProductSessionContext,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementSubscribe,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
   SettledPrompt,
@@ -155,6 +158,9 @@ export type {
   DaemonNoticeOperation,
   DaemonNoticeSeverity,
   DaemonPromptImage,
+  DaemonPromptSettledEvent,
+  DaemonPromptSettledListener,
+  DaemonPromptSettlementOutcome,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
@@ -673,6 +679,9 @@ const DaemonTurnNavigationContext = createContext<
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
+const DaemonPromptSettlementContext = createContext<
+  DaemonPromptSettlementSubscribe | undefined
+>(undefined);
 interface SessionNoticesValue {
   notices: readonly DaemonSessionNotice[];
   dismissNotice(id: string): void;
@@ -1052,6 +1061,37 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
+  const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
+    new Set(),
+  );
+  const publishedPromptSettlementsRef = useRef(new Set<string>());
+  const subscribeToPromptSettlement =
+    useCallback<DaemonPromptSettlementSubscribe>((listener) => {
+      promptSettlementListenersRef.current.add(listener);
+      return () => promptSettlementListenersRef.current.delete(listener);
+    }, []);
+  const publishPromptSettlement = useCallback(
+    (event: DaemonPromptSettledEvent) => {
+      const key = getPromptSettledKey(event.sessionId, event.promptId);
+      if (publishedPromptSettlementsRef.current.has(key)) return;
+      publishedPromptSettlementsRef.current.add(key);
+      const listeners = [...promptSettlementListenersRef.current];
+      queueMicrotask(() => {
+        for (const listener of listeners) {
+          if (!promptSettlementListenersRef.current.has(listener)) continue;
+          try {
+            listener(event);
+          } catch (error) {
+            console.error(
+              '[DaemonSessionProvider] prompt settlement listener failed',
+              error,
+            );
+          }
+        }
+      });
+    },
+    [],
+  );
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -3437,6 +3477,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   },
                 );
               }
+              if (
+                event.type === 'turn_complete' ||
+                event.type === 'turn_error'
+              ) {
+                // `turn_error` adds its terminal error block after the earlier
+                // pre-settlement flush. Commit that projection before hosts run.
+                flushTranscriptSync();
+                const settlement = promptSettledFromTurnEvent(
+                  activeSession.sessionId,
+                  event,
+                );
+                if (settlement) publishPromptSettlement(settlement);
+              }
               const pendingRepair = liveJournalRepairRef.current;
               if (
                 pendingRepair?.sessionId === activeSession.sessionId &&
@@ -4075,6 +4128,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     clearNotices,
     addNotice,
     dismissNotice,
+    publishPromptSettlement,
     setConnectionSynchronous,
   ]);
 
@@ -4750,7 +4804,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     <DaemonTranscriptHistoryContext.Provider
                       value={transcriptHistoryValue}
                     >
-                      {children}
+                      <DaemonPromptSettlementContext.Provider
+                        value={subscribeToPromptSettlement}
+                      >
+                        {children}
+                      </DaemonPromptSettlementContext.Provider>
                     </DaemonTranscriptHistoryContext.Provider>
                   </DaemonSessionOwnerGuardContext.Provider>
                 </DaemonActionsContext.Provider>
@@ -4761,6 +4819,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       </DaemonTurnNavigationContext.Provider>
     </DaemonStoreContext.Provider>
   );
+}
+
+function promptSettledFromTurnEvent(
+  sessionId: string,
+  event: DaemonEvent,
+): DaemonPromptSettledEvent | undefined {
+  if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
+    return undefined;
+  }
+  const promptId = eventPromptId(event);
+  if (!promptId) return undefined;
+  if (event.type === 'turn_error') {
+    const data = isRecord(event.data) ? event.data : undefined;
+    const code = getString(data, 'code');
+    return {
+      sessionId,
+      promptId,
+      outcome: 'failed',
+      error: {
+        message: getString(data, 'message') ?? 'Prompt failed',
+        ...(code ? { code } : {}),
+      },
+    };
+  }
+  const stopReason =
+    (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+    'end_turn';
+  return {
+    sessionId,
+    promptId,
+    outcome: stopReason === 'cancelled' ? 'cancelled' : 'completed',
+    stopReason,
+  };
 }
 
 /**
@@ -5151,6 +5242,23 @@ export function useDaemonPromptStatus(): DaemonPromptStatus {
     );
   }
   return promptStatus;
+}
+
+export function useDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  const subscribe = useContext(DaemonPromptSettlementContext);
+  const listenerRef = useRef(listener);
+  listenerRef.current = listener;
+  useEffect(
+    () => subscribe?.((event) => listenerRef.current?.(event)),
+    [subscribe],
+  );
+  if (!subscribe) {
+    throw new Error(
+      'useDaemonPromptSettled must be used within DaemonSessionProvider',
+    );
+  }
 }
 
 export function useDaemonConnection(): DaemonConnectionState {
