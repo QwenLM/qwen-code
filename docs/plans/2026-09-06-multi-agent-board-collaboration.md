@@ -1,8 +1,9 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: Revised after source-backed review. The admission foundation and three
-> runtime preparation contracts are committed on #11206; the workspace
-> transaction, durability contract, and execution path remain unbuilt.
+> Status: Revised after source-backed review. Admission, runtime preparation,
+> capability, and versioned storage are committed on #11206. The hidden-host
+> launcher is locally implemented on its stacked step branch; dispatch remains
+> unbuilt.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: targeted tests, build, typecheck, and lint are recorded in §0.2;
 > no agent has run this design end to end
@@ -85,12 +86,17 @@ continuations already emit `EXTERNAL_MESSAGE`, and cold revival explicitly
 seeds the continuation prompt in the transcript. Mesh still uses structured
 input because correlation, not transcript presence, is the missing contract.
 
-**Verified locally in steps 2-3, not yet end to end.** The capability table and
+**Verified locally in steps 2-4, not yet end to end.** The capability table and
 shell predicate pass their named tests. The versioned store tests exercise
 newer-version refusal, v0 migration and backup recovery, two-process sequence
 allocation, source-first outbox replay, persisted admission outcomes, and
-tree-wide token accounting. These are local observations only until the merged
-step is green in #11206; they still do not launch an agent or run a dispatcher.
+tree-wide token accounting. The step-4 tests exercise invocation-time tool
+refusal, typed launcher outcomes, a singleton hidden host, default-catalog
+exclusion, and host reload before a subsequent launch. The ACP bridge and child
+handler have focused route tests. These are local observations only until the
+merged step is green in #11206; the reload test runs the real bridge reaper
+in-process with a fake ACP child, not a daemon process, and no mesh agent or
+dispatcher has run against a live model.
 
 **Still never prototyped end to end.** No mesh agent has been launched, no
 thread has been dispatched, no prompt in §6 has been sent to a model. The
@@ -519,23 +525,27 @@ action on the child caused it.
 
 ## 5. Module map
 
-Pre-existing on this branch (five production files plus two tests; nothing
-starts an agent yet):
+Implemented through the step-6 stacked branch; the shared runtime turn seam is
+kept in the next isolated child PR:
 
-| File                                      | Responsibility                                        |
-| ----------------------------------------- | ----------------------------------------------------- |
-| `core/src/agents/mesh/types.ts`           | Entities and limits                                   |
-| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD                      |
-| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                                   |
-| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                               |
-| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock        |
-| `core/src/agents/mesh/thread-status.ts`   | Aggregate status over every run's close obligation    |
-| `core/src/agents/mesh/run-lifecycle.ts`   | Run close, terminal state, status application, outbox |
-| `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding       |
-| `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers        |
-| `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only           |
-| `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports   |
-| `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime       |
+| File                                      | Responsibility                                         |
+| ----------------------------------------- | ------------------------------------------------------ |
+| `core/src/agents/mesh/types.ts`           | Entities and limits                                    |
+| `core/src/agents/mesh/mesh-store.ts`      | Paths, validation, locking, CRUD, singleton host claim |
+| `core/src/agents/mesh/mentions.ts`        | `@name` → agent ids                                    |
+| `core/src/agents/mesh/dispatch-policy.ts` | `decideDispatch` — pure                                |
+| `core/src/agents/mesh/thread-actions.ts`  | `postMessage` — append and book under one lock         |
+| `core/src/agents/mesh/thread-status.ts`   | Aggregate status over every run's close obligation     |
+| `core/src/agents/mesh/run-lifecycle.ts`   | Run close, terminal state, status application, outbox  |
+| `core/src/agents/mesh/run-context.ts`     | Per-turn ambient `(agent, run, thread)` binding        |
+| `core/src/agents/mesh/prompt.ts`          | Turn envelope: thread frame, delta, gap, peers         |
+| `core/src/agents/mesh/capability.ts`      | Read-only name and invocation boundary                 |
+| `core/src/agents/mesh/launcher.ts`        | Persona conversion and typed local launch              |
+| `core/src/tools/mesh-thread.ts`           | The six thread tools; ambient identity only            |
+| `core/src/agents/mesh/dispatcher.ts`      | FIFO selection, runtime entry point, parent reports    |
+| `core/src/agents/mesh/dispatch-port.ts`   | The one binding to the background-agent runtime        |
+| `cli/src/serve/mesh/mesh-host-session.ts` | Hidden ACP host ownership, keepalive, reload            |
+| `acp-bridge` + `cli/src/acp-integration/` | Private daemon-to-host launch control                  |
 
 ### 5.1 Local review correction — committed and verified
 
@@ -552,11 +562,14 @@ starts an agent yet):
 5. Stale daemon-session comments and the unreachable `explicit_routing` outcome
    were removed. The latter remains a target-resolution rule.
 
-Steps 1-3 now cover admission, capability classification, and the versioned
-storage protocol. Delivery acknowledgement, assignment triggers, status
-commands, provenance producers, and transcript slices remain scheduled below;
-their storage fields exist because v1 deliberately batches the full §3 schema,
-not because those behaviors have run.
+Steps 1-3 cover admission, capability classification, and the versioned storage
+protocol. Step 4 now has a source-tested hidden host and typed launcher; it is
+not complete until the #11206 CI gate passes. Its daemon-process observation is
+deferred to step 6, where the dispatcher first gives the host owner a server
+caller. Delivery acknowledgement, assignment triggers, status commands,
+provenance producers, and transcript slices remain scheduled below; their
+storage fields exist because v1 deliberately batches the full §3 schema, not
+because those behaviors have run.
 
 ### 5.2 Order of work
 
@@ -580,6 +593,9 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    launch path. Prove resident continue and transcript-backed revive separately;
    definition absence produces `agent_unavailable`, while registry saturation
    produces `capacity_wait`. Runtime preparation is integrated on this branch.
+   The source implementation reuses the background-agent launch path and the
+   scheduled-task keepalive resume deadline; its stacked step remains subject
+   to the #11206 whole-branch CI gate and live-model validation in step 7.
 5. **Run envelope and tools** — populate the §3 delivery/provenance fields, add
    the prompt assembler, correlated mesh external-input/consumed events,
    per-turn ambient mesh context, incremental run usage recording, and minimal `thread_post`,
@@ -631,7 +647,7 @@ child PR merges:
 ```bash
 cd packages/core
 npx vitest run src/agents/mesh/capability.test.ts
-# 1 file, 10 tests passed
+# 1 file, 12 tests passed (step 4 adds invocation and definition-narrowing checks)
 ```
 
 Supporting local evidence for step 3; its gate is likewise #11206 CI after the
@@ -647,10 +663,32 @@ npx vitest run src/agents/mesh/mesh-store.test.ts \
 # 5 files, 59 tests passed
 ```
 
-The earlier foundation's targeted lint and core typecheck passed. Step 3 has
-run only the named tests above; compile/style health waits for the whole-branch
-CI gate. None of these checks validate the unbuilt execution path. Update the
-test counts above when the implementation changes.
+Supporting local evidence for step 4; #11206 CI remains its gate:
+
+```bash
+cd packages/core
+npx vitest run src/agents/background-agent-resume.test.ts \
+  src/agents/background-tasks.test.ts \
+  src/agents/mesh/capability.test.ts \
+  src/agents/mesh/launcher.test.ts
+# 4 files, 218 tests passed
+
+cd packages/acp-bridge
+npx vitest run src/bridge.test.ts
+# 1 file, 914 tests passed
+
+cd packages/cli
+npx vitest run src/acp-integration/acpAgent.test.ts
+# 1 file, 629 tests passed
+npx vitest run src/serve/scheduled-task-keepalive.test.ts \
+  src/serve/mesh/mesh-host-session.test.ts
+# 2 files, 34 tests passed; in-process bridge reload 4.3 ms after a 20 ms reap
+```
+
+The earlier foundation's targeted lint and core typecheck passed. Step 4's
+targeted `acp-bridge` package build passed; whole-branch compile/style health
+still waits for #11206 CI. None of these checks validates a mesh turn against a
+live model. Update the test counts above when the implementation changes.
 
 Future unit coverage is required for: all twelve admission outcomes; unknown
 mention suppressing assignee fallback; assignment and parent-dependency triggers;
@@ -677,12 +715,10 @@ Still to build:
 
 | Piece                                                                                                       | Where                                  |
 | ----------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Invocation-time enforcement of the read-only shell predicate                                                | launcher/tool hook in steps 4-5        |
-| Hidden host-session owner and programmatic launcher                                                         | `core/src/agents/`                     |
 | Run envelope, delivery state, prompt assembler, ambient run context                                         | `core/src/agents/mesh/`                |
 | Consume the integrated correlated external-input runtime contract                                           | `core/src/agents/mesh/`                |
 | Thread tools: `thread_post`, `thread_wait`, `thread_block`, `thread_review`, `thread_create`, `thread_read` | `core/src/tools/`                      |
-| Dispatcher, reconciliation, FIFO, sweeper, and keepalive                                                    | `cli/src/serve/mesh/`                  |
+| Dispatcher, reconciliation, FIFO, and sweeper                                                               | `cli/src/serve/mesh/`                  |
 | REST: agents, threads, posts, runs                                                                          | `cli/src/serve/routes/mesh.ts`         |
 | Channel notifications for the four events                                                                   | reuse the channel workers              |
 | Web Shell: roster, thread list, thread view, run transcripts                                                | `web-shell/client/`                    |
@@ -1004,6 +1040,6 @@ write code, which decision 1 defers until isolation is settled.
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 
-**验证边界**：当前规则/存储层已有定向测试、类型与 lint 证据；launcher、线程工具、dispatcher、delivery watermark、恢复、REST、Web Shell、通知都还没端到端跑通。§5.2 把 live vertical slice 提前，§9 记录 11 个仍需产品或存储取舍的问题。
+**验证边界**：当前规则、存储、capability 和 launcher 路径已有定向测试与编译证据；隐藏 host 的 reload 测试使用注入 bridge，mesh agent 尚未对真实模型运行。线程工具、dispatcher、delivery watermark、恢复、REST、Web Shell、通知都还没端到端跑通。§5.2 把 live vertical slice 提前，§9 记录仍需产品或存储取舍的问题。
 
 </details>

@@ -190,6 +190,7 @@ describe('sessions list command', () => {
 
     expect(mockListSessions).toHaveBeenCalledWith({
       size: 10,
+      excludeSourceType: 'mesh',
     });
   });
 
@@ -200,6 +201,7 @@ describe('sessions list command', () => {
 
     expect(mockListSessions).toHaveBeenCalledWith({
       size: 20,
+      excludeSourceType: 'mesh',
     });
   });
 

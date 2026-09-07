@@ -47,8 +47,21 @@ Supporting local observation: `mesh-store.test.ts`, `workspace-lock.test.ts`,
 ### Step 4 — Hidden host session, keepalive, launcher
 
 Lands: one hidden `Config` + registry per workspace; keepalive registration reusing `scheduled-task-keepalive.ts`; `launchMeshAgent(agent)` that builds the persona through `convertToRuntimeConfig` and starts a background agent; typed launch results `started | capacity_wait | agent_unavailable | launch_failed`.
-Gate: (a) with `QWEN_CODE_MAX_BACKGROUND_AGENTS=1`, launching a second agent returns `capacity_wait` and books nothing; (b) an agent whose `agentType` names no definition returns `agent_unavailable` and no runtime is created; (c) the host session does not appear in the session list API; (d) after the reaper closes the host session, keepalive reloads it and the next launch succeeds without a daemon restart; (e) `continueResidentAgent` returns `continued` for a completed resident and `capacity_wait` never triggers a cold revive (#11204's tests, now on this branch).
-Evidence: (d) is the one that needs the daemon; report the reaper timeout used and the observed reload latency.
+Gate: (a) with `QWEN_CODE_MAX_BACKGROUND_AGENTS=1`, launching a second agent returns `capacity_wait` and books nothing; (b) an agent whose `agentType` names no definition returns `agent_unavailable` and no runtime is created; (c) the host session does not appear in the session list API; (d) after the real bridge reaper closes the host session, keepalive reloads it and the next launch succeeds without recreating the bridge; (e) `continueResidentAgent` returns `continued` for a completed resident and `capacity_wait` never triggers a cold revive (#11204's tests, now on this branch).
+Evidence: report the reaper timeout and observed reload latency from an in-process `AcpSessionBridge` with a fake ACP child. Step 4 deliberately has no server-bootstrap caller before the dispatcher exists, so step 7 repeats this observation through the daemon dispatcher instead of adding unused wiring here.
+
+Supporting local observations on the stacked step branch: `capability.test.ts`
+and `launcher.test.ts` pass 16 tests; `background-agent-resume.test.ts` passes
+52 tests including cold-revive capability restoration; `background-tasks.test.ts`
+passes 150 tests including typed resident continuation; `mesh-host-session.test.ts`
+and `scheduled-task-keepalive.test.ts` pass 34 tests; `bridge.test.ts` passes
+914 tests; and `acpAgent.test.ts` passes 629 tests. A targeted `acp-bridge`
+package build also succeeds. The real `AcpSessionBridge` reaper was configured
+to 20 ms in-process with a fake ACP child; it closed the host, a second channel
+resumed the same session, and the next launch returned `started` after a
+measured 4.3 ms reload (1,000 ms resume deadline), without recreating the
+bridge. The child merge and #11206's whole-branch CI remain the step gate; the
+daemon-process observation is part of step 7 for the reason above.
 
 ### Step 5 — Run envelope, tools, runtime correlation
 
@@ -83,12 +96,12 @@ Still open in step 6: `runWithMeshRunContext` is not yet established at the turn
 
 Lands: nothing new; this is a run.
 Gate: the §8 demo steps 1-5 complete against two real agents on a build-capable machine, plus: a forced `queueExternalInput` miss (kill the agent between its last tool round and finish) is rebooked and delivered on the next run; a synthetic ping-pong between two _running_ agents on one thread stops at 12 with `turn_budget_exhausted` in the thread and one channel-less notification record.
-Evidence: the thread JSON files after the run, the two agents' transcript slices, and the observed wall-clock between the child's `thread_review` and the parent's wake. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
+Evidence: the thread JSON files after the run, the two agents' transcript slices, the observed wall-clock between the child's `thread_review` and the parent's wake, and the host reaper timeout plus daemon-observed reload latency. If any prompt in §6 had to change to make the model close its run explicitly, the changed prompt and the failure it fixed.
 
 ### Step 8 — Dispatcher reliability
 
-Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stall sweeper; full outbox replay on startup.
-Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
+Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/cancel (`cancelling` state, runtime abort); restart recovery (`running` → reconcile → resume once → terminal on second failure); stale host-session binding replacement after a definitive resume failure; stall sweeper; full outbox replay on startup.
+Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; a stored host session that cannot be resumed is replaced once; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
 Evidence: the injection matrix as a table in the PR, one row per test, with the asserted final state.
 
 ### Step 9 — REST and Web Shell

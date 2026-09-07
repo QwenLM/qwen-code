@@ -52,6 +52,7 @@ import {
   stripAnsiAndControl,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
+import { MESH_HOST_SESSION_SOURCE_TYPE } from '../runtime/mesh-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
@@ -1964,7 +1965,9 @@ export async function loadCliConfig(
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
-      sessionData = await sessionService.loadLastSession();
+      sessionData = await sessionService.loadLastSession({
+        excludeSourceType: MESH_HOST_SESSION_SOURCE_TYPE,
+      });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
