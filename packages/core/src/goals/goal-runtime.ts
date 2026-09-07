@@ -1208,6 +1208,11 @@ export function createGoalRuntime(
           );
           return;
         }
+        debugLogger.debug(
+          'Checkpoint check failed; counted as a stall only if the window overflowed.',
+          `windowTruncated=${window.truncated}`,
+          error,
+        );
         if (window.truncated) {
           // A check that produced nothing while the window overflows is a
           // compaction that gave no relief, whatever stopped it: a result
@@ -1218,10 +1223,6 @@ export function createGoalRuntime(
           // overflowing window run a Goal in circles: each turn paid the
           // call, kept the same cursor, and was told to retry, with nothing
           // but the token budget left to stop it.
-          debugLogger.debug(
-            'Checkpoint check failed on an overflowing window; counting it as a stall.',
-            error,
-          );
           await finishCheckpointCheck(attempt, 'stalled');
           return;
         }

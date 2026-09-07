@@ -36,6 +36,28 @@ import type {
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
+// Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
+// checkpoint check leaves a trace on every arm of its handler. The wrapper
+// delegates to the real logger, so logging behavior itself is unchanged.
+const runtimeDebugCalls = vi.hoisted(() => [] as unknown[][]);
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      return {
+        ...logger,
+        debug: (...args: unknown[]) => {
+          if (tag === 'GOAL_RUNTIME') runtimeDebugCalls.push(args);
+          logger.debug(...args);
+        },
+      };
+    },
+  };
+});
+
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
 function deferred<T>() {
@@ -2152,6 +2174,7 @@ describe('goal runtime', () => {
   it('stops a Goal whose verifier never answers on an overflowing window', async () => {
     const { journal, host, runtime, checkpointVerifier, setRecords } =
       stallHarness();
+    runtimeDebugCalls.length = 0;
     // The reported loop: one long turn overflowed the window, and every
     // checkpoint after it timed out. Nothing was ever folded into claims,
     // the cursor never moved, and each new turn was told to retry.
@@ -2205,6 +2228,14 @@ describe('goal runtime', () => {
     expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
     // No fourth continuation was minted.
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    // Every failed check leaves the same trace, so an investigation reads
+    // why the verifier failed from the first overflow on.
+    expect(runtimeDebugCalls).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    for (const [message, windowLabel, loggedError] of runtimeDebugCalls) {
+      expect(message).toContain('Checkpoint check failed');
+      expect(windowLabel).toBe('windowTruncated=true');
+      expect(loggedError).toBeInstanceOf(Error);
+    }
   });
 
   it('stops a Goal whose verifier keeps returning unusable checkpoint results', async () => {
@@ -2283,6 +2314,7 @@ describe('goal runtime', () => {
 
   it('keeps the stall streak through a provider failure on a window with room', async () => {
     const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    runtimeDebugCalls.length = 0;
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
 
     let records: RuntimeRecord[] = [];
@@ -2309,6 +2341,15 @@ describe('goal runtime', () => {
       activity: 'running',
       goal: { status: 'active', checkpointStalls: 1 },
     });
+    // The room arm leaves the same trace the truncated arm does: the
+    // discarded error is diagnosable from the first failure, not only once
+    // the window overflows.
+    expect(runtimeDebugCalls).toHaveLength(1);
+    const [message, windowLabel, loggedError] = runtimeDebugCalls[0]!;
+    expect(message).toContain('Checkpoint check failed');
+    expect(windowLabel).toBe('windowTruncated=false');
+    expect(loggedError).toBeInstanceOf(Error);
+    expect((loggedError as Error).message).toBe('provider failed');
     expect(host.started).toHaveLength(3);
   });
 
