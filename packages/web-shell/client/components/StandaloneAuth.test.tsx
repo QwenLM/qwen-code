@@ -213,6 +213,9 @@ it('renders the zh-CN copy for an invalid token', async () => {
   expect(container.textContent).toContain('连接到 Qwen Code');
   expect(container.textContent).toContain('令牌无效或已过期');
   expect(container.textContent).not.toContain('Invalid or expired');
+  // The token-safety hint is the only in-UI warning distinguishing the real
+  // gate from a look-alike page; pin it per language.
+  expect(container.textContent).toContain('完整访问权限');
 });
 
 it('probes the daemon capabilities endpoint', async () => {
@@ -351,6 +354,31 @@ it('leaves the submit button enabled once the token form is up', async () => {
   await mount();
   expect(container.querySelector('input')).not.toBeNull();
   expect(submitButton().disabled).toBe(false);
+  expect(container.textContent).toContain('grants full access to the daemon');
+});
+
+it('resets the live region when a retry probe starts', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockImplementation(hangingFetch());
+  vi.stubGlobal('fetch', fetch);
+  await mount('wrong');
+  expect(container.textContent).toContain('Invalid or expired');
+  act(() => {
+    const input = container.querySelector('input')!;
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'good');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  // The operator must see the submit accepted, not the stale 401 copy, for
+  // the whole in-flight probe.
+  const live = container.querySelector('[role="status"]');
+  expect(live?.textContent).toContain('Connecting');
+  expect(live?.textContent).not.toContain('Invalid or expired');
 });
 
 it('keeps a manually typed token after a rejected submit', async () => {

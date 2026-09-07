@@ -160,6 +160,16 @@ it('reads wildcard-ness from the bound address, not the spelling', () => {
     { label: 'Local', url: 'http://127.0.0.1:43210' },
     { label: 'Network (en0)', url: 'http://192.168.1.7:43210' },
   ]);
+  // The defensive fallback (boot hands opts.hostname over when the socket
+  // address is unavailable) can carry whitespace or casing; that
+  // normalisation lives in the entries helper and stays exercised here.
+  for (const bound of [' 0.0.0.0 ', '::FFFF:0.0.0.0']) {
+    expect(
+      remoteQuickstartAddresses('0.0.0.0', bound, 43210, false, {
+        en0: [iface('192.168.1.7', 'IPv4')],
+      }),
+    ).toEqual(ipv4Shape);
+  }
 });
 
 it('picks the loopback the :: listener actually answers on', () => {
@@ -266,6 +276,32 @@ it('encodes credentials only in deliberate QR output, not address lines', async 
       call[0].startsWith('Generated bearer token'),
     ),
   ).toHaveLength(1);
+});
+
+it('prints https authorities and omits the plaintext warning under TLS', async () => {
+  stubIsTTY(true);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: true,
+    token: 'gen-token-tls',
+    generated: true,
+    web: true,
+  });
+  expect(mocks.line).toHaveBeenCalledWith('Address: https://192.168.1.2:4170');
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'https://192.168.1.2:4170/#token=gen-token-tls',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
+    'HTTP is unencrypted',
+  );
 });
 
 it('prints the generated bearer line verbatim, exactly once', async () => {
@@ -415,11 +451,6 @@ it('survives a throwing stdout writer', async () => {
   }
 });
 
-const lanInterfaces = {
-  lo0: [iface('127.0.0.1', 'IPv4', true), iface('::1', 'IPv6', true)],
-  en0: [iface('192.168.1.7', 'IPv4'), iface('fd12:3456::1', 'IPv6')],
-};
-
 describe('wildcard enumeration and QR candidate', () => {
   afterEach(() => stubIsTTY(undefined));
 
@@ -480,16 +511,23 @@ describe('wildcard enumeration and QR candidate', () => {
     );
   });
 
-  it('says so when no QR candidate exists', async () => {
+  it('says so when a wildcard bind has interfaces but no dialable candidate', async () => {
+    // A stable operator token at a captured stdout: the fallback line must
+    // come from the missing-candidate guard, not from the QR suppression
+    // path — deleting the guard would return silently here.
     await printRemoteQuickstart({
-      bind: 'fe80::1%en0',
-      boundAddress: 'fe80::1%en0',
+      bind: '0.0.0.0',
+      boundAddress: '0.0.0.0',
       port: 4170,
       tls: false,
-      token: 'generated-token-000000',
-      generated: true,
+      token: 'stable-secret',
+      generated: false,
       web: true,
-      interfaces: lanInterfaces,
+      interfaces: {
+        lo0: [iface('127.0.0.1', 'IPv4', true)],
+        docker0: [iface('172.17.0.1', 'IPv4')],
+        en0: [iface('203.0.113.7', 'IPv4')],
+      },
     });
     expect(mocks.generate).not.toHaveBeenCalled();
     expect(mocks.line).toHaveBeenCalledWith(

@@ -59,8 +59,13 @@ export interface ServeOptions {
   port: number;
   /**
    * Bearer token required on every request. Optional when bound to loopback
-   * (developer convenience); required when bound beyond loopback (boot fails
-   * without one — see runQwenServe).
+   * (developer convenience). On a non-loopback bind with neither this option
+   * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
+   * prints it once instead of refusing; read it back from
+   * `RunHandle.resolvedToken` — the only programmatic channel, since the
+   * value is never exported to the environment. An explicitly empty value is
+   * a supplied source, not an absent one, and still fails the remote-bind
+   * check.
    */
   token?: string;
   mode: ServeMode;

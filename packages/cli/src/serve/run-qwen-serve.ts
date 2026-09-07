@@ -726,7 +726,6 @@ export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
   tls = false,
-  boundFamily?: 'IPv4' | 'IPv6',
   ipv6LoopbackAssigned: boolean = hostAssignsIpv6Loopback(),
 ): string {
   const scheme = tls ? 'https' : 'http';
@@ -740,26 +739,15 @@ export function formatChannelWorkerDaemonUrl(
   // binds `::` while its loopback carries no `::1` (e.g.
   // `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. The old
   // spelling-based rule handed the latter `[::1]`, and the first worker's
-  // `fetch failed` exited the daemon. The v4 wildcard keeps v4 loopback:
-  // measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
-  //
-  // An EMPTY --hostname decides by the socket that actually bound, not by
-  // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
-  // for it and falls back to `0.0.0.0` when IPv6 is unavailable, so on the
-  // fallback host the socket is IPv4 while the spelling said IPv6 — handing
-  // workers `[::1]` there dialled an address nothing listens on, and the
-  // first worker's failure exited the daemon. Explicit `::`/`[::]` and
+  // `fetch failed` exited the daemon. Explicit `::`/`[::]` and
   // `0.0.0.0` keep their spelling-based family mapping: those binds fail
   // loud when their family is unavailable, so the spelling cannot lie about
-  // them.
+  // them. An EMPTY --hostname never reaches here: runQwenServe refuses it as
+  // operator error before any listener exists, so there is no empty-host
+  // branch to keep in sync with the socket family.
   const v6Loopback = ipv6LoopbackAssigned
     ? `${scheme}://[::1]:${port}`
     : `${scheme}://127.0.0.1:${port}`;
-  if (normalized === '') {
-    return boundFamily === 'IPv4'
-      ? `${scheme}://127.0.0.1:${port}`
-      : v6Loopback;
-  }
   if (canonicalIp === '::') {
     return v6Loopback;
   }
@@ -3369,9 +3357,13 @@ async function runQwenServeImpl(
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
+  // Generation keys on the operator's spelling (with the literal `localhost`
+  // resolved once). The fail-closed backstop for a spelling that resolves
+  // off-loopback is the resolved-address refusal further below — it must not
+  // be folded into this operand, which by construction never sees it.
   const { token, generated: generatedToken } = resolveRemoteServeToken(
     optsIn.token,
-    isLoopbackBind(optsIn.hostname) || isLoopbackBind(bindHostname),
+    isLoopbackBind(optsIn.hostname),
   );
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
@@ -4315,9 +4307,12 @@ async function runQwenServeImpl(
           writeStderrLine(
             'qwen serve: same-origin Web Shell HTTP requests work without ' +
               '--allow-origin, but WebSocket-backed features (terminal, voice) ' +
-              'and browsers reaching the daemon through a TLS-terminating or ' +
-              'Host-rewriting proxy still need --allow-origin <origin> (or a ' +
-              'same-origin proxy that preserves Host).',
+              'and browsers reaching the daemon through a TLS-terminating ' +
+              'proxy still need --allow-origin <origin>. A plain-HTTP ' +
+              'intermediary that rewrites Host or serves from a different ' +
+              'port needs --allow-origin <origin> for the origin the browser ' +
+              'sees, unless it preserves Host and the port so the browser ' +
+              'origin matches the daemon socket.',
           );
         }
       }
@@ -8769,11 +8764,6 @@ async function runQwenServeImpl(
             workerHostname,
             actualPort,
             tlsOptions !== undefined,
-            typeof addr === 'object' &&
-              addr &&
-              (addr.family === 'IPv4' || addr.family === 'IPv6')
-              ? addr.family
-              : undefined,
           );
 
           (

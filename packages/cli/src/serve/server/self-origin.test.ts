@@ -50,14 +50,30 @@ describe('remote same-origin authentication', () => {
       .set('X-Forwarded-Host', 'evil.test');
     expect(response.status).toBe(403);
   });
+  // Non-canonical authorities Node's URL parser accepts: the string compare
+  // matches (Host equals Origin), so only the re-parse guard rejects them.
+  it.each(['192.168.1.2.:4170', 'u:p@192.168.1.2:4170'])(
+    'keeps the wall for the non-canonical authority %s',
+    async (authority) => {
+      const response = await request(app())
+        .post('/probe')
+        .set('Host', authority)
+        .set('Origin', `http://${authority}`)
+        .set('Authorization', 'Bearer secret');
+      expect(response.status).toBe(403);
+    },
+  );
   it('allows public module scripts but keeps APIs and mutations authenticated', async () => {
     const result = express();
     installRemoteSelfOriginMiddleware(result, '0.0.0.0', 'secret');
     result.use(denyBrowserOriginCors);
     result.get('/assets/app.js', (_req, res) => res.sendStatus(200));
+    // Registered ahead of bearerAuth so the unauthenticated same-origin POST
+    // row discriminates the pre-auth predicate's GET/HEAD method gate: with
+    // the gate deleted the Origin is stripped and this route answers 200.
+    result.post('/assets/app.js', (_req, res) => res.sendStatus(200));
     result.use(bearerAuth('secret'));
     result.get('/capabilities', (_req, res) => res.sendStatus(200));
-    result.post('/assets/app.js', (_req, res) => res.sendStatus(200));
     for (const [method, path, status] of [
       ['get', '/assets/app.js', 200],
       ['get', '/capabilities', 401],

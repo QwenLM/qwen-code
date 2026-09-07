@@ -1473,9 +1473,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1487,52 +1487,21 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::', '[::]'])(
     'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
-      ).toBe('http://127.0.0.1:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, false)).toBe(
+        'http://127.0.0.1:4170',
+      );
     },
   );
 
-  // R10-1: `listen(port, '')` tries the IPv6 unspecified address first and
-  // falls back to binding `0.0.0.0` when IPv6 is unavailable, so an empty
-  // --hostname decides by the socket that actually bound, not by spelling —
-  // on the fallback host the old spelling-based rule handed workers `[::1]`,
-  // which nothing listened on, and the first worker's failure exited the
-  // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
-  // binds fail loud when their family is unavailable.
-  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
-      'http://[::1]:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
-      'http://[::1]:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
-    expect(
-      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
-    ).toBe('http://127.0.0.1:4170');
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
-      'http://127.0.0.1:4170',
-    );
-  });
-
-  it('falls back to IPv4 loopback for an empty hostname on an IPv4-bound socket', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv4')).toBe(
-      'http://127.0.0.1:4170',
-    );
-    expect(formatChannelWorkerDaemonUrl('', 4170, true, 'IPv4')).toBe(
-      'https://127.0.0.1:4170',
-    );
-  });
-
+  // R10-1's empty-hostname mapping is gone together with its branch: an
+  // empty --hostname is refused at boot as operator error before any
+  // listener exists, so no worker URL can ever be formatted for it.
   it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
     'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
     (host) => {
-      expect(
-        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
-      ).toBe('http://[::1]:4170');
+      expect(formatChannelWorkerDaemonUrl(host, 4170, false, true)).toBe(
+        'http://[::1]:4170',
+      );
     },
   );
 
@@ -1576,11 +1545,6 @@ describe('formatChannelWorkerDaemonUrl', () => {
       // v4 loopback only — measured here through the same dial the workers
       // use; mutating the mapping to `[::1]` reddens this arm.
       ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
-      // R10-1: the daemon's real bind shape for an empty --hostname. The
-      // loopback family is read from the socket that actually bound, so on a
-      // host without IPv6 this same arm binds 0.0.0.0 and exercises the
-      // IPv4 fallback instead.
-      ['', { host: '', port: 0 }],
     ] as const) {
       let server: net.Server;
       try {
@@ -1592,14 +1556,7 @@ describe('formatChannelWorkerDaemonUrl', () => {
       try {
         const addr = server.address() as AddressInfo;
         const certified = new URL(
-          formatChannelWorkerDaemonUrl(
-            bind,
-            addr.port,
-            false,
-            bind === '' && (addr.family === 'IPv4' || addr.family === 'IPv6')
-              ? addr.family
-              : undefined,
-          ),
+          formatChannelWorkerDaemonUrl(bind, addr.port, false),
         );
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
@@ -1642,8 +1599,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
 
 describe('assertChannelWorkerDaemonUrlIsLocal', () => {
   it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    // No empty-host arm: boot refuses an empty --hostname before any listener
+    // or worker URL exists, so the certifier never sees one.
     for (const host of [
-      '',
       '0',
       '0.0',
       '0.0.0.0',
@@ -9479,6 +9437,42 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('keeps the remote same-origin exception alive during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { hostname: '0.0.0.0' },
+    });
+    try {
+      // The runtime is not mounted yet, so these hit the bootstrap app: the
+      // same-origin exception must already be live there, or the gate's
+      // cold-window probes dead-end on the CORS wall's 403.
+      const authed = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: handle.url,
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authed.status).not.toBe(403);
+      expect(authed.status).not.toBe(401);
+      const unauthed = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: handle.url },
+      });
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await fetch(`${handle.url}/capabilities`, {
+        headers: {
+          Origin: 'http://evil.test',
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      expect(crossOrigin.status).toBe(403);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('serves the // root alias during the deferred window like the warm app', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-alias-')),
@@ -12678,6 +12672,184 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(arg.token).toBe('env-token-bound-pin');
     } finally {
       vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('reports the wildcard bound address, not the inet_aton spelling', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      const arg = mockRemoteQuickstart.print.mock.calls[0][0];
+      // The operator spelling and the socket address differ here, so this
+      // pins that boot reports what the socket bound, not what was typed.
+      expect(arg.bind).toBe('0');
+      expect(arg.boundAddress).toBe('0.0.0.0');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('hands the quickstart the mounted-web-shell flag', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-web-')),
+    );
+    writeWebShellFixture(tmpDir);
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-web-pin');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
+      expect(mockRemoteQuickstart.print.mock.calls[0][0].web).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --require-auth on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('boots non-loopback --allow-origin * on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['*'],
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('refuses --require-auth and --allow-origin * on a tokenless loopback bind', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            requireAuth: true,
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--require-auth/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('boots loopback --require-auth when a token arrives pre-installed', async () => {
+    // The shape --open-with-auth leaves behind: its generated loopback token
+    // is installed on the options before runQwenServe, so the flag's
+    // fail-fast must see it like any configured source.
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          requireAuth: true,
+          token: 'pre-installed-loopback-token',
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toBe('pre-installed-loopback-token');
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('survives an asynchronous EPIPE on stdout and rethrows other stream errors', async () => {
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      // The guard listens on the process streams; without it an 'error'
+      // event with no listener throws out of emit itself.
+      const epipe = Object.assign(new Error('write EPIPE'), {
+        code: 'EPIPE',
+      });
+      expect(() => process.stdout.emit('error', epipe)).not.toThrow();
+      const other = Object.assign(new Error('stream boom'), {
+        code: 'ENOENT',
+      });
+      expect(() => process.stdout.emit('error', other)).toThrow('stream boom');
+    } finally {
       await started?.close();
     }
   });

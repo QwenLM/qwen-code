@@ -138,6 +138,11 @@ export function StandaloneAuth({
       const controller = new AbortController();
       controllerRef.current = controller;
       setBusy(true);
+      // Reset the live region too: keeping the previous outcome (e.g.
+      // "Invalid or expired token…") on screen for the whole in-flight probe
+      // leaves a screen-reader user without any announcement that the submit
+      // landed. retryIn overwrites this once the outcome is known.
+      setStatus(copyRef.current.connecting);
       const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
       // Transient failures re-probe on their own and leave the button enabled,
       // so a manual retry can always jump the queue.
