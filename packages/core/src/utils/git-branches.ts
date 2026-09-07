@@ -443,7 +443,11 @@ export async function gitCreateBranch(
   // otherwise the current HEAD. Used on rollback to detect commits a failing
   // post-checkout hook may have created on the new branch.
   const startCommit = (
-    await runGit(cwd, ['rev-parse', startPoint ?? 'HEAD'], env).catch(() => '')
+    await runGit(
+      cwd,
+      ['rev-parse', '--verify', `${startPoint ?? 'HEAD'}^{commit}`],
+      env,
+    ).catch(() => '')
   ).trim();
   try {
     await runGit(cwd, args, env);
@@ -470,7 +474,9 @@ export async function gitCreateBranch(
       // those commits, so keep the branch when its HEAD has moved past the
       // start commit instead of force-deleting it.
       const newHead = (
-        await runGit(cwd, ['rev-parse', name], env).catch(() => '')
+        await runGit(cwd, ['rev-parse', `refs/heads/${name}`], env).catch(
+          () => '',
+        )
       ).trim();
       if (newHead && startCommit && newHead !== startCommit) {
         debugLogger.warn(

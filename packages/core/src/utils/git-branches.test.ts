@@ -600,6 +600,28 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
   });
 
+  it('rolls back a branch created from an annotated tag before a failing post-checkout hook', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    git(dir, 'tag', '-a', 'v1.0', '-m', 'annotated start');
+    expect(git(dir, 'cat-file', '-t', 'v1.0').trim()).toBe('tag');
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      {
+        mode: 0o755,
+      },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic', 'v1.0')).rejects.toThrow();
+
+    expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+  });
+
   it('keeps a branch that a failing post-checkout hook committed to', async () => {
     const dir = makeRepo();
     const before = currentBranch(dir);
