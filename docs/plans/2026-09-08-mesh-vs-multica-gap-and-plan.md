@@ -153,19 +153,57 @@ the limit and the machine's memory becomes it. A roster size limit belongs in
 the UI, and `max_concurrent_tasks` (Multica has it; we currently force serial)
 becomes a per-agent field rather than decision 10's blanket rule.
 
-## 6. What I need decided before Stage A
+## 6. Decisions, made 2026-09-08
 
-1. **Per-agent concurrency.** Multica lets an agent hold several tasks
-   (`max_concurrent_tasks`). Our decision 10 makes it strictly serial. Serial is
-   simpler and was chosen when an agent was a subagent; with its own process the
-   reason is weaker. Keep serial for v1, or carry the field?
-2. **Agent session visibility.** Should an agent's session appear in the normal
-   session list, so a person can open it like any other conversation, or stay
-   hidden the way the mesh host is? Multica shows agent activity; hiding it
-   would undo Stage B.
-3. **What happens to a thread when its agent is deleted.** Multica keeps the
-   record and the agent goes offline. We tombstone the name. Confirm that is
-   what you want.
+1. **An agent may work several threads at once.** `MeshAgent.maxConcurrentRuns`,
+   default 1, mirroring Multica's `max_concurrent_tasks`. Decision 10 is
+   rewritten: serial was a consequence of a subagent owning one chat inside a
+   shared process, and with a process per agent it is a policy rather than a
+   fact. The default keeps today's behaviour until someone raises it, and
+   `queueLimit` stays a separate bound — throughput and backlog are different
+   questions.
+   _Where it lands:_ `selectCandidates` counts an agent's live runs against its
+   own limit instead of treating any live run as busy; `claimRun`'s
+   already-live check does the same. Both are single conditions.
+
+2. **An agent's session appears in the normal session list.** A person opens
+   alice the way they open any other conversation. This is what makes Stage B
+   possible: with the session visible there is one message renderer and one
+   transcript, and the bespoke thread conversation I built can go. Only the
+   dispatch host stays hidden, because it is infrastructure with no
+   conversation of its own.
+   _Where it lands:_ the mesh-agent source type is excluded from the
+   host-session filters in `session-list.ts` and `acpAgent.ts`, not added to
+   them. The session is labelled by the agent so a list of five sessions reads
+   as five agents.
+
+3. **Deleting an agent retires it; it never rewrites history.** Multica's shape.
+   The roster entry stops being addressable and reads `offline`, the session
+   closes, and every post the agent made keeps its name — those posts are
+   evidence other agents reasoned from, and erasing the author makes a thread
+   unreadable after the fact. Disable-and-drain remains the reversible middle.
+   _Where it lands:_ decision 8 rewritten; the tombstone snapshot becomes
+   unnecessary because the identity is retained rather than removed.
+
+## 7. Stage A, concretely
+
+In dependency order. Each item is small; the sequence is what matters.
+
+1. `MeshAgent` gains `runtime: { mode: 'local'; sessionId?: string }`,
+   `maxConcurrentRuns`, and `status` derived from the session rather than stored.
+2. `mesh-agent` session source type, and persona resolution in the child at
+   `newSession` — roster lookup, `Config.systemPrompt`, `deriveConfig` for tool
+   registry, invocation guard and model.
+3. `dispatch-port.ts` rewritten against the bridge: `inspect` from the live
+   session record, `start` as spawn-or-attach plus prompt, `deliver` as the
+   session's mid-prompt input path.
+4. `launcher.ts` and `runtime-bridge.ts` deleted; their callers move to 3.
+5. `selectCandidates` and `claimRun` honour `maxConcurrentRuns`.
+6. The per-turn `(agent, run, thread)` binding moves from the host's
+   AsyncLocalStorage frame to the agent's own process, read at its turn seam.
+
+The dispatcher's rules, the twelve admission outcomes, the store, the tools,
+the prompt envelope and the REST surface are not touched by any of this.
 
 <details>
 <summary>中文说明</summary>
