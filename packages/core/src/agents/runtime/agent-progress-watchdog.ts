@@ -9,7 +9,6 @@ import type {
   AgentEventEmitter,
   AgentApprovalRequestEvent,
   AgentToolCallEvent,
-  AgentToolOutputUpdateEvent,
   AgentToolProgressEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
@@ -55,6 +54,7 @@ export function attachAgentProgressWatchdog(
 ): () => void {
   let disposed = false;
   let waitingForExternalInput = false;
+  let modelRetrying = false;
   let roundHadToolCalls = false;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
   let escalationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -97,6 +97,7 @@ export function attachAgentProgressWatchdog(
     if (
       disposed ||
       waitingForExternalInput ||
+      modelRetrying ||
       [...tools.values()].some((tool) => tool.state !== 'queued')
     )
       return;
@@ -129,31 +130,34 @@ export function attachAgentProgressWatchdog(
       () => armTool(callId),
     );
   };
-  const onActivity = () => armModel();
+  const onActivity = () => {
+    modelRetrying = false;
+    armModel();
+  };
   const onRoundStart = () => {
     waitingForExternalInput = false;
+    modelRetrying = false;
     roundHadToolCalls = false;
     armModel();
   };
   const onRoundEnd = () => {
+    modelRetrying = false;
     waitingForExternalInput = !roundHadToolCalls && isWaitingForExternalInput();
     armModel();
+  };
+  const onModelRetry = () => {
+    modelRetrying = true;
+    clearModel();
   };
   const onExternalInput = () => {
     waitingForExternalInput = false;
     armModel();
   };
   const onToolCall = (event: AgentToolCallEvent) => {
+    modelRetrying = false;
     roundHadToolCalls = true;
     tools.set(event.callId, { name: event.name, state: 'queued' });
     armModel();
-  };
-  const onToolProgress = (event: AgentToolOutputUpdateEvent) => {
-    const tool = tools.get(event.callId);
-    if (!tool) return;
-    tool.state = 'executing';
-    armTool(event.callId);
-    clearModel();
   };
   const onToolHeartbeat = (event: AgentToolProgressEvent) => {
     const tool = tools.get(event.callId);
@@ -182,9 +186,9 @@ export function attachAgentProgressWatchdog(
   emitter.on(AgentEventType.ROUND_END, onRoundEnd);
   emitter.on(AgentEventType.STREAM_TEXT, onActivity);
   emitter.on(AgentEventType.USAGE_METADATA, onActivity);
+  emitter.on(AgentEventType.MODEL_RETRY, onModelRetry);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalInput);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolProgress);
   emitter.on(AgentEventType.TOOL_PROGRESS, onToolHeartbeat);
   emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
   emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
@@ -204,9 +208,9 @@ export function attachAgentProgressWatchdog(
     emitter.off(AgentEventType.ROUND_END, onRoundEnd);
     emitter.off(AgentEventType.STREAM_TEXT, onActivity);
     emitter.off(AgentEventType.USAGE_METADATA, onActivity);
+    emitter.off(AgentEventType.MODEL_RETRY, onModelRetry);
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalInput);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolProgress);
     emitter.off(AgentEventType.TOOL_PROGRESS, onToolHeartbeat);
     emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     emitter.off(AgentEventType.TOOL_RESULT, onToolResult);

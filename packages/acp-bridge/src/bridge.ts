@@ -9454,9 +9454,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     isChannelLive() {
-      return Array.from(aliveChannels).some(
-        (candidate) => candidate.state !== 'dying',
-      );
+      return liveChannelInfo() !== undefined;
     },
 
     getWorkspaceRuntimeLifecycleSnapshot() {
