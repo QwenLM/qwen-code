@@ -90,7 +90,7 @@ Gate (a): one `startRun`/`finishRun` per assignment — covered. Gate (b): two t
 Observed locally: 11 files, 127 tests passed; targeted ESLint clean.
 Writing the production port corrected the design's four-branch idle path to three. Whether a completed body still has a resident runtime is not a choice the dispatcher can make — only the registry knows, and #11204 already reports its own fallback — so a dispatcher choosing between "continue resident" and "cold revive" would be guessing at state it cannot see and would cold-revive a live body. The three entry points it does choose between are `launch`, `resume` (a restart-recovered `paused` entry, which the revive path rejects) and `continue_completed`.
 `dispatch-port.ts` binds those to the runtime and is the single place a non-local runtime would be substituted (§9.12). Its tests pin the registry-state mapping, the hot path not touching the transcript, capacity reported before any mutation, a state change under it not being forced, and a thrown runtime error becoming a typed failure rather than a start.
-**Runtime wiring landed for the demo path.** Every launch, resident continuation, resume, and revive persists the next run binding, and both real background-turn seams establish it inside the turn body. Mesh agents see the six thread tools while ordinary subagents do not. Structured resident delivery uses the run id as its correlation id; the consumed event advances that run's accepted/consumed ids and watermark, usage events upsert cumulative rounds, and body completion terminalizes the mesh run. Launch/revive inputs are marked consumed when the runtime accepts their initial prompt. This correction was deliberately not expanded with new test code or a local CI/build pass; step 7's live model run is the next evidence gate.
+**Runtime wiring landed for the demo path.** Every launch, resident continuation, resume, and revive persists the next run binding, and both real background-turn seams establish it inside the turn body. Mesh agents see the six thread tools while ordinary subagents do not. Every mesh turn carries the run id in structured external input; runtime acceptance records the accepted ids, the correlated consumed event advances consumed ids and the watermark, usage events upsert cumulative rounds, and body completion terminalizes the mesh run. A recovered delivery's initial input is cleared before a later resident turn. This correction was deliberately not expanded with new test code or a local CI/build pass; step 7's live model run is the next evidence gate.
 
 ### Step 7 — Live vertical slice (first integration gate)
 
@@ -124,6 +124,46 @@ Lands: `delivery_race` detach/rebook; `launch_failed` with `failureStage`; done/
 Gate: failure injection at each named point, as separate tests: enqueue returns false; process exit after `acceptedMessageIds` write; process exit after transcript record but before `consumedMessageIds` write; process exit after parent apply but before acknowledge; daemon restart with one `running` and one `queued` run; a stored host session that cannot be resumed is replaced once; N-minute stall. Each test asserts the thread file's final state and that no message id is both unconsumed and unbooked.
 Evidence: the injection matrix as a table in the PR, one row per test, with the asserted final state.
 
+**Production path implemented; gate not run.** The dispatcher now sends a
+structured, correlated input only to the exact ambient run binding; a rejected
+or raced delivery detaches its unaccepted trigger ids into the queued
+successor. Accepted-but-unconsumed input survives restart and is replayed once;
+late callbacks are attempt-guarded. Stored running work is resumed once and a
+second failure becomes terminal. The hidden host binding is replaced only
+after the resume promise definitively rejects, never merely on its timeout.
+An aggregate child-review report carries the review summary's source run id,
+so the parent wake remains auditable across the system-authored hop.
+Mesh reuses the existing three-minute workflow watchdog, including its
+tool-in-flight suspension, and requeues the first stalled attempt. Per the
+demo-first instruction, no local tests, lint, typecheck, build, or CI wait was
+performed for this implementation. Route startup now reopens owners for durable
+live work or pending outbox events. Cancellation is source-first: the run is
+persisted as `cancelling`, the dispatcher verifies the ambient runtime binding,
+then stops the body and records terminal `cancelled`; queued cancellation also
+wakes the dispatcher so the next FIFO item is not stranded. A racing runtime
+completion observes `cancelling` and also settles as `cancelled`.
+Prompt replay now detects internal retention holes by counting missing message
+sequences, rather than trusting the first retained message, because referenced
+old posts can survive trimming. The frame no longer tells an agent to recover
+physically deleted posts through `thread_read`; it marks the gap unrecoverable
+and tells the agent to ask a person when the missing context is required.
+Undelivered triggers are rebooked only from a running, finishing, or completed
+attempt where delivery can genuinely have raced completion. Failed and
+cancelled runs remain terminal, so a later dispatcher pass cannot undo an
+explicit cancellation or retry a definition/start failure forever. The
+rebooking transaction checks that status again rather than trusting its scan
+snapshot, closing the cancellation-versus-delivery race.
+Cancellation admission now reads and changes the run under one workspace lock.
+A queued run cannot be claimed between the route's observation and its write,
+and the response is based on the stored post-dispatch state rather than the
+stale status that initiated the request.
+The hidden host owner is also bound to the selected workspace runtime
+generation. A replaced or drained generation stops its keepalive loop and is
+rejected before later launch or dispatch; generation checks bracket host claims
+and releases, and a raced stale spawn is cleaned up. Reusing the same bridge
+object cannot keep the old owner alive. This path was source-inspected only
+under the same demo-first constraint.
+
 ### Step 9 — REST and Web Shell
 
 Design direction is settled ahead of the build in [`2026-09-07-mesh-web-shell-design.md`](./2026-09-07-mesh-web-shell-design.md): the thread view is a ledger of outstanding obligations with the conversation as evidence, not a chat log with a status badge. It inherits Web Shell's existing tokens and adds no new colour or typeface. Step 9 renders `resolveThreadStatus`'s `status` and `reason` rather than inventing a second status vocabulary, shows one lane per agent that has worked the thread, and bounds every transcript view to the run's own slice.
@@ -131,6 +171,97 @@ Design direction is settled ahead of the build in [`2026-09-07-mesh-web-shell-de
 Lands: routes for agents, threads, posts, runs; roster, thread list, thread view with run slices, busy reason, gate/failure display, cancel; #11140's sidebar entry absorbed.
 Gate: Playwright visuals for roster, thread view with two agents' posts attributed by name snapshot, a `blocked` thread with its question, and a run slice rendered from `transcriptStartOffset..EndOffset` showing only that run; deleting an agent keeps old posts readable with the tombstoned name.
 Evidence: screenshots from the visuals config, in CI.
+
+**Demo-path observation (2026-09-07).** A real `qwen serve` daemon and Web
+Shell created two fresh persistent identities and an assigned root thread from
+the Agents page. `alice-demo` created one child for `bob-demo`, closed
+`waiting`, received the durable child report, resumed the same body, and closed
+the root `review`. `bob-demo` closed the child `review`. The page updated from
+the resolver reason while the runs were active and finished with the root in
+`in_review`, Alice's two past runs collapsed behind their count, and Alice's
+attributed result visible in the ledger. The tree accounted 186,317 of 200,000
+tokens.
+
+The first browser-driven attempt exposed an actual prompt failure: agents put
+peer mentions in ordinary result prose, which booked unintended runs back and
+forth and exhausted the tree budget before the parent could resume. The turn
+envelope now states that an at-sign address books work, forbids it in status or
+result prose unless another wake is intended, and states that child completion
+already reports to the parent. A fresh run with that wording completed without
+the extra bookings. A separate draft containing the literal word `@mentions`
+was correctly rejected as an unknown agent name. The new-thread form now runs
+the selected assignee through the same admission rule before creation, so a
+full queue or disabled/unknown target is visible before the durable write.
+
+**Latest-source smoke (2026-09-07).** From the Web Shell, the new-thread form
+previewed `Will start @alice`, then durably created and assigned thread
+`th_eca773de-4efa-4c82-bdeb-9bdafc521077`. After a daemon restart, the queued
+run `rn_077865eb-b3da-4ab0-8521-ab8c96882818` was replayed, Alice inspected the
+workspace, posted an attributed conclusion, and explicitly closed with
+`thread_review`. The API and browser both showed the run as
+`completed/review` and the thread as `in_review`. This was a manual demo-path
+observation only: no test suite, lint, typecheck, or CI was run. The source-mode
+daemon required the ACP bridge package output to be refreshed because this
+worktree shared a `node_modules` link whose existing bridge build predated the
+mesh dispatch method.
+
+The same live daemon then covered the remaining visible step-9 paths. A fresh
+run recorded transcript offsets `16990..22071`; opening its history row showed
+only that byte range beside the still-visible thread. A second agent called
+`thread_block` and the page rendered both `Which target file should I inspect?`
+and the resolver reason that the run was waiting for a person. Cancelling a
+running agent changed the row from `working` to `stopping`, reached terminal
+`cancelled`, and the thread could then be marked done. Deleting `alice-demo`
+removed it from the roster while its existing post remained attributed as
+`alice-demo (removed)`. The first-class Agents sidebar entry from #11140 and
+inline child-thread navigation were also exercised in the same browser.
+Assigned creation now writes the new thread, assignment, admission outcome, and
+first run in one replacement; a human post also invokes the dispatcher for a
+running coalesce, not only for a newly queued run. These last production-path
+changes were inspected from source only. No local unit tests, lint, typecheck,
+build, or CI wait were run. Roster and header activity copy now follows the
+actual active run state instead of calling a queued or cancelling run
+"working", and an unacknowledged cancellation is shown as an outstanding
+obligation. The dead `agent_unavailable` composer branch was removed: missing
+definitions remain typed dispatcher launch failures because the pure admission
+rule has no runtime definition loader. The roster now exposes the designed
+enable/disable state. Disabling is one workspace-locked mutation that rejects
+new admissions while already-booked work keeps draining; deletion still
+refuses live or queued work. A booking cannot race either roster change.
+Root and child creation revalidate the chosen assignee under that same lock, so
+a concurrent disable or delete cannot leave a new thread pointing at a stale
+identity.
+Agent creation reuses the storage protocol's mention-name validator at the REST
+boundary and reports case-insensitive duplicates as a conflict instead of a
+generic server failure.
+Deleting an idle identity now makes the hidden host forget its resident body
+and removes that deterministic body's transcript and sidecar from every host
+session directory under the selected workspace runtime; historical thread posts
+keep their name snapshot. Removing the last identity also stops the owner,
+releases its workspace claim, and closes the now-unused hidden host session.
+Creating the first identity starts that host immediately; daemon startup only
+restores it for a non-empty roster, so retained notification events cannot
+resurrect a host after every identity was removed.
+The thread header also supports atomic human reassignment: changing the default
+assignee writes a structured assignment through admission without cancelling
+work already booked for another agent; choosing no assignee only clears the
+future fallback. Marking a thread done now scans its complete descendant tree,
+refuses live children, cancels its own work, and writes the terminal state in
+one workspace transaction, so a racing agent cannot create an open child after
+the check. Repeating the command does not enqueue another `child_done` report.
+The Web Shell also surfaces a background-processing failure after a durable
+mutation as "saved, but background processing failed"; periodic refreshes no
+longer erase that action error a second later. These paths were source-inspected
+only.
+Tool responses now report booking as queued work rather than claiming the peer
+has already started, and `thread_block` reports the durable blocked state
+without promising channel delivery while §9.12 remains open.
+An unassigned `open` child no longer satisfies `thread_wait`: only a live run,
+pending parent report, or non-open descendant state is a future wake path, so a
+parent cannot silently sleep behind an inert child.
+An accepted delivery replay that repeats `thread_create` with the same parent
+and normalized title now reuses the existing child instead of duplicating the
+delegated work.
 
 ### Step 10 — Channel notifications
 
@@ -140,7 +271,7 @@ Evidence: the channel transcript.
 
 ## 3. Product decisions the implementer must not make
 
-Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), token reservation vs accounting (§9.5), and persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, accounting limit with overshoot, and definition read at revive only.
+Open in §9 of the design: envelope role transport (§9.9), parent-to-child replies (§9.10), human blocker acknowledgement scope (§9.11), channel notification destination (§9.12), token reservation vs accounting (§9.5), and persona drift policy (§9.4). Until each is decided the implementation takes the conservative reading: user-role envelope, ambient-thread-only mutation, acknowledgement of every open blocker on a human post that books, notification events retained without broadcasting, accounting limit with overshoot, and definition read at revive only.
 
 The owner settled three step-3 inputs: v1 denies every MCP tool; the v1 schema declares the full §3 shape in one migration; and runtime is a first-class concept, represented by generic `runtimeId` beside the local `backgroundAgentId`. Step 4 keeps the launcher surface minimal and supplies the local implementation first.
 

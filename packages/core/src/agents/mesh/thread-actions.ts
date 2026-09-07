@@ -7,10 +7,11 @@
 import {
   generateMessageId,
   generateRunId,
+  prepareThreadInTransaction,
   withMeshStoreTransaction,
   type MeshStoreTransaction,
 } from './mesh-store.js';
-import { parseMentions } from './mentions.js';
+import { mentionToken, parseMentions } from './mentions.js';
 import {
   applyAggregateStatus,
   finishRunInTransaction,
@@ -72,6 +73,8 @@ export interface PostMessageOptions {
   agents?: readonly MeshAgent[];
   limits?: BudgetLimits;
   now?: number;
+  /** Thread state to admit against and persist in the final replacement. */
+  threadOverride?: Thread;
 }
 
 export function countQueuedElsewhere(
@@ -137,8 +140,12 @@ export async function postMessageInTransaction(
   input: PostMessageInput,
   options: PostMessageOptions = {},
 ): Promise<PostMessageResult> {
-  const current = await transaction.readThread(threadId);
+  const current =
+    options.threadOverride ?? (await transaction.readThread(threadId));
   if (!current) throw new Error(`No thread with id "${threadId}".`);
+  if (current.id !== threadId) {
+    throw new Error(`Thread override id does not match "${threadId}".`);
+  }
 
   if (input.originEventId) {
     const persisted = current.messages.find(
@@ -163,12 +170,18 @@ export async function postMessageInTransaction(
   }
 
   const agents = options.agents ?? (await transaction.readAgents());
-  const { threads, unreadable } = await transaction.listThreads();
+  const listed = await transaction.listThreads();
+  const { unreadable } = listed;
   if (unreadable.length > 0) {
     throw new Error(
       `Cannot admit a message while thread records are unreadable: ${unreadable.join(', ')}.`,
     );
   }
+  const threads = listed.threads.some((thread) => thread.id === current.id)
+    ? listed.threads.map((thread) =>
+        thread.id === current.id ? current : thread,
+      )
+    : [...listed.threads, current];
   const root = threads.find((thread) => thread.id === current.rootThreadId);
   if (!root || root.rootThreadId !== root.id) {
     throw new Error(
@@ -334,6 +347,7 @@ export async function postMessageInTransaction(
       storedMessage.sequence,
       (obligation) =>
         storedMessage.authorKind === 'human' ||
+        obligation.kind === 'cancelled' ||
         obligation.kind === 'failure' ||
         obligation.kind === 'unclosed' ||
         (storedMessage.authorKind === 'system' &&
@@ -364,6 +378,105 @@ export async function postMessage(
   return withMeshStoreTransaction(projectRoot, (transaction) =>
     postMessageInTransaction(transaction, threadId, input, options),
   );
+}
+
+export async function createAssignedThread(
+  projectRoot: string,
+  input: {
+    title: string;
+    body?: string;
+    assignee: MeshAgent;
+  },
+): Promise<{ thread: Thread; assignment: PostMessageResult }> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const assignee = agents.find((agent) => agent.id === input.assignee.id);
+    if (!assignee || assignee.enabled === false) {
+      throw new Error(`Agent "${input.assignee.name}" is no longer available.`);
+    }
+    const thread = await prepareThreadInTransaction(transaction, {
+      title: input.title,
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      assigneeAgentId: assignee.id,
+    });
+    const assignment = await postMessageInTransaction(
+      transaction,
+      thread.id,
+      {
+        from: HUMAN_AUTHOR_ID,
+        authorKind: 'human',
+        triggerKind: 'assignment',
+        text: `Assigned to ${mentionToken(assignee)}.`,
+      },
+      { agents, threadOverride: thread },
+    );
+    return { thread: assignment.thread, assignment };
+  });
+}
+
+export type AssignThreadResult =
+  | {
+      kind: 'updated';
+      thread: Thread;
+      assignment?: PostMessageResult;
+    }
+  | {
+      kind:
+        | 'thread_not_found'
+        | 'thread_done'
+        | 'agent_unknown'
+        | 'agent_disabled';
+    };
+
+export async function assignThread(
+  projectRoot: string,
+  threadId: string,
+  assigneeName?: string,
+): Promise<AssignThreadResult> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread) return { kind: 'thread_not_found' };
+    if (thread.status === 'done') return { kind: 'thread_done' };
+
+    if (!assigneeName) {
+      if (!thread.assigneeAgentId) return { kind: 'updated', thread };
+      const { assigneeAgentId: _, ...unassigned } = thread;
+      return {
+        kind: 'updated',
+        thread: await transaction.writeThread(unassigned),
+      };
+    }
+
+    const agents = await transaction.readAgents();
+    const assignee = agents.find(
+      (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
+    );
+    if (!assignee) return { kind: 'agent_unknown' };
+    if (assignee.enabled === false) return { kind: 'agent_disabled' };
+    if (thread.assigneeAgentId === assignee.id) {
+      return { kind: 'updated', thread };
+    }
+
+    const assignment = await postMessageInTransaction(
+      transaction,
+      threadId,
+      {
+        from: HUMAN_AUTHOR_ID,
+        authorKind: 'human',
+        triggerKind: 'assignment',
+        text: `Assigned to ${mentionToken(assignee)}.`,
+      },
+      {
+        agents,
+        threadOverride: { ...thread, assigneeAgentId: assignee.id },
+      },
+    );
+    return {
+      kind: 'updated',
+      thread: assignment.thread,
+      assignment,
+    };
+  });
 }
 
 export interface ClaimRunInput {
@@ -433,7 +546,7 @@ export interface BindRunSessionInput {
    * reports draining it.
    */
   contextThroughSequence?: number;
-  /** Launch/revive input is already in history when start returns. */
+  /** Whether this runtime path consumes its initial input before returning. */
   consumedOnStart?: boolean;
   /** Content hash of the agent definition in force, for drift audit (§9.4). */
   definitionVersion?: string;
@@ -522,6 +635,7 @@ export async function bindRunSession(
 export async function consumeRunDelivery(
   projectRoot: string,
   context: MeshRunContext,
+  deliveryId = context.runId,
 ): Promise<Thread> {
   return withMeshStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(context.threadId);
@@ -539,8 +653,13 @@ export async function consumeRunDelivery(
       );
     }
 
+    const deliveredMessage = thread.messages.find(
+      (message) => message.id === deliveryId,
+    );
     const through =
-      context.contextThroughSequence ?? run.contextThroughSequence;
+      deliveryId === context.runId
+        ? (context.contextThroughSequence ?? run.contextThroughSequence)
+        : deliveredMessage?.sequence;
     if (through === undefined) return thread;
     const previousCommitted =
       thread.deliveryByAgent[run.agentId]?.committedThroughSequence ?? 0;
@@ -568,13 +687,50 @@ export async function consumeRunDelivery(
               ...entry,
               acceptedMessageIds,
               consumedMessageIds: Array.from(
-                new Set([...entry.consumedMessageIds, ...acceptedMessageIds]),
+                new Set([...entry.consumedMessageIds, ...deliveredMessageIds]),
               ),
               contextThroughSequence: through,
             }
           : entry,
       ),
     });
+  });
+}
+
+export async function requeueRun(
+  projectRoot: string,
+  input: { threadId: string; runId: string; attempt: number },
+): Promise<boolean> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    const run = thread?.runs.find((entry) => entry.id === input.runId);
+    if (
+      !thread ||
+      !run ||
+      run.status !== 'running' ||
+      run.attempts !== input.attempt
+    ) {
+      return false;
+    }
+    await transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              status: 'queued',
+              sessionId: undefined,
+              startedAt: undefined,
+              endedAt: undefined,
+              transcriptStartOffset: undefined,
+              transcriptEndOffset: undefined,
+              error: undefined,
+              failureStage: undefined,
+            }
+          : entry,
+      ),
+    });
+    return true;
   });
 }
 
@@ -622,8 +778,10 @@ export async function finishRun(
   runId: string,
   outcome: {
     status: 'completed' | 'failed' | 'cancelled';
+    attempt?: number;
     error?: string;
     failureStage?: string;
+    transcriptEndOffset?: number;
   },
   now = Date.now(),
 ): Promise<Thread> {

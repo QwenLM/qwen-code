@@ -28,8 +28,8 @@ import {
   requireLiveRunInTransaction,
 } from '../agents/mesh/run-lifecycle.js';
 import {
-  createThreadInTransaction,
   findAgentByName,
+  prepareThreadInTransaction,
   readMeshAgents,
   readThread,
   withMeshStoreTransaction,
@@ -248,7 +248,7 @@ class ThreadBlockInvocation extends CloseInvocation<ThreadBlockParams> {
     return { kind: 'blocked', question: this.params.question } as const;
   }
   protected success() {
-    return 'Question posted and your run ends here. A person will be notified; their reply wakes you again.';
+    return 'Question posted and your run ends here. The thread is marked blocked for a person to answer; their reply wakes you again.';
   }
 }
 
@@ -262,8 +262,9 @@ export class ThreadBlockTool extends BaseDeclarativeTool<
     super(
       ThreadBlockTool.Name,
       'ThreadBlock',
-      'Ask a person a question and end your run. Costs nothing while you ' +
-        'wait, and their reply wakes you again. Use this instead of guessing.',
+      'Ask a person a question, mark the thread blocked, and end your run. ' +
+        'Costs nothing while you wait, and their reply wakes you again. Use ' +
+        'this instead of guessing.',
       Kind.Other,
       {
         type: 'object',
@@ -373,21 +374,8 @@ class ThreadCreateInvocation extends BaseToolInvocation<
     try {
       const context = requireMeshRunContext('thread_create');
       const projectRoot = this.config.getProjectRoot();
-      const agents = await readMeshAgents(projectRoot);
-      const assignee = this.params.assignee
-        ? findAgentByName(agents, this.params.assignee.replace(/^@/, ''))
-        : undefined;
-      if (this.params.assignee && !assignee) {
-        return failed(
-          `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
-        );
-      }
-      if (assignee && assignee.enabled === false) {
-        return failed(
-          `Agent "${assignee.name}" is disabled and cannot take work.`,
-        );
-      }
-
+      const title = this.params.title.trim();
+      if (!title) return failed('A sub-thread title is required.');
       // Creating and assigning are one transaction: two would leave a crash
       // window in which an assigned sub-thread exists with nothing scheduled
       // to work it.
@@ -399,35 +387,86 @@ class ThreadCreateInvocation extends BaseToolInvocation<
             context,
             'thread_create',
           );
-          const child = await createThreadInTransaction(transaction, {
-            title: this.params.title,
+          const agents = await transaction.readAgents();
+          const { threads, unreadable } = await transaction.listThreads();
+          if (unreadable.length > 0) {
+            throw new Error(
+              `Cannot create a sub-thread while thread records are unreadable: ${unreadable.join(', ')}.`,
+            );
+          }
+          const existing = threads.find(
+            (thread) =>
+              thread.parentThreadId === context.threadId &&
+              thread.title.trim().toLowerCase() === title.toLowerCase(),
+          );
+          if (existing) return { child: existing, reused: true as const };
+          const assignee = this.params.assignee
+            ? findAgentByName(
+                agents,
+                this.params.assignee.replace(/^@/, ''),
+              )
+            : undefined;
+          if (this.params.assignee && !assignee) {
+            throw new Error(
+              `No agent named "${this.params.assignee}" in this workspace. Use one of the peers listed in your run frame.`,
+            );
+          }
+          if (assignee?.enabled === false) {
+            throw new Error(
+              `Agent "${assignee.name}" is disabled and cannot take work.`,
+            );
+          }
+          const child = await prepareThreadInTransaction(transaction, {
+            title,
             ...(this.params.body ? { body: this.params.body } : {}),
             createdBy: context.agentId,
             parentThreadId: context.threadId,
             ...(assignee ? { assigneeAgentId: assignee.id } : {}),
           });
-          if (!assignee) return { child, booked: 0 };
+          if (!assignee) {
+            return {
+              child: await transaction.writeThread(child),
+              booked: 0,
+              assignee: undefined,
+              reused: false as const,
+            };
+          }
           // Assignment is a structured trigger through the same admission
           // path, so it cannot bypass budgets, the queue limit, or the
           // outcome model. It is system-authored but keeps the run that
           // caused it, so it is charged as unattended work.
-          const posted = await postMessageInTransaction(transaction, child.id, {
-            from: SYSTEM_AUTHOR_ID,
-            authorKind: 'system',
-            sourceRunId: context.runId,
-            triggerKind: 'assignment',
-            text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
-          });
-          return { child, booked: posted.dispatched.length };
+          const posted = await postMessageInTransaction(
+            transaction,
+            child.id,
+            {
+              from: SYSTEM_AUTHOR_ID,
+              authorKind: 'system',
+              sourceRunId: context.runId,
+              triggerKind: 'assignment',
+              text: `Assigned to ${mentionToken(assignee)} by ${context.agentId} from thread ${context.threadId}.`,
+            },
+            { agents, threadOverride: child },
+          );
+          return {
+            child: posted.thread,
+            booked: posted.dispatched.length,
+            assignee,
+            reused: false as const,
+          };
         },
       );
 
       const shares = ` It shares this thread tree's budget.`;
+      if (created.reused) {
+        return ok(
+          `Reused existing sub-thread ${created.child.id}; no duplicate was created.${shares}`,
+        );
+      }
       return ok(
-        assignee
-          ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(assignee)}.${
+        created.assignee
+          ? `Created sub-thread ${created.child.id} and assigned ${mentionToken(created.assignee)}.${
               created.booked > 0
-                ? ' They have been woken.'
+                ? ' Their work has been queued.'
                 : ' No run was booked — check the thread for the reason.'
             }${shares}`
           : `Created sub-thread ${created.child.id} with no assignee; it stays idle until someone is mentioned on it.${shares}`,

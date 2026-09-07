@@ -186,6 +186,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionMeshAgentLaunch: 'qwen/control/session/mesh-agent/launch',
+  sessionMeshDispatch: 'qwen/control/session/mesh/dispatch',
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',

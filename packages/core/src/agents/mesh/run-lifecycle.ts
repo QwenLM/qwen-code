@@ -113,8 +113,22 @@ export function hasLiveDescendant(
     for (const child of byParent.get(current) ?? []) {
       if (seen.has(child.id)) continue;
       seen.add(child.id);
-      if (child.status !== 'done') return true;
       queue.push(child.id);
+      if (child.status === 'done') continue;
+      const canWakeParent =
+        child.status !== 'open' ||
+        child.runs.some(
+          (run) =>
+            run.status === 'queued' ||
+            run.status === 'running' ||
+            run.status === 'finishing' ||
+            run.status === 'cancelling',
+        ) ||
+        child.outbox.some(
+          (event) =>
+            event.kind === 'parent_report' && event.status === 'pending',
+        );
+      if (canWakeParent) return true;
     }
   }
   return false;
@@ -325,15 +339,19 @@ export async function applyAggregateStatus(
 
   if (resolution.status === 'in_review') {
     if (next.parentThreadId && !alreadyReported('child_in_review')) {
+      const summary = next.messages[next.messages.length - 1];
       next = enqueue(
         next,
         {
           kind: 'parent_report',
+          ...(summary?.sourceRunId
+            ? { causedByRunId: summary.sourceRunId }
+            : {}),
           payload: {
             event: 'child_in_review',
             threadId: next.id,
             parentThreadId: next.parentThreadId,
-            summaryMessageId: next.messages[next.messages.length - 1]?.id,
+            summaryMessageId: summary?.id,
           },
         },
         now,
@@ -349,6 +367,36 @@ export async function applyAggregateStatus(
         now,
       );
     }
+  }
+
+  if (
+    resolution.status === 'blocked' &&
+    next.parentThreadId &&
+    !resolution.outstanding.some(
+      (obligation) =>
+        (obligation.kind === 'failure' ||
+          obligation.kind === 'cancelled') &&
+        obligation.acknowledgedAtSequence === undefined,
+    ) &&
+    !alreadyReported('child_blocked')
+  ) {
+    const cause = resolution.outstanding.find(
+      (obligation) => obligation.acknowledgedAtSequence === undefined,
+    );
+    next = enqueue(
+      next,
+      {
+        kind: 'parent_report',
+        ...(cause ? { causedByRunId: cause.runId } : {}),
+        payload: {
+          event: 'child_blocked',
+          threadId: next.id,
+          parentThreadId: next.parentThreadId,
+          reason: resolution.reason,
+        },
+      },
+      now,
+    );
   }
 
   if (resolution.status === 'blocked' && !alreadyReported('thread_blocked')) {
@@ -382,8 +430,10 @@ export async function finishRunInTransaction(
     runId: string;
     outcome: {
       status: 'completed' | 'failed' | 'cancelled';
+      attempt?: number;
       error?: string;
       failureStage?: string;
+      transcriptEndOffset?: number;
     };
     now?: number;
   },
@@ -391,9 +441,54 @@ export async function finishRunInTransaction(
   const now = input.now ?? Date.now();
   const thread = await transaction.readThread(input.threadId);
   if (!thread) throw new Error(`No thread with id "${input.threadId}".`);
+  const target = thread.runs.find((run) => run.id === input.runId);
+  if (
+    !target ||
+    (input.outcome.attempt !== undefined &&
+      target.attempts !== input.outcome.attempt) ||
+    (target.status !== 'queued' &&
+      target.status !== 'running' &&
+      target.status !== 'finishing' &&
+      target.status !== 'cancelling')
+  ) {
+    return thread;
+  }
+  const terminalStatus =
+    target.status === 'cancelling' ? 'cancelled' : input.outcome.status;
+  const terminalError =
+    terminalStatus === input.outcome.status ? input.outcome.error : undefined;
+  const terminalFailureStage =
+    terminalStatus === input.outcome.status
+      ? input.outcome.failureStage
+      : undefined;
 
+  const closedThrough =
+    target.status === 'finishing'
+      ? thread.messages
+          .filter((message) => target.acceptedMessageIds.includes(message.id))
+          .reduce<number | undefined>(
+            (highest, message) =>
+              highest === undefined
+                ? message.sequence
+                : Math.max(highest, message.sequence),
+            undefined,
+          )
+      : undefined;
   let next: Thread = {
     ...thread,
+    deliveryByAgent:
+      closedThrough === undefined
+        ? thread.deliveryByAgent
+        : {
+            ...thread.deliveryByAgent,
+            [target.agentId]: {
+              committedThroughSequence: Math.max(
+                thread.deliveryByAgent[target.agentId]
+                  ?.committedThroughSequence ?? 0,
+                closedThrough,
+              ),
+            },
+          },
     runs: thread.runs.map((run) =>
       run.id === input.runId &&
       (run.status === 'queued' ||
@@ -402,21 +497,125 @@ export async function finishRunInTransaction(
         run.status === 'cancelling')
         ? {
             ...run,
-            status: input.outcome.status,
+            status: terminalStatus,
             endedAt: now,
+            consumedMessageIds:
+              run.status === 'finishing'
+                ? Array.from(
+                    new Set([
+                      ...run.consumedMessageIds,
+                      ...run.acceptedMessageIds,
+                    ]),
+                  )
+                : run.consumedMessageIds,
             // A run that stopped without calling a closing tool is recorded as
             // `unclosed`, never as an implicit success.
             closeKind:
               run.closeKind ??
-              (input.outcome.status === 'completed' ? 'unclosed' : undefined),
-            ...(input.outcome.error ? { error: input.outcome.error } : {}),
-            ...(input.outcome.failureStage
-              ? { failureStage: input.outcome.failureStage }
+              (terminalStatus === 'completed' ? 'unclosed' : undefined),
+            ...(terminalError ? { error: terminalError } : {}),
+            ...(terminalFailureStage
+              ? { failureStage: terminalFailureStage }
+              : {}),
+            ...(input.outcome.transcriptEndOffset !== undefined
+              ? { transcriptEndOffset: input.outcome.transcriptEndOffset }
               : {}),
           }
         : run,
     ),
   };
+
+  if (
+    terminalStatus === 'failed' &&
+    !next.messages.some(
+      (message) =>
+        message.sourceRunId === target.id &&
+        message.triggerKind === 'run_failure',
+    )
+  ) {
+    const message: ThreadMessage = {
+      id: generateMessageId(),
+      sequence: next.nextMessageSequence,
+      authorKind: 'system',
+      from: 'system',
+      authorNameSnapshot: 'system',
+      sourceRunId: target.id,
+      triggerKind: 'run_failure',
+      text: `Run ${target.id} failed${terminalFailureStage ? ` during ${terminalFailureStage}` : ''}: ${terminalError ?? 'unknown error'}`,
+      mentions: [],
+      outcomes: [],
+      at: now,
+    };
+    next = {
+      ...next,
+      messages: [...next.messages, message],
+      nextMessageSequence: next.nextMessageSequence + 1,
+    };
+  }
+
+  const hasLiveRun = next.runs.some(
+    (run) =>
+      run.status === 'queued' ||
+      run.status === 'running' ||
+      run.status === 'finishing' ||
+      run.status === 'cancelling',
+  );
+  const parentEvent =
+    terminalStatus === 'failed'
+      ? 'child_failed'
+      : terminalStatus === 'cancelled'
+        ? 'child_cancelled'
+        : undefined;
+  if (
+    next.parentThreadId &&
+    !hasLiveRun &&
+    parentEvent &&
+    !next.outbox.some(
+      (event) =>
+        event.payload['event'] === parentEvent &&
+        event.status === 'pending',
+    )
+  ) {
+    next = enqueue(
+      next,
+      {
+        kind: 'parent_report',
+        causedByRunId: target.id,
+        payload: {
+          event: parentEvent,
+          threadId: next.id,
+          parentThreadId: next.parentThreadId,
+          ...(terminalError ? { error: terminalError } : {}),
+        },
+      },
+      now,
+    );
+  }
+
+  if (
+    terminalStatus === 'failed' &&
+    target.attempts >= 2 &&
+    !next.outbox.some(
+      (event) =>
+        event.payload['event'] === 'run_failed_after_retry' &&
+        event.causedByRunId === target.id,
+    )
+  ) {
+    next = enqueue(
+      next,
+      {
+        kind: 'notification',
+        causedByRunId: target.id,
+        payload: {
+          event: 'run_failed_after_retry',
+          threadId: next.id,
+          agentId: target.agentId,
+          error: terminalError,
+        },
+      },
+      now,
+    );
+  }
 
   next = await applyAggregateStatus(transaction, next, now);
   return transaction.writeThread(next);

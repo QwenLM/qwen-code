@@ -1042,6 +1042,26 @@ export async function claimMeshHostSession(
   });
 }
 
+export async function releaseMeshHostSession(
+  projectRoot: string,
+  expectedSessionId: string,
+): Promise<boolean> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    if (workspace.hostSessionId !== expectedSessionId) return false;
+    await atomicWriteJSON(
+      getWorkspaceFilePath(projectRoot),
+      {
+        schemaVersion: workspace.schemaVersion,
+        workspaceId: workspace.workspaceId,
+        nextRunSequence: workspace.nextRunSequence,
+      },
+      { noFollow: true },
+    );
+    return true;
+  });
+}
+
 export async function readMeshAgents(
   projectRoot: string,
 ): Promise<MeshAgent[]> {
@@ -1059,6 +1079,66 @@ export async function updateMeshAgents(
     const next = mutate(agents);
     if (next !== agents) await transaction.writeAgents(next);
     return next;
+  });
+}
+
+type MeshAgentRosterChange = 'updated' | 'not_found' | 'has_live_work';
+
+async function agentHasLiveWork(
+  transaction: MeshStoreTransaction,
+  agentId: string,
+): Promise<boolean> {
+  const { threads, unreadable } = await transaction.listThreads();
+  if (unreadable.length > 0) {
+    throw new Error(
+      `Cannot change the agent roster while thread records are unreadable: ${unreadable.join(', ')}.`,
+    );
+  }
+  return threads.some((thread) =>
+    thread.runs.some(
+      (run) =>
+        run.agentId === agentId &&
+        (run.status === 'queued' ||
+          run.status === 'running' ||
+          run.status === 'finishing' ||
+          run.status === 'cancelling'),
+    ),
+  );
+}
+
+export async function setMeshAgentEnabled(
+  projectRoot: string,
+  agentId: string,
+  enabled: boolean,
+): Promise<MeshAgentRosterChange> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    if (!agent) return 'not_found';
+    if ((agent.enabled !== false) === enabled) return 'updated';
+    await transaction.writeAgents(
+      agents.map((candidate) =>
+        candidate.id === agentId ? { ...candidate, enabled } : candidate,
+      ),
+    );
+    return 'updated';
+  });
+}
+
+export async function removeMeshAgent(
+  projectRoot: string,
+  agentId: string,
+): Promise<MeshAgentRosterChange> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    if (!agents.some((candidate) => candidate.id === agentId)) {
+      return 'not_found';
+    }
+    if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
+    await transaction.writeAgents(
+      agents.filter((candidate) => candidate.id !== agentId),
+    );
+    return 'updated';
   });
 }
 
@@ -1137,12 +1217,19 @@ export interface CreateThreadInput {
 /**
  * Creates a thread inside an open transaction.
  *
- * Exposed separately so a caller that must create a thread *and* do something
- * else atomically — assigning it, which books a run — can do both under one
- * lock. Two transactions would leave a crash window in which an assigned
- * sub-thread exists with nothing scheduled to work it.
+ * Use `prepareThreadInTransaction` when the first message and run must be part
+ * of the initial file replacement too.
  */
 export async function createThreadInTransaction(
+  transaction: MeshStoreTransaction,
+  input: CreateThreadInput,
+): Promise<Thread> {
+  return transaction.writeThread(
+    await prepareThreadInTransaction(transaction, input),
+  );
+}
+
+export async function prepareThreadInTransaction(
   transaction: MeshStoreTransaction,
   input: CreateThreadInput,
 ): Promise<Thread> {
@@ -1161,7 +1248,7 @@ export async function createThreadInTransaction(
       throw new Error(`No valid root thread with id "${rootThreadId}".`);
     }
   }
-  return transaction.writeThread({
+  return {
     schemaVersion: MESH_SCHEMA_VERSION,
     id,
     title: input.title,
@@ -1181,7 +1268,7 @@ export async function createThreadInTransaction(
     ...(input.assigneeAgentId
       ? { assigneeAgentId: input.assigneeAgentId }
       : {}),
-  });
+  };
 }
 
 export async function createThread(

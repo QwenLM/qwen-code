@@ -20,8 +20,12 @@
  * avoid cold-reviving a body that was still live.
  */
 
+import { stat } from 'node:fs/promises';
+
 import type { Config } from '../../config/config.js';
+import { isNodeError } from '../../utils/errors.js';
 import {
+  getAgentJsonlPath,
   getAgentMetaPath,
   patchAgentMeta,
   readAgentMeta,
@@ -36,8 +40,34 @@ import type {
 import type { MeshAgent } from './types.js';
 
 /** Deterministic per identity, so one agent has exactly one body. */
-export function meshBackgroundAgentId(agent: MeshAgent): string {
+export function meshBackgroundAgentId(agent: Pick<MeshAgent, 'id'>): string {
   return `mesh-${agent.id}`;
+}
+
+async function transcriptSize(config: Config, agent: MeshAgent): Promise<number> {
+  try {
+    return (
+      await stat(
+        getAgentJsonlPath(
+          config.storage.getProjectDir(),
+          config.getSessionId(),
+          meshBackgroundAgentId(agent),
+        ),
+      )
+    ).size;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return 0;
+    throw error;
+  }
+}
+
+function withTranscriptStart(
+  result: MeshStartResult,
+  transcriptStartOffset: number,
+): MeshStartResult {
+  return result.status === 'started'
+    ? { ...result, transcriptStartOffset }
+    : result;
 }
 
 /**
@@ -53,8 +83,25 @@ export function inspectBody(config: Config, agent: MeshAgent): MeshBodyState {
     .get(meshBackgroundAgentId(agent));
   if (!entry) return { kind: 'absent' };
   switch (entry.status) {
-    case 'running':
-      return { kind: 'running' };
+    case 'running': {
+      const meshRun = readAgentMeta(
+        getAgentMetaPath(
+          config.storage.getProjectDir(),
+          config.getSessionId(),
+          meshBackgroundAgentId(agent),
+        ),
+      )?.meshRun;
+      return {
+        kind: 'running',
+        ...(meshRun
+          ? {
+              threadId: meshRun.threadId,
+              runId: meshRun.runId,
+              attempt: meshRun.attempt,
+            }
+          : {}),
+      };
+    }
     case 'paused':
       return { kind: 'paused' };
     case 'completed':
@@ -111,7 +158,11 @@ async function continueCompleted(
       failureStage: 'continue',
     };
   }
-  const revived = await config.reviveCompletedBackgroundAgent(agentId, prompt);
+  const revived = await config.reviveCompletedBackgroundAgent(agentId, {
+    kind: 'message',
+    text: prompt,
+    deliveryId,
+  });
   if (!revived) {
     return {
       status: 'launch_failed',
@@ -122,7 +173,7 @@ async function continueCompleted(
   return {
     status: 'started',
     sessionId: config.getSessionId(),
-    consumedOnStart: true,
+    consumedOnStart: false,
   };
 }
 
@@ -160,6 +211,50 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
     async inspect(agent) {
       return inspectBody(config, agent);
     },
+    async cancel({ agent, threadId, runId, attempt }) {
+      const agentId = meshBackgroundAgentId(agent);
+      const metaPath = getAgentMetaPath(
+        config.storage.getProjectDir(),
+        config.getSessionId(),
+        agentId,
+      );
+      const binding = readAgentMeta(metaPath)?.meshRun;
+      if (
+        binding?.threadId !== threadId ||
+        binding.runId !== runId ||
+        binding.attempt !== attempt
+      ) {
+        return false;
+      }
+      const registry = config.getBackgroundTaskRegistry();
+      const entry = registry.get(agentId);
+      if (entry?.status === 'paused') {
+        registry.abandon(agentId);
+        return true;
+      }
+      if (entry?.status !== 'running') return false;
+      registry.cancel(agentId, { notify: false });
+      return true;
+    },
+    async deliver({ agent, prompt, deliveryId, threadId, runId, attempt }) {
+      const metaPath = getAgentMetaPath(
+        config.storage.getProjectDir(),
+        config.getSessionId(),
+        meshBackgroundAgentId(agent),
+      );
+      const binding = readAgentMeta(metaPath)?.meshRun;
+      if (
+        binding?.threadId !== threadId ||
+        binding.runId !== runId ||
+        binding.attempt !== attempt
+      ) {
+        return false;
+      }
+      return config.getBackgroundTaskRegistry().queueExternalInput(
+        meshBackgroundAgentId(agent),
+        { kind: 'message', text: prompt, deliveryId },
+      );
+    },
     async start({
       action,
       agent,
@@ -172,6 +267,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
       contextThroughSequence,
     }) {
       try {
+        const transcriptStartOffset = await transcriptSize(config, agent);
         const binding: MeshRunContext = {
           workspaceId,
           agentId: agent.id,
@@ -194,7 +290,8 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
               return {
                 status: 'started',
                 sessionId: result.sessionId,
-                consumedOnStart: true,
+                consumedOnStart: false,
+                transcriptStartOffset,
               };
             }
             if (result.status === 'capacity_wait') {
@@ -212,7 +309,7 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
           case 'resume': {
             const resumed = await config.resumeBackgroundAgent(
               meshBackgroundAgentId(agent),
-              prompt,
+              { kind: 'message', text: prompt, deliveryId: runId },
             );
             if (!resumed) {
               return {
@@ -224,11 +321,15 @@ export function createMeshDispatchPort(config: Config): MeshDispatchPort {
             return {
               status: 'started',
               sessionId: config.getSessionId(),
-              consumedOnStart: true,
+              consumedOnStart: false,
+              transcriptStartOffset,
             };
           }
           case 'continue_completed':
-            return await continueCompleted(config, agent, prompt, runId);
+            return withTranscriptStart(
+              await continueCompleted(config, agent, prompt, runId),
+              transcriptStartOffset,
+            );
           default: {
             const exhaustive: never = action;
             return failure(

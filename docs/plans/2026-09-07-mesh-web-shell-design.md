@@ -3,7 +3,7 @@
 > For §5.2 step 9, written before any UI exists so the build does not start from a blank page or from whichever list component was nearest to hand.
 > Grounded in Multica's shipped UI, read at `multica-ai/multica@7a438bd5b`: `packages/views/issues/components/{issue-detail,execution-log-section,comment-trigger-chips,thread-nav-panel}.tsx` and `packages/views/issues/blocked-trigger-copy.ts`. Where this design diverges from theirs, the reason is stated.
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) and [`2026-09-07-mesh-implementation-acceptance.md`](./2026-09-07-mesh-implementation-acceptance.md).
-> Nothing here has been rendered. Screenshots are step 9's own evidence.
+> The live demo path was rendered on 2026-09-07 through a real daemon and Web Shell. It covers roster/create/list/detail, reply routing preview, live dispatch, parent-report continuation, final review, blocked questions, cancellation, per-run transcript slices, tombstoned names, inline children, and the first-class sidebar entry. Branch CI visual evidence remains step 9 work.
 
 ## 1. Who this is for
 
@@ -155,13 +155,12 @@ From the shell's 14px base: 20px/1.3 semibold thread title, 15px/1.5 header sent
 
 ## 6. Copy rules, and one borrowed law
 
-Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale: **a label must not assert a cause the reason code does not carry.** They keep `runtime_offline`, `agent_runtime_required` and `runtime_unusable` apart because the _fix_ differs, and copy that conflated them sent people to reconnect a machine that was already connected. The same discipline applies to our nine skip reasons, each of which has a different fix:
+Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale: **a label must not assert a cause the reason code does not carry.** They keep `runtime_offline`, `agent_runtime_required` and `runtime_unusable` apart because the _fix_ differs, and copy that conflated them sent people to reconnect a machine that was already connected. The same discipline applies to our eight admission skip reasons, each of which has a different fix:
 
 | Reason                   | What the reader is told                    | The fix it points at                        |
 | ------------------------ | ------------------------------------------ | ------------------------------------------- |
 | `agent_unknown`          | no agent named "dave" in this workspace    | check the spelling, or add the agent        |
 | `agent_disabled`         | alice is disabled and cannot take work     | enable alice                                |
-| `agent_unavailable`      | alice's definition "log-reader" is missing | point the agent at a definition that exists |
 | `no_target`              | your reply reached nobody                  | mention an agent, or set an assignee        |
 | `queue_full`             | alice already has 5 runs waiting           | wait, or give the work to another agent     |
 | `turn_budget_exhausted`  | 12 unattended turns spent on this thread   | reply yourself to continue                  |
@@ -169,7 +168,9 @@ Multica's `blocked-trigger-copy.ts` carries a rule this design adopts wholesale:
 | `thread_done`            | this thread is done and takes no new work  | open a new thread                           |
 | `self_trigger`           | an agent cannot wake itself                | mention someone else                        |
 
-The composer preview and the post-send result share this table, so a reason reads the same in both places.
+The composer preview and the post-send result share this table, so a reason reads the same in both places. Missing or invalid agent definitions are not admission reasons: only the runtime loader can know them, and they appear as a typed launch failure on the run row.
+
+A mutation may be durable even when the immediate dispatcher wake fails. The UI says **the change was saved, but the agent could not start**, includes the typed dispatcher error, and keeps that action error visible across background refreshes. It must not report the whole mutation as failed or silently leave a queued run looking merely slow.
 
 Everything else follows from naming the actor and the act: _alice asked a question_, never _Blocked_. One vocabulary end to end — the button that says **Mark done** produces a thread that reads **done**, and `thread_review` surfaces as _submitted for review_ everywhere. Failures state the stage and the fix in the interface's voice and never apologise: **alice's run failed at launch: agent definition "log-reader" is unavailable.** Refusals name the alternative and link it: **this thread has 1 sub-thread that is not done. Finish or close th_91c first.**
 

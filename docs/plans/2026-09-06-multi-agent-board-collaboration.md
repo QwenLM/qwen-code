@@ -1,7 +1,10 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: The two-agent happy-path live slice is verified; dispatcher
-> reliability, daemon integration, Web Shell, and notifications remain.
+> Status: The two-agent happy path and Web demo are verified. Production paths
+> exist for direct delivery, recovery, startup replay, source-first
+> cancellation, and the Web surface, but the negative reliability matrix has
+> not been run. Channel delivery is blocked on the destination decision in
+> §9.12.
 > Baseline: `origin/main` @ `703678136a` (2026-09-06)
 > Verification: §0.2 separates earlier targeted checks from the first live
 > two-agent run and from everything still unverified
@@ -113,11 +116,35 @@ root as the launcher fixed the next run. A separate first attempt mentioned
 both `@alice` and `@bob` in the human instruction and correctly woke both; the
 demo input was corrected to address only Alice, with no routing-rule change.
 
+**Verified through the real daemon and Web Shell demo path (2026-09-07).** The
+Agents page created persistent identities and a root thread, the workspace-
+qualified REST surface resolved the exact runtime, and the hidden host
+dispatched bookings while the browser polled the ledger. With fresh
+`alice-demo` and `bob-demo` bodies, Alice created one child and waited, Bob
+reviewed it, the parent report woke Alice, and Alice reviewed the root. The UI
+finished with the root `in_review`, the attributed result visible, and the two
+Alice runs collapsed as history. The tree accounted 186,317 of 200,000 tokens.
+This is a demo-path observation, not the full step-9 acceptance gate.
+
+An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
+peer mentions in result prose, and each mention correctly booked another run.
+That tree reached 253,320 accounted tokens and blocked before the parent could
+resume. The prompt now says that an at-sign address books work, forbids it in
+status/result prose unless another wake is intended, and reminds the agent that
+child completion already reports to the parent. Re-running with fresh bodies
+removed the unintended bookings and completed the loop.
+
 **Still unverified.** Running-delivery miss reconciliation, the 12-turn
-ping-pong gate, restart and stall recovery, the real daemon host/reaper path,
-bare-mode tool exposure, REST/Web Shell, and notifications have not been run
-end to end. The negative paths in §4 therefore remain reasoned and locally
-checked contracts, not live-system evidence.
+ping-pong gate, restart and stall recovery, daemon host replacement/reaper,
+bare-mode tool exposure, and notifications have not been run end to end.
+Production paths now exist for correlated running delivery, delivery-race
+rebooking, one retry after restart or a three-minute no-activity stall, stale
+host replacement after a definitive resume failure, source-first cancellation,
+startup replay, and attempt-guarded late callbacks. They have deliberately not
+been tested locally while the demo path is being completed. Cancellation,
+transcript slicing, blocked-question rendering, inline children, and
+deleted-agent tombstones have been exercised through the real daemon and
+browser.
 
 **How to re-check the Multica claims.** Clone `github.com/multica-ai/multica`
 and read `server/internal/daemon/types.go`, `server/internal/daemon/prompt.go`,
@@ -214,7 +241,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 16  | Two gates: **12 unattended agent deliveries per thread / 200k accounted tokens per thread tree**. A human post resets only that thread's turn counter; the token gate applies to every trigger. `coalesce(running)` costs a turn, `coalesce(queued)` does not.                                                                                | Turn count is a local loop breaker; token count is money. A sibling comment cannot reset a loop, and a human message cannot bypass known spend; strict reservation versus bounded in-flight overshoot remains §9.5. |
 | 17  | A child **inherits the parent's current turn count** and charges tokens to the root.                                                                                                                                                                                                                                                          | Creating a child does not mint immediate unattended turns; a child created at the limit may be gated immediately. Later human input resets only the child being supervised.                                         |
-| 18  | A run is stuck when **N minutes pass with no activity** — not by total duration.                                                                                                                                                                                                                                                              | A legitimate two-hour investigation is never killed for being slow.                                                                                                                                                 |
+| 18  | A run is stuck after **three minutes with no model/runtime activity and no tool in flight** — not by total duration. Mesh reuses the existing workflow stall watchdog and its progress definition.                                                                                                                                                                                                           | A legitimate long-running tool is never killed for being slow, and mesh does not invent a second watchdog policy.                                                                                                   |
 | 19  | A stuck run, and any run still `running` after a **daemon restart**, is reconciled once. Restart-recovered registry entries are `paused` and use `resumeBackgroundAgent`; completed entries use resident continue or cold revive. A second execution failure is terminal. A launch failure is typed and terminal unless classified transient. | Recovery follows the runtime's actual state machine and replays only work not committed by the delivery watermark; queued launch failures cannot poison the backlog indefinitely.                                   |
 
 ### Surfaces
@@ -343,8 +370,10 @@ that root id.
 
 The workspace lock prevents concurrent writers; it does **not** make two JSON
 files one transaction. A thread post, its admission outcomes, and its booked run
-share one atomic thread-file replacement. Cross-file parent reports and
-notifications use durable, idempotent outbox events. Every runtime
+share one atomic thread-file replacement. For an assigned new thread, the
+thread, assignment message, outcomes, and first run are all written by that
+initial replacement, so no empty assigned thread can survive a crash. Cross-file
+parent reports and notifications use durable, idempotent outbox events. Every runtime
 `USAGE_METADATA` event upserts `(runId, attempt, cumulativeRound, usage)` on the
 source run; duplicate events replace the same entry. Admission sums
 `runs[].usageByRound` across the root's thread tree under the workspace lock
@@ -423,7 +452,6 @@ mechanism, and it is why the guards are not optional.
 | ------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `skip: agent_unknown`          | an explicit `@token` resolved to no roster identity, or an assignee disappeared | a typo must be visible and must not fall back to the assignee                    |
 | `skip: agent_disabled`         | agent exists but is off                                                         | keeps identity and history without taking work                                   |
-| `skip: agent_unavailable`      | the required agent definition is missing or invalid                             | fail before booking instead of turning a configuration error into a stuck run    |
 | `skip: thread_done`            | thread is finished                                                              | a late post must not silently restart spend                                      |
 | `skip: self_trigger`           | the target wrote the post                                                       | otherwise one "I'm done" becomes an infinite self-conversation                   |
 | `skip: no_target`              | no explicit mention and no assignee                                             | an accepted-looking post must not disappear silently                             |
@@ -437,9 +465,10 @@ mechanism, and it is why the guards are not optional.
 Explicit routing is a target-resolution rule, not a synthetic skip outcome: the
 presence of any `@token`, including an unknown one, suppresses assignee fallback.
 Known and unknown tokens in the same post produce their own outcomes; known
-targets still run. These twelve outcomes are the complete admission contract;
-the local foundation currently tests eleven because definition availability is
-implemented with the launcher in §5.2 step 4.
+targets still run. These eleven outcomes are the complete admission contract.
+Definition availability is deliberately not a twelfth admission outcome: it is
+known only when the runtime loads the required definition, so the dispatcher
+records a typed terminal launch failure without creating an agent body.
 
 Malformed input, authentication failure, missing/corrupt storage, lock failure,
 and unknown schema version abort the mutation as typed API errors; they are not
@@ -483,17 +512,21 @@ The daemon scans durable unaccepted triggers and outbox events after startup and
 periodically, so a crash between a successful file write and an in-process wake
 notification only adds latency.
 
+Cancellation intent is persisted before the runtime is touched. Once a run is
+`cancelling`, any racing completion callback resolves it as `cancelled`; a late
+normal return cannot reverse the person's stop request.
+
 ### Status transition matrix
 
 | Action                                                                                          | Allowed from           | Result and durable side effects                                                                                                            |
 | ----------------------------------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | first successful booking/delivery                                                               | `open`                 | `in_progress`                                                                                                                              |
 | human feedback that successfully books/delivers                                                 | `blocked`, `in_review` | acknowledge applicable blockers/review candidates, set `in_progress`, reset only this thread's turn count; target scope remains §9.11      |
-| `thread_wait()` from the bound run with another live run (excluding itself) or child dependency | `open`, `in_progress`  | record `closeKind=waiting`, mark run `finishing`, keep `in_progress`; no person notification                                               |
+| `thread_wait()` from the bound run with another live run (excluding itself) or a descendant with a future wake path | `open`, `in_progress`  | record `closeKind=waiting`, mark run `finishing`, keep `in_progress`; no person notification                                               |
 | `thread_wait()` without a live dependency                                                       | `open`, `in_progress`  | reject; the agent must block, review, or continue working                                                                                  |
 | `thread_block(question)` from the bound run                                                     | `open`, `in_progress`  | append question, record `closeKind=blocked`, mark run `finishing`, enqueue blocker notification atomically                                 |
 | `thread_review(summary)` from the bound run                                                     | `open`, `in_progress`  | append summary, record `closeKind=review`, mark run `finishing` atomically                                                                 |
-| any admission books/delivers nothing and leaves no runnable target                              | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, unavailable/unknown assignees, and `no_target` |
+| any admission books/delivers nothing and leaves no runnable target                              | any non-`done`         | persist all outcomes, set `blocked`, enqueue one deduplicated notification; includes gates, disabled/unknown assignees, and `no_target`    |
 | terminal launch/execution failure leaves no runnable target                                     | any non-`done`         | append system failure, set `blocked`, enqueue failure notification                                                                         |
 | clean run exit without `thread_block`/`thread_review`                                           | `in_progress`          | append final text, commit consumed input, record `closeKind=unclosed`; block only if no successor is runnable                              |
 | human marks done with a non-done descendant                                                     | any non-`done`         | refuse and return the descendant ids; v1 never silently cascades                                                                           |
@@ -579,14 +612,10 @@ kept in the next isolated child PR:
 5. Stale daemon-session comments and the unreachable `explicit_routing` outcome
    were removed. The latter remains a target-resolution rule.
 
-Steps 1-3 cover admission, capability classification, and the versioned storage
-protocol. Step 4 now has a source-tested hidden host and typed launcher; it is
-not complete until the #11206 CI gate passes. Its daemon-process observation is
-deferred to step 6, where the dispatcher first gives the host owner a server
-caller. Delivery acknowledgement, assignment triggers, status commands,
-provenance producers, and transcript slices remain scheduled below; their
-storage fields exist because v1 deliberately batches the full §3 schema, not
-because those behaviors have run.
+Steps 1-9 now have production paths. The live vertical slice and Web demo prove
+the ordinary parent/child return flow; §0.2 names the recovery and delivery
+paths that still lack runtime observations. Step 10 cannot safely deliver until
+§9.12 defines a concrete channel recipient.
 
 ### 5.2 Order of work
 
@@ -646,6 +675,14 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    cancellation, restart and stall recovery, and full outbox replay.
 9. **REST routes and Web Shell** — roster, thread list/view, busy reason, gates,
    failures, cancellation, and transcript slices; absorb #11140's entry.
+   The 2026-09-07 demo slice reached `in_review` through a real daemon and Web
+   Shell: Alice created Bob's child, waited, received its parent report, and
+   reviewed the root. The live surface now also covers cancellation,
+   transcript-slice reading, blocked questions, tombstoned agent names, inline
+   children, mark-done, and the Agents sidebar entry. Assigned creation now
+   validates the live roster and persists its first booking atomically, human
+   posts wake both new and coalesced work, and cancel/done persist intent before
+   touching the runtime.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate
     tripped, and terminal failure. Last because it consumes state transitions
     proven by steps 7-9.
@@ -736,18 +773,35 @@ does not hide another still running; a human reply on one child does not reset a
 sibling; parent done refuses a live child; and marking a leaf done stops its
 queued and running work.
 
-Still to build:
+Production surface status:
 
-| Piece                                                                                                       | Where                                  |
-| ----------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Run envelope, delivery state, prompt assembler, ambient run context                                         | `core/src/agents/mesh/`                |
-| Consume the integrated correlated external-input runtime contract                                           | `core/src/agents/mesh/`                |
-| Thread tools: `thread_post`, `thread_wait`, `thread_block`, `thread_review`, `thread_create`, `thread_read` | `core/src/tools/`                      |
-| Dispatcher, reconciliation, FIFO, and sweeper                                                               | `cli/src/serve/mesh/`                  |
-| REST: agents, threads, posts, runs                                                                          | `cli/src/serve/routes/mesh.ts`         |
-| Channel notifications for the four events                                                                   | reuse the channel workers              |
-| Web Shell: roster, thread list, thread view, run transcripts                                                | `web-shell/client/`                    |
-| #11140's sidebar entry, absorbed                                                                            | `web-shell/client/components/sidebar/` |
+| State | Piece |
+| --- | --- |
+| Implemented and exercised on the happy path | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Web Shell, transcript slices, cancellation UI |
+| Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay |
+| Not implemented pending product decision | channel delivery for the four notification events (§9.12) |
+
+The daemon owner is scoped to one workspace runtime generation, not merely its
+bridge object. Once that generation drains or is replaced, its keepalive stops
+and later launches and dispatches fail closed. Generation assertions bracket
+host-session claims and releases, with raced stale spawns cleaned up. This
+prevents an old owner from continuing to act through a reused bridge after the
+workspace trust/runtime boundary has moved.
+
+Delivery-race rebooking applies only while an attempt is running, finishing, or
+has just completed. `failed` and `cancelled` are true terminal states: their
+unaccepted trigger ids remain audit evidence and are never turned into a new run
+by a later dispatcher sweep.
+
+Cancellation admission reads and transitions the run under the workspace lock.
+The dispatcher therefore cannot claim a queued run between a route's stale read
+and its attempted cancellation, and the route reports the state read back after
+dispatch rather than claiming cancellation from its initial snapshot.
+
+The human `done` transition is one workspace transaction: it scans the full
+descendant tree, refuses any non-done child, marks the target terminal, and
+cancels its queued or active work while holding the same lock. It therefore
+cannot race a live agent creating a new child between validation and commit.
 
 ## 6. What an agent actually receives
 
@@ -814,9 +868,11 @@ Eight rules:
   retry is labelled. Message ids/sequences make duplicate input recognisable.
 - **Mesh turns use structured external input.** The dispatcher supplies one
   `{kind: 'message', text, deliveryId}` envelope rather than a bare
-  `task_prompt`. The correlated consumed event and transcript record retain the
-  delivery id. Ordinary background-agent continuations may keep their legacy
-  string path; they are not durable mesh deliveries.
+  `task_prompt` for launch, resident continuation, paused resume, and cold
+  revival. The correlated consumed event and transcript record retain the
+  delivery id.
+  Ordinary background-agent continuations may keep their legacy string path;
+  they are not durable mesh deliveries.
 - **Trust comes from runtime binding, not a heading.** Today's resident chat has
   no per-turn system-role injection seam. Product must choose between a fixed
   user-role prefix whose authority is established by the ambient binding plus
@@ -828,6 +884,10 @@ Eight rules:
 - **Mention tokens are handed over verbatim for enabled peers only**, excluding
   self. Unknown/disabled targets are surfaced by routing rather than wasting a
   model turn.
+- **A mention is a booking, not decoration.** Result and status prose must not
+  address a peer by at-sign name unless another run is intended. Completing a
+  child already reports to its parent; repeating the hand-off with a mention
+  creates a ping-pong rather than adding provenance.
 - **A run must close explicitly.** The prompt requires `thread_wait`,
   `thread_review`, or `thread_block`. Runtime final text is still captured, but
   a run that exits without one is a visible `unclosed_run`, never implicit
@@ -878,7 +938,7 @@ cross-issue references have no equivalent.
 | Capability                       | Target reach | Note                                                                                             |
 | -------------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
 | Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, serialisation, gates; mid-run steering remains unproved |
-| Run records and observability    | ~80%         | shared transcript with per-run slices, per-run tokens, retry and timeout are designed, not built |
+| Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified |
 | Skills                           | ~70%         | carried by the agent definition                                                                  |
 | Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                            |
 | Triggers                         | ~50%         | assignment and `@`; scheduled and external events unconnected                                    |
@@ -987,9 +1047,11 @@ remain genuinely open:
    `MAX_THREAD_RUNS` retain active references but trim old terminal history. The
    v1 conservative default also retains messages carrying an `originEventId`
    and runs carrying usage, because trimming either would break replay
-   idempotency or reset the token gate. The dispatcher must record the first
-   retained sequence and emit a gap; whether full history and these durable
-   ledgers move to a separate append-only archive is undecided.
+   idempotency or reset the token gate. Because referenced old messages can
+   survive while unreferenced messages around them are removed, prompt assembly
+   counts missing sequence numbers across the undisplayed range and emits an
+   explicit, non-recoverable gap; whether full history and these durable ledgers
+   move to a separate append-only archive is undecided.
 3. **Cancellation UX.** Done now has defined cancellation semantics, but the
    user-facing choice between graceful stop and immediate abort, and what partial
    output should be posted, remains to be designed.
@@ -1014,9 +1076,10 @@ remain genuinely open:
    deduplicated, but replaying accepted input after a process crash can make the
    model independently repeat a post, mention, or child-thread creation. The
    system can preserve provenance and show that it was a retry; child creation
-   should additionally deduplicate an exact `(parentThreadId, normalizedTitle)`
-   retry. Whether the UI should offer broader semantic duplicate collapse is
-   undecided. Silent loss remains worse than a visible duplicate.
+   now deduplicates an exact `(parentThreadId, normalizedTitle)` retry in the
+   workspace transaction. Whether the UI should offer broader semantic
+   duplicate collapse is undecided. Silent loss remains worse than a visible
+   duplicate.
 8. **System-prompt provenance and drift.** QWEN.md, the agent definition, and
    auto-memory all enter the system prompt at higher trust than thread posts.
    Another session can change them while a resident body keeps the old prompt.
@@ -1037,6 +1100,13 @@ remain genuinely open:
     reply aimed at `@bob` must not silently clear an unrelated question raised
     by Alice. Decide whether acknowledgement follows mentioned targets, the
     assignee, or an explicit blocker id.
+12. **Channel notification destination.** Existing channel workers can send a
+    message only with a concrete `(channelName, user|chat, targetId)`. A thread
+    created in Web Shell has none, and “one configured channel” identifies a
+    connector but not a recipient. Decide whether a thread retains the channel
+    origin that created it, the workspace declares one notification target, or
+    both with an explicit precedence. Broadcasting is not a safe default; until
+    this is settled, notification outbox events remain pending.
 
 ### Resolved during step 3
 
@@ -1044,7 +1114,7 @@ Runtime shape is settled: runtime is a first-class concept. V1 carries
 `runtimeId` beside `backgroundAgentId`; step 4 exposes the smallest launcher
 contract with the local background agent as its first implementation. Remote,
 cloud, and foreign-runtime adapters remain out of scope for v1. This settles
-the schema dependency formerly listed here as open question 12 without deciding
+the former runtime-shape schema dependency without deciding
 whether #9402 becomes the seed of a later adapter.
 
 ## 10. Out of scope
@@ -1065,6 +1135,6 @@ write code, which decision 1 defers until isolation is settled.
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 
-**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。这次运行发现并修复了续跑时 agent sidecar 使用错误存储根目录的问题，没有为了跑通修改 §6 提示词。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、真实 daemon host、bare 模式、REST、Web Shell 和通知仍未端到端验证。
+**验证边界**：两名真实 agent 的最小闭环已经跑通：Alice 拆子线程并 `thread_wait`，Bob `thread_review`，父报告 13ms 写回，同一个 Alice 长期执行体续跑并把根线程 `thread_review` 到 `in_review`。真实 daemon + Web Shell 的 demo 路径也已跑通 roster/create/list/detail、实时派发和父级续跑，最终根线程进入 `in_review`，树内计费 186,317/200,000。浏览器首轮同时发现 result 文本里的 peer mention 会按规则继续 booking 并形成回环，因此 §6 补了「at-sign address 等于 booking，子线程完成已自动回报父级」约束；fresh agent 重跑后没有多余 booking。后续同一真实环境又跑通 running → stopping → cancelled、`thread_block` 问题与聚合原因、精确 run transcript byte range、inline child、mark done，以及删除 agent 后保留 `name (removed)` 历史署名。运行中投递丢失、12 轮防乒乓、重启/卡死恢复、host 替换/reaper、bare 模式、视觉 CI 和通知仍未端到端验证。
 
 </details>

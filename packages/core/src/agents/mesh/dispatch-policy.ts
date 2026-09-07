@@ -137,9 +137,10 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
   // thread. Either state absorbs the message: a queued run has not been sent
   // yet, and a running one accepts mid-turn delivery.
   const existing = thread.runs.find(
+    (run) => run.agentId === target.id && run.status === 'queued',
+  ) ?? thread.runs.find(
     (run) =>
-      run.agentId === target.id &&
-      (run.status === 'queued' || run.status === 'running'),
+      run.agentId === target.id && run.status === 'running',
   );
   if (existing) {
     return {

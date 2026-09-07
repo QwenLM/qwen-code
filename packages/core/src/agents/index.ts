@@ -21,6 +21,7 @@ export * from './background-tasks.js';
 export * from './background-agent-resume.js';
 export {
   MAX_AGENT_TRACE_NODES,
+  getAgentJsonlPath,
   getSubagentSessionDir,
   getSubagentsRootDir,
   readAgentMeta,
@@ -31,10 +32,51 @@ export {
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
 export {
   claimMeshHostSession,
+  createThread,
+  generateAgentId,
+  generateEventId,
+  isValidAgentName,
+  listThreads,
   readMeshAgents,
   readMeshWorkspace,
+  readThread,
+  releaseMeshHostSession,
+  removeMeshAgent,
+  setMeshAgentEnabled,
+  updateMeshAgents,
+  updateThread,
+  withMeshStoreTransaction,
 } from './mesh/mesh-store.js';
+export { decideDispatch, resolveTargets } from './mesh/dispatch-policy.js';
+export { parseMentions } from './mesh/mentions.js';
+export {
+  assignThread,
+  createAssignedThread,
+  finishRun,
+  postMessage,
+} from './mesh/thread-actions.js';
+export { resolveThreadStatus } from './mesh/thread-status.js';
+export {
+  finishRunInTransaction,
+  hasLiveDescendant,
+} from './mesh/run-lifecycle.js';
+export {
+  createMeshDispatchPort,
+  meshBackgroundAgentId,
+} from './mesh/dispatch-port.js';
+export { dispatchOnce } from './mesh/dispatcher.js';
 export { launchMeshAgent } from './mesh/launcher.js';
 export type { MeshAgentLaunchResult } from './mesh/launcher.js';
-export type { MeshAgent, MeshWorkspaceState } from './mesh/types.js';
+export type { DispatchRecord } from './mesh/dispatcher.js';
+export {
+  DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  DEFAULT_THREAD_TOKEN_BUDGET,
+  HUMAN_AUTHOR_ID,
+} from './mesh/types.js';
+export type {
+  MeshAgent,
+  MeshWorkspaceState,
+  Thread,
+  ThreadRun,
+} from './mesh/types.js';
 export * from './tasks/types.js';

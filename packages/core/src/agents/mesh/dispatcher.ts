@@ -14,25 +14,29 @@
  * the second kind in the rules layer is what an earlier revision did with a
  * `defer` outcome, and it gave one situation two spellings.
  *
- * Deliberately without recovery: no stall sweeper, no restart reconciliation,
- * no delivery into a running turn. Those need failure injection to prove and
- * belong to the reliability step. What is here is enough to run the live
- * vertical slice, which is the first evidence that any of this works at all.
+ * A periodic pass also reconciles interrupted runs and delivers posts that
+ * were coalesced while a body was already working.
  */
 
 import { assembleMeshPrompt } from './prompt.js';
 import {
+  generateRunId,
   listThreads,
   readMeshAgents,
   readMeshWorkspace,
   reconcileThreadOutbox,
   withMeshStoreTransaction,
 } from './mesh-store.js';
-import { finishRunInTransaction, hasLiveDescendant } from './run-lifecycle.js';
+import {
+  applyAggregateStatus,
+  finishRunInTransaction,
+  hasLiveDescendant,
+} from './run-lifecycle.js';
 import {
   bindRunSession,
   claimRun,
   postMessageInTransaction,
+  requeueRun,
   releaseRunClaim,
   SYSTEM_AUTHOR_ID,
 } from './thread-actions.js';
@@ -43,7 +47,12 @@ export type MeshBodyState =
   | { kind: 'absent' }
   | { kind: 'paused' }
   | { kind: 'completed' }
-  | { kind: 'running'; threadId?: string };
+  | {
+      kind: 'running';
+      threadId?: string;
+      runId?: string;
+      attempt?: number;
+    };
 
 /**
  * How a body is brought back for the next turn.
@@ -73,6 +82,20 @@ export type MeshStartResult =
 
 export interface MeshDispatchPort {
   inspect(agent: MeshAgent): Promise<MeshBodyState>;
+  cancel?(input: {
+    agent: MeshAgent;
+    threadId: string;
+    runId: string;
+    attempt: number;
+  }): Promise<boolean>;
+  deliver?(input: {
+    agent: MeshAgent;
+    prompt: string;
+    deliveryId: string;
+    threadId: string;
+    runId: string;
+    attempt: number;
+  }): Promise<boolean>;
   start(input: {
     action: MeshStartAction;
     agent: MeshAgent;
@@ -90,6 +113,12 @@ export interface MeshDispatchPort {
 
 export type DispatchResultKind =
   | 'started'
+  | 'delivered'
+  | 'delivery_race'
+  | 'cancelled'
+  | 'requeued'
+  | 'recovered_terminal'
+  | 'recovery_failed'
   | 'busy_other_thread'
   | 'capacity_wait'
   | 'launch_failed'
@@ -111,6 +140,157 @@ interface Candidate {
 }
 
 const LIVE = new Set(['running', 'finishing', 'cancelling']);
+
+function pendingTriggerIds(run: ThreadRun): string[] {
+  const accepted = new Set(run.acceptedMessageIds);
+  return run.triggerMessageIds.filter((id) => !accepted.has(id));
+}
+
+function bodyCarriesRun(
+  state: MeshBodyState,
+  thread: Thread,
+  run: ThreadRun,
+): boolean {
+  return (
+    state.kind === 'running' &&
+    state.threadId === thread.id &&
+    state.runId === run.id &&
+    state.attempt === run.attempts
+  );
+}
+
+async function acceptRunningDelivery(
+  projectRoot: string,
+  input: {
+    threadId: string;
+    runId: string;
+    attempt: number;
+    throughSequence: number;
+    messageIds: string[];
+  },
+): Promise<boolean> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(input.threadId);
+    const run = thread?.runs.find((entry) => entry.id === input.runId);
+    if (
+      !thread ||
+      !run ||
+      run.status !== 'running' ||
+      run.attempts !== input.attempt
+    ) {
+      return false;
+    }
+    await transaction.writeThread({
+      ...thread,
+      runs: thread.runs.map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              acceptedMessageIds: Array.from(
+                new Set([...entry.acceptedMessageIds, ...input.messageIds]),
+              ),
+              contextThroughSequence: input.throughSequence,
+            }
+          : entry,
+      ),
+    });
+    return true;
+  });
+}
+
+async function rebookUndeliveredTriggers(
+  projectRoot: string,
+  threadId: string,
+  runId: string,
+  attempt: number,
+  now: number,
+): Promise<ThreadRun | undefined> {
+  return withMeshStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    const run = thread?.runs.find((entry) => entry.id === runId);
+    if (
+      !thread ||
+      !run ||
+      run.attempts !== attempt ||
+      thread.status === 'done' ||
+      (run.status !== 'running' &&
+        run.status !== 'finishing' &&
+        run.status !== 'completed')
+    ) {
+      return undefined;
+    }
+    const pending = pendingTriggerIds(run);
+    if (pending.length === 0) return undefined;
+
+    const queued = thread.runs.find(
+      (entry) =>
+        entry.id !== run.id &&
+        entry.agentId === run.agentId &&
+        entry.status === 'queued',
+    );
+    const successor: ThreadRun = queued
+      ? {
+        ...queued,
+        triggerMessageIds: Array.from(
+          new Set([...queued.triggerMessageIds, ...pending]),
+        ),
+      }
+      : {
+        id: generateRunId(),
+        agentId: run.agentId,
+        status: 'queued',
+        triggerMessageIds: pending,
+        acceptedMessageIds: [],
+        consumedMessageIds: [],
+        usageByRound: [],
+        queueSequence: await transaction.allocateRunSequence(),
+        queuedAt: now,
+        attempts: 0,
+      };
+
+    const pendingSet = new Set(pending);
+    const nextRuns = thread.runs
+      .map((entry) =>
+        entry.id === run.id
+          ? {
+              ...entry,
+              triggerMessageIds: entry.triggerMessageIds.filter(
+                (id) => !pendingSet.has(id),
+              ),
+            }
+          : entry.id === successor.id
+            ? successor
+            : entry,
+      )
+      .concat(
+        thread.runs.some((entry) => entry.id === successor.id)
+          ? []
+          : [successor],
+      );
+    const messages = thread.messages.map((message) =>
+      pendingSet.has(message.id)
+        ? {
+            ...message,
+            outcomes: message.outcomes.map((outcome) =>
+              outcome.runId === run.id &&
+              outcome.targetAgentId === run.agentId
+                ? {
+                    ...outcome,
+                    kind: 'coalesce' as const,
+                    into: 'queued' as const,
+                    runId: successor.id,
+                  }
+                : outcome,
+            ),
+          }
+        : message,
+    );
+    let next = { ...thread, messages, runs: nextRuns };
+    next = await applyAggregateStatus(transaction, next, now);
+    await transaction.writeThread(next);
+    return successor;
+  });
+}
 
 /**
  * The oldest queued run for every agent that is not already working.
@@ -136,7 +316,7 @@ export function selectCandidates(
     for (const run of thread.runs) {
       if (run.status !== 'queued' || busy.has(run.agentId)) continue;
       const agent = agents.find((candidate) => candidate.id === run.agentId);
-      if (!agent || agent.enabled === false) continue;
+      if (!agent) continue;
       const held = byAgent.get(run.agentId);
       if (!held || run.queueSequence < held.run.queueSequence) {
         byAgent.set(run.agentId, { agent, thread, run });
@@ -161,6 +341,196 @@ function actionFor(state: MeshBodyState): MeshStartAction | undefined {
   }
 }
 
+async function reconcileInterruptedRuns(
+  projectRoot: string,
+  port: MeshDispatchPort,
+  agents: readonly MeshAgent[],
+  threads: readonly Thread[],
+  now: number,
+): Promise<DispatchRecord[]> {
+  const records: DispatchRecord[] = [];
+  for (const thread of threads) {
+    for (const run of thread.runs) {
+      if (!LIVE.has(run.status)) continue;
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      if (!agent) continue;
+      const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
+      const state = await port.inspect(agent);
+      if (run.status === 'cancelling') {
+        if (state.kind === 'running' && !bodyCarriesRun(state, thread, run)) {
+          records.push({
+            ...base,
+            kind: 'runtime_divergence',
+            detail: state.threadId ?? state.runId ?? 'unknown running body',
+          });
+          continue;
+        }
+        await port.cancel?.({
+          agent,
+          threadId: thread.id,
+          runId: run.id,
+          attempt: run.attempts,
+        });
+        await withMeshStoreTransaction(projectRoot, (transaction) =>
+          finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: { status: 'cancelled', attempt: run.attempts },
+            now,
+          }),
+        );
+        records.push({ ...base, kind: 'cancelled' });
+        continue;
+      }
+      if (bodyCarriesRun(state, thread, run)) continue;
+      if (state.kind === 'running') {
+        records.push({
+          ...base,
+          kind: 'runtime_divergence',
+          detail: state.threadId ?? state.runId ?? 'unknown running body',
+        });
+        continue;
+      }
+
+      const hasUndrainedInput = run.acceptedMessageIds.some(
+        (id) => !run.consumedMessageIds.includes(id),
+      );
+      if (
+        run.status === 'finishing' ||
+        (state.kind === 'completed' && !hasUndrainedInput)
+      ) {
+        await withMeshStoreTransaction(projectRoot, (transaction) =>
+          finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: { status: 'completed', attempt: run.attempts },
+            now,
+          }),
+        );
+        records.push({ ...base, kind: 'recovered_terminal' });
+        continue;
+      }
+      if (run.attempts < 2) {
+        if (
+          await requeueRun(projectRoot, {
+            threadId: thread.id,
+            runId: run.id,
+            attempt: run.attempts,
+          })
+        ) {
+          records.push({ ...base, kind: 'requeued' });
+        }
+        continue;
+      }
+      await withMeshStoreTransaction(projectRoot, (transaction) =>
+        finishRunInTransaction(transaction, {
+          threadId: thread.id,
+          runId: run.id,
+          outcome: {
+            status: 'failed',
+            attempt: run.attempts,
+            error: 'Agent body disappeared after its recovery attempt.',
+            failureStage: 'recovery',
+          },
+          now,
+        }),
+      );
+      records.push({ ...base, kind: 'recovery_failed' });
+    }
+  }
+  return records;
+}
+
+async function deliverRunningInputs(
+  projectRoot: string,
+  port: MeshDispatchPort,
+  workspaceId: string,
+  agents: readonly MeshAgent[],
+  threads: readonly Thread[],
+  now: number,
+): Promise<DispatchRecord[]> {
+  const records: DispatchRecord[] = [];
+  for (const thread of threads) {
+    for (const run of thread.runs) {
+      if (
+        (run.status !== 'running' &&
+          run.status !== 'finishing' &&
+          run.status !== 'completed') ||
+        pendingTriggerIds(run).length === 0
+      ) {
+        continue;
+      }
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      if (!agent) continue;
+      const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
+      let delivered = false;
+      if (run.status === 'running' && port.deliver) {
+        const state = await port.inspect(agent);
+        if (bodyCarriesRun(state, thread, run)) {
+          const prompt = assembleMeshPrompt({
+            workspaceId,
+            agent,
+            run,
+            thread,
+            roster: agents,
+          });
+          const through = thread.messages.find(
+            (message) => message.sequence === prompt.contextThroughSequence,
+          );
+          if (through) {
+            const committed =
+              thread.deliveryByAgent[run.agentId]?.committedThroughSequence ??
+              0;
+            const messageIds = thread.messages
+              .filter(
+                (message) =>
+                  message.sequence > committed &&
+                  message.sequence <= prompt.contextThroughSequence,
+              )
+              .map((message) => message.id);
+            delivered = await port.deliver({
+              agent,
+              prompt: prompt.text,
+              deliveryId: through.id,
+              threadId: thread.id,
+              runId: run.id,
+              attempt: run.attempts,
+            });
+            if (delivered) {
+              delivered = await acceptRunningDelivery(projectRoot, {
+                threadId: thread.id,
+                runId: run.id,
+                attempt: run.attempts,
+                throughSequence: prompt.contextThroughSequence,
+                messageIds,
+              });
+            }
+          }
+        }
+      }
+      if (delivered) {
+        records.push({ ...base, kind: 'delivered' });
+        continue;
+      }
+      const successor = await rebookUndeliveredTriggers(
+        projectRoot,
+        thread.id,
+        run.id,
+        run.attempts,
+        now,
+      );
+      if (successor) {
+        records.push({
+          ...base,
+          kind: 'delivery_race',
+          detail: successor.id,
+        });
+      }
+    }
+  }
+  return records;
+}
+
 /**
  * Starts at most one run per idle agent, then delivers parent reports.
  *
@@ -177,8 +547,30 @@ export async function dispatchOnce(
   const now = options.now ?? Date.now();
   const workspace = await readMeshWorkspace(projectRoot);
   const agents = await readMeshAgents(projectRoot);
-  const { threads } = await listThreads(projectRoot);
+  let { threads } = await listThreads(projectRoot);
   const records: DispatchRecord[] = [];
+
+  records.push(
+    ...(await reconcileInterruptedRuns(
+      projectRoot,
+      port,
+      agents,
+      threads,
+      now,
+    )),
+  );
+  ({ threads } = await listThreads(projectRoot));
+  records.push(
+    ...(await deliverRunningInputs(
+      projectRoot,
+      port,
+      workspace.workspaceId,
+      agents,
+      threads,
+      now,
+    )),
+  );
+  ({ threads } = await listThreads(projectRoot));
 
   for (const candidate of selectCandidates(agents, threads)) {
     const { agent, thread, run } = candidate;
@@ -267,6 +659,7 @@ export async function dispatchOnce(
         runId: run.id,
         outcome: {
           status: 'failed',
+          attempt: claimed.run.attempts,
           error: result.error,
           failureStage:
             result.status === 'agent_unavailable' ? 'definition' : 'launch',
@@ -290,6 +683,22 @@ export async function dispatchOnce(
 
 function isParentReport(event: ThreadEvent): boolean {
   return event.kind === 'parent_report';
+}
+
+function parentReportText(thread: Thread, event: ThreadEvent): string {
+  const label = `Sub-thread ${thread.id} ("${thread.title}")`;
+  switch (event.payload['event']) {
+    case 'child_blocked':
+      return `${label} is blocked: ${String(event.payload['reason'] ?? 'it needs input')}`;
+    case 'child_failed':
+      return `${label} failed: ${String(event.payload['error'] ?? 'unknown error')}`;
+    case 'child_cancelled':
+      return `${label} was cancelled.`;
+    case 'child_done':
+      return `${label} was marked done by a person.`;
+    default:
+      return `${label} is ready for review.`;
+  }
 }
 
 /**
@@ -329,7 +738,7 @@ export async function deliverParentReports(
           ...(event.causedByRunId ? { sourceRunId: event.causedByRunId } : {}),
           triggerKind: 'child_report',
           originEventId: event.id,
-          text: `Sub-thread ${thread.id} ("${thread.title}") is ready for review.`,
+          text: parentReportText(thread, event),
         });
         delivered += 1;
       },

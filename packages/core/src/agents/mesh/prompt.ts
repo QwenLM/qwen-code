@@ -125,16 +125,21 @@ export function assembleMeshPrompt(
 
   const committed = thread.deliveryByAgent[agent.id]?.committedThroughSequence;
   const messages = thread.messages;
-  const firstRetained = messages[0]?.sequence;
   const lastRetained = messages[messages.length - 1]?.sequence;
 
-  // A gap is provable only from sequences: the store trims oldest-first, so
-  // anything below the first retained sequence that the agent has not already
-  // been shown is missing for good.
+  // Referenced old posts survive retention, so the retained array can contain
+  // holes. Count sequences rather than comparing only its first element.
   const expectedFrom = committed === undefined ? 1 : committed + 1;
   const gapCount =
-    firstRetained !== undefined && firstRetained > expectedFrom
-      ? firstRetained - expectedFrom
+    lastRetained !== undefined && lastRetained >= expectedFrom
+      ? Math.max(
+          0,
+          lastRetained -
+            expectedFrom +
+            1 -
+            messages.filter((message) => message.sequence >= expectedFrom)
+              .length,
+        )
       : 0;
 
   const delivery: MeshDeliveryKind =
@@ -193,7 +198,7 @@ export function assembleMeshPrompt(
   if (gapCount > 0) {
     lines.push('');
     lines.push(
-      `GAP — ${gapCount} earlier post(s) are no longer retained on this thread; use thread_read for the record you need.`,
+      `GAP — ${gapCount} post(s) are no longer retained on this thread. Do not infer their contents; ask a person if they are required.`,
     );
   }
 
@@ -218,6 +223,12 @@ export function assembleMeshPrompt(
   lines.push('ENABLED PEERS (excludes this agent)');
   lines.push(...renderPeers(input));
   lines.push(`You can: ${MESH_THREAD_TOOL_NAMES.join(' · ')}`);
+  lines.push(
+    'Addressing a peer by at-sign name books another run. Do not do that in status or result posts unless you intend to wake them.',
+  );
+  lines.push(
+    'Completing a child thread reports its result to the parent automatically.',
+  );
   lines.push(
     'Before ending this run: use thread_wait() after delegating live work,',
   );

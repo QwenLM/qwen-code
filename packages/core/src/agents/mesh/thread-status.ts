@@ -53,7 +53,12 @@ export const LIVE_RUN_STATUSES = new Set([
  * died never reached a closing tool, so it has no `closeKind` to read.
  */
 export type CloseObligationKind =
-  'blocked' | 'failure' | 'unclosed' | 'waiting' | 'review';
+  | 'blocked'
+  | 'cancelled'
+  | 'failure'
+  | 'unclosed'
+  | 'waiting'
+  | 'review';
 
 export interface CloseObligation {
   runId: string;
@@ -66,6 +71,7 @@ export interface CloseObligation {
 /** Blocked-class obligations outrank a review; a waiting one is conditional. */
 const BLOCKING_KINDS = new Set<CloseObligationKind>([
   'blocked',
+  'cancelled',
   'failure',
   'unclosed',
 ]);
@@ -81,6 +87,9 @@ function obligationFor(run: ThreadRun): CloseObligation | undefined {
   // the thing a person has to see.
   if (run.status === 'failed') {
     return { ...base, kind: 'failure', ...acknowledged };
+  }
+  if (run.status === 'cancelled') {
+    return { ...base, kind: 'cancelled', ...acknowledged };
   }
   if (run.closeKind === undefined) return undefined;
   const kind: CloseObligationKind =
@@ -180,9 +189,11 @@ export function resolveThreadStatus(
       reason:
         first.kind === 'blocked'
           ? `run ${first.runId} asked a question and is waiting for a person`
-          : first.kind === 'failure'
-            ? `run ${first.runId} failed and no successor is runnable`
-            : `run ${first.runId} ended without a hand-off`,
+          : first.kind === 'cancelled'
+            ? `run ${first.runId} was cancelled and no successor is runnable`
+            : first.kind === 'failure'
+              ? `run ${first.runId} failed and no successor is runnable`
+              : `run ${first.runId} ended without a hand-off`,
       outstanding,
     };
   }

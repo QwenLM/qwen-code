@@ -147,7 +147,10 @@ import {
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
   sessionIdContext,
+  createMeshDispatchPort,
+  dispatchOnce,
   launchMeshAgent,
+  readAgentMeta,
   readMeshAgents,
   readMeshWorkspace,
   type MeshAgent,
@@ -8494,7 +8497,8 @@ class QwenAgent implements Agent {
           : params;
       if (
         (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
-          method === SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch) &&
+          method === SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -12256,6 +12260,46 @@ class QwenAgent implements Agent {
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
         return result;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionMeshDispatch: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid mesh dispatch request',
+          );
+        }
+        const config = this.sessionOrThrow(sessionId).getConfig();
+        if (config.getSessionSourceType() !== MESH_HOST_SESSION_SOURCE_TYPE) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Mesh dispatch requires a mesh host session',
+          );
+        }
+        const workspace = await readMeshWorkspace(config.getProjectRoot());
+        if (workspace.hostSessionId !== config.getSessionId()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Mesh dispatch requires the claimed mesh host session',
+          );
+        }
+        const agents = await readMeshAgents(config.getProjectRoot());
+        const agentIds = new Set(agents.map((agent) => agent.id));
+        const registry = config.getBackgroundTaskRegistry();
+        for (const entry of registry.getAll()) {
+          const meshAgentId = entry.metaPath
+            ? readAgentMeta(entry.metaPath)?.meshAgentId
+            : undefined;
+          if (meshAgentId && !agentIds.has(meshAgentId)) {
+            registry.forget(entry.agentId);
+          }
+        }
+        return {
+          records: await dispatchOnce(
+            config.getProjectRoot(),
+            createMeshDispatchPort(config),
+          ),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionMeshAgentLaunch: {
         const sessionId = params['sessionId'];

@@ -25,6 +25,7 @@ import {
   type AgentLevelFilter,
 } from './agents-manager-logic';
 import { AgentCreatePage } from './AgentCreatePage';
+import { ThreadsRoute } from '../mesh/ThreadsRoute';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -150,6 +151,7 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
+  const [meshOpen, setMeshOpen] = useState(false);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -171,8 +173,10 @@ export function AgentsManagerPage({
   }, [agents]);
 
   useEffect(() => {
-    embedded?.onDetailChange(Boolean(selectedName || createOpen || editOpen));
-  }, [createOpen, editOpen, embedded, selectedName]);
+    embedded?.onDetailChange(
+      Boolean(selectedName || createOpen || editOpen || meshOpen),
+    );
+  }, [createOpen, editOpen, embedded, meshOpen, selectedName]);
 
   useEffect(() => {
     if (!selection) {
@@ -208,6 +212,7 @@ export function AgentsManagerPage({
   }, [initialCreateScope]);
 
   function returnToList(): void {
+    setMeshOpen(false);
     setCreateOpen(false);
     setEditOpen(false);
     setSelection(null);
@@ -245,7 +250,12 @@ export function AgentsManagerPage({
   ];
   const subpageTitle = editOpen
     ? t('agent.edit')
-    : (selectedName ?? (createOpen ? t('agent.create.button') : null));
+    : (selectedName ??
+      (createOpen
+        ? t('agent.create.button')
+        : meshOpen
+          ? 'Shared threads'
+          : null));
 
   const standaloneNavigation = (
     <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
@@ -308,6 +318,15 @@ export function AgentsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  if (meshOpen) {
+    return (
+      <div className="flex w-full flex-col gap-6 pb-8">
+        {navigation}
+        <ThreadsRoute />
+      </div>
+    );
+  }
 
   // ── Create view ──
   if (createOpen) {
@@ -610,10 +629,16 @@ export function AgentsManagerPage({
               {t('agents.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+              {t('agents.description')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground tabular-nums">
               {t('agent.count', { count: agents.length })}
             </p>
           </div>
           <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setMeshOpen(true)}>
+              Shared threads
+            </Button>
             <Button
               variant="outline"
               disabled={loading}

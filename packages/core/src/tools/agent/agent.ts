@@ -3170,6 +3170,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      if (this.programmatic?.meshRun) {
+        contextState.set('external_inputs_override', [
+          {
+            kind: 'message',
+            text: taskPrompt,
+            deliveryId: this.programmatic.meshRun.runId,
+          },
+        ]);
+      }
       // Always set hook_context so ${hook_context} in systemPrompt does not
       // throw when no hook is configured or the hook returns no additional context.
       contextState.set('hook_context', '');
@@ -3231,10 +3240,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
             agentName: subagentConfig.name,
             agentColor: subagentConfig.color,
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
+            // Mesh launch input is recorded by its correlated external-input
+            // event; ordinary launches still need this transcript seed.
+            ...(this.programmatic?.meshRun
+              ? {}
+              : { initialUserPrompt: this.params.prompt }),
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           });
@@ -3841,7 +3851,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                           projectRoot: this.config.getProjectRoot(),
                           context: meshRun,
                           emitter: bgEventEmitter,
+                          abortController: turnAbortController,
                           metaPath,
+                          transcriptPath: jsonlPath,
                           body,
                         })
                     : body,

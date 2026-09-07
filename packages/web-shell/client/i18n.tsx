@@ -372,6 +372,8 @@ const EN: Messages = {
   'agent.view': 'View',
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
+  'agents.description':
+    'Create specialized agents and let Qwen coordinate them in an Agent Team.',
   'subagent.result': 'Result',
   'subagent.tools': (v) => `Tools (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} tools`,
@@ -2885,6 +2887,7 @@ const EN: Messages = {
   'tasks.moreAbove': (v) => `^ ${v?.count ?? 0} more above`,
   'tasks.moreBelow': (v) => `v ${v?.count ?? 0} more below`,
   'tasks.running': 'Running',
+  'tasks.idle': 'Idle',
   'tasks.pausing': 'Pausing',
   'tasks.completed': 'Completed',
   'tasks.failed': 'Failed',
@@ -3940,6 +3943,8 @@ const ZH: Messages = {
   'agent.view': '查看',
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
+  'agents.description':
+    '创建专业智能体，并让 Qwen 通过 Agent Team 协调它们共同完成任务。',
   'subagent.result': '结果',
   'subagent.tools': (v) => `工具 (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} 个工具`,
@@ -6264,6 +6269,7 @@ const ZH: Messages = {
   'tasks.moreAbove': (v) => `^ 上方还有 ${v?.count ?? 0} 个`,
   'tasks.moreBelow': (v) => `v 下方还有 ${v?.count ?? 0} 个`,
   'tasks.running': '运行中',
+  'tasks.idle': '空闲',
   'tasks.pausing': '暂停中',
   'tasks.completed': '已完成',
   'tasks.failed': '失败',
