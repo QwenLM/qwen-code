@@ -1,3 +1,7 @@
+---
+description: "Use the Qwen Code monitor tool to run long-lived background commands and stream output notifications back to the agent."
+---
+
 # Monitor Tool (`monitor`)
 
 This document describes the `monitor` tool for Qwen Code.

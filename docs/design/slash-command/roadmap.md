@@ -1,3 +1,7 @@
+---
+description: "Qwen Code slash command refactoring roadmap. Deliver 95% Claude Code parity with unified command platform and prompt command support."
+---
+
 # Slash Command 重构路线图
 
 ## 总体目标

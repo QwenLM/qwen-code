@@ -1,3 +1,7 @@
+---
+description: "Qwen Code outbound telemetry propagation design. Control trace context and session correlation headers for LLM provider requests."
+---
+
 # Telemetry: Outbound Trace Context & Session ID Header Propagation
 
 > 配套 issue: [#4384](https://github.com/QwenLM/qwen-code/issues/4384)

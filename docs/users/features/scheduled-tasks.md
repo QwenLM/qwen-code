@@ -1,3 +1,7 @@
+---
+description: "Schedule recurring prompts in Qwen Code with /loop. Poll deployments, monitor PRs, and set reminders automatically within your coding session."
+---
+
 # Run Prompts on a Schedule
 
 > Use `/loop` and the cron scheduling tools to run prompts repeatedly, poll for status, or set one-time reminders within a Qwen Code session.

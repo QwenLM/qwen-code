@@ -1,3 +1,7 @@
+---
+description: "Delegate complex tasks to Qwen Code Subagents. Use specialized AI assistants for research, code generation, debugging, and more."
+---
+
 # Subagents
 
 Subagents are specialized AI assistants that handle specific types of tasks within Qwen Code. They allow you to delegate focused work to AI agents that are configured with task-specific prompts, tools, and behaviors.

@@ -1,3 +1,7 @@
+---
+description: "Qwen Code slash command Phase 2 technical design. Extend command capabilities with advanced features and improved user workflows."
+---
+
 # Phase 2 技术设计文档：能力扩展
 
 ## 1. 设计目标与约束

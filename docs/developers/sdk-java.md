@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code Java SDK. Integrate AI coding capabilities into Java applications with this experimental SDK for programmatic access."
+---
+
 # Qwen Code Java SDK
 
 The Qwen Code Java SDK provides a recommended daemon transport for `qwen serve` and retains the experimental legacy stdio API for compatibility. Both APIs ship in the same `com.alibaba:qwencode-sdk` artifact.

@@ -1,3 +1,7 @@
+---
+description: "Enable web search in Qwen Code. Connect MCP servers for internet access and enhance your AI coding agent with real-time information."
+---
+
 # Web Search
 
 Qwen Code provides web search two ways:

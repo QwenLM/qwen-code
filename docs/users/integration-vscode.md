@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code in VS Code with the AI extension. See code changes in real-time and interact with Qwen Code directly inside your IDE — no terminal required."
+---
+
 # Visual Studio Code
 
 > The VS Code extension (Beta) lets you see Qwen's changes in real-time through a native graphical interface integrated directly into your IDE, making it easier to access and interact with Qwen Code.

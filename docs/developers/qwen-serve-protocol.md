@@ -1,3 +1,7 @@
+---
+description: "Reference the qwen serve HTTP protocol, including authentication, session routes, SSE events, workspace control, and error shapes."
+---
+
 # `qwen serve` HTTP protocol reference
 
 Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/issues/3803). All routes live under the daemon's base URL (default `http://127.0.0.1:4170`).

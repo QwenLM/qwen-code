@@ -1,3 +1,7 @@
+---
+description: "Qwen Code slash command refactor plan. Redesign the command module to align with Claude Code's 95% feature parity while fixing core issues."
+---
+
 # Qwen Code Command 模块重构方案
 
 ## 1. 目标定义

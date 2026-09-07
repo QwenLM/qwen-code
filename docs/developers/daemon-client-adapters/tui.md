@@ -1,3 +1,7 @@
+---
+description: "Design an experimental TUI daemon adapter for Qwen Code that routes terminal sessions through qwen serve."
+---
+
 # TUI Daemon Adapter Draft
 
 > **Deprecated**: this document describes the early `DaemonTuiAdapter` spike. The legacy adapter still exists in `packages/cli/src/ui/daemon/`, but the reusable direction is now the SDK shared UI transcript layer. For the current architecture, see [`../daemon/14-cli-tui-adapter.md`](../daemon/14-cli-tui-adapter.md).

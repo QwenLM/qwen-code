@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code TypeScript SDK. Access AI coding features programmatically with @qwen-code/sdk for Node.js and TypeScript applications."
+---
+
 # Typescript SDK
 
 ## @qwen-code/sdk

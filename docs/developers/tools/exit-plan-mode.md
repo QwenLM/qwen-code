@@ -1,3 +1,7 @@
+---
+description: "Qwen Code exit_plan_mode tool reference. Understand how the AI agent exits planning mode and applies changes to your codebase."
+---
+
 # Exit Plan Mode Tool (`exit_plan_mode`)
 
 This document describes the `exit_plan_mode` tool for Qwen Code.

@@ -1,3 +1,7 @@
+---
+description: "Extend Qwen Code with custom Skills. Create, manage, and share modular capabilities to boost your AI coding agent's effectiveness."
+---
+
 # Agent Skills
 
 > Create, manage, and share Skills to extend Qwen Code's capabilities.

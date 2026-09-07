@@ -1,3 +1,7 @@
+---
+description: "Master all Qwen Code commands. Learn slash commands, system prompts, and keyboard shortcuts to control sessions and customize your workflow."
+---
+
 # Commands
 
 This document details all commands supported by Qwen Code, helping you efficiently manage sessions, customize the interface, and control its behavior.

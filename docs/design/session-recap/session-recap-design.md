@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Session Recap design. Auto-generate 'where did I leave off' summaries when returning to idle sessions with /recap command."
+---
+
 # Session Recap Design
 
 > A brief (1-2 sentence) "where did I leave off" summary surfaced when the user

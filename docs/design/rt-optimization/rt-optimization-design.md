@@ -1,3 +1,7 @@
+---
+description: "Qwen Code agent loop RT optimization design. Reduce response latency by cutting unnecessary LLM rounds and improving routing decisions."
+---
+
 # Qwen Code Agent Loop RT 优化技术方案
 
 ## 1. 背景与问题定义

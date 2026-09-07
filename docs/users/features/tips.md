@@ -1,3 +1,7 @@
+---
+description: "Discover Qwen Code features faster with Contextual Tips. Get smart hints and feature suggestions based on your current session and workflow."
+---
+
 # Contextual Tips
 
 Qwen Code includes a contextual tips system that helps you discover features and stay aware of session state.

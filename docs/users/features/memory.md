@@ -1,3 +1,7 @@
+---
+description: "Make Qwen Code remember your preferences with Memory. Use QWEN.md for custom instructions and auto-memory for persistent context across sessions."
+---
+
 # Memory
 
 Every Qwen Code session starts with a fresh context window. Two mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:

@@ -1,3 +1,7 @@
+---
+description: "Design channel and web backend adapters for qwen serve using DaemonSessionClient while keeping browser access behind a backend."
+---
+
 # Channel And Web Backend Daemon Adapter Draft
 
 ## Goal
