@@ -11,6 +11,7 @@ import type {
   SearchRuntimeConfiguration,
   ScopeLocation,
   SearchProvider,
+  AuthenticationKind,
 } from './types.js';
 
 const MAX_RESULTS = 5;
@@ -54,9 +55,9 @@ export function createRequestEngine(
   };
 }
 
-function applyAuthentication(
+export function applyAuthentication(
   headers: Headers,
-  runtime: SearchRuntimeConfiguration,
+  runtime: { dialect: { auth: AuthenticationKind }; credential: string },
 ): void {
   switch (runtime.dialect.auth) {
     case 'authorization-token':
@@ -168,7 +169,7 @@ function placeValue(
   filters[name] = value;
 }
 
-async function readBoundedBody(response: Response): Promise<string> {
+export async function readBoundedBody(response: Response): Promise<string> {
   const declaredLength = response.headers.get('content-length');
   if (declaredLength !== null) {
     const bytes = Number(declaredLength);
