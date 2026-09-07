@@ -224,4 +224,35 @@ describe('DialogShell', () => {
     expect(panel.className).toContain('sm:max-w-[720px]');
     expect(panel.className).not.toContain('w-max');
   });
+
+  it('uses expand and shrink icons for fullscreen', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Fullscreen" allowFullscreen onClose={vi.fn()}>
+              body
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Fullscreen"]',
+    )!;
+    expect(toggle.querySelector('.lucide-expand')).not.toBeNull();
+
+    act(() => toggle.click());
+
+    expect(
+      document
+        .querySelector('[aria-label="Exit fullscreen"]')
+        ?.querySelector('.lucide-shrink'),
+    ).not.toBeNull();
+  });
 });
