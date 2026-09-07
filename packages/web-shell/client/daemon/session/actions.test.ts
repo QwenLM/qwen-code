@@ -592,6 +592,37 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('records a notice for a silent non-transient context usage error', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.contextUsage.mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context_usage' }),
+    );
+  });
+
+  it('dedupes repeated silent hard context usage failures to one notice', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.contextUsage
+      .mockRejectedValueOnce(new Error('bad response'))
+      .mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+    await expect(
+      actions.getContextUsage({ detail: true, silent: true }),
+    ).rejects.toThrow('bad response');
+    expect(addNotice).toHaveBeenCalledTimes(1);
+  });
+
   it('does not report a silent context usage error for a name-only transport error', async () => {
     const addNotice = vi.fn();
     const session = createMockSession('session-a');

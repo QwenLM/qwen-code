@@ -6029,10 +6029,11 @@ export function App({
       const newlyOpenedIds = new Set(
         tabsOpenedDuringRestore.map((tab) => tab.id),
       );
-      const mergedTabs = [
+      const candidateTabs = [
         ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
         ...tabsOpenedDuringRestore,
-      ].filter(
+      ];
+      const mergedTabs = candidateTabs.filter(
         (tab) =>
           // Once the split decision is final, drop stale pane-bound tabs before
           // they can be selected active and mount a foreign collection; while
@@ -6046,6 +6047,8 @@ export function App({
               !splitSessionIdsRef.current.includes(tab.sessionId))
           ),
       );
+      const reclaimEmptiedPanel =
+        mergedTabs.length === 0 && candidateTabs.length > 0;
       const activeTabId = mergedTabs.some(
         (tab) => tab.id === activeArtifactPanelTabIdRef.current,
       )
@@ -6058,10 +6061,20 @@ export function App({
           ? { ...tab, initialized: true }
           : tab,
       );
-      setSuppressArtifactDockOpenAnimation(restoredOpen);
-      setArtifactPanelOpen(artifactPanelOpenRef.current);
       setArtifactPanelTabs(activatedTabs);
-      setActiveArtifactPanelTabId(activeTabId);
+      if (reclaimEmptiedPanel) {
+        // The reclaim removed every restored tab; mirror the reset
+        // closeArtifactPanelTabs applies so an empty docked panel is not
+        // persisted as open and reopened on every later load.
+        setArtifactPanelOpen(false);
+        setArtifactPanelFullscreen(false);
+        setSuppressArtifactDockOpenAnimation(false);
+        setActiveArtifactPanelTabId(null);
+      } else {
+        setSuppressArtifactDockOpenAnimation(restoredOpen);
+        setArtifactPanelOpen(artifactPanelOpenRef.current);
+        setActiveArtifactPanelTabId(activeTabId);
+      }
       if (previousSessionId !== nextSessionId) {
         setReviewChanges(restoreInputs.latestReviewChanges);
         setArtifactPanelWidth(
@@ -8040,12 +8053,6 @@ export function App({
     );
     previousSplitSessionIdsRef.current = splitSessionIds;
   }, [closeUsageTabs, splitSessionIds]);
-  useEffect(() => {
-    // Gated on the same latch: before the split decision is final this would
-    // drop a persisted live pane tab whose pane is a moment from landing.
-    if (!splitViewSettled) return;
-    if (mainView !== 'split') closeUsageTabs(undefined, true);
-  }, [closeUsageTabs, mainView, splitViewSettled]);
   // Signature of the pane-bound usage tabs, so the sweep below re-runs when
   // restoration lands them even if no other dependency moves.
   const paneBoundUsageTabsSignature = useMemo(
@@ -8279,6 +8286,9 @@ export function App({
       const generation = splitClassificationGenerationRef.current + 1;
       splitClassificationGenerationRef.current = generation;
       splitClassificationStartGenerationRef.current = generation;
+      // A new decision is pending: un-settle so reclaim waits for it. The
+      // empty-request branch below settles without classifying.
+      if (requested.length > 0) setSplitViewSettled(false);
       if (requested.length === 0) {
         const currentWorkspaceSessionId =
           connection.sessionId !== undefined &&
@@ -8366,6 +8376,9 @@ export function App({
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
     splitClassificationStartGenerationRef.current = generation;
+    // A new decision is pending: un-settle so reclaim waits for it. The
+    // empty-request branch below settles without classifying.
+    if (requested.length > 0) setSplitViewSettled(false);
     if (requested.length > 0 && cockpitViewRequested()) {
       updateCockpitLocation(false, true);
     }

@@ -2096,6 +2096,15 @@ export function createDaemonSessionActions({
           'Load context usage failed',
           error,
           'load_context_usage',
+          opts?.silent
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey(
+                  'load_context_usage',
+                  error,
+                ),
+              }
+            : undefined,
         );
       }
     },
