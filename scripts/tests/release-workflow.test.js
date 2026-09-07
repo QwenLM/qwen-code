@@ -552,7 +552,7 @@ describe('release workflow', () => {
           'if [ "$1" = view ]; then\n' +
           '  case "$PWD" in */channels/base) exit 1 ;; */channels/*) exit 0 ;; *) exit 1 ;; esac\n' +
           'fi\n' +
-          'if [ "$1" = publish ]; then printf "%s\\n" "$PWD" >> "$PUBLISH_LOG"; fi\n',
+          'if [ "$1" = publish ]; then printf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"; fi\n',
         { mode: 0o755 },
       );
       try {
@@ -576,12 +576,140 @@ describe('release workflow', () => {
         );
         expect(result.status).toBe(0);
         const canonicalDirectory = realpathSync(directory);
-        expect(readFileSync(publishLog, 'utf8').trim().split('\n')).toEqual([
+        const publishCalls = readFileSync(publishLog, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => line.split('\t'));
+        expect(publishCalls.map(([cwd]) => cwd)).toEqual([
           join(canonicalDirectory, 'dist'),
           join(canonicalDirectory, 'packages/channels/base'),
         ]);
+        // The dist-tag is the reason NPM_TAG is set in this child env at all.
+        // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
+        // nightly would take over the tag every end-user install and the ECS
+        // fleet updater resolve through. `--access public` is here for the
+        // same reason: one array feeds all twelve published packages.
+        for (const [cwd, args] of publishCalls) {
+          expect(args, cwd).toContain('--access public');
+          expect(args, cwd).toContain('--tag=latest');
+        }
         expect(result.stdout).toContain(
           'Every channel package was already published; nothing shipped',
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the extracted release scripts executable', () => {
+    // release.yml runs these by bare path, so the mode is load-bearing:
+    // a checkout that materializes them 100644 dies with exit 126 before any
+    // validation runs. Nothing else pins it — the execution tests all invoke
+    // `bash <script>`, which ignores the mode, and release.yml triggers only
+    // on schedule/workflow_dispatch, so no pull-request lane ever runs the
+    // bare-path form. Assert the *recorded* mode, not the working tree's:
+    // that is what actions/checkout materializes.
+    const recorded = spawnSync('git', ['ls-tree', 'HEAD', '.github/scripts/'], {
+      encoding: 'utf8',
+    });
+    expect(recorded.status).toBe(0);
+    const modes = new Map(
+      recorded.stdout
+        .trim()
+        .split('\n')
+        .map((line) => {
+          const [meta, path] = line.split('\t');
+          return [path, meta.split(' ')[0]];
+        }),
+    );
+    for (const script of [
+      '.github/scripts/run-release-step.sh',
+      '.github/scripts/run-release-workspace-tests.sh',
+      '.github/scripts/run-release-docker-integration.sh',
+    ]) {
+      expect(modes.get(script), script).toBe('100755');
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'maps a manual preview release onto the preview override flags',
+    () => {
+      // `resolve-version` was the one arm no test executed or text-pinned, so
+      // flipping --type=preview to --type=stable left the whole scripts lane
+      // green — while at runtime the stable path ignores
+      // preview_version_override entirely, publishing the operator's manual
+      // preview as a stable version under npm's `latest` dist-tag.
+      const directory = mkdtempSync(join(tmpdir(), 'release-resolve-'));
+      const bin = join(directory, 'bin');
+      const argsLog = join(directory, 'node-args');
+      const output = join(directory, 'github-output');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'node'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$NODE_ARGS_LOG"\n' +
+          'echo \'{"releaseTag":"v1.2.3-preview.0","releaseVersion":"1.2.3-preview.0","npmTag":"preview","previousReleaseTag":"v1.2.2"}\'\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(output, '');
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'resolve-version'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_NIGHTLY: 'false',
+              IS_PREVIEW: 'true',
+              MANUAL_VERSION: '1.2.3',
+              NODE_ARGS_LOG: argsLog,
+              GITHUB_OUTPUT: output,
+            },
+          },
+        );
+        expect(result.status).toBe(0);
+        const nodeArgs = readFileSync(argsLog, 'utf8');
+        expect(nodeArgs).toContain('--type=preview');
+        expect(nodeArgs).toContain(
+          '--preview_version_override=1.2.3-preview.0',
+        );
+        expect(nodeArgs).not.toContain('--type=stable');
+        expect(readFileSync(output, 'utf8')).toContain('NPM_TAG=preview');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a manual preview version that is not X.Y.Z or X.Y.Z-preview.N',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-resolve-bad-'));
+      const output = join(directory, 'github-output');
+      writeFileSync(output, '');
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'resolve-version'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              IS_NIGHTLY: 'false',
+              IS_PREVIEW: 'true',
+              MANUAL_VERSION: 'not-a-version',
+              GITHUB_OUTPUT: output,
+            },
+          },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stdout + result.stderr).toContain(
+          'For preview releases, version must be X.Y.Z or X.Y.Z-preview.N',
         );
       } finally {
         rmSync(directory, { recursive: true, force: true });
