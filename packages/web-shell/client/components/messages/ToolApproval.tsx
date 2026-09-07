@@ -15,6 +15,10 @@ import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
+import {
+  ThinkingTranslateButton,
+  type SessionContentGenerator,
+} from './AssistantMessage';
 import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
@@ -33,6 +37,7 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
+  generateContent?: SessionContentGenerator;
 }
 
 export function parseTitle(title?: string): {
@@ -222,6 +227,7 @@ export function ToolApproval({
   variant = 'inline',
   keyboardActive = true,
   planTodos = [],
+  generateContent,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
@@ -398,9 +404,9 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.key !== 'Escape' &&
         e.target instanceof Element &&
-        e.target.closest('[data-plan-interactive]')
+        ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
+          e.target.closest('[data-approval-shortcuts-ignore]'))
       ) {
         return;
       }
@@ -515,6 +521,18 @@ export function ToolApproval({
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
+        </div>
+      )}
+
+      {isExec && command && generateContent && (
+        <div className={styles.explainRow}>
+          <ThinkingTranslateButton
+            key={request.id}
+            content={command}
+            generateContent={generateContent}
+            className={styles.explainButton}
+            mode="explain-shell"
+          />
         </div>
       )}
 
