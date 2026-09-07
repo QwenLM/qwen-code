@@ -318,6 +318,44 @@ it('keeps the legacy composer extension loader for an untrusted workspace', asyn
   expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
 });
 
+it('omits the composer extension loader for an untrusted non-primary workspace', async () => {
+  const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
+  const ensureRuntime = vi.fn(async () => ({}));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    extensions: [] as never[],
+  }));
+  const workspaceByCwd = vi.fn(() => ({
+    ensureRuntime,
+    workspaceRuntimeExtensions,
+  }));
+  optionalWorkspaceState.current = {
+    actions: { loadExtensionsStatus: legacyLoad },
+    capabilities: {
+      features: ['workspace_extension_mentions'],
+      workspaces: [
+        {
+          id: 'id-secondary',
+          cwd: '/secondary',
+          primary: false,
+          trusted: false,
+        },
+      ],
+    },
+    client: { workspaceByCwd },
+  };
+
+  await mount({ atWorkspaceCwd: '/secondary' });
+
+  // A non-primary target that is not confirmed trusted fails closed with no
+  // extension loader rather than serving another workspace's catalog.
+  expect(
+    latest!.workspaceActionsRef.current!.loadExtensionsStatus,
+  ).toBeUndefined();
+  expect(legacyLoad).not.toHaveBeenCalled();
+  expect(ensureRuntime).not.toHaveBeenCalled();
+  expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
+});
+
 it('keeps the legacy composer extension loader without the capability', async () => {
   const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
   const workspaceRuntimeExtensions = vi.fn(async () => ({

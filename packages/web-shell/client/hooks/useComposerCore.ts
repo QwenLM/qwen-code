@@ -1574,24 +1574,34 @@ export function useComposerCore(
     workspaceActionsRef.current = undefined;
   } else if (workspace && atWorkspaceCwd) {
     const client = workspace.client.workspaceByCwd(atWorkspaceCwd);
-    // The qualified runtime routes are trust-gated per target, so an
-    // untrusted workspace keeps the trust-free legacy extension loader.
-    const atWorkspaceUntrusted = workspace.capabilities?.workspaces?.some(
-      (entry) =>
-        entry.kind !== 'live' && entry.cwd === atWorkspaceCwd && !entry.trusted,
+    // The qualified runtime routes are trust-gated per target. An untrusted
+    // primary keeps the trust-free legacy extension loader; a non-primary
+    // target that is not confirmed trusted omits the loader so the composer
+    // fails closed instead of serving another workspace's catalog.
+    const atEntry = workspace.capabilities?.workspaces?.find(
+      (entry) => entry.kind !== 'live' && entry.cwd === atWorkspaceCwd,
     );
-    workspaceActionsRef.current = {
-      ...workspace.actions,
-      ...(workspace.capabilities?.features.includes(
+    const loadExtensionsStatus: AtMentionWorkspaceActions['loadExtensionsStatus'] =
+      workspace.capabilities?.features.includes(
         'workspace_extension_mentions',
-      ) === true && !atWorkspaceUntrusted
-        ? {
-            async loadExtensionsStatus() {
+      ) !== true
+        ? workspace.actions.loadExtensionsStatus
+        : atEntry === undefined || atEntry.trusted
+          ? async () => {
               await client.ensureRuntime();
               return client.workspaceRuntimeExtensions();
-            },
-          }
-        : {}),
+            }
+          : atEntry.primary
+            ? workspace.actions.loadExtensionsStatus
+            : undefined;
+    const baseActions = { ...workspace.actions };
+    if (loadExtensionsStatus === undefined) {
+      delete baseActions.loadExtensionsStatus;
+    } else {
+      baseActions.loadExtensionsStatus = loadExtensionsStatus;
+    }
+    workspaceActionsRef.current = {
+      ...baseActions,
       async globWorkspace(pattern, options) {
         options?.signal?.throwIfAborted();
         const result = (await client.glob(pattern, {

@@ -29782,6 +29782,7 @@ describe('sessionLanguage multi-session propagation', () => {
     skillManager.refreshCache.mockResolvedValue(undefined);
     sendAvailableCommandsUpdate.mockClear();
     sendAvailableCommandsUpdateOrThrow.mockClear();
+    extensionManager.refreshTools.mockClear();
     await expect(
       agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
@@ -29799,6 +29800,9 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).not.toHaveBeenCalled();
+    // The full reconcile's most consequential leg: refreshTools reinitializes
+    // MCP servers, LSP, subagents, hooks, and hierarchical memory.
+    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
 
     extensionManager.refreshTools.mockClear();
     await expect(
@@ -29813,6 +29817,10 @@ describe('sessionLanguage multi-session propagation', () => {
       notifyConfigChanged: false,
     });
 
+    // An unrelated Skill cache failure must not fail a full reconcile whose
+    // extension change is already applied: the counters stay clean and the
+    // session command update still goes out.
+    sendAvailableCommandsUpdateOrThrow.mockClear();
     skillManager.refreshCache.mockRejectedValueOnce(
       new Error('broken skill cache'),
     );
@@ -29822,10 +29830,32 @@ describe('sessionLanguage multi-session propagation', () => {
         {},
       ),
     ).resolves.toMatchObject({
+      configsRefreshed: 2,
+      configsFailed: 0,
+      sessionsRefreshed: 1,
+      sessionsSkipped: 0,
+    });
+    expect(sendAvailableCommandsUpdateOrThrow).toHaveBeenCalledOnce();
+
+    // A refreshTools failure (e.g. an LSP reload rejecting) is attributed to
+    // its config instead of being swallowed.
+    sendAvailableCommandsUpdateOrThrow.mockClear();
+    extensionManager.refreshTools.mockRejectedValueOnce(
+      new Error('extension LSP reload failed'),
+    );
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+        {},
+      ),
+    ).resolves.toMatchObject({
+      configsRefreshed: 1,
       configsFailed: 1,
-      configErrors: ['broken skill cache'],
+      configErrors: ['extension LSP reload failed'],
+      sessionsRefreshed: 0,
       sessionsSkipped: 1,
     });
+    expect(sendAvailableCommandsUpdateOrThrow).not.toHaveBeenCalled();
 
     extensionManager.refreshCache.mockRejectedValueOnce(
       new Error('broken session config'),

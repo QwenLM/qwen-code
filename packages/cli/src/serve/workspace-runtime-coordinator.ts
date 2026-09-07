@@ -140,6 +140,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private extensionsRefreshFailedRevision: number | undefined;
 
+  private extensionsRefreshRetryRevision: number | undefined;
+
   private skillsRefreshRetryRevision: number | undefined;
 
   private skillsRefreshFailedRevision: number | undefined;
@@ -345,6 +347,7 @@ export class WorkspaceRuntimeCoordinator {
     this.desiredExtensionGeneration = generation;
     this.extensionsRevision += 1;
     this.extensionsRefreshFailedRevision = undefined;
+    this.extensionsRefreshRetryRevision = undefined;
     this.extensionsStatus = {
       state:
         this.extensionsStatus.runtimeEpoch === undefined
@@ -400,9 +403,11 @@ export class WorkspaceRuntimeCoordinator {
         error instanceof ExtensionRuntimeRefreshError
           ? error.result
           : undefined;
-      this.invalidateDerivedCapabilities();
+      this.invalidateDerivedCapabilities(options);
       this.scheduleSkillsReconciliation();
-      this.scheduleMcpReconciliation();
+      if (!options.skillsOnly) {
+        this.scheduleMcpReconciliation();
+      }
       return {
         state: 'failed',
         refreshed: refresh?.sessionsRefreshed ?? 0,
@@ -420,9 +425,11 @@ export class WorkspaceRuntimeCoordinator {
       generation === this.desiredExtensionGeneration &&
       this.appliedExtensionGeneration === generation
     ) {
-      this.invalidateDerivedCapabilities();
+      this.invalidateDerivedCapabilities(options);
       this.scheduleSkillsReconciliation();
-      this.scheduleMcpReconciliation();
+      if (!options.skillsOnly) {
+        this.scheduleMcpReconciliation();
+      }
       return {
         state: 'reconciled',
         refreshed: result?.sessionsRefreshed ?? 0,
@@ -674,7 +681,7 @@ export class WorkspaceRuntimeCoordinator {
         };
         return;
       }
-      if (catalog.runtimeEpoch !== runtimeEpoch || !catalog.initialized) {
+      if (catalog.runtimeEpoch !== runtimeEpoch) {
         throw new Error(
           'Extension runtime returned a stale or uninitialized catalog',
         );
@@ -685,14 +692,39 @@ export class WorkspaceRuntimeCoordinator {
             'Extension runtime did not return a live snapshot',
         );
       }
-      this.appliedExtensionGeneration = generation;
-      this.extensionsStatus = {
-        state: 'ready',
-        revision,
-        runtimeEpoch,
-        desiredGeneration: generation,
-        appliedGeneration: generation,
-      };
+      if (!catalog.initialized) {
+        throw new Error(
+          'Extension runtime returned a stale or uninitialized catalog',
+        );
+      }
+      if (revision === this.extensionsRefreshRetryRevision) {
+        this.extensionsRefreshRetryRevision = undefined;
+      }
+      // A skill refresh cannot certify an earlier failed full refresh: the
+      // narrow reconcile skipped refreshTools, MCP discovery, and the command
+      // update for generations the runtime never fully applied.
+      const certifiesGeneration =
+        !options.skillsOnly ||
+        this.appliedExtensionGeneration === generation - 1 ||
+        this.appliedExtensionGeneration === generation;
+      if (certifiesGeneration) {
+        this.appliedExtensionGeneration = generation;
+      }
+      this.extensionsStatus = certifiesGeneration
+        ? {
+            state: 'ready',
+            revision,
+            runtimeEpoch,
+            desiredGeneration: generation,
+            appliedGeneration: generation,
+          }
+        : {
+            state: 'stale',
+            revision,
+            runtimeEpoch,
+            desiredGeneration: generation,
+            appliedGeneration: this.appliedExtensionGeneration,
+          };
       return result;
     } catch (error) {
       this.recordExtensionsError(revision, runtimeEpoch, error);
@@ -999,11 +1031,11 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
-  private invalidateDerivedCapabilities(): void {
+  private invalidateDerivedCapabilities(
+    options: { skillsOnly?: boolean } = {},
+  ): void {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     this.skillsRevision += 1;
-    this.mcpRevision += 1;
-    this.mcpConfigRevision += 1;
     this.skillsStatus = {
       state:
         this.skillsStatus.runtimeEpoch === undefined ? 'not_started' : 'stale',
@@ -1012,6 +1044,12 @@ export class WorkspaceRuntimeCoordinator {
         ? {}
         : { runtimeEpoch: this.skillsStatus.runtimeEpoch }),
     };
+    this.skillsReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+    // A skills-only refresh cannot change MCP config; leave the MCP
+    // capability and its reconciliation coalescing untouched.
+    if (options.skillsOnly) return;
+    this.mcpRevision += 1;
+    this.mcpConfigRevision += 1;
     this.mcpStatus = {
       state:
         this.mcpStatus.runtimeEpoch === undefined ? 'not_started' : 'stale',
@@ -1020,7 +1058,6 @@ export class WorkspaceRuntimeCoordinator {
         ? {}
         : { runtimeEpoch: this.mcpStatus.runtimeEpoch }),
     };
-    this.skillsReconcileDeferred ||= snapshot.runtimeLive && this.draining;
     this.mcpReconcileDeferred ||= snapshot.runtimeLive && this.draining;
   }
 
@@ -1058,7 +1095,14 @@ export class WorkspaceRuntimeCoordinator {
         ),
       },
     };
-    this.extensionsRefreshFailedRevision = revision;
+    // One failed refresh is retried once from the ensure path; the latch
+    // closes only when that retry fails too. Mirror of the Skills markers.
+    if (this.extensionsRefreshRetryRevision === revision) {
+      this.extensionsRefreshRetryRevision = undefined;
+      this.extensionsRefreshFailedRevision = revision;
+    } else {
+      this.extensionsRefreshRetryRevision = revision;
+    }
   }
 
   private recordMcpError(

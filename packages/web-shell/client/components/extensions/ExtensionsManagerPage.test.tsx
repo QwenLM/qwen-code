@@ -187,6 +187,61 @@ describe('ExtensionsManagerPage split-runtime trust gating', () => {
     expect(mocks.ensureRuntime).toHaveBeenCalledTimes(2);
   });
 
+  it('clears the load-failure notice once the retried load succeeds', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'runtime_still_starting' },
+          'Workspace runtime is still starting',
+        ),
+      )
+      .mockResolvedValue({});
+
+    await mountPage();
+
+    expect(container!.textContent).toContain(
+      'Workspace runtime is still starting',
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(2);
+    expect(container!.textContent).not.toContain(
+      'Workspace runtime is still starting',
+    );
+  });
+
+  it('does not re-arm the runtime retry when the runtime is unavailable', async () => {
+    vi.useFakeTimers();
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        { code: 'workspace_runtime_unavailable' },
+        'Workspace runtime is not active.',
+      ),
+    );
+
+    await mountPage();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flush();
+
+    expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+    expect(container!.textContent).toContain(
+      'Workspace runtime is not active.',
+    );
+  });
+
   it('does not re-arm the runtime retry when the catalog answers 403', async () => {
     vi.useFakeTimers();
     const mocks = makeSplitWorkspaceMocks(true);

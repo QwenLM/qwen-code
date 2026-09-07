@@ -205,14 +205,84 @@ describe('WorkspaceRuntimeCoordinator', () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
     const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    await coordinator.ensure();
+    // Certify the previous generation so the skills-only reconcile reaches
+    // the success exit (applied === generation - 1).
+    await coordinator.reconcileExtensionGeneration(6);
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.mcp?.state).toBe('ready'),
+    );
+    harness.reloadWorkspaceMcp.mockClear();
 
-    await coordinator.reconcileExtensionGeneration(7, { skillsOnly: true });
+    await expect(
+      coordinator.reconcileExtensionGeneration(7, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'reconciled' });
 
     expect(harness.invokeWorkspaceCommand).toHaveBeenCalledWith(
       'qwen/control/workspace/extensions/reconcile',
       { cwd: '/workspace', skillsOnly: true },
       { timeoutMs: 30_000 },
     );
+    // A skills-only reconcile cannot change MCP config: the ready MCP
+    // capability must not be invalidated or reloaded for it.
+    expect(coordinator.status().capabilities?.mcp).toMatchObject({
+      state: 'ready',
+      runtimeEpoch: 3,
+    });
+    await vi.waitFor(() =>
+      expect(coordinator.status().capabilities?.skills?.state).toBe('ready'),
+    );
+    expect(harness.reloadWorkspaceMcp).not.toHaveBeenCalled();
+  });
+
+  it('does not let a skills-only reconcile certify an unapplied generation', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(8),
+    ).resolves.toMatchObject({ state: 'reconciled' });
+    expect(
+      coordinator.status().capabilities?.extensions?.appliedGeneration,
+    ).toBe(8);
+
+    harness.invokeWorkspaceCommand.mockResolvedValueOnce({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    await expect(
+      coordinator.reconcileExtensionGeneration(9),
+    ).resolves.toMatchObject({ state: 'failed' });
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      appliedGeneration: 8,
+    });
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(10, { skillsOnly: true }),
+    ).resolves.toMatchObject({ state: 'deferred' });
+
+    // The generation-10 skill refresh succeeded, but the generation-9 full
+    // refresh never applied: the capability must stay non-ready so the next
+    // ensure runs the full refresh.
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      desiredGeneration: 10,
+      appliedGeneration: 8,
+    });
+    expect(coordinator.status().capabilities?.extensions?.state).not.toBe(
+      'ready',
+    );
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 10,
+      appliedGeneration: 10,
+    });
   });
 
   it('defers an Extension generation until the runtime is ensured', async () => {
@@ -290,6 +360,36 @@ describe('WorkspaceRuntimeCoordinator', () => {
       desiredGeneration: 7,
       appliedGeneration: 0,
     });
+  });
+
+  it('surfaces the runtime Extension diagnostic over the uninitialized gate', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      runtimeEpoch: 3,
+      extensions: [],
+      errors: [
+        {
+          kind: 'extensions',
+          status: 'error',
+          error: 'extension manifest parse failed',
+        },
+      ],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await expect(
+      coordinator.reconcileExtensionGeneration(7),
+    ).resolves.toMatchObject({
+      state: 'failed',
+      error: 'extension manifest parse failed',
+    });
+    expect(coordinator.status().capabilities?.extensions?.error?.message).toBe(
+      'extension manifest parse failed',
+    );
   });
 
   it('sanitizes Extension reconcile failures before broadcasting and persisting them', async () => {
@@ -443,14 +543,47 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
     expect(reconcileCalls()).toBe(1);
 
-    // A failed revision is terminal for the ensure path: re-ensuring (the
-    // Extensions page retries every 2s) must not hammer the runtime.
+    // The failure arms one retry, consumed by the next ensure; the retry
+    // fails too, and only then is the revision terminal for the ensure path.
     await coordinator.ensure();
-    expect(reconcileCalls()).toBe(1);
+    expect(reconcileCalls()).toBe(2);
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+    });
+    await coordinator.ensure();
+    expect(reconcileCalls()).toBe(2);
 
     // A newly observed generation (or an explicit reconcile) retries.
     coordinator.observeExtensionGeneration(3);
     await coordinator.ensure();
+    expect(reconcileCalls()).toBe(3);
+  });
+
+  it('retries a failed Extension refresh once and reaches ready', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.getWorkspaceExtensionsStatus.mockRejectedValueOnce(
+      new Error('catalog read failed'),
+    );
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+    coordinator.observeExtensionGeneration(2);
+    const reconcileCalls = () =>
+      (harness.invokeWorkspaceCommand.mock.calls as unknown[][]).filter(
+        (call) => call[0] === 'qwen/control/workspace/extensions/reconcile',
+      ).length;
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      error: { message: 'catalog read failed' },
+    });
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 2,
+      appliedGeneration: 2,
+    });
     expect(reconcileCalls()).toBe(2);
   });
 

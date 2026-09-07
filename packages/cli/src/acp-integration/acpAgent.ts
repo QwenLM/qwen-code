@@ -13597,12 +13597,20 @@ class QwenAgent implements Agent {
                 ?.refreshCache({ throwOnError: true });
             } else {
               await extensionManager.refreshTools();
-              // refreshTools retries the Skill refresh here so a second
-              // failure is surfaced instead of remaining best-effort inside
-              // it.
-              await config
-                .getSkillManager()
-                ?.refreshCache({ throwOnError: true });
+              // refreshTools already retried the Skill refresh best-effort;
+              // surfacing a second, unrelated Skill failure here would fail
+              // a refresh whose extension change is already applied.
+              try {
+                await config
+                  .getSkillManager()
+                  ?.refreshCache({ throwOnError: true });
+              } catch (error) {
+                debugLogger.warn(
+                  `Extension Skill refresh failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              }
             }
             await config.getLlmClient()?.refreshSystemInstruction();
           }),

@@ -474,6 +474,11 @@ export function ExtensionsManagerPage({
   const runtimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  // Tracks that the current global notice was set by the load path itself,
+  // so a successful (re)load can clear it without touching notices owned by
+  // an in-flight mutation.
+  const loadNoticeRef = useRef(false);
+  const messageOwnerRef = useRef<string | null>(null);
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -544,6 +549,10 @@ export function ExtensionsManagerPage({
     },
     [],
   );
+
+  useEffect(() => {
+    messageOwnerRef.current = messageOwner;
+  }, [messageOwner]);
 
   const load = useCallback(
     async (preserveMessage = false) => {
@@ -626,20 +635,29 @@ export function ExtensionsManagerPage({
           );
           const capability = coordinator.capabilities?.extensions;
           if (capability?.state === 'error') {
+            loadNoticeRef.current = true;
             setMessageOwner(null);
             setMessageTone('error');
             setMessage(
               capability.error?.message ??
                 'Extension runtime preparation failed.',
             );
-          } else if (
-            capability?.state === 'starting' ||
-            capability?.state === 'stale'
-          ) {
-            runtimeRetryTimerRef.current = setTimeout(
-              () => void loadRef.current?.(true),
-              2000,
-            );
+          } else {
+            if (loadNoticeRef.current && messageOwnerRef.current === null) {
+              loadNoticeRef.current = false;
+              setMessageOwner(null);
+              setMessageTone('info');
+              setMessage(null);
+            }
+            if (
+              capability?.state === 'starting' ||
+              capability?.state === 'stale'
+            ) {
+              runtimeRetryTimerRef.current = setTimeout(
+                () => void loadRef.current?.(true),
+                2000,
+              );
+            }
           }
         } else {
           const projection = workspace.workspaceCwd
@@ -669,16 +687,22 @@ export function ExtensionsManagerPage({
       } catch (error) {
         if (requestId === loadRequestRef.current) {
           if (!preserveMessage) {
+            loadNoticeRef.current = true;
             setMessageOwner(null);
             setMessageTone('error');
             setMessage(error instanceof Error ? error.message : String(error));
           }
-          if (
-            splitRuntimeAvailable &&
-            (!(error instanceof DaemonHttpError) ||
-              error.status === 429 ||
-              error.status >= 500)
-          ) {
+          // Only the daemon's own retryable codes re-arm: a 503
+          // workspace_runtime_unavailable (a draining or otherwise
+          // non-active target) is terminal here, not a poll loop.
+          const retryable =
+            error instanceof DaemonHttpError &&
+            (error.status === 429 ||
+              (typeof error.body === 'object' &&
+                error.body !== null &&
+                (error.body as { code?: unknown }).code ===
+                  'runtime_still_starting'));
+          if (splitRuntimeAvailable && retryable) {
             runtimeRetryTimerRef.current = setTimeout(
               () => void loadRef.current?.(true),
               2000,
@@ -983,6 +1007,7 @@ export function ExtensionsManagerPage({
           mutationInFlightRef.current = false;
           if (operation.operation === 'uninstall') {
             uninstallInFlightNameRef.current = null;
+            loadNoticeRef.current = false;
             setMessageOwner(null);
             setSelectedName(null);
           }
@@ -1029,6 +1054,7 @@ export function ExtensionsManagerPage({
   }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
 
   const refreshList = useCallback(() => {
+    loadNoticeRef.current = false;
     setMessageOwner(null);
     setMessageTone('info');
     setMessage(null);
@@ -1104,6 +1130,7 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    loadNoticeRef.current = false;
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);

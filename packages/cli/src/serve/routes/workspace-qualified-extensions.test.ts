@@ -16,6 +16,7 @@ import {
   type ExtensionStoreSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { createServeApp } from '../server.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import { ClientMcpSenderRegistry } from '../acp-http/client-mcp-sender-registry.js';
 import {
   canonicalizeWorkspace,
@@ -1705,6 +1706,183 @@ describe('extension management v2 REST', () => {
       ).toHaveBeenCalledWith({ refreshed: 2, failed: 0 });
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not keep a coordinator runtime pending on a rolled-back generation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    const invalidateCount = () =>
+      vi.mocked(h.secondary.workspaceService.invalidateWorkspaceSkillsStatus)
+        .mock.calls.length;
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      const settled = invalidateCount();
+      expect(settled).toBeGreaterThan(0);
+
+      const rolledBackSnapshot: ExtensionStoreSnapshot = {
+        version: 2,
+        generation: 6,
+        legacyProjectionHash: 'rolled-back-hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+
+      // The coordinator never adopts a lower generation, so the rollback
+      // must not read as pending: later ticks add no work.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(invalidateCount()).toBe(settled);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('broadcasts a failed coordinator reconciliation like the legacy path', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 1,
+        configErrors: ['broken extension'],
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).toHaveBeenCalledWith({ refreshed: 0, failed: 1 });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses the broadcast for a no-op coordinator reconciliation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand: vi.fn(async () => ({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+      })),
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    vi.spyOn(
+      getWorkspaceRuntimeCoordinator(h.secondary),
+      'reconcileExtensionGeneration',
+    ).mockResolvedValue({ state: 'reconciled', refreshed: 0, failed: 0 });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
       ).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

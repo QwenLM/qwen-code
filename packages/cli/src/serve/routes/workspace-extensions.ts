@@ -775,15 +775,26 @@ export function registerWorkspaceExtensionRoutes(
           .filter((runtime) => {
             const coordinator =
               getWorkspaceRuntimeCoordinatorIfSupported(runtime);
-            const status = coordinator?.status();
-            return coordinator
-              ? status?.runtimeLive === true &&
-                  status.state !== 'stopping' &&
-                  status.capabilities?.extensions?.appliedGeneration !==
-                    generation
-              : (legacyAppliedGenerationByWorkspaceId.get(
+            if (!coordinator) {
+              return (
+                (legacyAppliedGenerationByWorkspaceId.get(
                   runtime.workspaceId,
-                ) ?? 0) !== generation;
+                ) ?? 0) !== generation
+              );
+            }
+            const status = coordinator.status();
+            if (status.runtimeLive !== true || status.state === 'stopping') {
+              return false;
+            }
+            const extensions = status.capabilities?.extensions;
+            if (!extensions) return true;
+            // The coordinator's desired generation is monotonic by design,
+            // so a rolled-back store generation is never adopted; comparing
+            // applied alone would read as permanently pending.
+            return (
+              generation >= extensions.desiredGeneration &&
+              extensions.appliedGeneration !== generation
+            );
           });
         if (generation === observedGeneration && pendingRuntimes.length === 0)
           return;
@@ -804,12 +815,19 @@ export function registerWorkspaceExtensionRoutes(
                           generation,
                         );
                       if (result.state === 'failed') {
+                        runtime.bridge.broadcastExtensionsChanged({
+                          refreshed: result.refreshed,
+                          failed: result.failed,
+                        });
                         throw new Error(
                           result.error ??
                             'Extension generation reconciliation failed',
                         );
                       }
-                      if (result.state === 'reconciled') {
+                      if (
+                        result.state === 'reconciled' &&
+                        (result.refreshed > 0 || result.failed > 0)
+                      ) {
                         runtime.bridge.broadcastExtensionsChanged({
                           refreshed: result.refreshed,
                           failed: result.failed,
