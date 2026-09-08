@@ -242,6 +242,9 @@ jobs:
           # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Prepare VSCode Extension'
         env:
           UNIVERSAL_BUILD: '${{ matrix.universal }}'
