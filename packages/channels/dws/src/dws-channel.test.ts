@@ -8352,6 +8352,188 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
+  it('does not rerun an admitted IM turn when final reply delivery is rate-limited', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.replyToImMessage
+        .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
+        .mockResolvedValue(undefined);
+      const { channel, bridge } = await readyPolicyChannel(client);
+
+      await expect(
+        client.emit(
+          0,
+          message(
+            'user_im_message_receive_at',
+            'rate-limited-reply',
+            'review this',
+          ),
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+      const firstDelivery = client.replyToImMessage.mock.calls[0];
+
+      vi.advanceTimersByTime(4_999);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+
+      vi.advanceTimersByTime(1);
+      await channel.poll();
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
+      expect(client.replyToImMessage.mock.calls[1]).toEqual(firstDelivery);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes a completed IM reply delivery after restart without rerunning the turn', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const name = 'persisted-im-delivery-dws';
+      const firstClient = new FakeDwsClient();
+      firstClient.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
+
+      await firstClient.emit(
+        0,
+        message('user_im_message_receive_at', 'persisted-reply', 'review this'),
+      );
+      expect(first.bridge.prompt).toHaveBeenCalledOnce();
+      const firstDelivery = firstClient.replyToImMessage.mock.calls[0];
+      first.channel.disconnect();
+
+      vi.advanceTimersByTime(5_000);
+      const restartedClient = new FakeDwsClient();
+      const restarted = await readyPolicyChannel(
+        restartedClient,
+        makeConfig(),
+        name,
+      );
+      await restarted.channel.poll();
+
+      expect(restarted.bridge.prompt).not.toHaveBeenCalled();
+      expect(restartedClient.replyToImMessage).toHaveBeenCalledOnce();
+      expect(restartedClient.replyToImMessage.mock.calls[0]).toEqual(
+        firstDelivery,
+      );
+      restarted.channel.disconnect();
+
+      const finalClient = new FakeDwsClient();
+      const final = await readyPolicyChannel(finalClient, makeConfig(), name);
+      await final.channel.poll();
+      expect(final.bridge.prompt).not.toHaveBeenCalled();
+      expect(finalClient.replyToImMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a completed direct response without rerunning the turn', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.sendImMessage
+        .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
+        .mockResolvedValue(undefined);
+      const { channel, bridge } = await readyPolicyChannel(client);
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'rate-limited-direct',
+          'review this',
+        ),
+      );
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      const firstDelivery = client.sendImMessage.mock.calls[0];
+
+      vi.advanceTimersByTime(5_000);
+      await channel.poll();
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(client.sendImMessage).toHaveBeenCalledTimes(2);
+      expect(client.sendImMessage.mock.calls[1]).toEqual(firstDelivery);
+      expect(client.replyToImMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not block the next turn while a completed IM reply waits for retry', async () => {
+    const client = new FakeDwsClient();
+    let releaseFirstDelivery!: () => void;
+    const firstDelivery = new Promise<void>((resolve) => {
+      releaseFirstDelivery = resolve;
+    });
+    client.replyToImMessage
+      .mockImplementationOnce(() => firstDelivery)
+      .mockResolvedValue(undefined);
+    const { bridge } = await readyPolicyChannel(client);
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'first-reply', 'first request'),
+    );
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'second-reply', 'second request'),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+    expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
+    expect(client.replyToImMessage.mock.calls[0]?.[1]).toBe('first-reply');
+    expect(client.replyToImMessage.mock.calls[1]?.[1]).toBe('second-reply');
+    releaseFirstDelivery();
+    await firstDelivery;
+  });
+
+  it('caps completed IM delivery backoff at five minutes', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.replyToImMessage.mockRejectedValue(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const { channel, bridge } = await readyPolicyChannel(client);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'backoff-reply', 'review this'),
+      );
+
+      const delays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000];
+      for (const [index, delay] of delays.entries()) {
+        vi.advanceTimersByTime(delay - 1);
+        await channel.poll();
+        expect(client.replyToImMessage).toHaveBeenCalledTimes(index + 1);
+        vi.advanceTimersByTime(1);
+        await channel.poll();
+        expect(client.replyToImMessage).toHaveBeenCalledTimes(index + 2);
+      }
+
+      vi.advanceTimersByTime(299_999);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(8);
+      vi.advanceTimersByTime(1);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(9);
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('attributes an IM reply after checking the raw no-reply sentinel', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

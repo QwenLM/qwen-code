@@ -62,6 +62,8 @@ const NOTIFICATION_HISTORY_OVERLAP_MS = 5_000;
 const NOTIFICATION_POLL_INTERVAL_MS = 5_000;
 const TODO_POLL_INTERVAL_MS = 30_000;
 const TODO_CHAT_PREFIX = 'todo:';
+const IM_DELIVERY_RETRY_BASE_MS = 5_000;
+const IM_DELIVERY_RETRY_MAX_MS = 5 * 60_000;
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
@@ -107,6 +109,17 @@ interface PersistedPendingMessage {
   message: DwsImMessage;
 }
 
+interface PersistedImDelivery {
+  conversationId: string;
+  messageId: string;
+  senderId: string;
+  content: string;
+  idempotencyKey: string;
+  directTarget?: Extract<DwsImTarget, { kind: 'direct' }>;
+  attempts: number;
+  nextRetryAt: number;
+}
+
 interface DwsCursor {
   version: 1;
   selfProfile?: string;
@@ -118,6 +131,7 @@ interface DwsCursor {
   mentionCheckpoint?: PersistedNotificationCheckpoint;
   pendingDocumentNotifications?: PersistedDocumentNotification[];
   pendingMessages?: PersistedPendingMessage[];
+  pendingImDeliveries?: PersistedImDelivery[];
   processedMessages: string[];
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
@@ -374,6 +388,30 @@ function isPendingMessage(value: unknown): value is PersistedPendingMessage {
   );
 }
 
+function isPersistedImDelivery(value: unknown): value is PersistedImDelivery {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const delivery = value as PersistedImDelivery;
+  return (
+    [
+      delivery.conversationId,
+      delivery.messageId,
+      delivery.senderId,
+      delivery.idempotencyKey,
+    ].every((item) => typeof item === 'string' && Boolean(item)) &&
+    typeof delivery.content === 'string' &&
+    (delivery.directTarget === undefined ||
+      (delivery.directTarget.kind === 'direct' &&
+        typeof delivery.directTarget.openDingTalkId === 'string' &&
+        Boolean(delivery.directTarget.openDingTalkId))) &&
+    Number.isSafeInteger(delivery.attempts) &&
+    delivery.attempts >= 0 &&
+    Number.isSafeInteger(delivery.nextRetryAt) &&
+    delivery.nextRetryAt >= 0
+  );
+}
+
 function isPersistedInboundFailure(
   value: unknown,
 ): value is PersistedInboundFailure {
@@ -559,6 +597,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   // live or followup traffic, whose queue entries outlive their turn.
   private readonly replayDispatches = new Map<string, ReplayDispatch>();
   private readonly attemptedPendingMessages = new Set<string>();
+  private readonly activeImDeliveries = new Set<string>();
   private readonly conversationTails = new Map<string, ConversationTail>();
   private readonly messageStartResolvers = new Map<
     string,
@@ -659,6 +698,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       mentionCheckpoint: undefined,
       pendingDocumentNotifications: [],
       pendingMessages: [],
+      pendingImDeliveries: [],
       processedMessages: [],
       imTargets: [],
       todosInitialized: false,
@@ -712,6 +752,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       (cursor.pendingMessages !== undefined &&
         (!Array.isArray(cursor.pendingMessages) ||
           !cursor.pendingMessages.every(isPendingMessage))) ||
+      (cursor.pendingImDeliveries !== undefined &&
+        (!Array.isArray(cursor.pendingImDeliveries) ||
+          !cursor.pendingImDeliveries.every(isPersistedImDelivery))) ||
       !Array.isArray(cursor.processedMessages) ||
       !cursor.processedMessages.every((item) => typeof item === 'string') ||
       !Array.isArray(cursor.imTargets) ||
@@ -749,6 +792,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         cursor.pendingDocumentNotifications ?? []
       ).slice(-MAX_PROCESSED_ITEMS),
       pendingMessages: (cursor.pendingMessages ?? []).slice(),
+      pendingImDeliveries: (cursor.pendingImDeliveries ?? []).slice(
+        -MAX_PROCESSED_ITEMS,
+      ),
       processedMessages: cursor.processedMessages.slice(-MAX_PROCESSED_ITEMS),
       imTargets: cursor.imTargets.slice(-MAX_IM_TARGETS),
       todosInitialized: cursor.todosInitialized ?? false,
@@ -799,6 +845,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.documentIds = [];
       this.cursor.pendingDocumentNotifications = [];
       this.cursor.pendingMessages = [];
+      this.cursor.pendingImDeliveries = [];
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.pairingNotifications = [];
@@ -1171,21 +1218,136 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const idempotencyKey = stableUuid(
       `${this.name}\0${chatId}\0${messageId}\0${text}`,
     );
-    if (this.findImTarget(chatId)?.kind === 'direct') {
-      await this.sendImText(
-        chatId,
-        this.formatAttributedText(text, label),
-        idempotencyKey,
-      );
-      return;
-    }
-    await this.client.replyToImMessage(
-      chatId,
+    const target = this.findImTarget(chatId);
+    const delivery: PersistedImDelivery = {
+      conversationId: chatId,
       messageId,
       senderId,
-      this.formatAttributedText(text, label),
+      content: this.formatAttributedText(text, label),
       idempotencyKey,
+      ...(target?.kind === 'direct' ? { directTarget: target } : {}),
+      attempts: 0,
+      nextRetryAt: 0,
+    };
+    const pending = this.rememberImDelivery(delivery);
+    void this.attemptImDelivery(pending).catch((error: unknown) => {
+      this.deferImDelivery(pending, error);
+    });
+  }
+
+  private rememberImDelivery(
+    delivery: PersistedImDelivery,
+  ): PersistedImDelivery {
+    const existing = (this.cursor.pendingImDeliveries ?? []).find(
+      ({ idempotencyKey }) => idempotencyKey === delivery.idempotencyKey,
     );
+    if (existing) return existing;
+    const pending = this.cursor.pendingImDeliveries ?? [];
+    if (pending.length >= MAX_PROCESSED_ITEMS) {
+      throw new Error(`[Channel:${this.name}] DWS IM delivery queue is full.`);
+    }
+    pending.push(delivery);
+    this.cursor.pendingImDeliveries = pending;
+    // The completed response must be durable before its first delivery
+    // attempt. If this checkpoint fails, the inbound turn is still allowed to
+    // fail because there is no safe delivery-only recovery path yet.
+    try {
+      this.saveCursor();
+    } catch (error) {
+      this.cursor.pendingImDeliveries = pending.filter(
+        ({ idempotencyKey }) => idempotencyKey !== delivery.idempotencyKey,
+      );
+      throw error;
+    }
+    return delivery;
+  }
+
+  private async attemptImDelivery(
+    delivery: PersistedImDelivery,
+  ): Promise<void> {
+    if (
+      delivery.nextRetryAt > Date.now() ||
+      this.activeImDeliveries.has(delivery.idempotencyKey)
+    ) {
+      return;
+    }
+    if (!this.connected) {
+      this.deferImDelivery(delivery, new Error('channel disconnected'));
+      return;
+    }
+    this.activeImDeliveries.add(delivery.idempotencyKey);
+    try {
+      try {
+        if (delivery.directTarget) {
+          await this.client.sendImMessage(
+            delivery.directTarget,
+            delivery.content,
+            delivery.idempotencyKey,
+          );
+        } else {
+          await this.client.replyToImMessage(
+            delivery.conversationId,
+            delivery.messageId,
+            delivery.senderId,
+            delivery.content,
+            delivery.idempotencyKey,
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof DwsCommandError)) throw error;
+        this.deferImDelivery(delivery, error);
+        return;
+      }
+      const pending = this.cursor.pendingImDeliveries ?? [];
+      if (!pending.includes(delivery)) return;
+      this.cursor.pendingImDeliveries = pending.filter(
+        ({ idempotencyKey }) => idempotencyKey !== delivery.idempotencyKey,
+      );
+      try {
+        this.saveCursor();
+      } catch (error) {
+        // The DWS UUID makes replay safe even if the success checkpoint cannot
+        // be written. Keep the in-memory entry aligned with the last durable
+        // cursor and retry delivery without rerunning the agent turn.
+        this.cursor.pendingImDeliveries.push(delivery);
+        process.stderr.write(
+          `[Channel:${this.name}] DWS IM delivery succeeded but its checkpoint failed; the delivery will be retried with the same idempotency key: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
+    } finally {
+      this.activeImDeliveries.delete(delivery.idempotencyKey);
+    }
+  }
+
+  private deferImDelivery(delivery: PersistedImDelivery, error: unknown): void {
+    if (!(this.cursor.pendingImDeliveries ?? []).includes(delivery)) return;
+    delivery.attempts = Math.min(delivery.attempts + 1, 32);
+    const delay = Math.min(
+      IM_DELIVERY_RETRY_BASE_MS * 2 ** Math.min(delivery.attempts - 1, 16),
+      IM_DELIVERY_RETRY_MAX_MS,
+    );
+    delivery.nextRetryAt = Date.now() + delay;
+    try {
+      this.saveCursor();
+    } catch (saveError) {
+      process.stderr.write(
+        `[Channel:${this.name}] DWS IM delivery retry checkpoint failed: ${sanitizeLogText(saveError instanceof Error ? saveError.message : String(saveError), 300)}\n`,
+      );
+    }
+    process.stderr.write(
+      `[Channel:${this.name}] DWS IM delivery failed; retrying delivery only in ${delay}ms without rerunning the originating task: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+    );
+  }
+
+  private async replayPendingImDeliveries(signal: AbortSignal): Promise<void> {
+    for (const delivery of [...(this.cursor.pendingImDeliveries ?? [])]) {
+      if (signal.aborted || !this.connected) return;
+      try {
+        await this.attemptImDelivery(delivery);
+      } catch (error) {
+        this.deferImDelivery(delivery, error);
+      }
+    }
   }
 
   protected override async pushProactive(
@@ -1325,6 +1487,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
       this.lastTodoPollAt = Date.now();
     }
+    if (signal.aborted || !this.connected) return;
+    await this.replayPendingImDeliveries(signal);
   }
 
   private async pollTodos(signal: AbortSignal): Promise<void> {
