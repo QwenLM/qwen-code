@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -59,6 +59,18 @@ describe('e2e workflow', () => {
       'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
     );
     expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
+    // The arrangement is load-bearing: the batch must run first and the
+    // isolated suites second, joined by `&&` with nothing between or after.
+    // Counts and substrings are order- and backgrounding-blind.
+    expect(e2eRunScript).toMatch(
+      /run_vitest "\$\{bulk_args\[@\]\}" &&\n\s+run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1\n\}/,
+    );
+    // Text pins never touch the tree: renaming the file or directory these
+    // filters name silently returns the suites to the three-fork batch.
+    expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
+      true,
+    );
+    expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
   });
 
   describe('sandbox image preparation', () => {
