@@ -370,6 +370,7 @@ BODY
       issue_number="${issue_url##*/}"
     fi
 
+    echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT:?}"
     echo "Using ${issue_url}; dispatching autofix."
     if ! gh workflow run qwen-autofix.yml --repo "${GH_REPO}" --ref main \
       -f phase=issue \

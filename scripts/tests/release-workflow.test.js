@@ -800,6 +800,65 @@ describe('release workflow', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'records the issue before a failed autofix dispatch',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-notify-dispatch-'));
+      const bin = join(directory, 'bin');
+      const output = join(directory, 'github-output');
+      mkdirSync(bin);
+      writeFileSync(output, '');
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'case "$1 $2" in\n' +
+          "  'issue list') echo '[]' ;;\n" +
+          "  'issue create') echo 'https://github.example/QwenLM/qwen-code/issues/4242' ;;\n" +
+          "  'workflow run') exit 1 ;;\n" +
+          'esac\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'notify-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_OUTPUT: output,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              PREPARE_RESULT: 'success',
+              QUALITY_RESULT: 'failure',
+              INTEGRATION_NONE_RESULT: 'skipped',
+              INTEGRATION_DOCKER_RESULT: 'skipped',
+              PUBLISH_RESULT: 'skipped',
+              BUG_LABEL: 'type/bug',
+              READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
+              AUTOFIX_APPROVED_LABEL: 'autofix/approved',
+            },
+          },
+        );
+        expect(result.status).not.toBe(0);
+        expect(readFileSync(output, 'utf8')).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/4242\n',
+        );
+        const fallback = releaseYaml.jobs.notify_failure.steps.find(
+          (step) => step.name === 'File a fallback failure issue',
+        );
+        expect(fallback.if).toBe(
+          "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('pins validation and publishing to the commit resolved by prepare', () => {
     expect(releaseYaml.jobs.prepare.outputs.release_sha).toBe(
       '${{ steps.source.outputs.release_sha }}',

@@ -803,10 +803,9 @@ jobs:
 
       # Inline on purpose: this runs precisely when the trusted checkout or the
       # extracted runner is what failed, so it may not depend on either. It
-      # files a plain issue with no reuse, labelling or autofix dispatch —
-      # scheduled autofix scans issues, and a duplicate beats silence.
+      # files a human-triage issue with only the bug label, no reuse or autofix.
       - name: 'File a fallback failure issue'
-        if: "${{ always() && steps.notify.outcome != 'success' }}"
+        if: "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
