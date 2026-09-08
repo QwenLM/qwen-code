@@ -673,6 +673,41 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(status.errors?.[0]?.error).toContain('ENOTDIR');
   });
 
+  // A dangling symlink lstat()s fine but readdir()s ENOENT: a present,
+  // broken root, not an absent one, so it must fail closed like the
+  // regular-file shape above.
+  it.skipIf(process.platform === 'win32')(
+    'fails closed for a dangling symlink at the extensions root',
+    async () => {
+      await fsp.symlink(
+        path.join(qwenHome, 'missing-target'),
+        path.join(qwenHome, 'extensions'),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(false);
+      expect(status.skills).toEqual([]);
+      expect(status.errors?.[0]?.error).toContain('ENOENT');
+    },
+  );
+
+  it('degrades an unreadable extensions root when the extension level is disabled', async () => {
+    await fsp.writeFile(path.join(qwenHome, 'extensions'), 'not a directory');
+    await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(qwenHome, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['extension'] } }),
+    );
+    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+    // The workspace opted out of extension discovery, so the catalog-fatal
+    // root probe must not take the rest of its catalog down with it.
+    expect(status.initialized).toBe(true);
+    expect(status.errors).toBeUndefined();
+    expect(status.skills.some((s) => s.name === 'review')).toBe(true);
+    expect(status.skills.some((s) => s.level === 'extension')).toBe(false);
+    expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine.mock.calls[0][0]).toContain('ENOTDIR');
+  });
+
   // The store loader swallows listing errors, so the readdir probe is the
   // only thing that reports a searchable-but-unlistable extensions root.
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
@@ -765,6 +800,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
         expect.objectContaining({ name: 'review', level: 'bundled' }),
       ]),
     );
+    // The degraded response carries no errors cell, so this stderr line is
+    // the only observable signal that extension enumeration failed.
+    expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine.mock.calls[0][0]).toContain('store unavailable');
     // The degraded pair is not cached, so the next call retries the
     // extension enumeration instead of freezing an extension-less catalog.
     expect((await provider(workspace)).skills).toEqual(
@@ -820,6 +859,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
   });
 
   it('ignores a non-string general.language instead of failing the catalog', async () => {
+    // Pin the env out of the way ('' loses to settings): an ambient
+    // QWEN_CODE_LANG would shadow the invalid setting and leave the
+    // non-string guard unexercised.
+    vi.stubEnv('QWEN_CODE_LANG', '');
     const workspace = path.join(qwenHome, 'workspace');
     await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
     await fsp.writeFile(
@@ -850,6 +893,66 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await first;
     const second = await provider(qwenHome);
     expect(second.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'second-skill', status: 'ok' }),
+      ]),
+    );
+  });
+
+  it('starts a fresh build for post-invalidation callers and lets later callers join it', async () => {
+    await writeExtension('first', ['first-skill']);
+    const realRefresh = ExtensionManager.prototype.refreshCache;
+    const parked: Array<() => void> = [];
+    const releases: Array<() => void> = [];
+    const parkedPromises = [
+      new Promise<void>((resolve) => parked.push(resolve)),
+      new Promise<void>((resolve) => parked.push(resolve)),
+    ];
+    let refreshCalls = 0;
+    const refreshSpy = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementation(async function (this: ExtensionManager) {
+        const index = refreshCalls++;
+        await realRefresh.call(this);
+        // Park the first two builds after their store reads: the first must
+        // hold a pre-mutation snapshot, and both must be in flight while the
+        // invalidation, the first settle, and the joining caller land. A
+        // third build means the join failed, so let it run through.
+        if (index > 1) return;
+        parked[index]?.();
+        await new Promise<void>((resolve) => {
+          releases[index] = resolve;
+        });
+      });
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    const first = provider(qwenHome);
+    // Commit the store mutation and deliver the invalidation only after the
+    // first build's snapshot is taken, or the mutation races that read.
+    await parkedPromises[0];
+    await writeExtension('second', ['second-skill']);
+    provider.invalidate?.(qwenHome);
+    // The newer epoch must start a fresh build, not join the pre-mutation one.
+    const second = provider(qwenHome);
+    releases[0]!();
+    await first;
+    // The superseded build's cleanup must not evict the fresh build's entry.
+    const third = provider(qwenHome);
+    await parkedPromises[1];
+    releases[1]!();
+    const [firstStatus, secondStatus, thirdStatus] = await Promise.all([
+      first,
+      second,
+      third,
+    ]);
+
+    expect(firstStatus.skills.some((s) => s.name === 'second-skill')).toBe(
+      false,
+    );
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    expect(third).toBe(second);
+    expect(thirdStatus).toBe(secondStatus);
+    expect(secondStatus.skills).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'second-skill', status: 'ok' }),
       ]),

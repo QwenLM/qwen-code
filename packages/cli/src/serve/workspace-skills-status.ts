@@ -90,15 +90,22 @@ interface WorkspaceSkillManagers {
 
 /**
  * Fails closed on an unreadable directory while tolerating one that does not
- * exist. The store loader swallows listing errors, so without this probe an
- * unlistable root would silently yield a catalog missing its entries.
+ * exist. `lstat` decides absence and `readdir` decides readability: a
+ * dangling symlink lstat()s fine but readdir()s `ENOENT`, and a
+ * present-but-unlistable root must fail closed rather than read as absent
+ * (`fs.stat` cannot separate the two — it follows the link and throws the
+ * same `ENOENT`). The store loader swallows listing errors, so without this
+ * probe an unlistable root would silently yield a catalog missing its
+ * entries.
  */
 async function assertReadableDir(directory: string): Promise<void> {
   try {
-    await fs.readdir(directory);
+    await fs.lstat(directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
   }
+  await fs.readdir(directory);
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -203,12 +210,19 @@ async function buildWorkspaceSkillsStatus(
       // cached, so the next call retries enumeration.
       let extensionLoadFailed = false;
       if (workspaceTrusted && !safeMode) {
-        // Keep this probe outside the inner failure domain: an unreadable
-        // extensions *root* still fails the whole catalog (the store loader
-        // would silently swallow it), while a fault inside the load itself
-        // degrades to a catalog without extension Skills.
-        await assertReadableDir(Storage.getUserExtensionsDir());
+        // A workspace that disabled extension discovery opted out of the
+        // catalog-fatal tier: for it an unreadable root degrades like any
+        // other load fault instead of failing the whole catalog.
+        const extensionLevelDisabled = disabledLevels.has('extension');
+        // The store loader swallows listing errors, so without the root
+        // probe an unlistable root would silently yield a catalog missing
+        // every extension Skill. Only the probe is catalog-fatal (and only
+        // while discovery is enabled); a fault inside the load itself
+        // degrades the extension entries either way.
+        let rootProbed = false;
         try {
+          await assertReadableDir(Storage.getUserExtensionsDir());
+          rootProbed = true;
           extensionManager = new ExtensionManager({
             workspaceDir: workspaceCwd,
             isWorkspaceTrusted: workspaceTrusted,
@@ -216,6 +230,7 @@ async function buildWorkspaceSkillsStatus(
           });
           await extensionManager.refreshCache();
         } catch (error) {
+          if (!rootProbed && !extensionLevelDisabled) throw error;
           extensionLoadFailed = true;
           extensionManager = undefined;
           writeStderrLine(
@@ -234,15 +249,13 @@ async function buildWorkspaceSkillsStatus(
         // bare, so it is always off here.
         getBareMode: () => false,
         getProjectRoot: () => workspaceCwd,
-        // disabledLevels gates discovery only (SkillManager applies the same
-        // level gate); inactive-extension management entries are appended
-        // regardless, matching the child producer.
+        // SkillManager applies the disabled-level gate itself (through
+        // getDisabledSkillLevels) before ever calling this; inactive-extension
+        // management entries are appended regardless, matching the child
+        // producer.
         getActiveExtensions: () =>
-          disabledLevels.has('extension')
-            ? []
-            : (extensionManager
-                ?.getLoadedExtensions()
-                .filter((e) => e.isActive) ?? []),
+          extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
+          [],
         getDisabledSkillLevels: () => disabledLevels,
       };
       const skillManager = new SkillManager(shim as Config);

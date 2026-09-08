@@ -1280,13 +1280,84 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       const result = await svc.getWorkspaceSkillsStatus(makeCtx());
-      const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+      const reread = await svc.getWorkspaceSkillsStatus(makeCtx());
 
       expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
-      expect(workspaceSkillsStatusProvider).toHaveBeenCalledOnce();
+      // Daemon-local answers are deliberately not latched (unlike child
+      // answers): the provider caches its own managers, and skipping the
+      // latch lets a degraded extension enumeration retry on the next read.
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledTimes(2);
       expect(result.initialized).toBe(true);
       expect(result.skills.map((s) => s.name)).toEqual(['review']);
-      expect(cached).toEqual(result);
+      expect(reread).toEqual(result);
+    });
+
+    it('getWorkspaceSkillsStatus retries a degraded daemon-local answer instead of latching it', async () => {
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const degraded = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const complete = {
+        ...degraded,
+        skills: [
+          ...degraded.skills,
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'ext-skill',
+            description: 'Extension skill',
+            level: 'extension',
+            extensionName: 'suite',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const workspaceSkillsStatusProvider = vi
+        .fn()
+        .mockResolvedValueOnce(degraded)
+        .mockResolvedValue(complete);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      try {
+        const first = await svc.getWorkspaceSkillsStatus(makeCtx());
+        now += 6_000; // past the 5s snapshot TTL
+        const second = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+        expect(first.skills.map((s) => s.name)).toEqual(['review']);
+        // The degraded answer is served but not latched, so the next read
+        // past the TTL retries enumeration and self-heals.
+        expect(second.skills.map((s) => s.name)).toEqual([
+          'review',
+          'ext-skill',
+        ]);
+        expect(workspaceSkillsStatusProvider).toHaveBeenCalledTimes(2);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('getWorkspaceSkillsStatus prefers the cached child answer over the daemon-local provider', async () => {

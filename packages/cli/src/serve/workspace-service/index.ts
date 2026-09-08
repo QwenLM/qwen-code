@@ -357,15 +357,11 @@ export function createDaemonWorkspaceService(
     // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
     if (workspaceSkillsStatusProvider) {
       try {
-        const localStatus = await workspaceSkillsStatusProvider(boundWorkspace);
-        if (
-          localStatus.initialized &&
-          generation === workspaceSkillsGeneration
-        ) {
-          lastWorkspaceSkillsStatus = localStatus;
-          lastWorkspaceSkillsStatusAt = Date.now();
-        }
-        return localStatus;
+        // Daemon-local answers are deliberately not latched (the latch above
+        // is child-only): the provider is always callable and caches its own
+        // managers, and latching a degraded answer — an extension enumeration
+        // fault degrades to initialized:true — would suppress its retry.
+        return await workspaceSkillsStatusProvider(boundWorkspace);
       } catch (err) {
         writeStderrLine(
           `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
