@@ -245,6 +245,27 @@ servers were deliberately not added: `classifyAgentTool` denies every name not
 in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
 
+### How this branch was verified
+
+Everything below is repeatable from `scripts/audit/`, and every one of them was
+calibrated by breaking the thing it checks and watching it go red. A green run
+that has never failed is not evidence.
+
+| Check                                       | What it covers                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `workspace-agent-orphans.py`                | Exports whose only callers are tests, record fields nothing reads, baseline entries naming nothing, and the design doc's record diagrams against the real types                                                                                                                                                                            |
+| `tsconfig.workspace-agents-{core,cli}.json` | Narrow typechecks with `paths` pointed at package source rather than stale `dist`                                                                                                                                                                                                                                                          |
+| `run-workspace-agents.mjs`                  | 139 assertions over the rules: store round-trip, the eleven admission outcomes, priority, retirement, budget boundaries, a run's whole life, all six thread tools under real run frames, delegation, blocking, waiting, the status aggregate, the parent-report outbox, crash recovery, the panel's view logic, and in-process concurrency |
+| `run-workspace-agents-concurrency.mjs`      | Ten real processes contending the file lock. Removing `lockfile.lock` loses 7 of 10 posts                                                                                                                                                                                                                                                  |
+| `run-workspace-agents-crash.mjs`            | A writer SIGKILLed holding the lock: the store stays readable and writes return unaided                                                                                                                                                                                                                                                    |
+| `fuzz-workspace-agents.mjs`                 | Random operation sequences against the invariants. 25 seeds × 600 steps — 15,000 operations — with no violation                                                                                                                                                                                                                            |
+
+What none of it covers: the vitest suites, which are larger and still need CI;
+partial-write recovery, since the file lock means two writers never touch one
+file and killing an idle holder never interrupts a write (`store.test.ts`
+covers that with fault injection); and decisions 4 and 12 of §2, which have no
+executable check here.
+
 ### Found on this branch, outside this subsystem
 
 `client/App.tsx` reads `teamName` off `DaemonSessionAgentTaskStatus` in four
