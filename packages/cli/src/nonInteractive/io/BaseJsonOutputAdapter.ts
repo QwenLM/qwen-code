@@ -17,6 +17,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
+  createNotStartedToolErrorResponse,
   LlmEventType,
   isVisionBridgeNoticeDisplay,
   ToolErrorType,
@@ -616,9 +617,31 @@ export abstract class BaseJsonOutputAdapter {
    */
   restartAttempt(
     preserveText: boolean,
-    _discardedToolCalls: ToolCallRequestInfo[],
+    discardedToolCalls: ToolCallRequestInfo[],
   ): void {
     if (preserveText) {
+      const discardedIds = new Set(
+        discardedToolCalls.map((request) => request.callId),
+      );
+      if (discardedIds.size > 0) {
+        const state = this.mainAgentMessageState;
+        const retainedBlocks: ContentBlock[] = [];
+        const retainedOpenBlocks = new Set<number>();
+        for (const [index, block] of state.blocks.entries()) {
+          if (block.type === 'tool_use' && discardedIds.has(block.id)) {
+            continue;
+          }
+          const retainedIndex = retainedBlocks.length;
+          retainedBlocks.push(block);
+          if (state.openBlocks.has(index)) {
+            retainedOpenBlocks.add(retainedIndex);
+          }
+        }
+        state.blocks = retainedBlocks;
+        state.openBlocks = retainedOpenBlocks;
+        state.currentBlockType = retainedBlocks.at(-1)?.type ?? null;
+        state.messageStarted = retainedBlocks.length > 0;
+      }
       return;
     }
     this.startAssistantMessageInternal(this.mainAgentMessageState);
@@ -630,23 +653,10 @@ export abstract class BaseJsonOutputAdapter {
     const message =
       'Skipped because the provider attempt was retried before execution.';
     for (const request of discardedToolCalls) {
-      const error = new Error(message);
-      this.emitToolResult(request, {
-        callId: request.callId,
-        responseParts: [
-          {
-            functionResponse: {
-              id: request.callId,
-              name: request.name,
-              response: { error: message },
-            },
-          },
-        ],
-        resultDisplay: message,
-        error,
-        errorType: ToolErrorType.EXECUTION_FAILED,
-        executionStatus: 'not_started',
-      });
+      this.emitToolResult(
+        request,
+        createNotStartedToolErrorResponse(request, message),
+      );
     }
   }
 

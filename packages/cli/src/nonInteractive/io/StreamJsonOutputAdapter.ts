@@ -99,7 +99,7 @@ export class StreamJsonOutputAdapter
     preserveText: boolean,
     discardedToolCalls: ToolCallRequestInfo[],
   ): void {
-    if (preserveText) {
+    if (preserveText && discardedToolCalls.length === 0) {
       return;
     }
     // Stream frames cannot be retracted. Close the abandoned assistant first,

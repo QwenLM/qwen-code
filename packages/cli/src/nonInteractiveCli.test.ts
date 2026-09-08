@@ -643,6 +643,7 @@ describe('runNonInteractive', () => {
                 maxRetries: 10,
                 delayMs: 60_000,
                 skipDelay: vi.fn(),
+                ...(drain ? { message: 'Too many requests' } : {}),
               },
             },
             {
@@ -684,7 +685,7 @@ describe('runNonInteractive', () => {
         drain ? 3 : 2,
       );
       expect(processStderrSpy).toHaveBeenCalledWith(
-        'Retrying in 60s (attempt 1/10)\n',
+        `Retrying in 60s (attempt 1/10)${drain ? ': Too many requests' : ''}\n`,
       );
 
       const stdout = processStdoutSpy.mock.calls
@@ -716,6 +717,31 @@ describe('runNonInteractive', () => {
       } else {
         expect(discardedUses).toHaveLength(1);
         expect(discardedResults).toHaveLength(1);
+        const discardedUseFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'discarded-tool',
+            ),
+        );
+        const discardedResultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'discarded-tool',
+            ),
+        );
+        expect(discardedUseFrame).toBeGreaterThanOrEqual(0);
+        expect(discardedResultFrame).toBeGreaterThan(discardedUseFrame);
       }
       expect(stdout).toContain('accepted attempt');
       expect(blocks).toEqual(
@@ -730,10 +756,18 @@ describe('runNonInteractive', () => {
     },
   );
 
-  it.each([false, true])(
-    'preserves delivered text across a continuation Retry (drain=%s)',
-    async (drain) => {
-      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'preserves delivered text across a continuation Retry in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      if (format === OutputFormat.STREAM_JSON) {
+        vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      }
       setupMetricsMock();
       const finished: ServerLlmStreamEvent = {
         type: LlmEventType.Finished,
@@ -770,10 +804,120 @@ describe('runNonInteractive', () => {
       ).resolves.toBe(0);
 
       expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
-      const messages = JSON.parse(
-        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
-      );
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
       expect(JSON.stringify(messages)).toContain('prefix suffix');
+      if (format === OutputFormat.STREAM_JSON) {
+        const assistantMessages = messages.filter(
+          (message: { type?: string; message?: { content?: unknown[] } }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block: { type?: string }) => block.type === 'text',
+            ),
+        );
+        expect(assistantMessages).toHaveLength(1);
+        expect(
+          messages.find(
+            (message: { type?: string }) => message.type === 'result',
+          )?.result,
+        ).toContain('prefix suffix');
+      }
+    },
+  );
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'preserves continuation text while discarding a pending recovery tool in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix-answer ' },
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'recovery-tool',
+              name: 'test-tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'continuation-tool',
+            },
+          },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'continuation-tool',
+        ),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const assistantText = messages
+        .filter((message: { type?: string }) => message.type === 'assistant')
+        .flatMap(
+          (message: { message?: { content?: Array<{ text?: string }> } }) =>
+            message.message?.content ?? [],
+        )
+        .map((block: { text?: string }) => block.text ?? '')
+        .join('');
+      expect(assistantText).toContain('prefix-answer suffix');
+      if (format === OutputFormat.JSON) {
+        expect(JSON.stringify(messages)).not.toContain('recovery-tool');
+      } else {
+        const useFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'recovery-tool',
+            ),
+        );
+        const resultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'recovery-tool',
+            ),
+        );
+        expect(useFrame).toBeGreaterThanOrEqual(0);
+        expect(resultFrame).toBeGreaterThan(useFrame);
+      }
     },
   );
 
@@ -847,7 +991,131 @@ describe('runNonInteractive', () => {
         }),
       ]),
     );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Falling back from primary to fallback (1 buffered tool call(s) discarded).\n',
+    );
   });
+
+  it('retains every model fallback marker across repeated JSON attempt resets', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'abandoned primary' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+          fallbackIndex: 0,
+        },
+        { type: LlmEventType.Content, value: 'abandoned fallback-a' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+          fallbackIndex: 1,
+        },
+        { type: LlmEventType.Content, value: 'final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'two-fallbacks'),
+    ).resolves.toBe(0);
+
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    const fallbacks = messages.filter(
+      (message: { type?: string; subtype?: string }) =>
+        message.type === 'system' && message.subtype === 'model_fallback',
+    );
+    expect(fallbacks).toHaveLength(2);
+    expect(
+      messages.filter(
+        (message: { type?: string; subtype?: string }) =>
+          message.type === 'system' && message.subtype === 'retry',
+      ),
+    ).toHaveLength(2);
+    expect(fallbacks).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+        }),
+      }),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+        }),
+      }),
+    ]);
+    const output = JSON.stringify(messages);
+    expect(output).not.toContain('abandoned primary');
+    expect(output).not.toContain('abandoned fallback-a');
+    expect(output).toContain('final answer');
+  });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits a structured marker for a bare Retry in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned answer' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'bare-retry'),
+      ).resolves.toBe(0);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: expect.objectContaining({
+              discardedToolCalls: 0,
+              preserveText: false,
+            }),
+          }),
+        ]),
+      );
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(
+        'Retrying provider attempt (0 buffered tool call(s) discarded).',
+      );
+      expect(stderr).not.toContain('undefined');
+    },
+  );
 
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
@@ -8078,6 +8346,44 @@ describe('runNonInteractive', () => {
         errorMessage: 'model did not produce structured output',
         errorType: 'structured_output_missing',
       });
+    });
+
+    it('reports only the accepted attempt in the structured-output preview', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({ type: 'object' });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned prose' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'accepted prose' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Should call structured_output',
+          'prompt-id-preview-retry',
+        ),
+      ).resolves.toBe(1);
+
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      const result = messages.find(
+        (message: { type?: string }) => message.type === 'result',
+      );
+      expect(result.error.message).toContain('accepted prose');
+      expect(result.error.message).not.toContain('abandoned prose');
     });
 
     it('synthesises tool_result for suppressed sibling calls when structured_output fails validation', async () => {

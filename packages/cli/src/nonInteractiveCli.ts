@@ -1706,8 +1706,24 @@ export async function runNonInteractive(
         return 1;
       };
 
-      const emitRetryProgress = (event: ServerLlmStreamEvent): void => {
-        if (event.type !== LlmEventType.Retry || !event.retryInfo) {
+      const emitRetryProgress = (
+        event: ServerLlmStreamEvent,
+        discardedToolCallCount: number,
+        preserveText: boolean,
+      ): void => {
+        if (event.type === LlmEventType.ModelFallback) {
+          process.stderr.write(
+            `Falling back from ${event.fromModel} to ${event.toModel} (${discardedToolCallCount} buffered tool call(s) discarded).\n`,
+          );
+          return;
+        }
+        if (event.type !== LlmEventType.Retry) return;
+        if (!event.retryInfo) {
+          process.stderr.write(
+            `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
+              preserveText ? '; preserving delivered text' : ''
+            }).\n`,
+          );
           return;
         }
         const { attempt, maxRetries, delayMs, message } = event.retryInfo;
@@ -1717,6 +1733,42 @@ export async function runNonInteractive(
             message ? `: ${message}` : ''
           }\n`,
         );
+      };
+
+      const discardAbandonedAttempt = (
+        event: ServerLlmStreamEvent,
+        pendingRequests: ToolCallRequestInfo[],
+        onDiscardText?: () => void,
+      ): void => {
+        if (
+          event.type !== LlmEventType.Retry &&
+          event.type !== LlmEventType.ModelFallback
+        ) {
+          return;
+        }
+        const discardedToolCalls = pendingRequests.splice(0);
+        const preserveText =
+          event.type === LlmEventType.Retry && event.isContinuation === true;
+        adapter.restartAttempt(preserveText, discardedToolCalls);
+        if (!preserveText) {
+          onDiscardText?.();
+        }
+        const retryInfo =
+          event.type === LlmEventType.Retry ? event.retryInfo : undefined;
+        adapter.emitSystemMessage('retry', {
+          reason:
+            event.type === LlmEventType.Retry ? 'retry' : 'model_fallback',
+          ...(retryInfo
+            ? {
+                attempt: retryInfo.attempt,
+                maxRetries: retryInfo.maxRetries,
+                delayMs: retryInfo.delayMs,
+              }
+            : {}),
+          discardedToolCalls: discardedToolCalls.length,
+          preserveText,
+        });
+        emitRetryProgress(event, discardedToolCalls.length, preserveText);
       };
 
       /**
@@ -2456,24 +2508,9 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          if (
-            event.type === LlmEventType.Retry ||
-            event.type === LlmEventType.ModelFallback
-          ) {
-            const discardedToolCalls = toolCallRequests.splice(0);
-            const preserveText =
-              event.type === LlmEventType.Retry &&
-              event.isContinuation === true &&
-              discardedToolCalls.length === 0;
-            adapter.restartAttempt(preserveText, discardedToolCalls);
-            if (!preserveText) {
-              plainTextPreview = plainTextPreview.slice(
-                0,
-                attemptPreviewLength,
-              );
-            }
-            emitRetryProgress(event);
-          }
+          discardAbandonedAttempt(event, toolCallRequests, () => {
+            plainTextPreview = plainTextPreview.slice(0, attemptPreviewLength);
+          });
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
@@ -2800,18 +2837,7 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
-                if (
-                  event.type === LlmEventType.Retry ||
-                  event.type === LlmEventType.ModelFallback
-                ) {
-                  const discardedToolCalls = itemToolCallRequests.splice(0);
-                  const preserveText =
-                    event.type === LlmEventType.Retry &&
-                    event.isContinuation === true &&
-                    discardedToolCalls.length === 0;
-                  adapter.restartAttempt(preserveText, discardedToolCalls);
-                  emitRetryProgress(event);
-                }
+                discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);

@@ -288,6 +288,26 @@ describe('rate-limit retry diagnostics', () => {
     });
   });
 
+  it('decodes statusless SSE throttle details for diagnostics', () => {
+    const providerMessage =
+      'Too many requests, please wait before trying again. You have sent too many requests. Wait before trying again.';
+    const error = new Error(
+      JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: JSON.stringify({ message: providerMessage }),
+        },
+      }),
+    );
+
+    expect(getRateLimitErrorDetails(error)).toEqual({
+      providerCode: 'invalid_request_error',
+      providerMessage,
+      transport: 'unknown',
+    });
+  });
+
   it('should extract request id from top-level nested JSON error messages', () => {
     const error = new Error(
       '{"request_id":"req-123","error":{"code":"429","message":"Throttling: TPM limit reached"}}',
