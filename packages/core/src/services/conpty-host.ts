@@ -91,15 +91,21 @@ export const noteConPtyHostReleased = (ptyProcess: unknown): void => {
  *   skips `ClosePseudoConsole` when `get_pty_baton` returns null — with no
  *   throw, so not even the warn below fires. `struct pty_baton` has no
  *   destructor, so the erase leaks the HPCON rather than closing it. Every
- *   caller here runs strictly after `onExit`, so none of them can reach a live
- *   baton. The conhost half of #11303 is therefore NOT fixed by this function.
+ *   caller here runs strictly after `onExit` except `firePostSettle`'s
+ *   `'error'` entry point, which can reach a live baton and then does close the
+ *   pseudo-console (matching the `windowsKillPid` reap beside it). The conhost
+ *   half of #11303 is therefore NOT fixed by this function on the natural-exit
+ *   path.
  *
  * The call is kept because the call *site* is right: the moment upstream closes
  * the HPCON when the baton is erased (a `ClosePseudoConsole` in
  * `remove_pty_baton`, or a `~pty_baton`), this starts working with no change
- * here. Until then the only mitigation for the host half is
- * `tools.shell.enableInteractiveShell: false`, which skips the PTY path
- * entirely. Do not add a test that asserts the host is released — stubbing
+ * here. Until then the only mitigation for the host half of the shell-tool
+ * path is `tools.shell.enableInteractiveShell: false`, which drops that path
+ * to `child_process`. The web-terminal PTY (`web-terminal-registry.ts`) and
+ * the agent-view PTY host are not gated by it, so a daemon serving web
+ * terminals keeps stranding a host per exited terminal. Do not add a test that
+ * asserts the host is released — stubbing
  * `_ptyNative.kill` makes such a test pass on a call that does nothing.
  *
  * **Why not just call `ptyProcess.kill()`.** Beyond those two teardowns,
@@ -128,19 +134,25 @@ export const releaseConPtyHost = (ptyProcess: unknown): void => {
     ?._agent;
   const ptyId = agent?._pty;
   const nativeKill = agent?._ptyNative?.kill;
-  if (!agent || typeof nativeKill !== 'function' || typeof ptyId !== 'number') {
-    // Degrade to the pre-#11303 behavior rather than to `kill()`: leaking is
-    // recoverable by restarting the CLI, killing a recycled pid is not.
+  if (!agent) {
     debugLogger.warn(
-      'releaseConPtyHost: node-pty internals not in the expected shape; the conout worker was not released (see #11303)',
+      'releaseConPtyHost: no node-pty agent; nothing released (see #11303)',
     );
     return;
   }
-  try {
-    nativeKill.call(agent._ptyNative, ptyId, agent._useConptyDll ?? false);
-  } catch (e) {
+  if (typeof nativeKill === 'function' && typeof ptyId === 'number') {
+    try {
+      nativeKill.call(agent._ptyNative, ptyId, agent._useConptyDll ?? false);
+    } catch (e) {
+      debugLogger.warn(
+        `releaseConPtyHost: the native pty kill threw: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  } else {
+    // Degrade to the pre-#11303 behavior rather than to `kill()`: leaking is
+    // recoverable by restarting the CLI, killing a recycled pid is not.
     debugLogger.warn(
-      `releaseConPtyHost: the native pty kill threw: ${e instanceof Error ? e.message : String(e)}`,
+      'releaseConPtyHost: native pty shape changed; skipping the pseudo-console close (see #11303)',
     );
   }
   try {

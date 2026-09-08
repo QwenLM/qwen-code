@@ -301,8 +301,10 @@ function appendOutputCaptureLimitNotice(
  * `'completed'` / `'failed'` on natural child exit.
  *
  * Backwards compat: if `postPromote` is unset on the options bag the
- * service falls back to the PR-2 detach-everything contract — no
- * regressions for callers that don't opt in.
+ * service preserves the caller-visible half of the PR-2 detach-everything
+ * contract — no data listener is re-attached and no callback the caller did
+ * not provide fires. The settle listener that reaps and releases the conout
+ * worker is still attached internally (see #11303).
  */
 export interface ShellPostPromoteHandlers {
   /**
@@ -344,7 +346,8 @@ export interface ShellExecuteOptions {
   streamStdout?: boolean;
   /**
    * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
-   * Optional; omit to preserve the PR-2 detach-everything contract.
+   * Optional; omit to preserve the caller-visible PR-2 detach-everything
+   * contract (the settle listener still attaches internally).
    */
   postPromote?: ShellPostPromoteHandlers;
 }
@@ -1996,7 +1999,9 @@ export class ShellExecutionService {
           // path), and the eventual natural-exit transitions the
           // registry entry to `'completed'` / `'failed'` instead of
           // leaving it stuck on `'running'`. When postPromote is
-          // undefined the PR-2 detach-everything contract is preserved.
+          // undefined the caller-visible half of the PR-2 detach-everything
+          // contract is preserved (no data listener, no caller callback); the
+          // settle listener still attaches internally to reap and release.
           exited = true;
           listenersDetached = true;
           abortSignal.removeEventListener('abort', abortHandler);
@@ -2166,18 +2171,30 @@ export class ShellExecutionService {
           }
           // The settle path is attached UNCONDITIONALLY, unlike the onData
           // forwarding above. `firePostSettle` is the only thing that reaps a
-          // promoted shell and releases its ConPTY host and conout worker
-          // (#11303), and the promote branch already dropped this pid from
-          // `activePtys`, so with no listener a promote that passes no
-          // `postPromote` leaks both resources for the life of the CLI and
-          // nothing left can reach them. Only the *forwarding* to caller
-          // handlers stays gated: `firePostSettle` early-returns on
-          // `!postPromote?.onSettle` after the reap and the release, so the
-          // PR-2 detach-everything contract still holds for callers that did
-          // not opt in — no data listener is attached and no caller callback
-          // fires. Attaching the 'error' listener unconditionally also keeps a
-          // post-promote pty error from being emitted on an EventEmitter with
-          // no listener.
+          // promoted shell and releases its conout worker (#11303; the
+          // conhost.exe half is not freed here — see releaseConPtyHost), and
+          // the promote branch already dropped this pid from `activePtys`, so
+          // with no listener a promote that passes no `postPromote` leaks the
+          // worker for the life of the CLI and nothing left can reach them.
+          //
+          // Routing the no-`postPromote` promote through `firePostSettle` also
+          // gives it the #5873 settle-time reap: `windowsKillPid(pid, false)`
+          // (`taskkill /f /pid`) runs whenever `isPtyActive(pid)` is still
+          // true, a taskkill the caller did not explicitly ask for. That is the
+          // same recycle race the cancel path documents; it is pre-existing in
+          // kind, and no shipped caller omits `postPromote`.
+          //
+          // Only the *forwarding* to caller handlers stays gated:
+          // `firePostSettle` early-returns on `!postPromote?.onSettle` after
+          // the reap and the release, so no caller callback fires and no data
+          // listener is attached when the caller did not opt in. Attaching the
+          // 'error' listener unconditionally is load-bearing for a different
+          // reason than the text above: node-pty routes `on('error')` to the
+          // conout socket, whose own handler throws once it sees fewer than two
+          // 'error' listeners (`listeners('error').length < 2`), and the
+          // foreground handler was removed at promote — so without this
+          // listener a post-promote socket error escapes as an
+          // uncaughtException and takes the CLI down.
           try {
             postPromoteExitDisposable = ptyProcess.onExit(
               ({ exitCode, signal }: { exitCode: number; signal?: number }) => {

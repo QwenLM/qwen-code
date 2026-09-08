@@ -1944,7 +1944,7 @@ describe('ShellExecutionService', () => {
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
-    it('does not fail the result when ClosePseudoConsole throws', async () => {
+    it('does not fail the result when the native pty kill throws', async () => {
       mockPlatform.mockReturnValue('win32');
       mockPtyNativeKill.mockImplementation(() => {
         throw new Error('pty already gone');
@@ -2014,6 +2014,26 @@ describe('ShellExecutionService', () => {
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
+    it('still disposes the worker when only the native-kill shape drifts', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // A node-pty bump that renames _pty / _ptyNative must not cost the worker
+      // dispose — the only teardown that frees anything today. The fused guard
+      // used to skip both on a native-shape drift; see releaseConPtyHost.
+      (mockPtyProcess as unknown as { _agent: unknown })._agent = {
+        _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
+      };
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      // Never fall back to kill(): leaking is recoverable, killing a recycled
+      // pid is not.
+      expect(mockPtyProcess.kill).not.toHaveBeenCalled();
+    });
+
     it('does not close the pseudo-console twice when a cancel already killed it', async () => {
       mockPlatform.mockReturnValue('win32');
       // performCancelKill runs ptyProcess.kill() while the shell is still
@@ -2043,7 +2063,7 @@ describe('ShellExecutionService', () => {
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
-    it('releases the host of a promoted shell when it settles', async () => {
+    it('releases the conout worker of a promoted shell when it settles', async () => {
       mockPlatform.mockReturnValue('win32');
 
       const { result } = await simulateExecution(

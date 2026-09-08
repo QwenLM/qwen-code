@@ -6,7 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { getPty } from '../utils/getPty.js';
-import { releaseConPtyHost } from './conpty-host.js';
+import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 
 /**
  * Minimal PTY surface used by the web terminal registry. Backed by node-pty.
@@ -287,7 +287,17 @@ export class WebTerminalRegistry {
         pid: spawned.pid,
         write: (data) => spawned.write(data),
         resize: (cols, rows) => spawned.resize(cols, rows),
-        kill: () => spawned.kill(),
+        kill: () => {
+          spawned.kill();
+          // Mirror the cancel path (shellExecutionService.performCancelKill):
+          // node-pty's WindowsTerminal.kill() defers its whole teardown while
+          // `_isReady` is false, so note the close only when kill() really ran.
+          // release() then disposes the worker a deferred kill left behind,
+          // without double-closing a pseudo-console kill() already closed.
+          if ((spawned as { _isReady?: boolean })._isReady !== false) {
+            noteConPtyHostReleased(spawned);
+          }
+        },
         releaseHost: () => releaseConPtyHost(spawned),
       };
     } catch {
@@ -423,6 +433,13 @@ export class WebTerminalRegistry {
     session.exitListeners.clear();
     if (!session.exited) {
       killPtyTree(session.pty);
+      // killPtyTree's pty.kill() defers its whole teardown while `_isReady` is
+      // false, so a terminal released before its shell's first output byte (tab
+      // closed during slow pwsh startup, or a workspace drain) would strand the
+      // conout worker with no owner left to retry. The wrapper's kill() notes
+      // the close when it really ran, so this release only fires the worker
+      // dispose a deferred kill left behind — never a second close.
+      session.pty.releaseHost?.();
     } else {
       // The shell already exited, so nothing may signal its (possibly recycled)
       // pid — but node-pty does not release its conout worker thread on a

@@ -266,7 +266,7 @@ describe('WebTerminalRegistry', () => {
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
   });
 
-  it('releases an exited session by tearing down the host, never by signalling the pid', async () => {
+  it('releases an exited session\'s conout worker, never by signalling the pid', async () => {
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
@@ -289,6 +289,46 @@ describe('WebTerminalRegistry', () => {
     expect(conoutDispose).toHaveBeenCalledOnce();
     expect(disposeData).toHaveBeenCalledOnce();
     expect(disposeExit).toHaveBeenCalledOnce();
+  });
+
+  it('releases a live session whose kill was deferred before its first byte', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-live-deferred',
+      workspaceCwd: '/workspace',
+    });
+    // node-pty's WindowsTerminal.kill() queues its teardown while _isReady is
+    // false — a terminal released before the shell's first output byte. No
+    // onExit fired, so the session is still live.
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+
+    expect(registry.release('terminal:release-live-deferred')).toBe(true);
+    expect(kill).toHaveBeenCalledOnce();
+    // The deferred kill tore nothing down, so releaseHost still has to.
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not double-close a live session whose kill already closed it', async () => {
+    osPlatform.mockReturnValue('win32');
+    // Model node-pty's real WindowsTerminal.kill(): when ready it closes the
+    // HPCON and disposes the worker. The wrapper notes the close, so the
+    // releaseHost below must not add a second native kill (double-free).
+    kill.mockImplementation(() => {
+      nativeKill(42, false);
+      conoutDispose();
+    });
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-live-ready',
+      workspaceCwd: '/workspace',
+    });
+
+    expect(registry.release('terminal:release-live-ready')).toBe(true);
+    expect(kill).toHaveBeenCalledOnce();
+    expect(nativeKill).toHaveBeenCalledOnce();
+    expect(conoutDispose).toHaveBeenCalledOnce();
   });
 
   it('leaves an exited session alone off Windows', async () => {
