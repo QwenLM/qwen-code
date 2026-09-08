@@ -361,7 +361,7 @@ interface Attachment {
 
 ## Response delivery
 
-The base class forwards streaming chunks to adapter callbacks and routes the completed response through `onResponseComplete`. Adapters may provide native progressive display, such as updating an existing card in place. Platform length splitting is unchanged.
+For an inbound turn the base class forwards streaming chunks to adapter callbacks and routes the completed response through `onResponseComplete`. Scheduled loop runs, webhook-triggered tasks, and background replies forward chunks the same way but deliver through `pushProactive` / `deliverBackgroundReply`, so an adapter that enables proactive send must not treat `onResponseComplete` as its only delivery seam. Adapters may provide native progressive display, such as updating an existing card in place. Platform length splitting is unchanged.
 
 The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings have been removed. The base class no longer sends separate messages at paragraph boundaries or after an idle timer.
 

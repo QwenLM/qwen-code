@@ -418,7 +418,7 @@ You can also set dispatch mode per group, overriding the channel default:
 
 Channels use their normal response delivery path. The shared delivery layer sends completed responses, and adapters may provide native progressive display, such as updating an interactive card in place. Platform message-length limits may still split long responses.
 
-The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields, while allowing unchanged stored values to be retained or removed during other edits.
+The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
 
 ## Scheduled Channel Loops
 

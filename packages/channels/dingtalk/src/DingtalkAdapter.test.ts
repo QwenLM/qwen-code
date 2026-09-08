@@ -3554,6 +3554,23 @@ describe('DingtalkChannel question cards', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps question cards eligible when status cards are disabled', () => {
+    const channel = createChannel({
+      interactiveCards: { statusCard: { enabled: false } },
+    });
+    const internals = channel as unknown as {
+      interactiveCardClient?: unknown;
+      statusCardController?: unknown;
+      questionCardController?: unknown;
+      interactionPresenter?: unknown;
+    };
+
+    expect(internals.interactiveCardClient).toBeDefined();
+    expect(internals.statusCardController).toBeUndefined();
+    expect(internals.questionCardController).toBeDefined();
+    expect(internals.interactionPresenter).toBeDefined();
+  });
+
   it.each([
     undefined,
     { enabled: false },

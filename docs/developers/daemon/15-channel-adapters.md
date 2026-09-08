@@ -141,9 +141,9 @@ sequenceDiagram
 
     D-->>SC: SSE: session_update (agent_message_chunk)
     SC-->>BR: DaemonEvent
-    BR-->>CB: emit 'textChunk'
-    CB->>CB: deliver completed response
-    CB->>AD: sendMessage(chatId, chunk or full response)
+    BR-->>CB: emit 'textChunk' -> onResponseChunk (default no-op)
+    BR-->>CB: prompt() resolves with the full response
+    CB->>AD: sendThreadMessage(chatId, threadId, full response, sourceLabel)
     AD->>CH: sendText / sendMessage / sendChunk
 ```
 

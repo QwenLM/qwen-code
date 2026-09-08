@@ -14846,7 +14846,11 @@ describe('ChannelBase', () => {
           resolvePrompt = resolve;
         });
         vi.mocked(bridge.prompt).mockReturnValue(pendingPrompt);
-        const ch = createChannel();
+        const ch = createChannel({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 2 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        } as unknown as Partial<ChannelConfig>);
         const pending = ch.handleInbound(envelope());
         await vi.advanceTimersByTimeAsync(0);
         expect(bridge.prompt).toHaveBeenCalledOnce();
@@ -16069,76 +16073,69 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('does not emit buffered stream text after cancellation', async () => {
-      vi.useFakeTimers();
-      try {
-        let resolvePrompt!: (v: string) => void;
-        let resolveCancel!: () => void;
-        const pendingPrompt = new Promise<string>((resolve) => {
-          resolvePrompt = resolve;
-        });
-        const pendingCancel = new Promise<void>((resolve) => {
-          resolveCancel = resolve;
-        });
-        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
-          (sid: string) => {
-            (bridge as unknown as EventEmitter).emit(
-              'textChunk',
-              sid,
-              'partial response that should not leak',
-            );
-            return pendingPrompt;
-          },
-        );
-        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
-          pendingCancel,
-        );
+    it('does not emit stream chunks after cancellation', async () => {
+      let resolvePrompt!: (v: string) => void;
+      let resolveCancel!: () => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'partial response that should not leak',
+          );
+          return pendingPrompt;
+        },
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
 
-        const ch = createChannel({});
-        ch.enableCancelCommand();
-        const prompt = ch.handleInbound(envelope({ text: 'long task' }));
-        for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
-          await Promise.resolve();
-        }
-        expect(ch.promptStarts).toHaveLength(1);
-
-        const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      const ch = createChannel({});
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
         await Promise.resolve();
-        resolveCancel();
-        await cancel;
-
-        (bridge as unknown as EventEmitter).emit(
-          'textChunk',
-          's-1',
-          'late chunk after cancel',
-        );
-        await vi.advanceTimersByTimeAsync(500);
-
-        resolvePrompt('late full response');
-        await prompt;
-
-        expect(ch.sent).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ text: 'Cancelled current request.' }),
-          ]),
-        );
-        expect(ch.sent).not.toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              text: 'partial response that should not leak',
-            }),
-          ]),
-        );
-        expect(ch.sent).not.toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              text: 'late chunk after cancel',
-            }),
-          ]),
-        );
-      } finally {
-        vi.useRealTimers();
       }
+      expect(ch.promptStarts).toHaveLength(1);
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      resolveCancel();
+      await cancel;
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'late chunk after cancel',
+      );
+      resolvePrompt('late full response');
+      await prompt;
+
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.responseChunks).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chunk: 'late chunk after cancel',
+          }),
+        ]),
+      );
+      expect(
+        ch.taskEvents.filter(
+          (event) =>
+            event.type === 'text_chunk' &&
+            event.chunk === 'late chunk after cancel',
+        ),
+      ).toEqual([]);
     });
 
     it('keeps chunks emitted while a failed cancel is pending', async () => {
