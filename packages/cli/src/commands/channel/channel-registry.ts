@@ -125,7 +125,7 @@ function managementFieldsWithSharedControls(
               { value: 'process_and_result', label: 'Process and results' },
             ],
             description:
-              'Choose whether to deliver only the final conclusion or every complete assistant output. The processing indicator remains active until background continuations finish.',
+              'Choose whether to deliver only the last complete assistant reply or every complete assistant output. The processing indicator remains active until background continuations finish.',
           },
         ]),
     ...(declared.has('multiSession')

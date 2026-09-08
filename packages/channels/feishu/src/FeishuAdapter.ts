@@ -94,6 +94,7 @@ interface CardSessionState {
   boundaryText?: string;
   /** Set by onResponseComplete to distinguish completed from cancelled in onPromptEnd. */
   completed?: boolean;
+  pendingOutput?: boolean;
   /** Set synchronously in onCardAction so .then() callbacks can detect stop intent
    *  before cancelSession resolves. Cleared on cancelSession failure. */
   cancelling?: boolean;
@@ -390,7 +391,12 @@ export class FeishuChannel extends ChannelBase {
           now - state.lastUpdateAt > STALE_MS &&
           !state.creating &&
           !state.finalizing &&
-          !state.completed
+          !state.completed &&
+          ![...this.sessionToInboundMsg].some(
+            ([sessionId, inboundMsgId]) =>
+              inboundMsgId === msgId &&
+              this.getResponseMessageId(sessionId) === msgId,
+          )
         ) {
           this.cleanupCard(msgId);
           this.stoppedMessages.delete(msgId);
@@ -1436,6 +1442,21 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  protected override onResponsePending(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+  ): void {
+    const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
+    const state = inboundMsgId
+      ? this.cardSessions.get(inboundMsgId)
+      : undefined;
+    if (!state || state.stopped || state.cancelling) return;
+    state.completed = false;
+    state.pendingOutput = true;
+    this.onResponseChunk(chatId, '', sessionId, segment);
+  }
+
   protected override onResponseProgress(
     chatId: string,
     text: string,
@@ -1492,6 +1513,7 @@ export class FeishuChannel extends ChannelBase {
 
     if (cardState.stopped) return;
 
+    if (chunk) cardState.pendingOutput = false;
     cardState.boundaryText = undefined;
     const MAX_ACCUMULATE = 25_000;
     cardState.accumulatedText += chunk;
@@ -1888,7 +1910,7 @@ export class FeishuChannel extends ChannelBase {
         await this.deleteCard(cardState.messageId);
         await this.sendFallbackMessage(
           chatId,
-          contentPart,
+          `---\n${stopLabel}`,
           cardState.sourceLabel,
           prefix,
         );
@@ -1955,7 +1977,7 @@ export class FeishuChannel extends ChannelBase {
     if (cardState) cardState.completed = true;
 
     if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
-      this.cleanupCard(inboundMsgId);
+      this.finishResponseCard(inboundMsgId, segment);
       this.stoppedMessages.delete(inboundMsgId);
       return;
     }
@@ -1999,7 +2021,7 @@ export class FeishuChannel extends ChannelBase {
 
     // Re-check stopped state after busy-wait (user may have clicked Stop during wait)
     if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
-      this.cleanupCard(inboundMsgId);
+      this.finishResponseCard(inboundMsgId, segment);
       this.stoppedMessages.delete(inboundMsgId);
       return;
     }
@@ -2010,7 +2032,7 @@ export class FeishuChannel extends ChannelBase {
     if (cardState?.creating) {
       cardState.stopped = true;
       cardState.abandoned = true;
-      this.cleanupCard(inboundMsgId);
+      this.finishResponseCard(inboundMsgId, segment);
       await this.sendFallbackMessage(chatId, fullText, sourceLabel);
       return;
     }
@@ -2070,7 +2092,7 @@ export class FeishuChannel extends ChannelBase {
             // All three updateCard attempts failed — delete orphaned card
             // before falling back to sendMessage
             await this.deleteCard(cardState.messageId);
-            this.cleanupCard(inboundMsgId);
+            this.finishResponseCard(inboundMsgId, segment);
             await this.sendFallbackMessage(
               chatId,
               fullText,
@@ -2081,7 +2103,7 @@ export class FeishuChannel extends ChannelBase {
           }
         }
       }
-      this.cleanupCard(inboundMsgId);
+      this.finishResponseCard(inboundMsgId, segment);
       return;
     }
 
@@ -2106,7 +2128,7 @@ export class FeishuChannel extends ChannelBase {
         return;
       }
       if (finalized) {
-        this.cleanupCard(inboundMsgId);
+        this.finishResponseCard(inboundMsgId, segment);
         return;
       }
       // updateCard failed — delete the orphaned streaming card before fallback
@@ -2114,7 +2136,7 @@ export class FeishuChannel extends ChannelBase {
     }
 
     // Fallback to plain message (include @sender prefix for consistency)
-    this.cleanupCard(inboundMsgId);
+    this.finishResponseCard(inboundMsgId, segment);
     await this.sendFallbackMessage(chatId, fullText, sourceLabel, atSender);
   }
 
@@ -2163,6 +2185,13 @@ export class FeishuChannel extends ChannelBase {
       // Don't delete stoppedMessages here — let onResponseComplete / stale timer handle it.
       // Deleting here causes a race where the stop button's card callback loses the @sender prefix.
       const cs = this.cardSessions.get(inboundMsgId);
+      if (cs?.pendingOutput && cs.terminalStatus === 'completed') {
+        cs.stopped = true;
+        cs.abandoned = true;
+        if (cs.created && cs.messageId) await this.deleteCard(cs.messageId);
+        this.cleanupCard(inboundMsgId);
+        return;
+      }
       // Skip if already completed by onResponseComplete (empty-but-successful response)
       if (cs && !cs.stopped && !cs.completed) {
         if (cs.creating) {
@@ -2206,7 +2235,12 @@ export class FeishuChannel extends ChannelBase {
           this.cleanupCard(inboundMsgId);
         } else {
           // Card creation failed — fallback to plain message delivery
-          if (cs.accumulatedText) {
+          if (
+            cs.accumulatedText &&
+            cs.terminalStatus !== 'cancelled' &&
+            !cs.cancelling &&
+            !cs.userStopped
+          ) {
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
             this.sendFallbackMessage(
               _chatId,
@@ -2219,9 +2253,12 @@ export class FeishuChannel extends ChannelBase {
             // post-answer failure after the output card was released for a
             // question). A completed turn with no output ends silently.
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
-            const fallbackLabel = cs.terminalStatus
-              ? this.statusLabelFor(cs.terminalStatus)
-              : '出错了，请重试';
+            const fallbackLabel =
+              cs.cancelling || cs.userStopped
+                ? this.stopLabelFor('cancelled', cs.userStopped)
+                : cs.terminalStatus
+                  ? this.statusLabelFor(cs.terminalStatus)
+                  : '出错了，请重试';
             this.sendFallbackMessage(
               _chatId,
               `*${fallbackLabel}*`,
@@ -2472,9 +2509,7 @@ export class FeishuChannel extends ChannelBase {
             // strips it from quote-reply context.
             await this.sendFallbackMessage(
               chatId,
-              contentPart
-                ? `${contentPart}\n\n---\n*${stopLabel}*`
-                : `---\n*${stopLabel}*`,
+              `---\n*${stopLabel}*`,
               cardState.sourceLabel,
               prefix,
             );
@@ -2620,6 +2655,18 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  private finishResponseCard(
+    inboundMsgId: string,
+    segment?: ChannelOutputSegmentContext,
+  ): void {
+    if (segment?.requestFinal === false) {
+      this.releaseOutputCard(inboundMsgId);
+    } else {
+      this.removeReaction(inboundMsgId, 'OnIt').catch(() => {});
+      this.cleanupCard(inboundMsgId);
+    }
+  }
+
   private releaseOutputCard(inboundMsgId: string): void {
     const cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState) return;
@@ -2629,8 +2676,8 @@ export class FeishuChannel extends ChannelBase {
     if (cardState.creationTimer) {
       clearTimeout(cardState.creationTimer);
     }
-    // Keep an inert entry while the question is pending: the orphan sweep and
-    // the terminal-feedback paths both key on card-session presence. Carry any
+    // Keep request context between outputs and while questions are pending.
+    // The terminal-feedback paths key on card-session presence. Carry any
     // terminal status onTaskLifecycle wrote during the awaited finalization.
     this.cardSessions.set(inboundMsgId, {
       messageId: '',

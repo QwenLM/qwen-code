@@ -3459,6 +3459,65 @@ describe('FeishuChannel', () => {
       });
     }
 
+    it('keeps active request cards past ten minutes while cleaning stale cards and timed-out creations', async () => {
+      vi.useFakeTimers();
+      const channel = createChannel({ outputMode: 'final_only' });
+      const activePrompts = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'activePrompts');
+      try {
+        mockSuccessfulTokenFetch();
+        await channel.connect();
+        const states = getPrivateMethod<Map<string, Record<string, unknown>>>(
+          channel,
+          'cardSessions',
+        );
+        const mapping = getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        );
+        const questions = getPrivateMethod<Map<string, string>>(
+          channel,
+          'msgToQuestion',
+        );
+        for (const messageId of ['active', 'stale', 'superseded', 'creating']) {
+          states.set(messageId, {
+            messageId: `card-${messageId}`,
+            created: messageId !== 'creating',
+            creating: messageId === 'creating',
+            stopped: false,
+            accumulatedText: 'Waiting',
+            lastUpdateAt: Date.now(),
+          });
+          mapping.set(`session-${messageId}`, messageId);
+          questions.set(messageId, 'Original question');
+        }
+        // The initial prompt has returned, but its background continuation still owns the request.
+        activePrompts.set('session-active', {
+          messageId: 'active',
+          mainFinished: true,
+        });
+        activePrompts.set('session-superseded', { messageId: 'new-request' });
+        activePrompts.set('session-creating', { messageId: 'creating' });
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(states.has('creating')).toBe(false);
+        expect(states.has('stale')).toBe(true);
+        await vi.advanceTimersByTimeAsync(9 * 60_000);
+        expect([...states.keys()]).toEqual(['active']);
+        expect([...mapping.entries()]).toEqual([['session-active', 'active']]);
+        expect(questions.get('active')).toBe('Original question');
+        activePrompts.delete('session-active');
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(states.size).toBe(0);
+        expect(mapping.size).toBe(0);
+        expect(questions.size).toBe(0);
+      } finally {
+        activePrompts.clear();
+        channel.disconnect();
+        vi.useRealTimers();
+      }
+    });
+
     it('rejects invalid credentials before starting WebSocket', async () => {
       const channel = createChannel();
       vi.spyOn(global, 'fetch').mockResolvedValue(
@@ -3642,67 +3701,70 @@ describe('FeishuChannel', () => {
       expect(cardSessions.get('inbound_1')?.['stopped']).toBe(false);
     });
 
-    it('uses divider status shape when stopped empty-card fallback sends a message', async () => {
-      const bridge = createMockBridge();
-      const config = createConfig();
-      const channel = new FeishuChannel('test', config, bridge);
-      (
-        channel as unknown as {
-          requestActivePromptCancellation: (
-            sessionId: string,
-          ) => Promise<boolean>;
-        }
-      ).requestActivePromptCancellation = vi.fn().mockResolvedValue(true);
+    it.each(['', 'Unfinished interim text'])(
+      'uses only a divider status when stopped-card fallback sends a message (text=%s)',
+      async (accumulatedText) => {
+        const bridge = createMockBridge();
+        const config = createConfig();
+        const channel = new FeishuChannel('test', config, bridge);
+        (
+          channel as unknown as {
+            requestActivePromptCancellation: (
+              sessionId: string,
+            ) => Promise<boolean>;
+          }
+        ).requestActivePromptCancellation = vi.fn().mockResolvedValue(true);
 
-      const cardSessions = getPrivateMethod<
-        Map<string, Record<string, unknown>>
-      >(channel, 'cardSessions');
-      cardSessions.set('inbound_1', {
-        messageId: 'card_1',
-        created: true,
-        creating: false,
-        stopped: false,
-        accumulatedText: '',
-        lastUpdateAt: Date.now(),
-      });
-      getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
-        'inbound_1',
-        'original_user',
-      );
-      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
-        'session_1',
-        'inbound_1',
-      );
-
-      (channel as unknown as Record<string, unknown>)['updateCard'] = vi
-        .fn()
-        .mockResolvedValue(false);
-      (channel as unknown as Record<string, unknown>)['deleteCard'] = vi
-        .fn()
-        .mockResolvedValue(undefined);
-      const sendMessage = vi.fn().mockResolvedValue(undefined);
-      (channel as unknown as Record<string, unknown>)['sendMessage'] =
-        sendMessage;
-
-      getPrivateMethod<(data: Record<string, unknown>) => boolean>(
-        channel,
-        'onCardAction',
-      ).call(channel, {
-        action: { value: { action: 'stop' } },
-        context: {
-          open_message_id: 'card_1',
-          open_chat_id: 'oc_chat_id',
-        },
-        operator: { open_id: 'original_user' },
-      });
-
-      await vi.waitFor(() => {
-        expect(sendMessage).toHaveBeenCalledWith(
-          'oc_chat_id',
-          '---\n*已停止生成*',
+        const cardSessions = getPrivateMethod<
+          Map<string, Record<string, unknown>>
+        >(channel, 'cardSessions');
+        cardSessions.set('inbound_1', {
+          messageId: 'card_1',
+          created: true,
+          creating: false,
+          stopped: false,
+          accumulatedText,
+          lastUpdateAt: Date.now(),
+        });
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+          'inbound_1',
+          'original_user',
         );
-      });
-    });
+        getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        ).set('session_1', 'inbound_1');
+
+        (channel as unknown as Record<string, unknown>)['updateCard'] = vi
+          .fn()
+          .mockResolvedValue(false);
+        (channel as unknown as Record<string, unknown>)['deleteCard'] = vi
+          .fn()
+          .mockResolvedValue(undefined);
+        const sendMessage = vi.fn().mockResolvedValue(undefined);
+        (channel as unknown as Record<string, unknown>)['sendMessage'] =
+          sendMessage;
+
+        getPrivateMethod<(data: Record<string, unknown>) => boolean>(
+          channel,
+          'onCardAction',
+        ).call(channel, {
+          action: { value: { action: 'stop' } },
+          context: {
+            open_message_id: 'card_1',
+            open_chat_id: 'oc_chat_id',
+          },
+          operator: { open_id: 'original_user' },
+        });
+
+        await vi.waitFor(() => {
+          expect(sendMessage).toHaveBeenCalledWith(
+            'oc_chat_id',
+            '---\n*已停止生成*',
+          );
+        });
+      },
+    );
 
     it('awaits an in-flight streaming PATCH before the stop patch', async () => {
       vi.useFakeTimers();
@@ -5678,7 +5740,7 @@ describe('FeishuChannel', () => {
       };
       const content = card.body.elements[0]?.content ?? '';
       expect(content).toBe(
-        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\npartial answer\n\n---\n*已停止生成*',
+        '好的，<at id=ou_sender></at>\n\n\\[Alice · review\\_\\*\\]\n\n---\n*已停止生成*',
       );
       expect(content.match(/<at id=ou_sender><\/at>/g)).toHaveLength(1);
     });
@@ -7354,42 +7416,271 @@ describe('request output projection', () => {
     }
   });
 
-  it('finalizes the first detailed output once and sends the next output once through fallback', async () => {
-    const channel = createChannel({ outputMode: 'process_and_result' });
+  function detailedOutputHarness(
+    outputMode: 'final_only' | 'process_and_result' = 'process_and_result',
+  ) {
+    const channel = createChannel({ outputMode });
     const updateCard = vi.fn().mockResolvedValue(true);
+    const createStreamingCard = vi.fn().mockResolvedValue({
+      success: true,
+      messageId: 'card-next',
+    });
     const sendFallbackMessage = vi.fn().mockResolvedValue(undefined);
+    const removeReaction = vi.fn().mockResolvedValue(undefined);
+    const deleteCard = vi.fn().mockResolvedValue(true);
     Object.assign(channel as unknown as Record<string, unknown>, {
       updateCard,
+      createStreamingCard,
       sendFallbackMessage,
+      removeReaction,
+      deleteCard,
     });
-    getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
-      'session-detailed',
-      'inbound-detailed',
+    const mapping = getPrivateMethod<Map<string, string>>(
+      channel,
+      'sessionToInboundMsg',
     );
-    getPrivateMethod<Map<string, Record<string, unknown>>>(
+    const states = getPrivateMethod<Map<string, Record<string, unknown>>>(
       channel,
       'cardSessions',
-    ).set('inbound-detailed', {
-      messageId: 'card-detailed',
+    );
+    mapping.set('session-detailed', 'inbound-detailed');
+    states.set('inbound-detailed', {
+      messageId: 'card-first',
       created: true,
       creating: false,
       stopped: false,
       accumulatedText: '',
       lastUpdateAt: 0,
     });
-    const complete = getPrivateMethod<
-      (chatId: string, text: string, sessionId: string) => Promise<void>
-    >(channel, 'onResponseComplete').bind(channel);
-    await complete('chat-detailed', 'First full output', 'session-detailed');
-    expect(updateCard).toHaveBeenCalledTimes(1);
-    expect(updateCard.mock.calls[0][1]).toContain('First full output');
-    expect(sendFallbackMessage).not.toHaveBeenCalled();
-    await complete('chat-detailed', 'Second full output', 'session-detailed');
-    expect(updateCard).toHaveBeenCalledTimes(1);
-    expect(sendFallbackMessage).toHaveBeenCalledExactlyOnceWith(
-      'chat-detailed',
-      'Second full output',
-      undefined,
+    getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+      'inbound-detailed',
+      'Question',
     );
+    getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+      'inbound-detailed',
+      'sender',
+    );
+    const segment = { requestFinal: false } as ChannelOutputSegmentContext;
+    const complete = (text: string) =>
+      getPrivateMethod<
+        (
+          chatId: string,
+          text: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+        ) => Promise<void>
+      >(channel, 'onResponseComplete').call(
+        channel,
+        'chat-detailed',
+        text,
+        'session-detailed',
+        segment,
+      );
+    const pending = () =>
+      getPrivateMethod<
+        (
+          chatId: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+        ) => void
+      >(channel, 'onResponsePending').call(
+        channel,
+        'chat-detailed',
+        'session-detailed',
+        segment,
+      );
+    const end = async (terminalStatus: 'completed' | 'cancelled') => {
+      const state = states.get('inbound-detailed');
+      if (state) state.terminalStatus = terminalStatus;
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'chat-detailed',
+        'session-detailed',
+        'inbound-detailed',
+      );
+    };
+    return {
+      channel,
+      updateCard,
+      createStreamingCard,
+      sendFallbackMessage,
+      removeReaction,
+      deleteCard,
+      mapping,
+      states,
+      complete,
+      pending,
+      end,
+    };
+  }
+
+  it('opens the next running card during a detailed output gap and reuses it through completion', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = detailedOutputHarness();
+      await h.complete('First full output');
+      expect(h.updateCard).toHaveBeenLastCalledWith(
+        'card-first',
+        'First full output',
+        true,
+        'inbound-detailed',
+        '已完成',
+      );
+      expect(h.mapping.get('session-detailed')).toBe('inbound-detailed');
+      expect(
+        getPrivateMethod<Map<string, string>>(h.channel, 'msgToSenderId').get(
+          'inbound-detailed',
+        ),
+      ).toBe('sender');
+      h.pending();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.createStreamingCard).toHaveBeenCalledExactlyOnceWith(
+        'chat-detailed',
+        '',
+        undefined,
+        'inbound-detailed',
+      );
+      expect(h.states.get('inbound-detailed')).toMatchObject({
+        messageId: 'card-next',
+        created: true,
+        completed: false,
+      });
+      getPrivateMethod<
+        (chatId: string, text: string, sessionId: string) => void
+      >(h.channel, 'onResponseProgress').call(
+        h.channel,
+        'chat-detailed',
+        'Second in progress',
+        'session-detailed',
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(h.updateCard).toHaveBeenLastCalledWith(
+        'card-next',
+        'Second in progress',
+        false,
+        'inbound-detailed',
+      );
+      await h.complete('Second full output');
+      expect(h.updateCard).toHaveBeenLastCalledWith(
+        'card-next',
+        'Second full output',
+        true,
+        'inbound-detailed',
+        '已完成',
+      );
+      await h.end('completed');
+      expect(h.createStreamingCard).toHaveBeenCalledTimes(1);
+      expect(h.sendFallbackMessage).not.toHaveBeenCalled();
+      expect(h.removeReaction).toHaveBeenCalledExactlyOnceWith(
+        'inbound-detailed',
+        'OnIt',
+      );
+      expect(h.mapping.size).toBe(0);
+      expect(h.states.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
+
+  it('removes an unused pending card when a detailed request ends without another output', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = detailedOutputHarness();
+      await h.complete('Only output');
+      h.pending();
+      await vi.advanceTimersByTimeAsync(0);
+      await h.end('completed');
+      expect(h.deleteCard).toHaveBeenCalledExactlyOnceWith('card-next');
+      expect(h.updateCard).toHaveBeenCalledTimes(1);
+      expect(h.sendFallbackMessage).not.toHaveBeenCalled();
+      expect(h.mapping.size).toBe(0);
+      expect(h.removeReaction).toHaveBeenCalledExactlyOnceWith(
+        'inbound-detailed',
+        'OnIt',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('deletes a pending card whose creation settles after request completion', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = detailedOutputHarness();
+      let resolveCreation!: (value: {
+        success: boolean;
+        messageId: string;
+      }) => void;
+      h.createStreamingCard.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveCreation = resolve;
+          }),
+      );
+      await h.complete('Only output');
+      h.pending();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.states.get('inbound-detailed')?.creating).toBe(true);
+      await h.end('completed');
+      resolveCreation({ success: true, messageId: 'late-card' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.deleteCard).toHaveBeenCalledExactlyOnceWith('late-card');
+      expect(h.updateCard).toHaveBeenCalledTimes(1);
+      expect(h.sendFallbackMessage).not.toHaveBeenCalled();
+      expect(h.mapping.size).toBe(0);
+      expect(h.states.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending detailed card without replaying prior output', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = detailedOutputHarness();
+      await h.complete('Already delivered');
+      h.pending();
+      await vi.advanceTimersByTimeAsync(0);
+      await h.end('cancelled');
+      expect(h.updateCard).toHaveBeenLastCalledWith(
+        'card-next',
+        '',
+        true,
+        'inbound-detailed',
+        '已取消',
+      );
+      expect(h.sendFallbackMessage).not.toHaveBeenCalled();
+      expect(h.removeReaction).toHaveBeenCalledExactlyOnceWith(
+        'inbound-detailed',
+        'OnIt',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['final_only', 'process_and_result'] as const)(
+    'does not replay interim text on cancellation after card creation failed (%s)',
+    async (mode) => {
+      const h = detailedOutputHarness(mode);
+      Object.assign(h.states.get('inbound-detailed')!, {
+        created: false,
+        cardCreationFailed: true,
+        accumulatedText: 'Unfinished interim text',
+      });
+      await h.end('cancelled');
+      expect(h.sendFallbackMessage).toHaveBeenCalledExactlyOnceWith(
+        'chat-detailed',
+        '*已取消*',
+        undefined,
+        '',
+      );
+      expect(h.removeReaction).toHaveBeenCalledExactlyOnceWith(
+        'inbound-detailed',
+        'OnIt',
+      );
+    },
+  );
 });

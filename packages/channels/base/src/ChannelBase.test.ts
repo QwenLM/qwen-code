@@ -1023,6 +1023,140 @@ describe('ChannelBase', () => {
       expect(output(ch)).toEqual([]);
       expect(ch.taskEvents.some((e) => e.type === 'failed')).toBe(true);
     });
+    it.each(['before', 'during'] as const)(
+      'protects the final notification delivery when its acknowledgement arrives %s the send',
+      async (acknowledgement) => {
+        const ch = createChannel({ outputMode: 'process_and_result' });
+        const run = await begin(ch);
+        ch.dispatchBackgroundTask(task('a'));
+        run.finish('MAIN');
+        await tick();
+        let release!: () => void;
+        ch.responseCompleteGate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const delivery = ch.dispatchBackgroundResponse(
+          's-1',
+          'FINAL',
+          context('a'),
+        );
+        if (acknowledgement === 'during')
+          await vi.waitFor(() =>
+            expect(ch.responseCompletions.at(-1)?.text).toBe('FINAL'),
+          );
+        const complete = ch.dispatchBackgroundResponse('s-1', '', {
+          ...context('a'),
+          notificationComplete: true,
+        });
+        await vi.waitFor(() =>
+          expect(ch.responseCompletions.at(-1)?.text).toBe('FINAL'),
+        );
+        expect(await ch.cancelPromptForTest('s-1')).toBe(false);
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        release();
+        await Promise.all([delivery, complete, run.turn]);
+        expect(output(ch)).toEqual(['MAIN', 'FINAL']);
+        expect(ch.taskEvents.at(-1)?.type).toBe('completed');
+      },
+    );
+
+    it('allows cancellation after a detailed intermediate output', async () => {
+      const ch = createChannel({ outputMode: 'process_and_result' });
+      const run = await begin(ch);
+      ch.dispatchBackgroundTask(task('a'));
+      run.finish('MAIN');
+      await tick();
+      expect(output(ch)).toEqual(['MAIN']);
+      expect(await ch.cancelPromptForTest('s-1')).toBe(true);
+      await run.turn;
+      expect(ch.taskEvents.at(-1)?.type).toBe('cancelled');
+    });
+
+    it.each(['final_only', 'process_and_result'] as const)(
+      'fails a dead background request and releases its queued followup after bridge replacement (%s)',
+      async (outputMode) => {
+        const ch = createChannel({ outputMode, dispatchMode: 'followup' });
+        const run = await begin(ch);
+        const failed = expect(run.turn).rejects.toThrow(
+          'Agent bridge replaced',
+        );
+        ch.dispatchBackgroundTask(task('a'));
+        run.finish('INTERIM');
+        await tick();
+        ch.setBridge(bridge);
+        expect(run.settled()).toBe(false);
+        const next = ch.handleInbound(envelope({ text: 'next request' }));
+        const replacement = createBridge();
+        vi.mocked(replacement.prompt).mockResolvedValue('NEXT_FINAL');
+        ch.setBridge(replacement);
+        await failed;
+        await next;
+        expect(replacement.prompt).toHaveBeenCalledOnce();
+        expect(output(ch)).toEqual(
+          outputMode === 'final_only'
+            ? ['NEXT_FINAL']
+            : ['INTERIM', 'NEXT_FINAL'],
+        );
+        expect(
+          ch.taskEvents
+            .filter((e) => ['completed', 'failed'].includes(e.type))
+            .map((e) => e.type),
+        ).toEqual(['failed', 'completed']);
+        await ch.dispatchBackgroundResponse('s-1', 'OLD_RESULT', context('a'));
+        expect(output(ch)).not.toContain('OLD_RESULT');
+      },
+    );
+
+    it.each(['cancel', 'bridge replacement'] as const)(
+      'suppresses descendants first observed after their request retires through %s',
+      async (retirement) => {
+        const ch = createChannel();
+        const run = await begin(ch);
+        const settled =
+          retirement === 'bridge replacement'
+            ? expect(run.turn).rejects.toThrow('Agent bridge replaced')
+            : run.turn;
+        ch.dispatchBackgroundTask(task('a'));
+        run.finish('INTERIM');
+        await tick();
+        if (retirement === 'cancel')
+          expect(await ch.cancelPromptForTest('s-1')).toBe(true);
+        else ch.setBridge(createBridge());
+        await settled;
+
+        ch.dispatchBackgroundTask(task('child', 'running', 's-1', 'exec-a'));
+        ch.dispatchBackgroundTask(
+          task('grandchild', 'running', 's-1', 'exec-child'),
+        );
+        await ch.dispatchBackgroundResponse('s-1', '', {
+          ...context('a'),
+          notificationComplete: true,
+        });
+        for (const id of ['child', 'grandchild']) {
+          await ch.dispatchBackgroundResponse(
+            's-1',
+            `STALE_${id}`,
+            context(id),
+          );
+          await ch.dispatchBackgroundResponse('s-1', '', {
+            ...context(id),
+            notificationComplete: true,
+          });
+        }
+        expect(output(ch)).toEqual([]);
+
+        ch.dispatchBackgroundTask(
+          task('recovered', 'running', 's-1', 'unknown-parent'),
+        );
+        await ch.dispatchBackgroundResponse(
+          's-1',
+          'RECOVERED',
+          context('recovered'),
+        );
+        expect(output(ch)).toEqual(['RECOVERED']);
+      },
+    );
+
     it('falls back to normal notification delivery when its execution is unknown', async () => {
       const ch = createChannel();
       const run = await begin(ch);
@@ -15933,36 +16067,39 @@ describe('ChannelBase', () => {
       await prompt;
     });
 
-    it('reports cancel failure once response delivery has started', async () => {
-      let releaseDelivery!: () => void;
-      const deliveryGate = new Promise<void>((resolve) => {
-        releaseDelivery = resolve;
-      });
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
-      const ch = createChannel();
-      ch.enableCancelCommand();
-      ch.responseCompleteGate = deliveryGate;
+    it.each(['final_only', 'process_and_result'] as const)(
+      'reports cancel failure once final response delivery has started (%s)',
+      async (outputMode) => {
+        let releaseDelivery!: () => void;
+        const deliveryGate = new Promise<void>((resolve) => {
+          releaseDelivery = resolve;
+        });
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
+        const ch = createChannel({ outputMode });
+        ch.enableCancelCommand();
+        ch.responseCompleteGate = deliveryGate;
 
-      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
-      // The turn is now blocked inside delivery — a cancel can no longer
-      // suppress the output, so it must fail honestly instead of emitting a
-      // cancelled event for a response the user will receive.
-      await ch.handleInbound(envelope({ text: '/cancel' }));
+        const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+        // The turn is now blocked inside delivery — a cancel can no longer
+        // suppress the output, so it must fail honestly instead of emitting a
+        // cancelled event for a response the user will receive.
+        await ch.handleInbound(envelope({ text: '/cancel' }));
 
-      expect(bridge.cancelSession).not.toHaveBeenCalled();
-      expect(ch.sent).toContainEqual({
-        chatId: 'chat1',
-        text: 'Failed to cancel current request.',
-      });
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent).toContainEqual({
+          chatId: 'chat1',
+          text: 'Failed to cancel current request.',
+        });
 
-      releaseDelivery();
-      await prompt;
-      expect(ch.taskEvents.map((event) => event.type)).toEqual([
-        'started',
-        'completed',
-      ]);
-    });
+        releaseDelivery();
+        await prompt;
+        expect(ch.taskEvents.map((event) => event.type)).toEqual([
+          'started',
+          'completed',
+        ]);
+      },
+    );
 
     it('delivers completion when cancellation outlives the reconciliation timeout', async () => {
       let resolvePrompt!: (value: string) => void;
@@ -23036,71 +23173,74 @@ describe('ChannelBase', () => {
       await loopRun;
     });
 
-    it('completes a loop when cancellation settles after proactive delivery', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-        'loop response',
-      );
-      let resolveDelivery!: () => void;
-      const delivery = new Promise<void>((resolve) => {
-        resolveDelivery = resolve;
-      });
-      const ch = createChannel();
-      ch.enableCancelCommand();
-      ch.proactiveSupported = true;
-      vi.spyOn(
-        ch as unknown as {
-          pushProactive: (
-            target: { chatId: string },
-            text: string,
-          ) => Promise<void>;
-        },
-        'pushProactive',
-      ).mockImplementation(async () => {
-        await delivery;
-        ch.proactive.push({ chatId: 'chat1', text: 'loop response' });
-      });
+    it.each(['final_only', 'process_and_result'] as const)(
+      'completes a loop when cancellation settles after proactive delivery (%s)',
+      async (outputMode) => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+          'loop response',
+        );
+        let resolveDelivery!: () => void;
+        const delivery = new Promise<void>((resolve) => {
+          resolveDelivery = resolve;
+        });
+        const ch = createChannel({ outputMode });
+        ch.enableCancelCommand();
+        ch.proactiveSupported = true;
+        vi.spyOn(
+          ch as unknown as {
+            pushProactive: (
+              target: { chatId: string },
+              text: string,
+            ) => Promise<void>;
+          },
+          'pushProactive',
+        ).mockImplementation(async () => {
+          await delivery;
+          ch.proactive.push({ chatId: 'chat1', text: 'loop response' });
+        });
 
-      const loopRun = ch.runLoopPrompt({
-        id: 'job-1',
-        channelName: 'test-chan',
-        target: {
+        const loopRun = ch.runLoopPrompt({
+          id: 'job-1',
           channelName: 'test-chan',
-          senderId: 'alice',
-          chatId: 'chat1',
-          isGroup: false,
-        },
-        cwd: '/tmp',
-        cron: '0 9 * * *',
-        prompt: 'post summary',
-        label: 'daily summary',
-        recurring: false,
-        enabled: true,
-        createdBy: 'Alice',
-        createdAt: '2026-06-30T01:00:00.000Z',
-        consecutiveFailures: 0,
-        runCount: 0,
-      });
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
-      await vi.waitFor(() =>
-        expect(bridge.cancelSession).not.toHaveBeenCalled(),
-      );
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: false,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        });
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+        await vi.waitFor(() =>
+          expect(bridge.cancelSession).not.toHaveBeenCalled(),
+        );
 
-      const cancel = ch.handleInbound(
-        envelope({ text: '/cancel', senderId: 'alice' }),
-      );
-      await Promise.resolve();
-      resolveDelivery();
-      await cancel;
+        const cancel = ch.handleInbound(
+          envelope({ text: '/cancel', senderId: 'alice' }),
+        );
+        await Promise.resolve();
+        resolveDelivery();
+        await cancel;
 
-      await expect(loopRun).resolves.toBe('loop response');
-      expect(ch.proactive).toEqual([
-        { chatId: 'chat1', text: 'loop response' },
-      ]);
-      expect(ch.taskEvents).toEqual([
-        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
-        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
-      ]);
-    });
+        await expect(loopRun).resolves.toBe('loop response');
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'loop response' },
+        ]);
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+          expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+        ]);
+      },
+    );
 
     it('disables a stored job when its sender is no longer allowed', async () => {
       const disable = vi.fn().mockResolvedValue(true);

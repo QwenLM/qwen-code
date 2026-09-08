@@ -133,7 +133,7 @@ The channel editor presents these options as **仅最终结果** and **过程与
 ```
 
 The request remains active after the initial prompt returns while its background
-agents and their assistant continuations are pending. Finishing an agent is not
+agents, shell tasks, and their assistant continuations are pending. Finishing an agent is not
 sufficient: its notification continuation must also finish. No extra model
 summary is generated, and CLI task scheduling is unchanged. Paragraph block
 streaming does not split these outputs into additional messages.

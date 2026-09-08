@@ -145,14 +145,15 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Provided methods:**
 
-| Method                                                     | Description                                                                                                                                           |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
-| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
-| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
-| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
-| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
-| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
+| Method                                                     | Description                                                                                                                                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                            |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                                |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                          |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                          |
+| `onResponseProgress(chatId, text, sessionId, segment)`     | Hook called with cumulative provisional text for the current output; replace the preview while preserving `segment.sourceLabel` attribution (default: no-op) |
+| `onResponsePending(chatId, sessionId, segment)`            | Hook called to open the next running card while waiting for another output in process-and-results mode (default: no-op)                                      |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode)        |
 
 **Output boundaries:** Result notifications use complete assistant outputs. Legacy paragraph block-stream settings do not split request output into extra messages.
 

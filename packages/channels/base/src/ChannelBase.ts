@@ -316,6 +316,7 @@ type BackgroundDeliveryGroup = {
   tasks: Map<string, BackgroundExecution>;
   done: Promise<void>;
   resolve: () => void;
+  failure?: Error;
 };
 
 type ActivePrompt = {
@@ -325,6 +326,7 @@ type ActivePrompt = {
   backgroundGroup?: BackgroundDeliveryGroup;
   mainFinished?: boolean;
   latestOutput?: string;
+  latestDelivery?: { started: boolean };
   deferredOutputs?: string[];
   outputDelivery?: Promise<void>;
   outputError?: unknown;
@@ -585,6 +587,15 @@ export abstract class ChannelBase {
   dispatchBackgroundTask(event: BackgroundTaskEvent): void {
     const key = JSON.stringify([event.sessionId, event.executionId]);
     if (this.completedBackgroundExecutions.has(key)) return;
+    if (
+      event.parentExecutionId &&
+      this.completedBackgroundExecutions.has(
+        JSON.stringify([event.sessionId, event.parentExecutionId]),
+      )
+    ) {
+      this.retireBackgroundExecution(key);
+      return;
+    }
     let execution = this.backgroundExecutions.get(key);
     if (!execution) {
       const parent = event.parentExecutionId
@@ -637,7 +648,23 @@ export abstract class ChannelBase {
     this.settleBackgroundRequest(execution.group);
   }
 
+  private markFinalDeliveryStarted(prompt: ActivePrompt): void {
+    if (
+      prompt.mainFinished &&
+      prompt.latestDelivery?.started &&
+      !prompt.cancelled &&
+      !prompt.notificationFailed &&
+      !prompt.backgroundGroup?.failure &&
+      (!prompt.backgroundGroup ||
+        [...prompt.backgroundGroup.tasks.values()].every(
+          (task) => task.notificationComplete,
+        ))
+    )
+      prompt.deliveryStarted = true;
+  }
+
   private settleBackgroundRequest(group: BackgroundDeliveryGroup): void {
+    this.markFinalDeliveryStarted(group.prompt);
     if (
       group.prompt.cancelled ||
       (group.prompt.mainFinished &&
@@ -647,21 +674,21 @@ export abstract class ChannelBase {
     }
   }
 
+  private retireBackgroundExecution(key: string): void {
+    this.completedBackgroundExecutions.add(key);
+    if (this.completedBackgroundExecutions.size > 1024) {
+      const oldest = this.completedBackgroundExecutions.values().next().value;
+      if (oldest) this.completedBackgroundExecutions.delete(oldest);
+    }
+  }
+
   private forgetBackgroundGroup(group: BackgroundDeliveryGroup): void {
     group.resolve();
     this.backgroundGroups.delete(group.prompt.runId);
     for (const task of group.tasks.values()) {
       const key = JSON.stringify([group.sessionId, task.executionId]);
       this.backgroundExecutions.delete(key);
-      if (!task.notificationComplete) {
-        this.completedBackgroundExecutions.add(key);
-        if (this.completedBackgroundExecutions.size > 1024) {
-          const oldest = this.completedBackgroundExecutions
-            .values()
-            .next().value;
-          if (oldest) this.completedBackgroundExecutions.delete(oldest);
-        }
-      }
+      if (!task.notificationComplete) this.retireBackgroundExecution(key);
     }
   }
 
@@ -674,7 +701,7 @@ export abstract class ChannelBase {
     const segment = this.ensureOutputSegment(sessionId, prompt);
     prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
       .then(async () => {
-        if (!prompt.cancelled)
+        if (!prompt.cancelled && !prompt.backgroundGroup?.failure)
           await this.onResponseProgress(
             prompt.chatId,
             text,
@@ -702,7 +729,7 @@ export abstract class ChannelBase {
     if (!segment) return;
     prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
       .then(async () => {
-        if (!prompt.cancelled)
+        if (!prompt.cancelled && !prompt.backgroundGroup?.failure)
           await this.onResponsePending(prompt.chatId, sessionId, segment);
       })
       .catch((error: unknown) => {
@@ -719,12 +746,16 @@ export abstract class ChannelBase {
       return;
     prompt.latestOutput = text;
     const detailed = this.config.outputMode === 'process_and_result';
+    const delivery = { started: false };
+    if (detailed) prompt.latestDelivery = delivery;
     const segment = this.ensureOutputSegment(sessionId, prompt);
     if (detailed) this.closeOutputSegment(sessionId, prompt);
     prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
       .then(async () => {
-        if (prompt.cancelled) return;
+        if (prompt.cancelled || prompt.backgroundGroup?.failure) return;
         if (detailed) {
+          delivery.started = true;
+          this.markFinalDeliveryStarted(prompt);
           if (prompt.proactiveTarget)
             await this.pushProactive(prompt.proactiveTarget, text);
           else
@@ -795,6 +826,7 @@ export abstract class ChannelBase {
     }
     await prompt.outputDelivery;
     if (prompt.cancelled) return;
+    if (prompt.backgroundGroup?.failure) throw prompt.backgroundGroup.failure;
     if (prompt.outputError) throw prompt.outputError;
     if (prompt.notificationFailed)
       throw new Error('Background continuation did not finish successfully.');
@@ -2171,6 +2203,18 @@ export abstract class ChannelBase {
 
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
+    if (bridge !== this.bridge) {
+      for (const group of this.backgroundGroups.values()) {
+        if (
+          [...group.tasks.values()].every((task) => task.notificationComplete)
+        )
+          continue;
+        group.failure = new Error(
+          'Agent bridge replaced before background continuation completed.',
+        );
+        this.forgetBackgroundGroup(group);
+      }
+    }
     this.cancelAllBtw();
     if (this.registerBridgeEvents) {
       this.detachBridgeEvents(this.bridge);

@@ -1474,11 +1474,18 @@ export interface BackgroundNotificationQueueItem {
   };
 }
 
+interface ChannelTaskOwner {
+  signal: AbortSignal;
+  parentExecutionId?: string;
+}
+
 interface ChannelBackgroundExecution {
   executionId: string;
   controller: AbortController;
   status: string;
   notificationAccepted?: boolean;
+  owner?: ChannelTaskOwner;
+  isBackgrounded?: boolean;
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
@@ -9525,6 +9532,43 @@ export class Session implements SessionContext {
     );
   }
 
+  #channelTaskOwner(
+    agentId = getCurrentAgentId(),
+  ): ChannelTaskOwner | undefined {
+    if (
+      this.channelObservation &&
+      !this.channelObservation.signal.aborted &&
+      promptIdContext.getStore() === this.channelObservation.promptId
+    ) {
+      return this.channelObservation;
+    }
+    if (!agentId) return undefined;
+    const execution = this.channelExecutions.get(agentId);
+    const entry = this.config.getBackgroundTaskRegistry().get(agentId);
+    if (
+      !execution ||
+      execution.controller !== entry?.abortController ||
+      execution.controller.signal.aborted ||
+      execution.status !== 'running'
+    )
+      return undefined;
+    if (execution.isBackgrounded) {
+      return {
+        signal: execution.controller.signal,
+        parentExecutionId: execution.executionId,
+      };
+    }
+    const owner = execution.owner;
+    if (
+      !owner ||
+      owner.signal.aborted ||
+      (!owner.parentExecutionId &&
+        owner.signal !== this.channelObservation?.signal)
+    )
+      return undefined;
+    return owner;
+  }
+
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
     // Single-slot setter, so remember exactly what we installed and only ever
@@ -9539,7 +9583,7 @@ export class Session implements SessionContext {
       for (const taskId of this.channelExecutions.keys()) {
         if (!retainedIds.has(taskId)) this.channelExecutions.delete(taskId);
       }
-      if (!entry?.isBackgrounded) return;
+      if (!entry) return;
       let execution = this.channelExecutions.get(entry.id);
       if (
         execution &&
@@ -9556,27 +9600,41 @@ export class Session implements SessionContext {
           ['completed', 'failed', 'cancelled'].includes(execution.status))
       ) {
         this.channelExecutions.delete(entry.id);
-        if (
-          !this.channelObservation ||
-          this.channelObservation.signal.aborted ||
-          promptIdContext.getStore() !== this.channelObservation.promptId
-        )
-          return;
+        const owner = this.#channelTaskOwner(
+          entry.parentAgentId ?? getCurrentAgentId(),
+        );
+        if (!owner) return;
         execution = {
           executionId: randomUUID(),
           controller: entry.abortController,
           status: '',
+          owner,
+          isBackgrounded: entry.isBackgrounded,
         };
         this.channelExecutions.set(entry.id, execution);
       }
       if (
         !execution ||
         execution.controller !== entry.abortController ||
-        execution.status === entry.status ||
+        (execution.status === entry.status &&
+          execution.isBackgrounded === entry.isBackgrounded) ||
         (entry.status === 'cancelled' && !entry.notified)
       )
         return;
+      if (entry.isBackgrounded && !execution.isBackgrounded) {
+        const owner = execution.owner;
+        if (
+          execution.controller.signal.aborted ||
+          !owner ||
+          owner.signal.aborted ||
+          (!owner.parentExecutionId &&
+            owner.signal !== this.channelObservation?.signal)
+        )
+          return;
+      }
       execution.status = entry.status;
+      execution.isBackgrounded = entry.isBackgrounded;
+      if (!entry.isBackgrounded) return;
       void this.sendUpdate({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
@@ -9588,9 +9646,8 @@ export class Session implements SessionContext {
             executionId: execution.executionId,
             description: truncateNotificationLabel(entry.description),
             status: entry.status,
-            ...(this.channelObservation?.parentExecutionId &&
-            promptIdContext.getStore() === this.channelObservation.promptId
-              ? { parentExecutionId: this.channelObservation.parentExecutionId }
+            ...(execution.owner?.parentExecutionId
+              ? { parentExecutionId: execution.owner.parentExecutionId }
               : {}),
           },
         },
@@ -9675,27 +9732,9 @@ export class Session implements SessionContext {
       if (!execution || execution.controller !== entry.abortController) {
         this.channelShellExecutions.delete(entry.id);
         if (entry.status !== 'running') return;
-        const agentId = getCurrentAgentId();
-        if (
-          this.channelObservation &&
-          !this.channelObservation.signal.aborted &&
-          promptIdContext.getStore() === this.channelObservation.promptId
-        ) {
-          parentExecutionId = this.channelObservation.parentExecutionId;
-        } else if (agentId) {
-          const parent = this.channelExecutions.get(agentId);
-          const agent = backgroundRegistry.get(agentId);
-          if (
-            !parent ||
-            parent.controller !== agent?.abortController ||
-            parent.controller.signal.aborted ||
-            parent.status !== 'running'
-          )
-            return;
-          parentExecutionId = parent.executionId;
-        } else {
-          return;
-        }
+        const owner = this.#channelTaskOwner();
+        if (!owner) return;
+        parentExecutionId = owner.parentExecutionId;
         execution = {
           executionId: randomUUID(),
           controller: entry.abortController,

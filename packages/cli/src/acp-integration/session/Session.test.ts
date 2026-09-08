@@ -7489,6 +7489,188 @@ describe('Session', () => {
       },
     );
 
+    it.each([true, false])(
+      'attributes foreground descendants only to their channel request (%s)',
+      async (channel) => {
+        const parent = { ...makeTask('foreground'), isBackgrounded: false };
+        const child = {
+          ...makeTask('nested-foreground'),
+          isBackgrounded: false,
+        };
+        const nested = makeTask('nested-background');
+        const shell = makeShell();
+        const entries = [parent, child, nested];
+        mockBackgroundTaskRegistry.getAll.mockReturnValue(entries);
+        mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+          entries.find((entry) => entry.id === id),
+        );
+        mockBackgroundShellRegistry.getAll.mockReturnValue([shell]);
+        const agentId = vi.spyOn(core, 'getCurrentAgentId');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            status(parent);
+            agentId.mockReturnValue(parent.id);
+            core.promptIdContext.run('foreground-child-turn', () =>
+              status(child),
+            );
+            agentId.mockReturnValue(child.id);
+            core.promptIdContext.run('nested-child-turn', () => {
+              shellStatus(shell);
+              status(nested);
+            });
+            return createEmptyStream();
+          })
+          .mockImplementation(() => createEmptyStream());
+        await prompt(channel);
+        expect(observations()).toHaveLength(channel ? 2 : 0);
+        if (channel) {
+          expect(observations()).toEqual([
+            expect.objectContaining({ taskId: shell.id, status: 'running' }),
+            expect.objectContaining({ taskId: nested.id, status: 'running' }),
+          ]);
+        }
+        shell.status = 'completed';
+        shellNotify(shell);
+        nested.status = 'completed';
+        nested.notified = true;
+        notify(nested);
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+        );
+        await vi.waitFor(() =>
+          expect(completions()).toHaveLength(channel ? 2 : 0),
+        );
+      },
+    );
+
+    it.each(['owned', 'unowned', 'replaced', 'cancelled'] as const)(
+      'attributes nested background agents to their %s ancestor after the main turn',
+      async (ownership) => {
+        const parent = makeTask('parent');
+        const child = makeTask('nested');
+        const entries = [parent, child];
+        mockBackgroundTaskRegistry.getAll.mockReturnValue(entries);
+        mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+          entries.find((entry) => entry.id === id),
+        );
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          status(parent);
+          return createEmptyStream();
+        });
+        await prompt();
+        vi.spyOn(core, 'getCurrentAgentId').mockReturnValue(
+          ownership === 'unowned' ? 'another-agent' : parent.id,
+        );
+        if (ownership === 'replaced')
+          parent.abortController = new AbortController();
+        if (ownership === 'cancelled') parent.abortController.abort();
+        core.promptIdContext.run('background-child-turn', () => status(child));
+        expect(observations()).toHaveLength(ownership === 'owned' ? 2 : 1);
+        if (ownership === 'owned') {
+          expect(observations()[1]).toMatchObject({
+            taskId: child.id,
+            parentExecutionId: (observations()[0] as { executionId: string })
+              .executionId,
+          });
+        }
+      },
+    );
+
+    it('preserves background ancestry through foreground descendants after the main turn', async () => {
+      const parent = makeTask('background-parent');
+      const first = { ...makeTask('foreground-first'), isBackgrounded: false };
+      const second = {
+        ...makeTask('foreground-second'),
+        isBackgrounded: false,
+      };
+      const shell = makeShell();
+      const entries = [parent, first, second];
+      mockBackgroundTaskRegistry.getAll.mockReturnValue(entries);
+      mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+        entries.find((entry) => entry.id === id),
+      );
+      mockBackgroundShellRegistry.getAll.mockReturnValue([shell]);
+      const agentId = vi.spyOn(core, 'getCurrentAgentId');
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        status(parent);
+        return createEmptyStream();
+      });
+      await prompt();
+      core.promptIdContext.run('child-turn', () => {
+        agentId.mockReturnValue(parent.id);
+        status(first);
+        agentId.mockReturnValue(first.id);
+        status(second);
+        agentId.mockReturnValue(second.id);
+        shellStatus(shell);
+      });
+      expect(observations()).toHaveLength(2);
+      expect(observations()[1]).toMatchObject({
+        taskId: shell.id,
+        parentExecutionId: (observations()[0] as { executionId: string })
+          .executionId,
+      });
+    });
+
+    it.each(['replaced', 'cancelled', 'next-request'] as const)(
+      'rejects shell launches and promotion from a %s foreground execution',
+      async (ownership) => {
+        const parent = { ...makeTask('foreground'), isBackgrounded: false };
+        const shell = makeShell();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([parent]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(parent);
+        mockBackgroundShellRegistry.getAll.mockReturnValue([shell]);
+        const agentId = vi.spyOn(core, 'getCurrentAgentId');
+        const launchShell = () => {
+          agentId.mockReturnValue(parent.id);
+          core.promptIdContext.run('foreground-child-turn', () => {
+            shellStatus(shell);
+            parent.isBackgrounded = true;
+            status(parent);
+          });
+          return createEmptyStream();
+        };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            status(parent);
+            if (ownership === 'replaced')
+              parent.abortController = new AbortController();
+            if (ownership === 'cancelled') parent.abortController.abort();
+            return ownership === 'next-request'
+              ? createEmptyStream()
+              : launchShell();
+          })
+          .mockImplementationOnce(launchShell);
+        await prompt();
+        if (ownership === 'next-request') await prompt();
+        expect(observations()).toHaveLength(0);
+      },
+    );
+
+    it('observes foreground promotion without waiting for a foreground notification', async () => {
+      const entry = { ...makeTask(), isBackgrounded: false };
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+      mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          status(entry);
+          expect(observations()).toHaveLength(0);
+          entry.isBackgrounded = true;
+          status(entry);
+          return createEmptyStream();
+        })
+        .mockImplementation(() => createEmptyStream());
+      await prompt();
+      expect(observations()).toHaveLength(1);
+      entry.status = 'completed';
+      entry.notified = true;
+      notify(entry);
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+    });
+
     it('attributes a shell spawned during notification continuation despite inherited agent context', async () => {
       const first = makeShell('first-shell');
       const next = makeShell('next-shell');
