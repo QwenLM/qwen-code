@@ -1532,11 +1532,14 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
  * raised it to survive a slow model would wait the lifetime cap, get no
  * checkpoint, and see exactly the behaviour they had before touching it.
  *
- * A deployment that genuinely needs longer has to raise the lifetime cap too,
- * and that knob is `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
- * `ContentGeneratorConfig.streamMaxLifetimeMs`) rather than anything in
- * `settings.json`, so it cannot be reached from this setting alone. This also
- * keeps the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
+ * The bound is the shipped default, resolved once here rather than per
+ * request, so raising `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
+ * `ContentGeneratorConfig.streamMaxLifetimeMs`) does not raise it: a
+ * deployment that has lifted the lifetime guard still cannot set a longer
+ * ceiling through this setting. That is deliberate -- the accepted range
+ * stays the one every deployment can honour, instead of validating against
+ * a wire bound the process cannot know at construction time. This also keeps
+ * the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
  */
 export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP =
   DEFAULT_STREAM_MAX_LIFETIME_MS / 1000;
