@@ -61,6 +61,7 @@ import {
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { WorkspaceDrainingError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
@@ -268,6 +269,15 @@ const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
 // Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
 // here so the serve pre-listen graph does not statically import that module.
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+
+function deepestErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  let deepest: Error = err;
+  while (deepest.cause instanceof Error) {
+    deepest = deepest.cause;
+  }
+  return deepest.message;
+}
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -8936,10 +8946,15 @@ async function runQwenServeImpl(
       const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
         app: Application,
       ): void => {
-        if (shuttingDown || runtimeStartupError !== undefined) {
+        if (shuttingDown) {
           daemonLog.info(
-            'workspace MCP discovery after preheat skipped: ' +
-              (shuttingDown ? 'shutting down' : 'runtime startup failed'),
+            'workspace runtime ensure after preheat skipped: shutting down',
+          );
+          return;
+        }
+        if (runtimeStartupError !== undefined) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: runtime startup failed',
           );
           return;
         }
@@ -8949,7 +8964,7 @@ async function runQwenServeImpl(
         const runtime = registry?.primaryEntry.current?.runtime;
         if (!runtime) {
           daemonLog.info(
-            'workspace MCP discovery after preheat skipped: no primary runtime',
+            'workspace runtime ensure after preheat skipped: no primary runtime',
           );
           return;
         }
@@ -8957,7 +8972,7 @@ async function runQwenServeImpl(
           getWorkspaceRuntimeCoordinatorIfSupported?.(runtime);
         if (!coordinator) {
           daemonLog.info(
-            'workspace MCP discovery after preheat skipped: ' +
+            'workspace runtime ensure after preheat skipped: ' +
               'workspace runtime lifecycle is not supported',
           );
           return;
@@ -8965,14 +8980,11 @@ async function runQwenServeImpl(
         void coordinator
           .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
           .catch((err) => {
-            const message = err instanceof Error ? err.message : String(err);
-            const cause =
-              err instanceof Error && err.cause instanceof Error
-                ? err.cause.message
-                : undefined;
+            if (err instanceof WorkspaceDrainingError) {
+              return;
+            }
             daemonLog.warn(
-              `workspace MCP discovery after preheat failed: ${message}` +
-                (cause ? ` (${cause})` : ''),
+              `workspace runtime ensure after preheat failed: ${deepestErrorMessage(err)}`,
             );
           });
       };
