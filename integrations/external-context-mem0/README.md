@@ -1,7 +1,7 @@
 # Mem0 External Context Extension
 
-This package provides on-demand search, Auto Recall, and an opt-in daemon
-writer for administrator-configured Mem0-compatible HTTP services. It validates a closed
+This package provides on-demand search, Auto Recall, and opt-in daemon
+writing and single-record deletion for administrator-configured Mem0-compatible HTTP services. It validates a closed
 dialect grammar and uses a bounded HTTP request engine; it does not ship
 provider presets or provider-specific configuration.
 
@@ -195,8 +195,9 @@ that profile.
 
 The default Extension is retrieval-only. Provision a disposable test record
 through an administrator-approved upstream path if a known record is not
-already available. The separate writer below can create records when explicitly
-configured; this package does not provide a delete tool.
+already available. The separately configured writer below can create records;
+the [explicit deletion profile](#opt-in-daemon-explicit-deletion) can remove
+individual records after verification.
 
 ## Auto Recall profile
 
@@ -455,6 +456,142 @@ can retrieve the saved fact without putting the answer in its query. A different
 workspace's independent scope must remain isolated. Auto Recall integration with
 daemon is a separate validation and is not a prerequisite for this write profile.
 
+## Opt-in daemon explicit deletion
+
+Deletion is a separate administrator-enabled MCP server, `dist/delete-main.js`.
+It exposes only `context_get({ memoryId })` and
+`context_forget({ memoryId, expectedContent })`. Installing the default
+Extension or enabling the writer does not enable deletion.
+
+Use this profile in registered, trusted daemon workspaces. First read a precise
+candidate ID with `context_get`, then carry its complete original text into
+`context_forget` for approval. Search text is a summary, not confirmation text.
+Search results with IDs longer than 128 Unicode code points are omitted instead
+of returning a truncated ID. Full IDs up to 256 ASCII characters can still come
+from a writer's `stored.memoryId` or the service administration interface; do
+not substitute `accepted.providerOperationId` or repair an old truncated ID.
+
+The tool accepts only ASCII letters, digits, dot, underscore, colon and hyphen
+in IDs, rejecting the entire IDs `.` and `..`. Expected text is preserved exactly,
+including empty records, whitespace and control characters, with a maximum of
+4000 Unicode code points and no unpaired surrogate. Overlong text is rejected,
+never summarized or truncated. No scope, URL, credential, query, filters,
+confirmation flag or cascade option can be supplied by the model.
+
+### Bind a deletion server
+
+Supply `QWEN_EXTERNAL_CONTEXT_MEM0_DELETE_CONFIG` with an absolute instance path
+conforming to [the V5 schema](./schemas/delete-instance-config.schema.json):
+
+```json
+{
+  "schemaVersion": 5,
+  "repositoryRoot": "/workspace/project",
+  "dialectPath": "/etc/qwen/external-context/delete.dialect.json",
+  "endpoint": {
+    "origin": "https://memory.example.com",
+    "basePath": "",
+    "allowInsecureHttp": false
+  },
+  "credentialEnv": "MEMORY_DELETE_API_KEY",
+  "scope": { "userId": "repository-memory" },
+  "timeoutMs": 10000
+}
+```
+
+V5 is the extension's instance version, not the Qwen settings version. Paths,
+regular configuration files (64 KiB maximum), canonical repository containment,
+static endpoint and fixed nonempty scope are validated before the credential
+is read. The credential must allow both exact reads and deletion. Each process
+loads one fixed binding at startup; stop outstanding calls and restart that
+workspace's MCP server to change it.
+
+The independent [delete dialect](./schemas/delete-dialect.schema.json) is bounded:
+
+```json
+{
+  "deleteDialectVersion": 1,
+  "id": "organization-memory-delete-v1",
+  "auth": "authorization-token",
+  "record": {
+    "pathPrefix": "/memories/",
+    "pathSuffix": "",
+    "idField": "id",
+    "contentField": "memory",
+    "notFound": "http-404"
+  }
+}
+```
+
+This is an unbranded template, not a Holo preset. Authentication uses the same
+three supported headers as search. GET and DELETE share the static prefix plus
+one encoded ID segment; suffix is empty or `/`. There are no request bodies,
+query parameters, redirects, bulk fallbacks or automatic protocol detection.
+
+GET must return HTTP 200 with one root object and the selected `id`/`memory_id`
+and `memory`/`content`/`text` fields. Every configured scope must exactly match
+the authoritative top-level `user_id`, `agent_id` or `app_id`; arbitrary metadata
+is not a scope source. Foreign or missing targets do not disclose their text.
+The selected absence contract is either HTTP 404 (`http-404`) or HTTP 200 with
+JSON null (`null-200`); other shapes are not interpreted as absence.
+
+DELETE must return HTTP 200 with the exact message `Memory deleted successfully`
+or `Memory deleted successfully!`. Optional status must be `SUCCEEDED`, event
+must be `DELETE`, and cascade_count must be numeric zero. Non-null error/errors,
+conflicting fields, 202, 204 and other unrecognized replies remain unknown.
+Responses are bounded to 1 MiB and strictly decoded as UTF-8/JSON.
+
+### Approval, verification and limits
+
+Apply [the managed workspace settings example](./examples/managed-daemon-delete-workspace-settings.json),
+replacing the absolute paths and supplying the credential through that workspace's
+runtime environment. Keep the server binding workspace-local and complete normal
+MCP configuration approval. The example uses default mode, `trust: false`, and
+an explicit ask rule for `context_forget`. The read helper follows its own normal
+permission policy; read-only annotations are not automatic authorization.
+
+Web Shell displays the exact ID and full expected text through ordinary MCP
+parameter approval. After approval, forget reads the target again and compares
+ID, all configured scope fields and full text before submitting one DELETE.
+If it receives a recognized success acknowledgement, it performs one exact GET
+to verify absence. One total 100–30000 ms deadline covers those three steps;
+human approval waiting is outside that deadline. No state, confirmation token
+or mandatory earlier get is required: a direct call with the correct full ID
+and original text receives the same checks.
+
+| Result        | Meaning                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `deleted`     | Recognized deletion acknowledgement followed by a read confirming absence.                                                                                         |
+| `not_deleted` | This call submitted zero DELETE requests. A fixed reason distinguishes invalid input, unavailable/changed target, verification failure or pre-delete cancellation. |
+| `unknown`     | DELETE started but its result or subsequent absence check is uncertain. Do not retry automatically; explicitly read to inspect current state.                      |
+
+MCP schema errors can be rejected before execution. Result messages do not echo
+the provider response or target text. Non-idempotent destructive annotations
+prevent transparent replay; a new explicit call still follows current permissions.
+YOLO and PermissionRequest Hook automatic approvals retain their existing
+semantics. Client approval replies cannot edit arguments; reject and request a
+new call to change them. Pending approval cancellation and runtime ownership use
+the existing daemon lifecycle. Disconnecting a REST SSE subscription is not an
+explicit cancellation, and cancellation cannot undo an already submitted DELETE.
+
+The last GET and DELETE are **not atomic**. Changes while waiting for approval
+are detected, but an update after the final GET may also be deleted. Atomic
+version deletion requires a verified server-side conditional-delete contract;
+this client does not claim to provide one. Before accepting a multi-workspace
+deployment, verify that record IDs are not reused and scope cannot migrate, or
+that the service independently restricts deletion to the credential's fixed
+scope. Returned scope fields must be authoritative. Local scope configuration
+is not a tenant ACL, and trusted clients/same-UID processes remain within the
+existing trust model.
+
+Deletion does not erase old conversations, model context, service logs or
+backups, and a search index may lag behind exact reads. Verify propagation with
+new clients/sessions and unchanged same-scope and foreign-scope control records.
+The full expected text enters ordinary tool parameters and transcripts; this
+profile adds no target cache or separate body log. Real Holo conformance must be
+verified against its deployed GET/DELETE contract using disposable records;
+synthetic tests do not establish Holo support.
+
 ## Troubleshooting
 
 | Symptom                                              | What to check                                                                                                                                                                     |
@@ -482,7 +619,8 @@ daemon is a separate validation and is not a prerequisite for this write profile
 - The deployment enables exactly one retrieval profile: v2 MCP or v3 Hook.
 - The read server exposes only `context_search`; the Auto Recall profile has
   no read MCP server. An explicitly configured writer is a separate server
-  exposing only `context_remember`.
+  exposing only `context_remember`. A separately enabled deletion server exposes
+  only `context_get` and `context_forget`.
 - A known-record search succeeds. On-demand file changes take effect after
   restart; Auto Recall file changes take effect on the next eligible prompt.
 

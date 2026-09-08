@@ -204,7 +204,10 @@ function createMockSettings(): LoadedSettings {
   } as unknown as LoadedSettings;
 }
 
-function renderDialog(overrides?: { authType?: AuthType }) {
+function renderDialog(overrides?: {
+  authType?: AuthType;
+  initialError?: string;
+}) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
@@ -215,6 +218,7 @@ function renderDialog(overrides?: { authType?: AuthType }) {
       settings={settings}
       onClose={onClose}
       notify={notify}
+      initialError={overrides?.initialError}
     />,
   );
   return { onClose, notify, config };
@@ -271,6 +275,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     const { onClose } = renderDialog({ authType: AuthType.USE_OPENAI });
     await pressEsc();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes via Esc when the error was seeded from boot (R2-1)', async () => {
+    // A startup login failure seeds the message before mount; the swallow is
+    // for errors the dialog arms itself, so Esc must still close.
+    const { onClose } = renderDialog({
+      authType: AuthType.QWEN_OAUTH,
+      initialError: 'Failed to login',
+    });
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes via Esc when boot failed before any auth type existed (R2-1)', async () => {
+    // With no auth type the unauthenticated arm would overwrite the boot
+    // diagnostic with the must-connect message and wedge the dialog shut:
+    // Esc must close instead.
+    const { onClose } = renderDialog({ initialError: 'Boot failed' });
+    const consumed = await pressEsc();
+    expect(consumed).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/You must connect a provider/)).toBeNull();
   });
 
   it('navigates main → sub-menu and back with Esc', async () => {
