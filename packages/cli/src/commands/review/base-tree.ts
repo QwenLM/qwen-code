@@ -114,6 +114,22 @@ function gitOut(cwd: string, ...args: string[]): string {
   return (r.stdout ?? '').trim();
 }
 
+// The NUL-delimited form: `gitOut`'s `.trim()` would eat a leading-space
+// filename and the record separator is NUL, not whitespace.
+function gitOutZ(cwd: string, ...args: string[]): string {
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
+  }
+  const out = r.stdout ?? '';
+  return out.endsWith('\0') ? out.slice(0, -1) : out;
+}
+
 function git(cwd: string, ...args: string[]): void {
   const r = spawnSync('git', args, {
     cwd,
@@ -126,16 +142,32 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
-// The tree's untracked AND ignored path set, as `git status` collapses it (a
-// directory holding nothing tracked reports as one `path/` entry). Ignored is
-// included because that is exactly where a plant hides in a real repository —
-// `dist/` and `node_modules/` are gitignored here, so an untracked-only
-// listing is blind to the executable a host-side A/B would run.
+// The tree's untracked AND ignored FILES, listed individually. Two
+// `ls-files` calls rather than `git status`: status collapses a directory to
+// one `dir/` entry, and a plant dropped INSIDE a directory the build left —
+// `dist/cli.js`, `node_modules/.bin/<x>`, exactly what a host-side A/B
+// executes — then changes no set membership. `ls-files --others` never
+// collapses. The residual, by design: content rewritten IN PLACE at a
+// recorded path changes no membership either — the path-set limit stated at
+// the subset check below.
 function untrackedPaths(tree: string): string[] {
-  return gitOut(tree, 'status', '--porcelain', '-z', '--ignored')
-    .split('\0')
-    .filter((e) => e.startsWith('?? ') || e.startsWith('!! '))
-    .map((e) => e.slice(3))
+  const others = gitOutZ(
+    tree,
+    'ls-files',
+    '-z',
+    '--others',
+    '--exclude-standard',
+  );
+  const ignored = gitOutZ(
+    tree,
+    'ls-files',
+    '-z',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+  );
+  return [...others.split('\0'), ...ignored.split('\0')]
+    .filter((e) => e !== '')
     .sort();
 }
 
@@ -224,68 +256,68 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // phase in between — long enough for the reviewed code to drop
       // untracked executables in here, and `dist/cli.js` is what a host-side
       // A/B runs.
+      // The reuse path RETURNS, so the gate below the rebuild never runs
+      // for it — and both facts these arms establish come from inside the
+      // mount: `rev-parse HEAD` resolves through that tree's own `.git`,
+      // and its working files are a direct child of the directory the
+      // sandbox mounts read-write. A planted repository answers the right
+      // sha for a working tree holding anything at all; a plain copy
+      // overwrites the tracked sources while HEAD never moves — and the
+      // A/B's BASE side is then the reviewed code's own, so a test the PR
+      // breaks fails identically on both sides and reads as pre-existing.
+      const pointerWhy = untrustedGitfile(tree);
       if (
-        // The reuse path RETURNS, so the gate below the rebuild never runs
-        // for it — and both facts these arms establish come from inside the
-        // mount: `rev-parse HEAD` resolves through that tree's own `.git`,
-        // and its working files are a direct child of the directory the
-        // sandbox mounts read-write. A planted repository answers the right
-        // sha for a working tree holding anything at all; a plain copy
-        // overwrites the tracked sources while HEAD never moves — and the
-        // A/B's BASE side is then the reviewed code's own, so a test the PR
-        // breaks fails identically on both sides and reads as pre-existing.
-        //
-        // `--untracked-files=no`: the pipeline's own build leaves
-        // `node_modules/` and `dist/` here, so an untracked-inclusive check
-        // would call every correctly-built tree dirty and disable reuse
-        // outright. (The untracked surface is fenced separately, below.)
-        untrustedGitfile(tree) !== null ||
-        gitOut(tree, 'rev-parse', 'HEAD') !== baseSha ||
-        gitOut(tree, 'status', '--porcelain', '--untracked-files=no') !== ''
+        pointerWhy !== null ||
+        gitOut(tree, 'rev-parse', 'HEAD') !== baseSha
       ) {
-        // A state arm failed on a tree THIS RUN built. Falling through would
-        // discard it — but this run's own build can legitimately leave
-        // tracked dirt (codegen, a lockfile rewrite), and a concurrent
-        // shard's A/B can write one tracked file mid-measurement (a snapshot
-        // `--update`). Sweeping that tree reintroduces the concurrent-shard
-        // clobber this fast path exists to prevent: shard B would rmSync the
-        // tree shard A is mid-A/B in, and A's base side reads as empty
-        // output — a fabricated difference with a deterministic source tag.
-        // So decline, the way the build lock's EEXIST arm does. (A stamp
-        // that does NOT match this run still falls through to the rebuild:
-        // an earlier run's leftover or a forge is nobody's live tree, and
-        // the discard is what removes the plant.)
-        return unavailable(
-          `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
-            'but no longer passes a reuse check (a concurrent probe may be ' +
-            'writing it mid-A/B); declining to reuse or discard it — retry ' +
-            'when the probe finishes, or settle the claim by reading',
-        );
-      }
-      // The untracked surface. The state arms above are blind to it by
-      // design, and the window to abuse it is guaranteed: the sandboxed
-      // build/test phase overlaps the verifier shards, so reviewed code can
-      // drop `dist/cli.js` or `node_modules/.bin/<x>` in here AFTER the
-      // stamp, and a host-side A/B would then execute the plant as the BASE
-      // side. The marker itself cannot vouch for the set the build left —
-      // it is a file inside the mount — so the set was recorded host-side
-      // when the marker was written, and anything beyond it is a plant:
-      // content, not concurrency, so this one DOES fall through to the
-      // rebuild whose discard sweeps it.
-      const recorded = builtTreeRecord(trustPath, tree);
-      const current = untrackedPaths(tree);
-      if (
-        recorded !== null &&
-        recorded.baseSha === baseSha &&
-        current.every((p) => recorded.untracked.includes(p))
-      ) {
-        return {
-          available: true,
-          path: tree,
-          baseSha,
-          build: null,
-          note: `base tree already built at ${baseSha.slice(0, 9)} in ${tree} (reusing it — a concurrent or earlier probe built it)`,
-        };
+        // A rewritten pointer or a moved HEAD has NO benign cause: this
+        // run's build does not touch either, and a concurrent A/B does not
+        // move HEAD. Not the busy arm — the discard-and-rebuild below is
+        // exactly what sweeps the plant, and declining here would leave it
+        // standing for the rest of the run.
+      } else {
+        const recorded = builtTreeRecord(trustPath, tree);
+        if (recorded === null || recorded.baseSha !== baseSha) {
+          // A torn or stale record is not a live tree's state — the rebuild
+          // below self-heals it.
+        } else if (
+          // Tracked dirt OR an untracked addition. Both have benign causes
+          // on a tree this run built: codegen and lockfile rewrites from
+          // this run's own build, a concurrent shard's snapshot `--update`
+          // mid-A/B, the A/B's own cache output. Both are also what a plant
+          // looks like — and that ambiguity is exactly why the answer is to
+          // DECLINE rather than to discard: discarding on this signal
+          // sweeps a live tree another shard may be mid-A/B in (the
+          // concurrent-shard clobber this fast path exists to prevent),
+          // while a genuine plant wedged here is never executed, and the
+          // next run's fresh nonce discards it.
+          //
+          // `--untracked-files=no` for the tracked arm: the pipeline's own
+          // build leaves `node_modules/` and `dist/` here, so an
+          // untracked-inclusive check would call every correctly-built
+          // tree dirty and disable reuse outright — the untracked surface
+          // is the subset arm's, recorded host-side at marker write (a path
+          // SET per the finding's prescription; content rewritten in place
+          // at a recorded path changes no membership, stated not hidden).
+          gitOut(tree, 'status', '--porcelain', '--untracked-files=no') !==
+            '' ||
+          !untrackedPaths(tree).every((p) => recorded.untracked.includes(p))
+        ) {
+          return unavailable(
+            `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
+              'but no longer passes a reuse check (a concurrent probe may be ' +
+              'writing it mid-A/B); declining to reuse or discard it — retry ' +
+              'when the probe finishes, or settle the claim by reading',
+          );
+        } else {
+          return {
+            available: true,
+            path: tree,
+            baseSha,
+            build: null,
+            note: `base tree already built at ${baseSha.slice(0, 9)} in ${tree} (reusing it — a concurrent or earlier probe built it)`,
+          };
+        }
       }
     }
     // No marker, or a stamp that does not carry this run's secret — an

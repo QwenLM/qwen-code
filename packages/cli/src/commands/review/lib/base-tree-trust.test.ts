@@ -11,11 +11,13 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -54,6 +56,20 @@ describe('base-tree trust store', () => {
     const later = new Date(Date.now() + 60_000);
     utimesSync(plan, later, later);
     expect(baseTreeTrustPath(worktree, plan)).not.toBe(p);
+  });
+
+  it('re-keys when the plan is TOUCHED, even with its mtime left exactly in place', () => {
+    // The identity is not the mtime alone: mtime is one `utimensat` call
+    // away from any value the reviewed code chooses (a backdate to an
+    // earlier run's exact stamp would re-key this run to that run's trust
+    // file and adopt its nonce), while `ctimeMs` cannot be set from
+    // userland — `chmod` moves it without touching the mtime, so this is
+    // the discriminating probe: keying on mtime alone keeps the key here.
+    const before = baseTreeTrustPath(worktree, plan);
+    const mtime = statSync(plan).mtimeMs;
+    chmodSync(plan, 0o400);
+    expect(statSync(plan).mtimeMs).toBe(mtime); // the control: mtime unmoved
+    expect(baseTreeTrustPath(worktree, plan)).not.toBe(before);
   });
 
   it('creates the run secret once and hands every later asker the same one', () => {

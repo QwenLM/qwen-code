@@ -23,6 +23,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
   existsSync,
 } from 'node:fs';
@@ -149,14 +150,14 @@ describe('runBaseTree', () => {
   itWhereContainmentExists(
     "does not REUSE when an untracked path appears that THIS RUN's build did not leave",
     () => {
-      // The epoch fence excludes only trees a DIFFERENT run built: reviewed
+      // The nonce fence excludes only trees a DIFFERENT run built: reviewed
       // code holding the read-write mount can drop an untracked executable
-      // into a tree this run stamped, after the stamp — and
-      // `--untracked-files=no` cannot see it, while refusing all untracked
-      // files would disable every legitimate reuse (the pipeline's own build
-      // leaves `node_modules/` and `dist/` here). So the set the build left is
-      // recorded host-side at marker write, and anything beyond it is a
-      // plant: content, not concurrency, so the rebuild's discard sweeps it.
+      // into a tree this run stamped, after the stamp. But an untracked
+      // addition is also exactly what a concurrent A/B's own cache output
+      // looks like — and discarding on an ambiguous signal sweeps a live
+      // tree a sibling shard may be mid-A/B in (R26-1). So the run declines
+      // busy: the plant is never reused, never executed, and the NEXT run's
+      // fresh nonce discards the tree, which is what sweeps it.
       const tree = baseWorktreePath(worktree);
       const builds: string[] = [];
       const build = (w: string) => {
@@ -173,10 +174,106 @@ describe('runBaseTree', () => {
 
       const second = run({}, build);
       expect(second.note).not.toContain('reusing it');
-      expect(builds).toEqual([tree, tree]); // the rebuild fired again
-      // The plant went with the tree it was standing in.
+      expect(second.note).toContain('no longer passes a reuse check');
+      expect(second.available).toBe(false);
+      expect(builds).toEqual([tree]); // declined, not discarded
+      // ...and the cross-run arm is the discard: a re-captured plan keys a
+      // new trust file, the stamp no longer matches, and the rebuild below
+      // it sweeps the plant.
+      planPath = writePlan();
+      const third = run({}, build);
+      expect(builds).toEqual([tree, tree]); // the rebuild fired
       expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
+      expect(third.available).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    'sees a plant hiding INSIDE a directory the build left (file-level record)',
+    () => {
+      // The fence's blind spot when the record was collapsed: with `dist/`
+      // recorded as one entry, anything dropped inside it changed no set
+      // membership — the exact place a host-side A/B's executable lives.
+      // The record is file-level (`ls-files --others` never collapses), so
+      // the addition below IS a membership change, and the run declines.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        if (builds.length === 1) {
+          // The residue a real build leaves, recorded host-side as legitimate.
+          mkdirSync(join(w, 'dist'), { recursive: true });
+          writeFileSync(join(w, 'dist', 'cli.js'), 'built by round 1');
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      // The honest arm first: the recorded residue itself still reuses.
+      expect(run({}, build).note).toContain('reusing it');
+      expect(builds).toEqual([tree]);
+
+      writeFileSync(join(tree, 'dist', 'evil.js'), 'planted inside');
+      const third = run({}, build);
+      expect(third.note).not.toContain('reusing it');
+      expect(third.note).toContain('no longer passes a reuse check');
+      expect(third.available).toBe(false);
+      expect(builds).toEqual([tree]); // declined — still no rebuild
+    },
+  );
+
+  itWhereContainmentExists(
+    'rebuilds — does not decline — when a tree THIS RUN built has its pointer rewritten',
+    () => {
+      // Busy is for the ambiguous arms (dirt, untracked additions). A
+      // rewritten gitfile has no benign cause: this run's build does not
+      // touch the pointer, and a concurrent A/B does not either. Declining
+      // would leave the plant standing for the rest of the run; the
+      // discard-and-rebuild is what sweeps it.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-base'),
+        adminEntryOf(tree),
+        tree,
+        join(repo, '.git'),
+      );
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(second.note).not.toContain('declining to reuse or discard');
+      expect(builds).toEqual([tree, tree]); // rebuilt, not declined
       expect(second.available).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    "does not let a backdated plan re-key this run to an earlier run's trust file",
+    () => {
+      // The trust file is keyed by the plan's path and an identity the mount
+      // cannot roll back: mtime is one `utimensat` away from any value the
+      // reviewed code chooses, but `ctimeMs` cannot be set from userland.
+      // Backdate the plan to an earlier run's exact mtime and the key still
+      // moves — the fence sees a new run, and the earlier tree's stamp
+      // matches nothing.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+
+      const past = statSync(planPath).mtime;
+      utimesSync(planPath, past, past); // a same-value touch moves ctime
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]); // rebuilt under a fresh key
     },
   );
 

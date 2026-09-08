@@ -24,6 +24,7 @@ import {
   isReviewLeaseFile,
   LEGACY_LEASE_CUTOFF_MS,
   readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
   type ReviewWorktreeLease,
@@ -777,6 +778,98 @@ describe('the one-release rollout window', () => {
       ).trim(),
     ).toContain('qwen-review/pr-2');
     expect(existsSync(plant)).toBe(true);
+  });
+
+  it("never acts on a doctored TWIN of this session's own mirror (same target)", () => {
+    // The shape the field comparisons exist for: the plant is at the SAME
+    // target's legacy path, with every credential field copied from the
+    // mirror — only `worktreePath` redirected at a victim tree. The twin
+    // lookup then finds the genuine new-path lease, and only the per-field
+    // equality declines to act: drop the worktreePath comparison and this
+    // run removes the victim and deletes the genuine branch.
+    const root = createRepository();
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      branch: 'qwen-review/pr-1',
+    });
+    // The victim the doctored mirror points at instead.
+    const victim = join(root, '.qwen', 'tmp', 'review-pr-2');
+    execFileSync('git', ['-C', root, 'branch', 'qwen-review/pr-2']);
+    execFileSync('git', [
+      '-C',
+      root,
+      'worktree',
+      'add',
+      '-q',
+      victim,
+      'qwen-review/pr-2',
+    ]);
+    const genuine = readReviewWorktreeLease(root, 'pr-1');
+    const doctored = writeLegacyLease({
+      ...genuine!,
+      worktreePath: victim,
+    });
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    // The genuine lease's own finalization is the fixture's background and
+    // not the assertion: the doctored path is never acted on, so the victim
+    // tree and its branch survive — with the worktreePath comparison
+    // dropped (the mutation), this run removes them.
+    expect(existsSync(victim)).toBe(true);
+    expect(
+      execFileSync(
+        'git',
+        ['-C', root, 'branch', '--list', 'qwen-review/pr-2'],
+        { encoding: 'utf8' },
+      ).trim(),
+    ).toContain('qwen-review/pr-2');
+    expect(existsSync(doctored)).toBe(true);
+  });
+});
+
+describe('readReviewWorktreeLeaseAt', () => {
+  const acquire = (root: string) => ({
+    sessionId: 'session-a',
+    promptId: 'prompt-a',
+    target: 'pr-1',
+    repositoryRoot: root,
+    worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+    branch: 'qwen-review/pr-1',
+  });
+
+  it('names the new path for a lease acquired by this build', () => {
+    const root = createRepository();
+    createReviewWorktreeLease(acquire(root));
+    const found = readReviewWorktreeLeaseAt(root, 'pr-1');
+    expect(found?.lease.sessionId).toBe('session-a');
+    expect(found?.path).toBe(reviewLeasePath(root, 'pr-1'));
+  });
+
+  it('names the LEGACY path for a lease only an older build could have written', () => {
+    // The recovery instruction must name the file that actually holds the
+    // lock: "delete <new path> and re-run" deletes a file that does not
+    // exist and leaves this wedge in place.
+    const root = createRepository();
+    const legacy = writeLegacyLease(acquire(root), new Date(0));
+    const found = readReviewWorktreeLeaseAt(root, 'pr-1');
+    expect(found?.lease.sessionId).toBe('session-a');
+    expect(found?.path).toBe(legacy);
+    expect(found?.path).toContain(join('.qwen', 'tmp'));
+  });
+
+  it('answers nothing for a fresh-mtime legacy file (a plant wields no authority)', () => {
+    const root = createRepository();
+    writeLegacyLease(acquire(root), new Date(LEGACY_LEASE_CUTOFF_MS + 60_000));
+    expect(readReviewWorktreeLeaseAt(root, 'pr-1')).toBeNull();
   });
 });
 

@@ -16,9 +16,12 @@
 // random per-run secret that never enters the mount: the first host process
 // of a run creates it (atomically, `flag: 'wx'`), its sibling shards adopt
 // it, and a mount-local writer can neither read it to forge a stamp nor
-// write it to refresh one. The file is keyed by the plan's path AND mtime,
-// so a re-captured plan — a new run — gets a new secret, and an earlier
-// run's tree fails the fence exactly as a forged one does.
+// write it to refresh one. The file is keyed by the plan's path and an
+// identity the mount cannot roll back (`runKeyMs` — `ctimeMs` cannot be
+// set from userland, so a backdated mtime cannot re-key this run to an
+// earlier run's file), so a re-captured plan — a new run — gets a new
+// secret, and an earlier run's tree fails the fence exactly as a forged
+// one does.
 //
 // The same file records, per built tree, the untracked path set the build
 // legitimately left (`node_modules/`, `dist/`) — recorded host-side because
@@ -28,10 +31,15 @@
 // and the tree is rebuilt, sweeping it.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { REVIEW_LEASE_DIR } from './paths.js';
-import { runEpochMs } from './prompt-record.js';
 
 /** What a successful build legitimately left behind, recorded host-side. */
 export interface BuiltTreeRecord {
@@ -46,10 +54,32 @@ interface TrustFile {
 }
 
 /**
+ * The run identity the trust file is keyed by — NOT the plan's mtime alone.
+ * The plan lives inside the directory the sandbox mounts read-write, and an
+ * mtime is one `utimensat` call away from any value the reviewed code
+ * chooses: backdated to an earlier run's exact nanosecond stamp, it would
+ * re-key this run to that run's trust file, adopting its nonce and passing
+ * its fence. `ctimeMs` cannot be set from userland — every touch, a
+ * backdating `utimensat` included, sets it to now — and on Windows, where
+ * `ctimeMs` is the creation time, a backdated mtime still sits at or below
+ * it. The max of the two is the earliest time the file can claim.
+ */
+function runKeyMs(planPath: string): number {
+  try {
+    const stat = statSync(planPath);
+    return Math.max(stat.mtimeMs, stat.ctimeMs);
+  } catch {
+    // No plan, no identity — and no trust file: the caller reports the
+    // command unavailable rather than fencing on a shared key.
+    return -Infinity;
+  }
+}
+
+/**
  * The one file holding a run's base-tree trust state, named by a digest of
- * the plan's path and mtime — the run identity the rest of the pipeline
- * already keys on, so same-run shards share the file and a re-captured plan
- * starts a fresh one.
+ * the plan's path and its tamper-resistant identity (see `runKeyMs`) — the
+ * run identity the rest of the pipeline already keys on, so same-run shards
+ * share the file and a re-captured plan starts a fresh one.
  */
 export function baseTreeTrustPath(worktree: string, planPath: string): string {
   // The worktree is `<root>/.qwen/tmp/<name>` by construction (paths.ts's
@@ -61,7 +91,7 @@ export function baseTreeTrustPath(worktree: string, planPath: string): string {
   const key = createHash('sha256')
     .update(resolve(planPath))
     .update('\0')
-    .update(String(runEpochMs(planPath)))
+    .update(String(runKeyMs(planPath)))
     .digest('hex')
     .slice(0, 16);
   return join(qwenDir, basename(REVIEW_LEASE_DIR), 'base-tree', `${key}.json`);

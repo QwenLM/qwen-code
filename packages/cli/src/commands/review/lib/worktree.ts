@@ -1201,6 +1201,18 @@ export function discardWorktree(
   // volume that happens to be unmounted. So the entry is found by its own
   // `gitdir` file and removed alone.
   dropWorktreeRegistration(cwd, tree, ownAdminDir);
+  if (sweep !== undefined && sweep.status !== 0) {
+    // `worktree remove` FAILED — the shape that makes `ownAdminDir` a lie:
+    // the tree's gitfile was rewritten to a coherent planted entry (both
+    // ends attacker-written, so `adminDirOf`'s round-trip passes), and the
+    // removal above then cleared the PLANT's directory while the real
+    // registration — which git refused to remove because its `gitdir` no
+    // longer points back through the plant — survives. The reverse scan is
+    // what sees the real one: it matches entries by the path they name, and
+    // skips any whose tree is still on disk, so a live sibling is never its
+    // business and only this path's leftover goes.
+    dropWorktreeRegistration(cwd, tree, null);
+  }
   return sweep;
 }
 
@@ -1254,6 +1266,13 @@ function dropWorktreeRegistration(
   // `add` then calls "already registered". Fall back to the reverse scan, and
   // only for entries whose named tree is GONE: a live worktree's registration
   // is never this cleanup's business, whatever its `gitdir` file claims.
+  //
+  // Narrowed TWICE, because the scan reads files any same-user process can
+  // rewrite: the entry's id must be the tree's own basename — the name git
+  // gave it at `worktree add` — so a tampered entry that points AT this path
+  // from a sibling's directory is never deleted (the sibling's tree may be
+  // gone, which is exactly what a repo-wide prune would eat), and the named
+  // tree must be gone, so a live worktree is never this cleanup's business.
   const common = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
@@ -1268,7 +1287,9 @@ function dropWorktreeRegistration(
     return; // No linked worktrees at all.
   }
   const wanted = samePath(tree);
+  const ownId = basename(resolve(tree));
   for (const id of ids) {
+    if (id !== ownId) continue;
     try {
       const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
       const named = dirname(gitdir);
