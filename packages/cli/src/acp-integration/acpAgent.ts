@@ -148,6 +148,8 @@ import {
   type TurnResultRecordPayload,
   sessionIdContext,
   resolveAgentPersona,
+  resolveModelId,
+  buildModelIdContext,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -14078,6 +14080,21 @@ class QwenAgent implements Agent {
           persona.agent.name,
           persona.toolConfig.executionAllowedTools,
         );
+        const currentAuthType = config.getModelsConfig().getCurrentAuthType();
+        const model = resolveModelId(persona.definition.model, {
+          ...buildModelIdContext(config),
+          currentModel: undefined,
+          currentAuthType,
+        });
+        if (model?.authType && model.authType !== currentAuthType) {
+          await config.switchModel(model.authType, model.modelId, {
+            requireCachedCredentials:
+              model.authType === AuthType.QWEN_OAUTH &&
+              model.authType !== currentAuthType,
+          });
+        } else if (model) {
+          await config.setModel(model.modelId, { reason: 'workspace-agent' });
+        }
       }
       this.assertManagedSessionAdmission();
     } catch (error) {

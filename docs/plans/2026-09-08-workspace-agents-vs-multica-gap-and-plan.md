@@ -18,7 +18,16 @@ run_shell_command, save_memory, an unknown MCP name, and an omitted glob denied.
 It also observed an upstream denial preserved and an ordinary Config unchanged.
 The scheduler's existing pre-execution call site was inspected; model-driven
 negative-path and full reliability acceptance are still outstanding. No build
-or local CI ran. Model override application remains a separate unresolved wire.
+or local CI ran.
+
+Session startup now applies the resolved definition/identity model selector
+through the existing model resolver and Config APIs before publication.
+`inherit` leaves the workspace model unchanged; `fast` uses the configured
+selector; same-provider selections use setModel (including raw model IDs),
+and cross-provider selections use switchModel with cached-credential requirements
+for OAuth. This does not update an already-live agent after a roster edit.
+Direct resolver checks covered inherit, fast and explicit same-provider IDs;
+live provider-request verification and live configuration refresh remain pending.
 
 #### Live follow-up (supersedes the startup blocker below)
 
