@@ -117,6 +117,35 @@ describe('foldLiveEvent done (turn end)', () => {
   });
 });
 
+describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
+  it('records a rejected resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'rejected', done: false });
+  });
+
+  it('records an approved resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'approved',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved', done: false });
+  });
+
+  it('leaves an already-resolved card untouched', () => {
+    const items = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved' });
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {
@@ -473,6 +502,77 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
       kind: 'stop-hook',
       message: 'run the tests',
     });
+  });
+
+  it('pushes the U-33 user shell row after settling a streaming assistant', () => {
+    const items = foldLiveEvent([assistant('thinking')], {
+      type: 'user-shell',
+      text: 'ls',
+    });
+    expect(items).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'user-shell', text: 'ls' },
+    ]);
+  });
+
+  it('pushes the U-34 command cards structurally, settling the stream first', () => {
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    } as never;
+    const recap = foldLiveEvent([assistant('thinking')], {
+      type: 'away-recap',
+      text: 'did X',
+    });
+    expect(recap).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'away-recap', text: 'did X' },
+    ]);
+
+    const advisor = foldLiveEvent([assistant('thinking')], {
+      type: 'advisor',
+      text: 'Looks good',
+      model: 'qwen3-max',
+    });
+    expect(advisor).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+    ]);
+
+    const arenaAgent = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-agent',
+      agent,
+    });
+    expect(arenaAgent).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'arena-agent', agent },
+    ]);
+
+    const arenaSession = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
+    expect(arenaSession).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      {
+        kind: 'arena-session',
+        sessionStatus: 'completed',
+        task: 'do it',
+        totalDurationMs: 2000,
+        agents: [agent],
+      },
+    ]);
   });
 });
 

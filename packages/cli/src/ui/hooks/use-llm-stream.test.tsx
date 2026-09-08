@@ -620,6 +620,36 @@ describe('useLlmStream', () => {
     expect(syntheticPrompt).toContain('not evidence that the user supplied it');
   });
 
+  it('renders the queued spend figures into the synthetic Goal turn', async () => {
+    // The render site reads `usage` off the queued turn. Dropping that read
+    // typechecks and only shows up as a prompt missing its budget line.
+    const goal: QueuedGoalTurn = {
+      kind: 'goal',
+      permit: {
+        goalId: 'goal-usage',
+        revision: 2,
+        turnId: 'turn-usage',
+      },
+      turnKey: 'goal-runtime:turn-usage',
+      continuationContext: 'report the figures',
+      usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+    };
+    const { result, mockSendMessageStream: streamMock } = renderTestHook([]);
+
+    await act(async () => {
+      await result.current.submitQuery(
+        goal.continuationContext,
+        SendMessageType.Goal,
+        'prompt-id-goal-usage',
+        { goal },
+      );
+    });
+
+    expect(streamMock.mock.calls[0]?.[0] as string).toContain(
+      'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+    );
+  });
+
   it('claims a Goal only after direct user input becomes model-facing', async () => {
     const goal: QueuedGoalTurn = {
       kind: 'goal',
@@ -5972,149 +6002,152 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
   });
 
-  it('finishes a Goal turn without another model call after update_goal', async () => {
-    const permit: GoalTurnPermit = {
-      goalId: 'goal-complete',
-      revision: 1,
-      turnId: 'turn-complete',
-    };
-    const flush = vi.fn().mockResolvedValue(undefined);
-    const finishTurn = vi.fn().mockResolvedValue(undefined);
-    const completedSnapshot = {
-      v: 2 as const,
-      activity: 'idle' as const,
-      goal: {
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'finish without another call',
-        status: 'complete' as const,
-        evidenceCursor: { recordId: 'record-complete' },
-        turnCount: 1,
-        activeTimeMs: 20,
-        tokensUsed: 0,
-        createdAt: 1,
-        updatedAt: 2,
-      },
-    };
-    const runtime = {
-      permitForTurn: vi.fn(() => permit),
-      finishTurn,
-      getSnapshot: vi.fn(() => completedSnapshot),
-    } as unknown as ReturnType<Config['getGoalRuntime']>;
-    mockConfig.getGoalRuntime = vi.fn(() => runtime);
-    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
-    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
-    const client = new MockedLlmClientClass(mockConfig);
-    mockSendMessageStream.mockReturnValueOnce(
-      (async function* () {
-        yield {
-          type: ServerLlmEventType.ToolCallRequest,
-          value: {
-            callId: 'update-goal-1',
-            name: 'update_goal',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-goal-complete',
-            goalContext: permit,
-          },
-        };
-      })(),
-    );
-    const { result } = renderHook(() =>
-      useLlmStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
-    );
-    await act(async () => {
-      await result.current.submitQuery(
-        'finish the Goal',
-        SendMessageType.UserQuery,
-        'prompt-goal-complete',
-      );
-    });
-    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
-    const responseParts: Part[] = [
-      {
-        functionResponse: {
-          id: 'update-goal-1',
-          name: 'update_goal',
-          response: { output: 'proposal recorded' },
+  it.each(['complete', 'paused'] as const)(
+    'finishes a Goal turn as %s without another model call after update_goal',
+    async (status) => {
+      const permit: GoalTurnPermit = {
+        goalId: 'goal-complete',
+        revision: 1,
+        turnId: 'turn-complete',
+      };
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const finishTurn = vi.fn().mockResolvedValue(undefined);
+      const completedSnapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'finish without another call',
+          status,
+          evidenceCursor: { recordId: 'record-complete' },
+          turnCount: 1,
+          activeTimeMs: 20,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
         },
-      },
-    ];
-
-    await act(async () => {
-      await capturedOnComplete?.([
+      };
+      const runtime = {
+        permitForTurn: vi.fn(() => permit),
+        finishTurn,
+        getSnapshot: vi.fn(() => completedSnapshot),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      mockConfig.getGoalRuntime = vi.fn(() => runtime);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+      const client = new MockedLlmClientClass(mockConfig);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'update-goal-1',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-goal-complete',
+              goalContext: permit,
+            },
+          };
+        })(),
+      );
+      const { result } = renderHook(() =>
+        useLlmStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'finish the Goal',
+          SendMessageType.UserQuery,
+          'prompt-goal-complete',
+        );
+      });
+      await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+      const responseParts: Part[] = [
         {
-          request: {
-            callId: 'update-goal-1',
+          functionResponse: {
+            id: 'update-goal-1',
             name: 'update_goal',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-goal-complete',
-            goalContext: permit,
+            response: { output: 'proposal recorded' },
           },
-          status: 'success',
-          responseSubmittedToLlm: false,
-          response: {
-            callId: 'update-goal-1',
-            responseParts,
-            errorType: undefined,
-            terminateTurn: true,
-          },
-          tool: { displayName: 'UpdateGoal' },
-          invocation: {
-            getDescription: () => 'complete Goal',
-          } as unknown as AnyToolInvocation,
-        } as TrackedCompletedToolCall,
-      ]);
-    });
+        },
+      ];
 
-    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['update-goal-1']);
-    expect(client.addHistory).toHaveBeenCalledWith({
-      role: 'user',
-      parts: responseParts,
-    });
-    expect(flush).toHaveBeenCalledOnce();
-    expect(finishTurn).toHaveBeenCalledWith(permit);
-    expect(mockAddItem).toHaveBeenCalledWith(
-      {
-        type: 'goal_state',
-        snapshot: completedSnapshot,
-        cause: 'complete',
-      },
-      expect.any(Number),
-    );
-    expect(mockSendMessageStream).toHaveBeenCalledOnce();
-    expect(mockEndInteractionSpan).toHaveBeenCalledWith('ok', {
-      promptId: 'prompt-goal-complete',
-    });
-  });
+      await act(async () => {
+        await capturedOnComplete?.([
+          {
+            request: {
+              callId: 'update-goal-1',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-goal-complete',
+              goalContext: permit,
+            },
+            status: 'success',
+            responseSubmittedToLlm: false,
+            response: {
+              callId: 'update-goal-1',
+              responseParts,
+              errorType: undefined,
+              terminateTurn: true,
+            },
+            tool: { displayName: 'UpdateGoal' },
+            invocation: {
+              getDescription: () => 'complete Goal',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['update-goal-1']);
+      expect(client.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: responseParts,
+      });
+      expect(flush).toHaveBeenCalledOnce();
+      expect(finishTurn).toHaveBeenCalledWith(permit);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'goal_state',
+          snapshot: completedSnapshot,
+          cause: status === 'paused' ? 'pause' : status,
+        },
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+      expect(mockEndInteractionSpan).toHaveBeenCalledWith('ok', {
+        promptId: 'prompt-goal-complete',
+      });
+    },
+  );
 
   it('records the Goal finalization error on the owning interaction', async () => {
     const permit: GoalTurnPermit = {
