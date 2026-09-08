@@ -1,7 +1,7 @@
 # Mem0 External Context Extension
 
-This package provides retrieval-only on-demand and Auto Recall profiles for
-administrator-configured Mem0-compatible HTTP services. It validates a closed
+This package provides on-demand search, Auto Recall, and an opt-in daemon
+writer for administrator-configured Mem0-compatible HTTP services. It validates a closed
 dialect grammar and uses a bounded HTTP request engine; it does not ship
 provider presets or provider-specific configuration.
 
@@ -193,9 +193,10 @@ that profile.
 5. If available, correlate the request with the upstream service access log
    without recording the credential or response body.
 
-The Extension is retrieval-only. Provision a disposable test record through an
-administrator-approved upstream path if a known record is not already
-available; the Extension itself cannot create or delete memories.
+The default Extension is retrieval-only. Provision a disposable test record
+through an administrator-approved upstream path if a known record is not
+already available. The separate writer below can create records when explicitly
+configured; this package does not provide a delete tool.
 
 ## Auto Recall profile
 
@@ -306,6 +307,154 @@ changes require restarting Qwen Code.
 - Startup and request errors are redacted and do not expose paths, endpoints,
   queries, credentials, or upstream response bodies.
 
+## Explicit writes for daemon workspaces
+
+The separate `dist/write-main.js` entry provides `context_remember({ content })`
+for trusted, registered daemon workspaces. It is never started by the default
+Extension manifest. Enable it only for workspaces that need writes; configure
+each workspace's endpoint, credential environment and scope independently.
+
+The tool accepts one exact string of at most 4000 Unicode code points. It rejects
+blank/control-only text and unpaired surrogates, preserves whitespace and Unicode,
+and sends one `POST` with `messages: [{"role":"user","content":...}]` and
+`infer: false`. The model cannot supply a scope, URL, credential, metadata,
+record ID or an alternative inference mode. Use it only when the user explicitly
+asks to save a memory. There is no automatic extraction, update, delete, polling
+or retry.
+
+### Configure the writer
+
+Create a separate instance file matching
+[`write-instance-config.schema.json`](./schemas/write-instance-config.schema.json):
+
+```json
+{
+  "schemaVersion": 4,
+  "repositoryRoot": "/workspace/project",
+  "dialectPath": "/etc/qwen/external-context/write.dialect.json",
+  "endpoint": {
+    "origin": "https://memory.example.com",
+    "basePath": "",
+    "allowInsecureHttp": false
+  },
+  "credentialEnv": "MEMORY_WRITE_API_KEY",
+  "scope": { "userId": "repository-memory" },
+  "timeoutMs": 10000
+}
+```
+
+V4 is accepted only by the writer; existing V2 search and V3 Auto Recall files
+retain their meanings. At least one fixed scope is required. The HTTP deadline
+is 100–30000 ms and covers the response body, starting after permission handling.
+The instance and dialect files must be absolute paths to regular files of at
+most 64 KiB. Startup validates the complete binding and canonical repository/cwd
+containment before reading the credential. It rejects filesystem roots and
+symlink escapes. Configuration is loaded once per writer process.
+
+The independent closed write dialect matches
+[`write-dialect.schema.json`](./schemas/write-dialect.schema.json):
+
+```json
+{
+  "writeDialectVersion": 1,
+  "id": "organization-memory-write-v1",
+  "auth": "authorization-token",
+  "create": {
+    "path": "/memories",
+    "userIdLocation": "json",
+    "agentIdLocation": "omit",
+    "appIdLocation": "omit"
+  },
+  "response": {
+    "completion": "records",
+    "collection": "results",
+    "idField": "id"
+  }
+}
+```
+
+These are unbranded templates, not service presets. Authentication uses the same
+three header options as search. Each scope location is `json` or `omit`, and must
+match the presence of its instance value. Responses select exactly one of
+`results`, `root-array` or `root-object`, with `id` or `memory_id`. For a service
+with top-level `status` and `event_id` acknowledgements, use
+`completion: "records-or-event"` with `collection: "results"`. Other combinations,
+request templates, scripts and arbitrary mappings are rejected.
+
+Apply [the workspace settings example](./examples/managed-daemon-write-workspace-settings.json)
+to the intended trusted workspace. Replace the absolute Node, package, config
+and workspace paths. Supply `MEMORY_WRITE_API_KEY` through that workspace's
+runtime environment; the example explicitly passes it to the MCP child through
+an environment reference. Do not store its actual value in settings or commit
+it. Complete the existing MCP configuration approval step before invoking the
+tool; approving a server configuration is separate from approving a write.
+
+Do not place one workspace's writer binding in daemon-global settings or child
+environment overrides. Session ownership selects the workspace runtime; the
+writer's fixed scope selects its corpus. Process cwd checks and invocation
+metadata are not tenant authorization. Trusted clients may override MCP
+configuration, and same-UID code is within the existing trust boundary.
+Conversations, temporary workspaces and automatic corpus switching on `/cd`
+are outside this first deployment profile. An existing writer continues using
+its configured corpus; use a session in the other configured workspace to switch.
+
+### Permissions and results
+
+The writer uses ordinary daemon MCP permissions. The example uses default
+approval mode, `trust: false` and an explicit `permissions.ask` rule. Web Shell
+shows the full literal parameter body when the permission has no dedicated
+content/diff preview; daemon SDK clients can read `toolCall.rawInput` from the
+existing permission request. Reply through the session-qualified permission
+API using that session's actual client ID. Replies select an offered option;
+`updatedInput` in a daemon client reply does not edit the submitted content.
+Reject and issue a new call to change the text.
+
+Explicit ask takes precedence over ordinary allow rules and hides always-allow
+choices. Existing YOLO and PermissionRequest Hook approval semantics still
+apply, so human approval requires a configuration without those automatic
+approvals. No additional PreToolUse confirmation Hook is installed: ACP treats
+its `ask` result as a denial rather than opening another dialog.
+
+| Result                             | Meaning                                                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `stored` + `memoryId`              | The provider returned exactly one valid new-record acknowledgement. Search indexing may still be pending.                                                          |
+| `accepted` + `providerOperationId` | The provider acknowledged an operation without a confirmed record ID. No polling or resubmission follows.                                                          |
+| `failed`                           | The writer did not submit an HTTP request. Check content/configuration before another attempt.                                                                     |
+| `unknown`                          | A request may have committed, including after timeout, cancellation, disconnection, non-2xx status or an invalid reply. Check the provider before another attempt. |
+
+Schema-invalid MCP calls can be rejected by MCP validation before execution.
+IDs are bounded literal strings; an operation ID is not a memory ID. Response
+bodies are capped at 1 MiB and errors never echo the upstream body. The tool is
+marked non-read-only and non-idempotent, preventing Core from transparently
+replaying it. A newly requested call can still create another record.
+
+A pending permission has not invoked the writer. Explicitly cancel the active
+prompt/session to cancel it. Closing a REST SSE subscription does not itself
+cancel a pending approval; Web Shell detachment follows the existing session
+lifecycle. The existing permission response timeout defaults to disabled and is
+separate from the writer HTTP timeout. Once HTTP submission begins, cancellation
+cannot roll back a remote write.
+
+End outstanding write calls before changing a binding, then restart its MCP
+server through the selected workspace's MCP management API. The pool fingerprint
+includes cwd/env, but changes to file contents at an unchanged config path do not
+automatically reload it. Check that the restarted process uses the new binding.
+
+### Verify a shared-memory deployment
+
+First validate the service's `infer: false` behavior in a disposable scope: exact
+whitespace/Unicode preservation, one added record, and no modification of an
+existing conflicting record. Record acknowledgements alone do not prove those
+semantics. Preserve the returned record IDs and clean up only those test records
+through the service's administration API.
+
+Then test a rejected and an approved writer call through daemon, observing zero
+and one provider write respectively. Configure the existing V2 `context_search`
+entry against the same corpus and verify that another client in a new session
+can retrieve the saved fact without putting the answer in its query. A different
+workspace's independent scope must remain isolated. Auto Recall integration with
+daemon is a separate validation and is not a prerequisite for this write profile.
+
 ## Troubleshooting
 
 | Symptom                                              | What to check                                                                                                                                                                     |
@@ -331,8 +480,9 @@ changes require restarting Qwen Code.
   scripts, logs, or shell history.
 - Every non-`omit` dialect scope has exactly one matching fixed instance value.
 - The deployment enables exactly one retrieval profile: v2 MCP or v3 Hook.
-- `/mcp` shows only `context_search` in the on-demand profile and no Mem0 MCP
-  server in the Auto Recall profile.
+- The read server exposes only `context_search`; the Auto Recall profile has
+  no read MCP server. An explicitly configured writer is a separate server
+  exposing only `context_remember`.
 - A known-record search succeeds. On-demand file changes take effect after
   restart; Auto Recall file changes take effect on the next eligible prompt.
 
