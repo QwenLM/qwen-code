@@ -34,6 +34,21 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
+  it('runs three Vitest forks on one Linux runner per sandbox', () => {
+    const linuxJob = yml.jobs['e2e-test-linux'];
+    const runStep = linuxJob.steps.find(
+      (step) => step.name === 'Run E2E tests',
+    );
+
+    expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
+    expect(runStep.run).toMatch(
+      /^\s*npx cross-env .*QWEN_SANDBOX=docker vitest run .*--poolOptions\.forks\.maxForks=3/m,
+    );
+    expect(runStep.run).toMatch(
+      /^\s*QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- .*--poolOptions\.forks\.maxForks=3/m,
+    );
+  });
+
   describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
     const setupStep = steps.find((step) => step.name === 'Set up Docker');
@@ -193,7 +208,7 @@ describe('e2e workflow', () => {
       // shard and exclude coverage lives only in this argument list. The
       // excludes are shared verbatim with the docker leg above.
       expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'",
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}'",
       );
     });
 

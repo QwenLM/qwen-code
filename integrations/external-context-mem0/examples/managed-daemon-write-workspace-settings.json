@@ -1,0 +1,25 @@
+{
+  "$version": 4,
+  "tools": {
+    "approvalMode": "default"
+  },
+  "permissions": {
+    "ask": ["mcp__external-context-mem0-write__context_remember"]
+  },
+  "mcpServers": {
+    "external-context-mem0-write": {
+      "command": "/absolute/path/to/node",
+      "args": [
+        "/administrator/path/to/external-context-mem0/dist/write-main.js"
+      ],
+      "cwd": "/workspace/project",
+      "env": {
+        "QWEN_EXTERNAL_CONTEXT_MEM0_WRITE_CONFIG": "/etc/qwen/external-context/write.instance.json",
+        "MEMORY_WRITE_API_KEY": "${MEMORY_WRITE_API_KEY}"
+      },
+      "includeTools": ["context_remember"],
+      "alwaysLoadTools": true,
+      "trust": false
+    }
+  }
+}
