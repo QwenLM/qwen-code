@@ -1,0 +1,13 @@
+.root {
+  container-type: inline-size;
+}
+
+.navigation {
+  display: none;
+}
+
+@container (min-width: 600px) {
+  .navigation {
+    display: flex;
+  }
+}
