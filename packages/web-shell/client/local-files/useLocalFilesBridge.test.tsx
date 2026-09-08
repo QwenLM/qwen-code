@@ -1195,6 +1195,367 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it("keeps the connect's needs-gesture write when a declined revoke's reconcile runs from its finally", async () => {
+    const perms = { query: 'granted' as PermissionState };
+    const handle = fakeHandle('ai_coding', perms);
+    const store = fakeStore(handle);
+    const delayResolvers: Array<() => void> = [];
+    let releaseRequest!: (state: PermissionState) => void;
+    const requestGate = new Promise<PermissionState>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: exclusiveLocks(),
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    for (let i = 0; i < 8 && hB.get().status.phase !== 'held-elsewhere'; i++) {
+      delayResolvers.shift()?.();
+      await hB.flush();
+    }
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    const disconnecting = hB.get().disconnect();
+    await hB.flush();
+    // A holds the lock throughout: every attempt declines. The user
+    // reconnects inside the arbitration window and the permission re-ask
+    // keeps the connect in flight when the arbitration settles, so the
+    // reconcile is handed to the connect's finally.
+    perms.query = 'prompt';
+    vi.mocked(handle.requestPermission).mockImplementation(() => requestGate);
+    const connecting = hB.get().connect();
+    await hB.flush();
+    await hB.flush();
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await hB.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    // The re-ask consumed the click's activation and answered prompt: the
+    // connect commits needs-gesture itself, and the parked reconcile must
+    // leave that write — the panel's only reconnect affordance — alone.
+    releaseRequest('prompt');
+    await act(async () => {
+      await connecting;
+    });
+    await hB.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(hB.get().status).toEqual({
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    hA.unmount();
+    hB.unmount();
+  });
+
+  it("keeps the connect's needs-gesture write when a declined revoke reconciles after the connect settled", async () => {
+    const handle = fakeHandle('ai_coding', {
+      query: 'prompt',
+      request: 'prompt',
+    });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 10 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The settling release declines every attempt; the reconnect runs to
+    // completion inside the inter-attempt delay, so its needs-gesture
+    // write is the last authoritative status before the tail reconciles.
+    await act(async () => {
+      await h.get().connect();
+    });
+    expect(h.get().status).toEqual({
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await h.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toEqual({
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it("keeps the reconnect's needs-session write when a declined revoke's reconcile runs from its finally", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    // The re-save fails soft and writes nothing (the store's own contract),
+    // so the connect leaves without saving — but it did commit a status.
+    store.save = async () => false;
+    const lock = { held: false, settling: 10 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The permission re-query keeps the connect in flight when every
+    // arbitration attempt has declined, so the reconcile parks on its
+    // finally.
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    vi.mocked(handle.queryPermission).mockImplementation(() => queryGate);
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await h.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    // The re-query answers granted: with no session the connect parks the
+    // handle and commits needs-session, and the reconcile must not restore
+    // the pre-click idle over it.
+    releaseQuery('granted');
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it("keeps the picked grant's needs-session write when a declined revoke's reconcile runs from its finally", async () => {
+    const store = fakeStore();
+    store.save = async () => false;
+    const lock = { held: false, settling: 10 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    let resolvePicker!: (value: FileSystemDirectoryHandle) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>((resolve) => {
+      resolvePicker = resolve;
+    });
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('idle');
+
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The picker keeps the connect in flight when every arbitration
+    // attempt has declined, so the reconcile parks on its finally.
+    const connecting = h.get().connect();
+    await h.flush();
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await h.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    // The pick lands but the save fails soft: the connect still commits
+    // needs-session for its own grant, and the reconcile must not flatten
+    // it to the pre-click idle.
+    resolvePicker(fakeHandle('new_dir', { query: 'granted' }));
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(h.get().status).toEqual({
+      phase: 'needs-session',
+      blocker: null,
+      rootName: 'new_dir',
+    });
+    h.unmount();
+  });
+
+  it("keeps the connect's picker-failure write when a declined revoke's reconcile runs from its finally", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 10 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => {
+        throw new DOMException('Blocked by policy', 'SecurityError');
+      }),
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The permission re-query keeps the connect in flight when every
+    // arbitration attempt has declined, so the reconcile parks on its
+    // finally.
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    vi.mocked(handle.queryPermission).mockImplementation(() => queryGate);
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await h.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    // The denied re-query falls through to the picker, which fails: the
+    // connect commits the failure itself, and the reconcile must not
+    // restore the pre-click idle over it.
+    releaseQuery('denied');
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toMatchObject({
+      phase: 'failed',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it("keeps the connect's picker-unavailable write when a declined revoke's reconcile runs from its finally", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 10 };
+    const delayResolvers: Array<() => void> = [];
+    const locks: LockManagerLike = settlingLocks(lock);
+    const win = secureWindow(async () => handle);
+    const h = render({
+      sessionId: undefined,
+      baseUrl: 'https://daemon.example/',
+      win,
+      store,
+      locks,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          delayResolvers.push(resolve);
+        }),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The picker vanishes after the mount's probe: the connect's own
+    // re-detection reports unavailable. The re-query keeps the connect in
+    // flight when every arbitration attempt has declined, so the
+    // reconcile parks on its finally.
+    win.showDirectoryPicker = undefined;
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    vi.mocked(handle.queryPermission).mockImplementation(() => queryGate);
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    for (let i = 0; i < 8 && delayResolvers.length > 0; i++) {
+      delayResolvers.shift()?.();
+      await h.flush();
+    }
+    await act(async () => {
+      await disconnecting;
+    });
+    releaseQuery('denied');
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'unsupported-browser',
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
   it('revokes when a post-disconnect connect leaves without saving', async () => {
     // Empty store: a connect with nothing stored falls through to the
     // native picker, the only connect path that can leave without saving.
@@ -1535,6 +1896,62 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     // The soft-failed save left the original record in place, and the
     // deferred revoke reaches it.
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
+  it('revokes when the deferred reconnect only attempted to re-save the stored grant', async () => {
+    const perms = { query: 'denied' as PermissionState };
+    const handle = fakeHandle('ai_coding', perms);
+    const store = fakeStore(handle);
+    // The re-save fails soft and writes nothing (the store's own contract),
+    // so the record is not the reconnect's own grant and the reconnect must
+    // not stamp the saved flag that vetoes the pending revoke.
+    store.save = async () => false;
+    const lock = { held: false, settling: 1 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: () => delayGate,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    // Attempt 0 declined on the settling release; the user reconnects
+    // inside the window and the permission re-query keeps the connect in
+    // flight when attempt 1 lands, so the revoke defers.
+    let releaseQuery!: (state: PermissionState) => void;
+    const queryGate = new Promise<PermissionState>((resolve) => {
+      releaseQuery = resolve;
+    });
+    vi.mocked(handle.queryPermission).mockImplementation(() => queryGate);
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    // The re-query answers granted: the reconnect binds a live bridge, but
+    // the soft-failed re-save wrote nothing — the deferred revoke must
+    // still reach the record the user asked to release.
+    releaseQuery('granted');
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
     expect(store.clears).toBe(1);
     expect(await store.load()).toBeUndefined();
     h.unmount();
@@ -2074,6 +2491,106 @@ describe('useLocalFilesBridge restore', () => {
       rootName: 'ai_coding',
     });
     expect(await store.load()).toBe(handle);
+    h.unmount();
+  });
+
+  it("keeps the disconnect's idle write when the picker-failure name read settles behind it", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    // Gate only the failure branch's name read: load 1 is restore's, load
+    // 2 the connect's stored-handle read, load 3 the failure branch's.
+    const baseLoad = store.load;
+    let loads = 0;
+    store.load = async () => {
+      loads += 1;
+      if (loads === 3) await loadGate;
+      return baseLoad();
+    };
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => {
+        throw new DOMException('Blocked by policy', 'SecurityError');
+      }),
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'ai_coding',
+    });
+
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    // The picker failed and the connect parked on the gated name read; a
+    // disconnect landing in that window completes and must own the panel.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    releaseLoad();
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+    h.unmount();
+  });
+
+  it("keeps the disconnect's idle write when the picker-unavailable name read settles behind it", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    // Gate only the unavailable branch's name read: load 1 is restore's,
+    // load 2 the connect's stored-handle read, load 3 the branch's.
+    const baseLoad = store.load;
+    let loads = 0;
+    store.load = async () => {
+      loads += 1;
+      if (loads === 3) await loadGate;
+      return baseLoad();
+    };
+    const win = secureWindow(async () => handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win,
+      store,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toMatchObject({
+      phase: 'needs-gesture',
+      rootName: 'ai_coding',
+    });
+
+    // The picker vanishes after the mount's probe: the connect's own
+    // re-detection reports unavailable and parks on the gated name read.
+    win.showDirectoryPicker = undefined;
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    releaseLoad();
+    await act(async () => {
+      await connecting;
+    });
+    await h.flush();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
     h.unmount();
   });
 

@@ -202,8 +202,22 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * one started afterwards (which can).
    */
   const connectGenerationRef = useRef(0);
-  /** True once the in-flight connect has persisted its pick or stored handle. */
+  /**
+   * True once the in-flight connect has persisted its pick or stored
+   * handle. Both save sites stamp save()'s outcome, never the attempt: a
+   * soft-failed save wrote nothing, so the record is not this connect's
+   * own grant and must not veto a pending revoke (the clear() sibling in
+   * disconnect honours the same boolean). `?? true`: with no store there
+   * is nothing to veto over.
+   */
   const connectSavedRef = useRef(false);
+  /**
+   * True once the in-flight connect committed a panel status of its own,
+   * so a revoke reconcile handed to its finally restores the pre-click
+   * panel only when the connect wrote nothing (a dismissed picker) —
+   * never over the connect's own needs-gesture/failed/unavailable write.
+   */
+  const connectWroteStatusRef = useRef(false);
   /**
    * A revoke — or just its panel reconcile — handed to a connect's finally
    * because that connect may still write.
@@ -482,6 +496,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     const generation = generationRef.current;
     connectGenerationRef.current = generation;
     connectSavedRef.current = false;
+    connectWroteStatusRef.current = false;
     const stale = () => generationRef.current !== generation;
     try {
       // A peer tab's disconnect clears the store without signaling this tab:
@@ -500,9 +515,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         if (stale()) return;
         if (permission.state === 'granted') {
-          await store?.save(stored);
-          connectSavedRef.current = true;
+          connectSavedRef.current = (await store?.save(stored)) ?? true;
           if (stale()) return;
+          connectWroteStatusRef.current = true;
           startBridge(stored);
           return;
         }
@@ -513,6 +528,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // holds, and an ungranted handle would register tools whose every
         // call the browser rejects.
         if (permission.requested) {
+          connectWroteStatusRef.current = true;
           setStatus({
             phase: 'needs-gesture',
             blocker: null,
@@ -530,6 +546,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // Name the record-backed grant: the failure write must not hide the
         // panel's Disconnect, the only revoke path, over a persisted handle.
         const rootName = (await store?.load())?.name;
+        if (stale()) return;
+        connectWroteStatusRef.current = true;
         setStatus({
           phase: 'unavailable',
           blocker: result.blocker,
@@ -539,6 +557,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       }
       if (result.kind === 'failed') {
         const rootName = (await store?.load())?.name;
+        if (stale()) return;
+        connectWroteStatusRef.current = true;
         setStatus({
           phase: 'failed',
           blocker: null,
@@ -547,12 +567,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         return;
       }
-      // Stamp the outcome, not the attempt: a soft-failed save wrote nothing,
-      // so the record is not this connect's own grant and must not veto a
-      // pending revoke (the clear() sibling in disconnect honours the same
-      // boolean). `?? true`: with no store there is nothing to veto over.
       connectSavedRef.current = (await store?.save(result.handle)) ?? true;
       if (stale()) return;
+      connectWroteStatusRef.current = true;
       startBridge(result.handle);
     } finally {
       connectInFlightRef.current = false;
@@ -744,17 +761,24 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     if (connectGenerationRef.current >= generation) {
       if (connectSavedRef.current) return;
       if (connectInFlightRef.current) {
-        // The connect has written nothing yet: hand the reconcile to its
-        // finally, which runs it only when the connect leaves without
-        // saving — the one connect exit that commits no status of its own.
+        // The connect is still out: hand the reconcile to its finally,
+        // which runs it only when the connect leaves without saving. The
+        // closure then re-checks what the connect committed: a dismissed
+        // picker wrote nothing, so the pre-click panel is restored; a
+        // needs-gesture/failed/unavailable exit wrote the authoritative
+        // status itself and must stand.
         deferredRevokeRef.current = true;
         pendingRevokeRef.current = async () => {
           if (revokeGenerationRef.current !== revokeGeneration) return false;
+          if (connectWroteStatusRef.current) return false;
           setStatus(unclearedStatus(declined));
           return false;
         };
         return;
       }
+      // A connect that already settled committed its status itself; the
+      // pre-click panel is restored only over a connect that wrote nothing.
+      if (connectWroteStatusRef.current) return;
     }
     setStatus(unclearedStatus(declined));
   }, [capability.blocker, stopBridge, store]);
