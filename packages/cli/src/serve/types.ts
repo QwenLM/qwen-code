@@ -62,10 +62,11 @@ export interface ServeOptions {
    * (developer convenience). On a non-loopback bind with neither this option
    * nor QWEN_SERVER_TOKEN set, runQwenServe generates an ephemeral bearer and
    * prints it once instead of refusing; read it back from
-   * `RunHandle.resolvedToken` — the only programmatic channel, since the
-   * value is never exported to the environment. An explicitly empty value is
-   * a supplied source, not an absent one, and still fails the remote-bind
-   * check.
+   * `RunHandle.resolvedToken` — the only programmatic channel: the generated
+   * value is never written back into `QWEN_SERVER_TOKEN` in the daemon's own
+   * environment (spawned channel workers receive it as `QWEN_DAEMON_TOKEN`).
+   * An explicitly empty value is a supplied source, not an absent one, and
+   * still fails the remote-bind check.
    */
   token?: string;
   mode: ServeMode;

@@ -8,6 +8,8 @@ import request from 'supertest';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import type { Server } from 'node:http';
+import net from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import { installRemoteSelfOriginMiddleware } from './self-origin.js';
 import { bearerAuth, denyBrowserOriginCors } from '../auth.js';
@@ -37,6 +39,7 @@ describe('remote same-origin authentication', () => {
   it.each([
     'null',
     'http://evil.test',
+    'https://evil.test',
     'https://192.168.1.2:4170',
     'http://192.168.1.2:4170/',
     'http://192.168.1.2:4171',
@@ -52,7 +55,8 @@ describe('remote same-origin authentication', () => {
   });
   // Non-canonical authorities Node's URL parser accepts: the string compare
   // matches (Host equals Origin), so only the re-parse guard rejects them.
-  it.each(['192.168.1.2.:4170', 'u:p@192.168.1.2:4170'])(
+  // '[::1' additionally exercises the catch arm — its URL never parses.
+  it.each(['192.168.1.2.:4170', 'u:p@192.168.1.2:4170', '[::1'])(
     'keeps the wall for the non-canonical authority %s',
     async (authority) => {
       const response = await request(app())
@@ -63,6 +67,39 @@ describe('remote same-origin authentication', () => {
       expect(response.status).toBe(403);
     },
   );
+  it('keeps the wall for a hostless HTTP/1.0 request carrying Origin', async () => {
+    const handler = express();
+    installRemoteSelfOriginMiddleware(handler, '0.0.0.0', 'secret');
+    handler.use(denyBrowserOriginCors);
+    handler.post('/probe', (_req, res) => res.sendStatus(204));
+    const server = createServer(handler);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      // supertest always sends Host, so drive the raw socket: HTTP/1.0 with
+      // an Origin but no Host line must not blow up the guard's Host read.
+      const port = (server.address() as AddressInfo).port;
+      const raw = await new Promise<string>((resolve, reject) => {
+        let data = '';
+        const socket = net.connect(port, '127.0.0.1', () => {
+          socket.write(
+            'POST /probe HTTP/1.0\r\n' +
+              'Origin: http://192.168.1.2:4170\r\n' +
+              'Authorization: Bearer secret\r\n' +
+              'Content-Length: 0\r\n' +
+              'Connection: close\r\n\r\n',
+          );
+        });
+        socket.on('data', (chunk) => (data += chunk));
+        socket.on('end', () => resolve(data));
+        socket.on('error', reject);
+      });
+      expect(raw).toContain('403');
+    } finally {
+      server.close();
+    }
+  });
   it('allows public module scripts but keeps APIs and mutations authenticated', async () => {
     const result = express();
     installRemoteSelfOriginMiddleware(result, '0.0.0.0', 'secret');
@@ -155,6 +192,16 @@ describe('remote same-origin Host normalization', () => {
       .post('/probe')
       .set('Host', '192.168.1.2:80')
       .set('Origin', 'http://192.168.1.2:80')
+      .set('Authorization', 'Bearer secret');
+    expect(response.status).toBe(403);
+  });
+  it('keeps the wall when only the other scheme default port would strip', async () => {
+    // :443 is not the http default port — only the scheme's own default port
+    // may be stripped, so this Origin must never match a :443 Host.
+    const response = await request(app())
+      .post('/probe')
+      .set('Host', '192.168.1.2:443')
+      .set('Origin', 'http://192.168.1.2')
       .set('Authorization', 'Bearer secret');
     expect(response.status).toBe(403);
   });
@@ -294,6 +341,19 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
           .set('Authorization', 'Bearer secret');
         expect(response.status).toBe(403);
       }
+    });
+  });
+
+  it('never strips :80 from an https Host', async () => {
+    // The crossed arm of the http :443 pin: only the scheme's own default
+    // port may be stripped, so an :80 Host under https never matches.
+    await withTlsServer(async (server) => {
+      const response = await request(server)
+        .post('/probe')
+        .set('Host', '192.168.1.2:80')
+        .set('Origin', 'https://192.168.1.2')
+        .set('Authorization', 'Bearer secret');
+      expect(response.status).toBe(403);
     });
   });
 });

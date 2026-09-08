@@ -322,6 +322,11 @@ it('prints the generated bearer line verbatim, exactly once', async () => {
       call[0].includes('gen-token-abc'),
     ),
   ).toHaveLength(1);
+  // Positive direction of the TLS mirror above: the plaintext warning is
+  // printed on a non-TLS bind, not merely absent under TLS.
+  expect(mocks.line).toHaveBeenCalledWith(
+    expect.stringContaining('HTTP is unencrypted'),
+  );
 });
 
 it('prints only the bearer and the loopback note on a loopback bind', async () => {

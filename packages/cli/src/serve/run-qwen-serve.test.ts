@@ -9442,21 +9442,26 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),
     );
     writeWebShellFixture(tmpDir);
-    const { handle } = await startDeferredDaemon(tmpDir, {
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
       serveOptions: { hostname: '0.0.0.0' },
     });
     try {
-      // The runtime is not mounted yet, so these hit the bootstrap app: the
-      // same-origin exception must already be live there, or the gate's
-      // cold-window probes dead-end on the CORS wall's 403.
+      // Pin the premises, not just the statuses: the daemon really bound the
+      // wildcard, and every request below is answered by the bootstrap app —
+      // the runtime bridge has not started, so a widened deferred-route
+      // classifier or a dropped override flips these instead of silently
+      // turning the test into a loopback/warm-app probe.
+      expect(new URL(handle.url).hostname).toBe('0.0.0.0');
+      // The single-workspace bootstrap capabilities handler answers 200; a
+      // multi-workspace boot would be 503, which the guard's own retry loop
+      // tolerates but this exception test is not about.
       const authed = await fetch(`${handle.url}/capabilities`, {
         headers: {
           Origin: handle.url,
           Authorization: 'Bearer secret-token',
         },
       });
-      expect(authed.status).not.toBe(403);
-      expect(authed.status).not.toBe(401);
+      expect(authed.status).toBe(200);
       const unauthed = await fetch(`${handle.url}/capabilities`, {
         headers: { Origin: handle.url },
       });
@@ -9468,6 +9473,7 @@ describe('runQwenServe runtime startup failures', () => {
         },
       });
       expect(crossOrigin.status).toBe(403);
+      expect(createBridge).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }
@@ -12770,6 +12776,27 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('boots non-loopback --allow-origin with a remote HTTP(S) origin on the generated bearer', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['https://app.example.com'],
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(started.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
   it('refuses --require-auth and --allow-origin * on a tokenless loopback bind', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
     try {
@@ -12793,6 +12820,18 @@ describe('runQwenServe channel worker supervisor', () => {
             mode: 'http-bridge',
             serveWebShell: false,
             allowOrigins: ['*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/--allow-origin/);
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['https://app.example.com'],
           },
           { bridge: makeFakeBridge() },
         ),
@@ -12845,10 +12884,12 @@ describe('runQwenServe channel worker supervisor', () => {
         code: 'EPIPE',
       });
       expect(() => process.stdout.emit('error', epipe)).not.toThrow();
+      expect(() => process.stderr.emit('error', epipe)).not.toThrow();
       const other = Object.assign(new Error('stream boom'), {
         code: 'ENOENT',
       });
       expect(() => process.stdout.emit('error', other)).toThrow('stream boom');
+      expect(() => process.stderr.emit('error', other)).toThrow('stream boom');
     } finally {
       await started?.close();
     }
