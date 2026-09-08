@@ -12892,6 +12892,27 @@ describe('applyWorkspaceAgentPersona', () => {
     ).toThrow(/only be applied to an agent session/);
   });
 
+  it('enforces the persona tool subset without widening the read-only ceiling', async () => {
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('Read only', 'alice', [
+      'read_file',
+      'thread_review',
+      'write_file',
+    ]);
+    const guard = config.getToolInvocationGuard()!;
+    for (const toolName of ['read_file', 'thread_review', 'write_file', 'glob']) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(
+        toolName === 'read_file' || toolName === 'thread_review',
+      );
+    }
+  });
+
   it('refuses on a session belonging to another source', () => {
     const config = new Config(baseParams);
     config.setSessionSource('agent-host', 'ws_1');

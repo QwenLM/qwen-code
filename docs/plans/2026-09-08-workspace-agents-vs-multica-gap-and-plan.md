@@ -4,6 +4,22 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Session capability wiring follow-up
+
+The replacement session path previously applied only the resolved prompt.
+It now also passes the existing `toolConfig.executionAllowedTools` to Config;
+the scheduler-facing guard intersects that set with the existing capability
+classification and preserves host-policy denials. Ordinary sessions retain
+their previous guard. This is tool-call policy, not OS isolation or a claim
+about initialization hooks/MCP discovery.
+
+A direct source check observed read_file/thread_review allowed and write_file,
+run_shell_command, save_memory, an unknown MCP name, and an omitted glob denied.
+It also observed an upstream denial preserved and an ordinary Config unchanged.
+The scheduler's existing pre-execution call site was inspected; model-driven
+negative-path and full reliability acceptance are still outstanding. No build
+or local CI ran. Model override application remains a separate unresolved wire.
+
 #### Live follow-up (supersedes the startup blocker below)
 
 The source dev loader now resolves ACP bridge exports from this worktree, not

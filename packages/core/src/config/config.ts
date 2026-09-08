@@ -185,6 +185,7 @@ import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { createAgentToolInvocationGuard } from '../agents/workspace-agents/capability.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -2166,6 +2167,7 @@ export class Config {
   private readonly question: string | undefined;
   private systemPrompt: string | undefined;
   private workspaceAgentName: string | undefined;
+  private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -4408,17 +4410,19 @@ export class Config {
    * Gives this session the persona of the workspace agent it *is*.
    *
    * The bridge's spawn request carries no persona, so an agent session is told
-   * only its identity and resolves the rest itself at boot. This is the one
-   * write it needs: `getMainSessionBaseSystemPrompt` already prefers
-   * `systemPrompt` over the default core prompt, so the prompt half needs no
-   * new machinery, and tools and model are applied by the caller through
-   * `deriveConfig`, which already overrides both.
+   * only its identity and resolves the rest itself at boot. The main prompt
+   * reads systemPrompt, and the tool guard intersects the resolved execution
+   * allowlist with the workspace-agent capability ceiling and host policy.
    *
    * Refuses on anything but an agent session, and refuses a second call. A
    * session's prompt is part of what its transcript means; changing it under a
    * running conversation would make the record a lie.
    */
-  applyWorkspaceAgentPersona(systemPrompt: string, agentName: string): void {
+  applyWorkspaceAgentPersona(
+    systemPrompt: string,
+    agentName: string,
+    executionAllowedTools?: readonly string[],
+  ): void {
     if (this.sessionSourceType !== 'agent') {
       throw new Error(
         'A workspace-agent persona may only be applied to an agent session.',
@@ -4431,6 +4435,9 @@ export class Config {
     }
     this.systemPrompt = systemPrompt;
     this.workspaceAgentName = agentName;
+    this.workspaceAgentExecutionAllowedTools = executionAllowedTools
+      ? new Set(executionAllowedTools)
+      : undefined;
   }
 
   /**
@@ -9329,7 +9336,12 @@ export class Config {
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
-    return this.toolInvocationGuard;
+    return this.sessionSourceType === 'agent'
+      ? createAgentToolInvocationGuard(
+          this.toolInvocationGuard,
+          this.workspaceAgentExecutionAllowedTools,
+        )
+      : this.toolInvocationGuard;
   }
 
   /**

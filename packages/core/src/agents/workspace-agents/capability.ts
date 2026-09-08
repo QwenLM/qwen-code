@@ -134,6 +134,7 @@ export function buildAgentToolConfig(definition?: ToolConfig): ToolConfig {
 
 export function createAgentToolInvocationGuard(
   upstream?: ToolInvocationGuard,
+  executionAllowedTools?: ReadonlySet<string>,
 ): ToolInvocationGuard {
   return async (context) => {
     if (upstream) {
@@ -145,7 +146,11 @@ export function createAgentToolInvocationGuard(
     }
 
     const classification = classifyAgentTool(context.toolName);
-    if (classification === 'deny') {
+    if (
+      classification === 'deny' ||
+      (executionAllowedTools !== undefined &&
+        !executionAllowedTools.has(context.toolName))
+    ) {
       return {
         allowed: false,
         reason: `Tool "${context.toolName}" is outside this subsystem read-only capability boundary.`,

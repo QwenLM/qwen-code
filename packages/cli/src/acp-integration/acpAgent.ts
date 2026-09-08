@@ -14076,6 +14076,7 @@ class QwenAgent implements Agent {
         config.applyWorkspaceAgentPersona(
           persona.systemPrompt,
           persona.agent.name,
+          persona.toolConfig.executionAllowedTools,
         );
       }
       this.assertManagedSessionAdmission();
