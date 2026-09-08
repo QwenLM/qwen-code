@@ -4171,7 +4171,7 @@ describe('WebShellSidebar non-primary archive', () => {
     expect(archiveItem).toBeDefined();
     expect(archiveItem?.getAttribute('data-disabled')).not.toBeNull();
     expect(archiveItem?.title).toBe(
-      'A running session cannot be archived; archiving would end its turn',
+      'A running session cannot be archived; archiving would stop its work',
     );
 
     await act(async () => {
