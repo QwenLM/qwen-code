@@ -27,8 +27,8 @@ import {
   clearReviewWorktreeLease,
   isReviewLeaseFile,
   readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
-  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import { redirectedAncestor } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
@@ -723,11 +723,31 @@ export function runCleanup(target: string): void {
     process.exitCode = 1;
     return;
   }
+  // Capture the root once, at entry, and hand it to the walks below as an
+  // explicit stopAt: `redirectedAncestor`'s default stop reads process.cwd()
+  // in the CALLER's frame — outside the walk's own try — and REVIEW_TMP_DIR
+  // is a relative spelling, so a launch directory deleted out from under the
+  // process (an operator `rm -rf` mid-review, the nested geometry) threw
+  // uv_cwd out of this best-effort sweep before any degradation could run.
+  // With no live cwd the relative root cannot be resolved at all, so degrade
+  // with an explanation rather than sweeping.
+  let repositoryRoot: string;
+  try {
+    repositoryRoot = process.cwd();
+  } catch (err) {
+    writeStderrLine(
+      `Refusing to clean: the working directory no longer exists ` +
+        `(${(err as Error).message}), and ${REVIEW_TMP_DIR} is resolved ` +
+        `against it. Re-run from a live directory.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   // Before anything is deleted: the whole temp dir hangs off one path, and a
   // symlink anywhere above it redirects EVERY sweep below — the scratch family,
   // the base-tree lock, the side files. The scratch sweep alone used to answer
   // this, which announced the hazard and then kept deleting under it.
-  const redirected = redirectedAncestor(REVIEW_TMP_DIR);
+  const redirected = redirectedAncestor(REVIEW_TMP_DIR, repositoryRoot);
   if (redirected !== null) {
     writeStderrLine(
       `Refusing to clean: ${redirected} is a symlink, so every delete under ` +
@@ -763,12 +783,12 @@ export function runCleanup(target: string): void {
     // receipts it never wrote. Skip the whole target: worktree, siblings,
     // branch, side files, audit, and the lease itself all belong to the
     // holder until its own cleanup releases them.
-    const holder = readReviewWorktreeLease(process.cwd(), target);
-    if (reviewLeaseHeldByAnotherSession(holder)) {
+    const holder = readReviewWorktreeLeaseAt(repositoryRoot, target);
+    if (holder && reviewLeaseHeldByAnotherSession(holder.lease)) {
       writeStdoutLine(
         `note: skipped cleanup for "${target}" — another review session ` +
-          `(session ${holder.sessionId}) still holds the worktree lease at ` +
-          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `(session ${holder.lease.sessionId}) still holds the worktree lease at ` +
+          `${holder.path}. Its own cleanup ` +
           `releases the lease when it finishes; if that session is gone, ` +
           `delete the lease file and re-run to force cleanup.`,
       );
@@ -783,7 +803,10 @@ export function runCleanup(target: string): void {
     // of this function ran BEFORE it. A link that appears at any component of
     // the temp path during that window redirects every delete below it, so the
     // same refusal is re-taken here rather than assumed to still hold.
-    const redirectedAfterAudit = redirectedAncestor(REVIEW_TMP_DIR);
+    const redirectedAfterAudit = redirectedAncestor(
+      REVIEW_TMP_DIR,
+      repositoryRoot,
+    );
     if (redirectedAfterAudit !== null) {
       writeStderrLine(
         `Refusing to clean: ${redirectedAfterAudit} became a symlink during ` +
@@ -797,7 +820,7 @@ export function runCleanup(target: string): void {
     // A lease can appear during the same window (a review that started after
     // the gate above read none). Re-check before destroying anything and take
     // the same skip path (#9205).
-    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    const holderAfterAudit = readReviewWorktreeLease(repositoryRoot, target);
     if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
       writeStdoutLine(
         `note: skipped cleanup for "${target}" — a review session ` +
@@ -959,6 +982,21 @@ export function runCleanup(target: string): void {
         failedAny = true;
         failedDestruction = true;
       }
+    } else if (branchProbe.status !== 1) {
+      // With `--verify --quiet`, exit 1 is the ONLY genuine absence — and it
+      // stays silent, per the idempotency contract at the top of this file.
+      // Every other non-answer — the probe's null status ("the command could
+      // not be run at all": spawn ENOENT, the timeout kill), a 128 fatal
+      // from a corrupt .git — used to fall through this chain exactly like
+      // the exit-1 case: the delete was silently skipped, the lease released,
+      // and "Nothing to clean" printed over a surviving branch. Name the
+      // non-answer and hold the lease, the same as a refused probe.
+      writeStderrLine(
+        `Failed to delete branch ${branch}: git could not answer whether ` +
+          `it exists (exit ${branchProbe.status})`,
+      );
+      failedAny = true;
+      failedDestruction = true;
     }
   }
 
@@ -1082,7 +1120,7 @@ export function runCleanup(target: string): void {
   }
 
   if (!failedDestruction) {
-    clearReviewWorktreeLease(process.cwd(), target);
+    clearReviewWorktreeLease(repositoryRoot, target);
   }
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
