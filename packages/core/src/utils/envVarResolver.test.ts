@@ -58,6 +58,18 @@ describe('resolveEnvVarsInString', () => {
     expect(result).toBe('Value is ${UNDEFINED_VAR}');
   });
 
+  it.each([
+    ['session_id', '${session_id}'],
+    ['session_id', '$session_id'],
+    ['QWEN_CODE_SESSION_ID', '${QWEN_CODE_SESSION_ID}'],
+    ['QWEN_CODE_SESSION_ID', '$QWEN_CODE_SESSION_ID'],
+    ['qwen_code_session_id', '${qwen_code_session_id}'],
+  ])('preserves the runtime session ID placeholder %s', (name, input) => {
+    process.env[name] = 'environment-session';
+
+    expect(resolveEnvVarsInString(input)).toBe(input);
+  });
+
   describe('Qwen-internal secrets', () => {
     beforeEach(() => {
       process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';

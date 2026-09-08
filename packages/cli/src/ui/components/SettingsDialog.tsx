@@ -27,6 +27,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  nextBooleanSettingValue,
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
@@ -247,7 +248,10 @@ export function SettingsDialog({
           const currentValue = getEffectiveValue(key, pendingSettings, {});
           let newValue: SettingsValue;
           if (definition?.type === 'boolean') {
-            newValue = !(currentValue as boolean);
+            newValue = nextBooleanSettingValue(
+              currentValue,
+              definition.default,
+            );
             setPendingSettings((prev) =>
               setPendingSettingValue(key, newValue as boolean, prev),
             );
@@ -980,12 +984,10 @@ export function SettingsDialog({
             const defaultValue = getDefaultValue(currentSetting.value);
             const defType = currentSetting.type;
             if (defType === 'boolean') {
-              const booleanDefaultValue =
-                typeof defaultValue === 'boolean' ? defaultValue : false;
               setPendingSettings((prev) =>
-                setPendingSettingValue(
+                setPendingSettingValueAny(
                   currentSetting.value,
-                  booleanDefaultValue,
+                  defaultValue,
                   prev,
                 ),
               );
@@ -1008,17 +1010,24 @@ export function SettingsDialog({
               }
             }
 
-            // Remove from modified settings since it's now at default
+            const existedInScope = !isDefaultValue(
+              currentSetting.value,
+              settings.forScope(selectedScope).settings,
+            );
             setModifiedSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (existedInScope) updated.add(currentSetting.value);
+              else updated.delete(currentSetting.value);
               return updated;
             });
 
-            // Remove from restart-required settings if it was there
             setRestartRequiredSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (existedInScope && requiresRestart(currentSetting.value)) {
+                updated.add(currentSetting.value);
+              } else {
+                updated.delete(currentSetting.value);
+              }
               return updated;
             });
 
@@ -1027,9 +1036,7 @@ export function SettingsDialog({
               const immediateSettings = new Set([currentSetting.value]);
               const toSaveValue =
                 currentSetting.type === 'boolean'
-                  ? typeof defaultValue === 'boolean'
-                    ? defaultValue
-                    : false
+                  ? defaultValue
                   : typeof defaultValue === 'number' ||
                       typeof defaultValue === 'string'
                     ? defaultValue

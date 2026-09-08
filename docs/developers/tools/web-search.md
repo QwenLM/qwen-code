@@ -2,7 +2,7 @@
 
 Qwen Code provides web search two ways:
 
-1. **Built-in `web_search` tool** — backed by the DashScope Responses API server-side search. On by default when your model runs on an endpoint that can serve it; no extra provider or MCP setup.
+1. **Built-in `web_search` tool** — backed by the DashScope Responses API server-side search. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
 2. **MCP (Model Context Protocol) integrations** — connect any external search service (Tavily, GLM, and others). Use this when your provider cannot back the built-in tool.
 
 ## Built-in `web_search`
@@ -13,15 +13,15 @@ The built-in tool issues a self-contained search request to a small auxiliary mo
 
 If you configured nothing under `tools.webSearch`, the tool registers whenever the model you are running can back the search request with the same credentials:
 
-| How you signed in                                                                                          | Built-in search                           |
-| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| Alibaba ModelStudio → **Standard API Key**                                                                 | on                                        |
-| Alibaba ModelStudio → **Token Plan**                                                                       | on                                        |
-| Alibaba ModelStudio → **Coding Plan**                                                                      | off — configure it explicitly (see below) |
-| A hand-written `modelProviders` entry, or a Custom Provider entry, on a DashScope host                     | on                                        |
-| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models | off                                       |
+| How you signed in                                                                                                          | Built-in search                            |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                         |
+| Alibaba ModelStudio → **Token Plan**                                                                                       | on                                         |
+| Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint does not serve this API |
+| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                         |
+| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                        |
 
-Searches bill the same key as your main model. In the default Auto approval mode the classifier approves them without prompting, like other read-only tools; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear — no startup warning.
+Searches bill the same key as your main model. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
 
 To turn it off:
 
@@ -33,7 +33,7 @@ or `ENABLE_WEB_SEARCH=false`. Bare mode and safe mode always disable it.
 
 ### Configuring it explicitly
 
-Point the tool at any DashScope-compatible entry — useful for Coding Plan, or when your main model runs on another provider and you also hold a DashScope key:
+Point the tool at a ModelStudio Standard/Token Plan or another verified DashScope Responses entry. This is useful when your main model runs on another provider and you also hold a separate supported DashScope key. Coding Plan endpoints do not serve the Responses search API; use an MCP search provider instead.
 
 ```json
 {
@@ -55,11 +55,11 @@ Point the tool at any DashScope-compatible entry — useful for Coding Plan, or 
 }
 ```
 
-| Setting                        | Env override           | Meaning                                                                                                                                                                                             |
-| ------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.webSearch.enabled`      | `ENABLE_WEB_SEARCH`    | Set `false` to turn the tool off. Leave unset to let it turn on automatically. Setting `true` also requires a `model` (or an env-declared backend) and reports a startup notice if it cannot start. |
-| `tools.webSearch.model`        | `WEB_SEARCH_MODEL`     | Search model selector, resolved against `modelProviders` like `fastModel` (`modelId` or `authType:modelId`). Optional — when unset, searches run as `qwen3.6-plus` on your provider's endpoint.     |
-| `tools.webSearch.webExtractor` | `WEB_SEARCH_EXTRACTOR` | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                |
+| Setting                        | Env override           | Meaning                                                                                                                                                                                                                               |
+| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tools.webSearch.enabled`      | `ENABLE_WEB_SEARCH`    | Set `false` to turn the tool off. Automatic startup activation requires leaving `enabled`, `model`, and the env-only backend unset. Setting `true` first tries the same derivation and otherwise requires a `model`.                  |
+| `tools.webSearch.model`        | `WEB_SEARCH_MODEL`     | Search model selector, resolved against `modelProviders` like `fastModel` (`modelId` or `authType:modelId`). Setting it always uses the explicit path and requires a matching declared entry. The automatic path uses `qwen3.6-plus`. |
+| `tools.webSearch.webExtractor` | `WEB_SEARCH_EXTRACTOR` | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                  |
 
 ### Env-only configuration (no settings.json)
 
@@ -83,7 +83,8 @@ model id. The API key is read from `WEB_SEARCH_API_KEY` if set, otherwise from
 Notes:
 
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
-- Automatic activation follows the model you are currently running: switching to a provider that cannot back the tool turns it off for the next session.
+- Automatic activation is decided at startup. Switching providers takes effect after restarting the session.
+- Automatic host detection intentionally accepts only known DashScope regional, Token Plan MaaS, and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.

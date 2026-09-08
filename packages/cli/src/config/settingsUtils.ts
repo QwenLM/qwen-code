@@ -269,6 +269,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'goals', key: 'modelProposed' },
+  { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
@@ -584,7 +585,7 @@ export function getDisplayValue(
     value = getDefaultValue(key);
   }
 
-  let valueString = String(value);
+  let valueString = value === undefined ? t('(not set)') : String(value);
 
   // Special handling for outputLanguage 'auto' value
   if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
@@ -612,6 +613,14 @@ export function getDisplayValue(
   }
 
   return valueString;
+}
+
+export function nextBooleanSettingValue(
+  currentValue: unknown,
+  defaultValue?: unknown,
+): boolean {
+  if (currentValue !== undefined) return !currentValue;
+  return defaultValue === undefined ? false : !defaultValue;
 }
 
 /**

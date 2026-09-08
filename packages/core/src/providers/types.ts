@@ -126,10 +126,9 @@ export interface ProviderConfig {
    *
    * Absent means the provider has no documented server-side search reachable
    * through its endpoint, so the tool stays off unless the user configures a
-   * search model (or an env-declared backend) explicitly. `searchModel`
-   * overrides the default search model for providers that need one.
+   * search model (or an env-declared backend) explicitly.
    */
-  webSearch?: { backend: 'dashscope'; searchModel?: string };
+  webSearch?: { backend: 'dashscope' };
 
   /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.

@@ -13,8 +13,9 @@ import {
   resolveRequestTimeout,
 } from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
-import { findProviderByCredentials } from '../providers/all-providers.js';
+import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
+import { findProviderByCredentials } from '../providers/all-providers.js';
 import {
   buildRuntimeFetchOptions,
   preloadRuntimeFetchModule,
@@ -105,7 +106,9 @@ export interface WebSearchSettings {
 export interface WebSearchBackendConfig {
   modelId: string;
   /** Environment variable name holding the API key. */
-  apiKeyEnvKey: string;
+  apiKeyEnvKey?: string;
+  /** Resolved literal credential when the primary model did not use an env var. */
+  apiKey?: string;
   baseUrl: string;
   /** Whether the search agent may open result pages (web_extractor). */
   webExtractor: boolean;
@@ -136,11 +139,11 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways — a superset of
- * `DashScopeOpenAICompatibleProvider.isDashScopeProvider()` host semantics,
- * minus its OAuth/undefined-baseUrl passes (the side channel needs a
- * concrete endpoint). This only catches obvious misconfiguration; a host
- * that does not serve the Responses API fails loudly on first use.
+ * and internal Alibaba gateways. This is intentionally narrower than the
+ * content provider's DashScope detection: generic Alibaba Cloud API Gateway
+ * and proxy endpoints are not known to forward the Responses search tools.
+ * This only catches obvious misconfiguration; a host that does not serve the
+ * Responses API fails loudly on first use.
  */
 type DashScopeBaseUrlIssue = 'invalid' | 'insecure' | 'unknown-host';
 
@@ -179,6 +182,14 @@ function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
   return classifyDashScopeBaseUrl(baseUrl) === null;
 }
 
+function safeUrlHost(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname || '[invalid]';
+  } catch {
+    return '[invalid]';
+  }
+}
+
 const gateDebugLogger: DebugLogger = createDebugLogger('WEB_SEARCH');
 
 /**
@@ -190,13 +201,14 @@ function isUsableSearchEntry(entry: {
   authType: AuthType;
   baseUrl?: string;
   envKey?: string;
+  apiKey?: string;
 }): boolean {
   return (
     entry.authType !== AuthType.QWEN_OAUTH &&
     !!entry.baseUrl &&
     isDashScopeCompatibleBaseUrl(entry.baseUrl) &&
-    !!entry.envKey &&
-    !!process.env[entry.envKey]?.trim()
+    (!!entry.apiKey?.trim() ||
+      (!!entry.envKey && !!process.env[entry.envKey]?.trim()))
   );
 }
 
@@ -231,7 +243,8 @@ interface AutoSearchCandidate {
   authType: AuthType;
   modelId: string;
   baseUrl: string;
-  envKey: string;
+  envKey?: string;
+  apiKey?: string;
   /** Exact registry key component, for the customHeaders lookup. */
   registryBaseUrl?: string;
 }
@@ -279,19 +292,26 @@ function findPrimaryModelEntry(
   // ModelsConfig constructor, unlike the runtime model snapshot, which
   // `detectAndCaptureRuntimeModel()` only captures after the tool registry
   // has been built.
-  const generation = config.getModelsConfig().getGenerationConfig();
+  const modelsConfig = config.getModelsConfig();
+  const generation = modelsConfig.getGenerationConfig();
   if (generation.baseUrl && generation.authType) {
-    // A pure env configuration supplies the key's value, never its variable
-    // name (`apiKeyEnvKey` is only filled in from a modelProviders entry), so
-    // fall back to the auth type's documented default variable.
+    const apiKeySource = modelsConfig.getGenerationConfigSources()['apiKey'];
     const envKey =
-      generation.apiKeyEnvKey ?? getDefaultApiKeyEnvVar(generation.authType);
-    if (process.env[envKey]?.trim()) {
+      generation.apiKeyEnvKey ??
+      (apiKeySource?.kind === 'env' ? apiKeySource.envKey : undefined);
+    const apiKey = envKey ? undefined : generation.apiKey;
+    const fallbackEnvKey = getDefaultApiKeyEnvVar(generation.authType);
+    if (
+      apiKey?.trim() ||
+      (envKey && process.env[envKey]?.trim()) ||
+      (!envKey && !apiKey && process.env[fallbackEnvKey]?.trim())
+    ) {
       return {
         authType: generation.authType,
         modelId: generation.model ?? modelId,
         baseUrl: generation.baseUrl,
-        envKey,
+        envKey: envKey ?? (apiKey ? undefined : fallbackEnvKey),
+        apiKey,
       };
     }
   }
@@ -323,7 +343,12 @@ function resolveAutoBackend(
   const entry = findPrimaryModelEntry(config);
   if (!entry) {
     return unavailable(
-      'the selected model has no provider entry carrying both a baseUrl and an envKey',
+      'the selected model has no provider entry carrying both a baseUrl and a usable direct credential',
+    );
+  }
+  if (entry.authType !== AuthType.USE_OPENAI) {
+    return unavailable(
+      `the selected model uses the ${entry.authType} protocol, but the search side request requires an OpenAI-compatible provider`,
     );
   }
 
@@ -342,13 +367,13 @@ function resolveAutoBackend(
     }
   } else if (!isAutoEligibleDashScopeHost(entry.baseUrl)) {
     return unavailable(
-      `endpoint ${entry.baseUrl} is not known to serve the DashScope search tools`,
+      `endpoint host ${safeUrlHost(entry.baseUrl)} is not known to serve the DashScope search tools`,
     );
   }
 
   if (!isUsableSearchEntry(entry)) {
     return unavailable(
-      `the ${entry.envKey} environment variable is not set, or the entry cannot back a side request`,
+      'the selected model has no usable direct credential, or the entry cannot back a side request',
     );
   }
 
@@ -363,8 +388,9 @@ function resolveAutoBackend(
   return {
     ok: true,
     backend: {
-      modelId: preset?.webSearch?.searchModel ?? DEFAULT_WEB_SEARCH_MODEL,
+      modelId: DEFAULT_WEB_SEARCH_MODEL,
       apiKeyEnvKey: entry.envKey,
+      apiKey: entry.apiKey,
       baseUrl: entry.baseUrl,
       webExtractor: settings?.webExtractor !== false,
       customHeaders: resolvedEntry?.generationConfig?.customHeaders,
@@ -401,12 +427,12 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   }
   const selector = settings?.model?.trim();
   if (!selector) {
-    // Nothing explicit was asked for: derive the backend from the main
-    // model's provider. An explicit `enabled: true`, or an env-declared
-    // backend missing its model, still names the missing piece instead.
-    if (settings?.enabled !== true && !settings?.baseUrl) {
+    if (!settings?.baseUrl) {
       try {
-        return resolveAutoBackend(config, settings);
+        const derived = resolveAutoBackend(config, settings);
+        if (derived.ok || settings?.enabled !== true) {
+          return derived;
+        }
       } catch (e) {
         // Derivation is opportunistic and runs while the tool registry is
         // being built: an unexpected Config shape must cost the user web
@@ -414,12 +440,14 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
         gateDebugLogger.debug(
           `[WebSearch] auto backend derivation threw: ${e instanceof Error ? e.message : String(e)}`,
         );
-        return {
-          ok: false,
-          silent: true,
-          notice:
-            'WebSearch is not configured and no backend could be derived automatically.',
-        };
+        if (settings?.enabled !== true) {
+          return {
+            ok: false,
+            silent: true,
+            notice:
+              'WebSearch is not configured and no backend could be derived automatically.',
+          };
+        }
       }
     }
     return {
@@ -894,7 +922,13 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     await preloadRuntimeFetchModule();
 
     const startedAt = Date.now();
-    const apiKey = process.env[backend.apiKeyEnvKey];
+    const apiKey =
+      backend.apiKey ??
+      (backend.apiKeyEnvKey ? process.env[backend.apiKeyEnvKey] : undefined);
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.config.getProxy(),
+    );
     const client = new OpenAI({
       apiKey,
       baseURL: backend.baseUrl,
@@ -905,7 +939,12 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         // Entry-declared headers win, matching the providers' merge order.
         ...(backend.customHeaders ?? {}),
       },
-      ...(buildRuntimeFetchOptions('openai', this.config.getProxy()) || {}),
+      ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.config,
+        backend.customHeaders,
+      ),
     });
 
     // One total timeout across both attempts, combined with the caller's

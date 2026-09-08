@@ -591,12 +591,14 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               flexDirection="column"
               marginBottom={groupIndex === groupedServers.length - 1 ? 0 : 1}
             >
-              <text fg={C.text} attributes={1}>
-                {`  ${group.displayName}`}
+              <box flexDirection="row">
+                <text fg={C.text} attributes={1}>
+                  {`  ${group.displayName}`}
+                </text>
                 {group.servers[0]?.configPath ? (
-                  <text fg={C.dim}> ({group.servers[0].configPath})</text>
+                  <text fg={C.dim}>{` (${group.servers[0].configPath})`}</text>
                 ) : null}
-              </text>
+              </box>
               {group.servers.map((server, itemIndex) => {
                 const globalIndex = startIndex + itemIndex;
                 const isSelected = globalIndex === serverCursor;

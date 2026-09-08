@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
@@ -1319,6 +1320,44 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig({}, argv);
 
       expect(config.getGoalTokenBudgetGrant()).toBe(GOAL_DEFAULT_TOKEN_BUDGET);
+    });
+  });
+
+  describe('model.goalCheckpointTimeoutSeconds', () => {
+    it('carries the setting into the checkpoint verifier timeout', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { model: { goalCheckpointTimeoutSeconds: 45 } },
+        argv,
+      );
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+    });
+
+    it.each([
+      0,
+      -1,
+      1.5,
+      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      '30' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await expect(
+        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
+    });
+
+    it('uses the built-in default when the setting is unset', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig({}, argv);
+
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
     });
   });
 
@@ -2905,6 +2944,13 @@ describe('loadCliConfig', () => {
         { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
         argv,
       );
+      expect(config.getWebSearchSettings()).toEqual({ enabled: false });
+    });
+
+    it('disables web search in safe mode even when nothing is configured', async () => {
+      process.argv = ['node', 'script.js', '--safe-mode'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
       expect(config.getWebSearchSettings()).toEqual({ enabled: false });
     });
 

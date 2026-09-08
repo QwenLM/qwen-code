@@ -390,6 +390,35 @@ describe('SettingsDialog', () => {
   });
 
   describe('Settings Toggling', () => {
+    it('toggles an unset WebSearch setting off and resets it to auto', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'tools.webSearch.enabled',
+      );
+      expect(targetIndex).toBeGreaterThan(0);
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+      await waitFor(() => {
+        expect(lastFrame()).toContain('●\uFE0E Enable WebSearch');
+        expect(lastFrame()).toContain('(not set)');
+      });
+
+      act(() => stdin.write(TerminalKeys.ENTER));
+      await waitFor(() => expect(lastFrame()).toContain('false'));
+
+      act(() => stdin.write('\u0003'));
+      await waitFor(() => expect(lastFrame()).toContain('(not set)'));
+      unmount();
+    });
+
     it('should toggle setting with Enter key', async () => {
       vi.mocked(saveModifiedSettings).mockClear();
 
