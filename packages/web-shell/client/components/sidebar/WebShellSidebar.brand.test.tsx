@@ -247,6 +247,25 @@ describe('sidebar brand', () => {
     expect(builtInMark()).not.toBeNull();
   });
 
+  it('gives a replacement logo a fresh mount after a decode failure', () => {
+    // The host-prop path goes URI A → URI B with no intermediate undefined.
+    // Without `key={brand.logoDataUri}` remounting the image, A's failed
+    // state would stick and B — a perfectly good logo — would render the
+    // built-in mark instead: the leak the key exists to prevent.
+    renderSidebar({ logoDataUri: 'data:image/svg+xml,BROKEN' });
+    act(() => {
+      brandLogoImage()!.dispatchEvent(new Event('error'));
+    });
+    expect(builtInMark()).not.toBeNull();
+
+    renderSidebar({ logoDataUri: 'data:image/svg+xml,GOOD' });
+
+    expect(brandLogoImage()?.getAttribute('src')).toBe(
+      'data:image/svg+xml,GOOD',
+    );
+    expect(builtInMark()).toBeNull();
+  });
+
   it('renders a host-provided logo node in place of the built-in mark', () => {
     renderSidebar({ logo: <span data-testid="host-logo" /> });
 

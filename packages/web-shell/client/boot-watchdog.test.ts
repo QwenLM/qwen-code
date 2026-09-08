@@ -154,6 +154,16 @@ describe('boot watchdog', () => {
       faviconErrorEvent('data:image/svg+xml,%3Csvg%3E');
 
       expect(fallback()).toBeNull();
+
+      // The error must stay out of the panel's list too: a bare Event on the
+      // icon carries no message, so recording it would add a content-free
+      // 'unknown error' entry that consumes one of the five MAX_ERRORS slots
+      // and points the operator at nothing. The timer has to run past
+      // GRACE_MS for the panel — and therefore the list — to exist at all.
+      vi.advanceTimersByTime(15_001);
+
+      expect(fallback()).not.toBeNull();
+      expect(fallback()?.querySelector('pre')).toBeNull();
     });
 
     it('defers an inline-script runtime error to the grace timer', () => {

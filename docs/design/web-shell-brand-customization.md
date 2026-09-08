@@ -117,10 +117,16 @@ regular file, not a symlink, with a single hard link, and must open without
 following symlinks and re-verify its stat identity before the bytes are read.
 The content is capped at 32 KiB — a logo is a handful of paths, and the cap
 keeps the resulting data URI well inside both a JSON payload and a localStorage
-write. The parsed document's root element must be `svg`, tolerating an XML
-declaration, comments, and a DOCTYPE with or without an internal subset before
-it. A rejection yields a warning and no logo, so a bad path degrades to the
-built-in mark instead of failing the request.
+write. The parsed document's root element must be an `<svg>` that declares the
+SVG namespace (`xmlns="http://www.w3.org/2000/svg"`) — without it the browser
+does not render the document as an image, so this is a renderability check,
+not a sanitizer — tolerating a BOM, an XML declaration, comments, and a
+DOCTYPE with or without an internal subset before it. A root with no
+`viewBox` or explicit width/height is accepted with an advisory on the
+daemon's stderr, because the browser cannot scale such artwork into the
+fixed sidebar box and may render it blank. A rejection yields a warning and
+no logo, so a bad path degrades to the built-in mark instead of failing the
+request.
 
 The resolved SVG is percent-encoded into a `data:image/svg+xml` URI on the
 server. A data URI rather than a served file because the shell's Content
@@ -229,8 +235,13 @@ value, ever" are genuinely different outcomes, and an earlier draft of this
 design conflated them — pointed at a daemon too old to have the route, a
 previously cached brand would have stayed in the tab chrome forever because
 nothing could report the absence. The provider therefore exposes a settled flag
-beside the value: it flips when the fetch finishes, successfully or not, and
-the callback fires on a host prop or on that flag. A settled-with-no-brand
+beside the value, and the callback fires on a host prop or on that flag. The
+flag flips only on a definitive outcome — an answer (a brand or an empty
+object), or a 404 from a daemon that has no route and never will — because a
+retryable failure (a 503 while the deferred runtime starts, a 429, a transport
+blip, an old SDK with no `brand()`) is unknown, not absent: settling there
+would report an authoritative empty brand, reset the tab title mid-session and
+delete the cache over a blip nothing ever retries. A settled-with-no-brand
 outcome reports an empty brand, which clears stale cached chrome; an unsettled
 one reports nothing, which is what keeps the flash away. An older daemon's 404
 and a host withdrawing its `brand` prop both settle, so both invalidate the
@@ -332,14 +343,18 @@ touches the filesystem: layer precedence in both directions, workspace-layer
 exclusion for the name and the logo, name sanitization and the length cap,
 tilde expansion, relative resolution against the declaring file and the
 soft-fail when there is none, missing file, symlink, directory, oversize
-content in both the pre-read and post-decode caps, non-SVG content, an
-`xmlns`-less root, and an XML prolog with a DOCTYPE internal subset. One case
-asserts that an SVG containing script is _accepted_ — the resolver is meant to
-pass bytes through. The alarm for a renderer that inlines those bytes lives on
-the other side of the package boundary, in the sidebar test: it renders a
-script-bearing logo and asserts the payload reaches the document only as an
-`img` `src` with zero script nodes present. A future change that inlines the
-logo fails that test, not the resolver's.
+content in both the pre-read and post-decode caps, the fd identity re-check
+and both fs soft-fail branches, non-SVG content, an `xmlns`-less root, an
+`xmlns`-shaped substring hidden in another attribute's value, a prefix-only
+namespace binding, whitespace around the attribute `=`, a quoted `>` or
+bracket inside DOCTYPE literals and the root tag, and the scaling-geometry
+advisory for a root with no `viewBox` or dimensions. One case asserts that an
+SVG containing script is _accepted_ — the resolver is meant to pass bytes
+through. The alarm for a renderer that inlines those bytes lives on the other
+side of the package boundary, in the sidebar test: it renders a script-bearing
+logo and asserts the payload reaches the document only as an `img` `src` with
+zero script nodes present. A future change that inlines the logo fails that
+test, not the resolver's.
 
 The route test asserts the response shape, that `skipWorkspaceSettings` is
 passed, that a rejected logo still answers 200 with the name and reports the
@@ -349,26 +364,39 @@ settings dialog; the settings route test asserts the keys are neither exposed
 nor writable through it.
 
 On the client, the provider test asserts the brand and the settled flag reach
-the context on success, on rejection, and on a client with no brand method at
-all, and that a superseded client cannot write a stale brand into a newer
-connection. The app test asserts prop-wins-over-fetched precedence, in-flight
-silence, settled-with-no-brand reporting (which is what clears stale chrome),
-host-prop withdrawal reporting the empty brand again, empty-name normalization
-in the payload, logo-URI pass-through, and no re-firing for a fresh-but-equal
-inline prop and handler. The sidebar test asserts the built-in rendering is
-untouched — the inline mark is asserted present, not merely no image asserted
-absent — the name and tooltip follow the brand, the logo renders as an image
-with no script node in the document, an undecodable logo falls back to the
-built-in mark on `error`, a falsy host logo falls back too, a host logo node
-renders as given and never beside the built-in mark, and the existing branding
-render override still wins. A server-level test asserts the route answers JSON
-on the real app for a browser-like `Accept`. The standalone entry test asserts
-the title, the favicon (untouched for a name-only brand), the cache write, and
-clearing the cache when the brand goes away, plus that the built-in title is
-derived to match the document's own static title. The pre-paint script joins
-the existing `index.html` contract test, which also pins the built-in title and
-favicon bytes. A parity test runs the same inputs through the TUI banner
-resolver and asserts identical sanitization.
+the context on success, that a definitive 404 settles with no brand while a
+retryable 503 stays unsettled (unknown, not absent), that a superseded client
+can neither write its brand into nor settle the new connection, and that a
+re-point resets the previous brand before the new fetch. The app test asserts
+prop-wins-over-fetched precedence (including against a daemon brand that
+carries a logo — the takeover is whole-object, not field-merge), in-flight
+silence for both an absent and a nullish host prop, the unsettled-to-settled
+transition that production actually takes, settled-with-no-brand reporting
+(which is what clears stale chrome), host-prop withdrawal reporting the empty
+brand again, empty-name normalization in the payload, logo-URI pass-through,
+and no re-firing for a fresh-but-equal inline prop and handler. The sidebar
+test asserts the built-in rendering is untouched — the inline mark is asserted
+present, not merely no image asserted absent — the name and tooltip follow the
+brand, the logo renders as an image with no script node in the document, an
+undecodable logo falls back to the built-in mark on `error`, a replacement URI
+after such a failure gets a fresh mount, a falsy host logo falls back too, a
+host logo node renders as given and never beside the built-in mark, and the
+existing branding render override still wins. A server-level test asserts the
+route answers JSON on the real app for a browser-like `Accept` with the SPA
+fallback mounted, and that it sits behind bearer authentication when a token
+is configured; the System settings layer is pinned to empty files there so a
+maintainer's machine-wide brand cannot leak into the assertions. The boot
+watchdog test asserts a failing favicon neither proves boot impossible nor
+enters the panel's error list past the grace timer. The standalone entry test
+asserts the title, the favicon (untouched for a name-only brand), the cache
+write, and clearing the cache when the brand goes away, plus that the built-in
+title is derived to match the document's own static title, and — by reading
+the entry the entry-point actually wrote, located by enumeration rather than
+by a second copy of the key — that the real pre-paint script applies both
+fields back. The pre-paint script joins the existing `index.html` contract
+test, which also pins the built-in title and favicon bytes. A parity test runs
+the same inputs through the TUI banner resolver and asserts identical
+sanitization.
 
 One property matters more than the others: with no brand configured, the
 rendered shell is unchanged. That is what makes this safe to ship, and it is

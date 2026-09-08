@@ -4440,23 +4440,84 @@ describe('createServeApp', () => {
   });
 
   describe('GET /brand', () => {
+    // `createServeApp` only mounts the SPA fallback when given a webShellDir,
+    // and `bearerAuth` only enforces when a token is configured — a fixture
+    // without both cannot observe either leg of the published ordering
+    // ("after bearerAuth and the rate limiter, before the SPA fallback").
+    // The System settings layer is pinned to empty files too: the route reads
+    // the ambient machine's settings, and a maintainer dogfooding a
+    // system-wide brand would otherwise watch this routing test fail on the
+    // body they configured deliberately.
+    let brandWebShellDir: string;
+    let brandSystemSettingsDir: string;
+    let previousSystemSettingsPath: string | undefined;
+    let previousSystemDefaultsPath: string | undefined;
+    const BRAND_INDEX_HTML =
+      '<!doctype html><html><head><title>Qwen Code Web terminal</title>' +
+      '</head><body><div id="root"></div></body></html>';
+
+    beforeEach(async () => {
+      previousSystemSettingsPath =
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      previousSystemDefaultsPath =
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+      brandWebShellDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-webshell-brand-'),
+      );
+      await fsp.writeFile(
+        path.join(brandWebShellDir, 'index.html'),
+        BRAND_INDEX_HTML,
+      );
+      brandSystemSettingsDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-brand-system-'),
+      );
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{}',
+      );
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings-defaults.json'),
+        '{}',
+      );
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+        brandSystemSettingsDir,
+        'settings.json',
+      );
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+        brandSystemSettingsDir,
+        'settings-defaults.json',
+      );
+    });
+
+    afterEach(async () => {
+      if (previousSystemSettingsPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] =
+          previousSystemSettingsPath;
+      }
+      if (previousSystemDefaultsPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] =
+          previousSystemDefaultsPath;
+      }
+      await fsp.rm(brandWebShellDir, { recursive: true, force: true });
+      await fsp.rm(brandSystemSettingsDir, { recursive: true, force: true });
+    });
+
     it('answers JSON on the real app, ahead of the SPA fallback', async () => {
-      const primaryBridge = fakeBridge();
-      const primary = makeWorkspaceRuntimeForTest({
-        workspaceId: 'primary-id',
-        workspaceCwd: WS_BOUND,
-        primary: true,
-        bridge: primaryBridge,
-      });
       const app = createServeApp(baseOpts, undefined, {
-        bridge: primaryBridge,
-        workspaceRegistry: createWorkspaceRegistry([primary]),
+        webShellDir: brandWebShellDir,
       });
 
       // The route is registered unconditionally: no settings needed, and an
       // empty brand is a valid answer. A browser-like Accept must still get
       // JSON — registered ahead of the Web Shell SPA fallback, per the
-      // ordering claim in docs/developers/qwen-serve-protocol.md.
+      // ordering claim in docs/developers/qwen-serve-protocol.md. Only the
+      // text/html leg can witness that ordering: the fallback claims a
+      // request only for document-like Accepts, so under it a mis-ordered
+      // route would answer the HTML shell instead.
       for (const accept of ['*/*', 'application/json', 'text/html']) {
         const response = await request(app)
           .get('/brand')
@@ -4465,7 +4526,30 @@ describe('createServeApp', () => {
         expect(response.status).toBe(200);
         expect(response.headers['content-type']).toContain('application/json');
         expect(response.body).toEqual({});
+        expect(response.text).not.toContain('<div id="root">');
       }
+    });
+
+    it('is assembled behind bearer authentication', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir: brandWebShellDir,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      const unauthenticated = await request(app)
+        .get('/brand')
+        .set('Host', host);
+      const authenticated = await request(app)
+        .get('/brand')
+        .set('Host', host)
+        .set('Authorization', 'Bearer secret');
+
+      // Registered after bearerAuth: a pre-auth registration would leak the
+      // operator's product name and up to 32 KiB of inlined logo bytes to any
+      // unauthenticated caller on a --require-auth non-loopback bind.
+      expect(unauthenticated.status).toBe(401);
+      expect(authenticated.status).toBe(200);
+      expect(authenticated.body).toEqual({});
     });
   });
 

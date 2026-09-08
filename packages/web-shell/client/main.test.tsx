@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
 import type { WebShellResolvedBrand } from './brandContext';
-import { readIndexHtml } from './test/indexHtmlTestUtils';
+import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
 interface CapturedWorkspaceSessionProps {
   sessionId?: string;
@@ -275,5 +275,37 @@ describe('StandaloneApp brand', () => {
 
     expect(htmlTitle).toBeDefined();
     expect(document.title).toBe(htmlTitle);
+  });
+
+  it("round-trips the written cache through index.html's pre-paint script", () => {
+    // The pre-paint cache is a cross-file contract: main.tsx writes an entry
+    // under BRAND_STORAGE_KEY with {title, logo} fields, and index.html's
+    // inline script reads it under its own literal key with its own field
+    // names. Each side is otherwise pinned only against its own test's copy,
+    // so a rename on either axis ships a flash of the built-in chrome with
+    // the suite green. Read the entry main.tsx actually wrote — located by
+    // enumeration, not by a literal — and feed it to the real inline script.
+    resolveBrand({
+      name: 'QiuQiu Code',
+      logoDataUri: 'data:image/svg+xml,LOGO',
+    });
+    expect(window.localStorage.length).toBe(1);
+    const writtenKey = window.localStorage.key(0)!;
+    const raw = window.localStorage.getItem(writtenKey)!;
+
+    const script = extractInlineScript('qwen-code-web-shell-brand');
+    const stubIcon = { href: 'data:image/svg+xml,BUILT-IN' };
+    const stubDocument = {
+      title: 'Qwen Code Web chat',
+      querySelector: (selector: string) =>
+        selector === 'link[rel="icon"]' ? stubIcon : null,
+    };
+    const stubStorage = {
+      getItem: (key: string) => (key === writtenKey ? raw : null),
+    };
+    Function('localStorage', 'document', script)(stubStorage, stubDocument);
+
+    expect(stubDocument.title).toBe('QiuQiu Code Web chat');
+    expect(stubIcon.href).toBe('data:image/svg+xml,LOGO');
   });
 });

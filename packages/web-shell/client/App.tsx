@@ -10853,11 +10853,15 @@ export function App({
   // daemon has no brand route, so rendering can treat it as "built-in" but the
   // resolution callback must not fire on the in-flight state — that would make
   // the standalone entry reset the tab title and drop the pre-paint cache on
-  // every load. `brandSettled` is the distinction: it flips on either outcome,
-  // so a settled-with-no-brand result (older daemon, withdrawn host prop) is
-  // reported as an empty brand and clears stale cached chrome.
+  // every load. `brandSettled` is the distinction: it flips once the fetch
+  // reaches a definitive outcome (an answer, or a 404 from a route-less
+  // daemon), so a settled-with-no-brand result (older daemon, withdrawn host
+  // prop) is reported as an empty brand and clears stale cached chrome, while
+  // a retryable failure clears nothing. The prop check is `!= null`, matching
+  // the `??` above: an untyped host passing `null` must not open the gate
+  // during the in-flight state either.
   const brandResolved =
-    providedBrand !== undefined || workspace.brandSettled === true;
+    providedBrand != null || workspace.brandSettled === true;
 
   // Keyed on the two primitive fields with the callback behind a ref, so a host
   // passing an inline `brand` object and an inline handler — the shape the

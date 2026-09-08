@@ -14,7 +14,7 @@ import {
   useState,
 } from 'react';
 import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
-import { DaemonClient } from '@qwen-code/sdk/daemon';
+import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { createDaemonWorkspaceActions } from './actions.js';
 import type {
   DaemonWorkspaceContextValue,
@@ -214,10 +214,12 @@ export function DaemonWorkspaceProvider({
   // a cosmetic feature. Deferring turns that throw into a rejection the catch
   // below swallows like any other.
   //
-  // `brandSettled` flips true on either outcome — never back. Consumers must
-  // not fire on the in-flight undefined (that would reset cached branding
-  // mid-load), but they must learn about the settled-with-no-brand outcome:
-  // it is the only way to clear branding cached from an earlier daemon.
+  // `brandSettled` is per-client: it flips true once this client's fetch
+  // reaches a definitive outcome, and resets to false when the client changes.
+  // Consumers must not fire on the in-flight undefined (that would reset
+  // cached branding mid-load), but they must learn about the
+  // settled-with-no-brand outcome: it is the only way to clear branding
+  // cached from an earlier daemon.
   useEffect(() => {
     if (!client) return undefined;
     let disposed = false;
@@ -231,11 +233,21 @@ export function DaemonWorkspaceProvider({
           setBrandSettled(true);
         }
       })
-      .catch(() => {
-        // Silent by design; see the comment above. A failure still settles the
-        // fetch — the daemon answered (or refused to), so there is nothing more
-        // to wait for.
-        if (!disposed) setBrandSettled(true);
+      .catch((error: unknown) => {
+        // Silent by design; see the comment above. Settle only on the one
+        // definitive "no brand here" answer: a 404 means this daemon has no
+        // route and never will. Everything else — a 503 while the deferred
+        // runtime is still starting, a 429 from the rate limiter, a transport
+        // failure, an old SDK with no `brand()` — is unknown, not absent:
+        // settling would report an authoritative empty brand and clear cached
+        // chrome over a retryable blip, and nothing ever retries.
+        if (
+          !disposed &&
+          error instanceof DaemonHttpError &&
+          error.status === 404
+        ) {
+          setBrandSettled(true);
+        }
       });
     return () => {
       disposed = true;

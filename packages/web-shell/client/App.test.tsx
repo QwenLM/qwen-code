@@ -34054,6 +34054,61 @@ describe('brand resolution', () => {
     expect(resolved).toEqual([]);
   });
 
+  it('fires when the daemon brand arrives after an unsettled mount', async () => {
+    // Production never starts settled: the provider mounts in flight and
+    // flips both fields once `client.brand()` resolves. If the gate ever
+    // stopped being re-read per render, `onBrandResolved` would never fire
+    // in standalone mode and the whole white-label feature would no-op.
+    const resolved: unknown[] = [];
+    const { rerender } = renderApp({
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+    expect(resolved).toEqual([]);
+
+    mockWorkspace.brand = { name: 'Daemon Brand' };
+    mockWorkspace.brandSettled = true;
+    rerender({ onBrandResolved: (brand) => resolved.push(brand) });
+    await flush();
+
+    expect(resolved).toEqual([{ name: 'Daemon Brand' }]);
+  });
+
+  it('reports nothing for a nullish host brand while the daemon is still answering', async () => {
+    // A host whose brand comes from JSON page config passes `null` when
+    // nothing is configured. The resolution expression treats null as absent,
+    // so the gate must too — otherwise the in-flight state fires `{}`, which
+    // resets the tab title and deletes the pre-paint cache on every load.
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: null as unknown as { name: string },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved).toEqual([]);
+  });
+
+  it('lets the host prop replace a daemon brand that carries a logo', async () => {
+    // The takeover is whole-object, not field-merge: with a daemon logo in
+    // play, a host that passes only a name must receive exactly that name —
+    // no operator artwork leaking into the host's payload (and from there
+    // into the host page's favicon).
+    mockWorkspace.brand = {
+      name: 'Daemon Brand',
+      logoDataUri: 'data:image/svg+xml,DAEMON',
+    };
+    mockWorkspace.brandSettled = true;
+    const resolved: unknown[] = [];
+    renderApp({
+      brand: { name: 'Host Brand' },
+      onBrandResolved: (brand) => resolved.push(brand),
+    });
+    await flush();
+
+    expect(resolved.at(-1)).toEqual({ name: 'Host Brand' });
+  });
+
   it('reports an empty brand again when the host withdraws the prop', async () => {
     // brandSettled is true even though the daemon contributed nothing, so
     // withdrawing the prop resolves to the built-in brand — a host that was

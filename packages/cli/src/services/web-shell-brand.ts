@@ -66,9 +66,11 @@ export function resolveWebShellBrand(
   if (!logo) return { brand };
 
   const resolved = readBrandLogo(logo.value, logo.dir);
-  if (resolved.warning) return { brand, warning: resolved.warning };
+  if (resolved.dataUri === undefined) {
+    return { brand, warning: resolved.warning };
+  }
   brand.logoDataUri = resolved.dataUri;
-  return { brand };
+  return resolved.warning ? { brand, warning: resolved.warning } : { brand };
 }
 
 interface ScopedBrandValue {
@@ -185,7 +187,8 @@ function readBrandLogo(
       warning: `ui.brand.logoPath could not be read: ${filePath} (${read.reason})`,
     };
   }
-  if (!hasSvgRoot(read.content)) {
+  const rootTag = parseSvgRootTag(read.content);
+  if (rootTag === undefined) {
     return {
       warning: `ui.brand.logoPath is not an SVG document (root element is not a namespaced <svg>): ${filePath}`,
     };
@@ -193,6 +196,16 @@ function readBrandLogo(
 
   return {
     dataUri: `data:image/svg+xml,${encodeURIComponent(read.content)}`,
+    // Warn rather than reject: the file is usable, but without a viewBox (or
+    // an explicit width and height) the browser cannot scale the artwork into
+    // the fixed sidebar box and may paint a blank mark — and since the image
+    // loads successfully, no client-side error event fires to reveal it. The
+    // daemon's stderr is the only channel that can tell the operator.
+    ...(hasScalingGeometry(rootTag)
+      ? {}
+      : {
+          warning: `ui.brand.logoPath has no viewBox or width/height, so it cannot be scaled into the sidebar logo box and may render blank: ${filePath}`,
+        }),
   };
 }
 
@@ -259,7 +272,8 @@ function readRegularFileNoFollow(
 
 /**
  * Skip the XML prolog — declaration, comments, DOCTYPE — then require the
- * first element to be an `<svg>` that declares the SVG namespace.
+ * first element to be an `<svg>` that declares the SVG namespace, returning
+ * the root start tag (or `undefined` when the shape is anything else).
  *
  * The namespace requirement is renderability, not paranoia: a bare `<svg>`
  * root is parsed as an image only when it carries
@@ -270,42 +284,133 @@ function readRegularFileNoFollow(
  * loaded as an image cannot run script. Do not switch the client to inline
  * rendering without adding a sanitizer here first.
  */
-function hasSvgRoot(content: string): boolean {
+function parseSvgRootTag(content: string): string | undefined {
   let rest = content.replace(/^\uFEFF/, '');
   for (;;) {
     rest = rest.replace(/^\s+/, '');
     if (rest.startsWith('<?')) {
       const end = rest.indexOf('?>');
-      if (end === -1) return false;
+      if (end === -1) return undefined;
       rest = rest.slice(end + 2);
       continue;
     }
     if (rest.startsWith('<!--')) {
       const end = rest.indexOf('-->');
-      if (end === -1) return false;
+      if (end === -1) return undefined;
       rest = rest.slice(end + 3);
       continue;
     }
     if (rest.startsWith('<!')) {
-      const end = skipDeclaration(rest);
-      if (end === -1) return false;
+      const end = skipMarkupConstruct(rest);
+      if (end === -1) return undefined;
       rest = rest.slice(end);
       continue;
     }
-    return /^<svg\s[^>]*xmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg["']/.test(
-      rest,
-    );
+    if (!rest.startsWith('<svg')) return undefined;
+    const boundary = rest[4];
+    if (
+      boundary !== undefined &&
+      boundary !== '>' &&
+      boundary !== '/' &&
+      !/\s/.test(boundary)
+    ) {
+      return undefined;
+    }
+    const end = skipMarkupConstruct(rest);
+    if (end === -1) return undefined;
+    const tag = rest.slice(0, end);
+    return declaresSvgNamespace(tag) ? tag : undefined;
   }
 }
 
-/** Length of a `<!DOCTYPE …>` prefix, including an internal `[ … ]` subset. */
-function skipDeclaration(text: string): number {
-  const bracket = text.indexOf('[');
-  const close = text.indexOf('>');
-  if (bracket === -1 || close === -1) return close === -1 ? -1 : close + 1;
-  if (bracket > close) return close + 1;
-  const subsetEnd = text.indexOf(']', bracket);
-  if (subsetEnd === -1) return -1;
-  const afterSubset = text.indexOf('>', subsetEnd);
-  return afterSubset === -1 ? -1 : afterSubset + 1;
+/**
+ * Length of the markup construct at `text` (a start tag or a `<!…>`
+ * declaration) up to and including its closing `>`. XML permits `>`, `[` and
+ * `]` inside quoted literals, so the scan tracks quote state; `[`/`]` depth is
+ * tracked too, for DOCTYPE internal subsets. Returns -1 when unterminated —
+ * fail-closed, since a document this scanner cannot bound is not accepted.
+ */
+function skipMarkupConstruct(text: string): number {
+  let quote: string | undefined;
+  let subsetDepth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '[') {
+      subsetDepth++;
+      continue;
+    }
+    if (ch === ']' && subsetDepth > 0) {
+      subsetDepth--;
+      continue;
+    }
+    if (ch === '>' && subsetDepth === 0) return i + 1;
+  }
+  return -1;
+}
+
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+
+/**
+ * Replace every character inside a quoted literal with a space, preserving
+ * length and the quote characters themselves. XML attribute values cannot
+ * contain their delimiter quote, so this is exact — and it lets attribute
+ * tests run over text where the contents of foreign attribute values (which
+ * may hold whitespace, `>`, or an `xmlns`-shaped substring) no longer confuse
+ * the match.
+ */
+function blankQuotedSpans(text: string): string {
+  const chars = [...text];
+  let quote: string | undefined;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]!;
+    if (quote !== undefined) {
+      if (ch === quote) {
+        quote = undefined;
+      } else {
+        chars[i] = ' ';
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+  }
+  return chars.join('');
+}
+
+/**
+ * True when the root start tag declares the SVG default namespace. The match
+ * runs over quote-blanked text, so an `xmlns`-shaped substring inside another
+ * attribute's value does not count, and a prefix-only binding (`xmlns:svg`,
+ * which Inkscape emits beside the real `xmlns`) still refuses. Whitespace
+ * around `=` is allowed, as XML's grammar permits.
+ */
+function declaresSvgNamespace(tag: string): boolean {
+  const blanked = blankQuotedSpans(tag);
+  const re = /(?:^|\s)xmlns\s*=\s*(["'])/g;
+  for (let match = re.exec(blanked); match !== null; match = re.exec(blanked)) {
+    const quoteChar = match[1]!;
+    const valueStart = match.index + match[0].length;
+    const valueEnd = tag.indexOf(quoteChar, valueStart);
+    if (valueEnd === -1) continue;
+    if (tag.slice(valueStart, valueEnd) === SVG_NAMESPACE) return true;
+  }
+  return false;
+}
+
+/**
+ * True when the root tag carries geometry the browser can scale into the
+ * fixed sidebar logo box: a `viewBox`, or an explicit `width` and `height`.
+ */
+function hasScalingGeometry(rootTag: string): boolean {
+  const blanked = blankQuotedSpans(rootTag);
+  const has = (name: string) =>
+    new RegExp(`(?:^|\\s)${name}\\s*=\\s*["']`).test(blanked);
+  return has('viewBox') || (has('width') && has('height'));
 }

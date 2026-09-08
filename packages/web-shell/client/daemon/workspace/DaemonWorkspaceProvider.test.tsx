@@ -9,6 +9,7 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   DaemonWorkspaceProvider,
   useDaemonWorkspace,
@@ -329,11 +330,14 @@ describe('DaemonWorkspaceProvider', () => {
   });
 
   it('keeps the connection healthy when the daemon has no /brand route', async () => {
-    // An older daemon answers 404. Branding is cosmetic, so the failure is
-    // swallowed and the client falls back to its built-in brand rather than
-    // putting the whole shell into an error state. The fetch still SETTLES —
-    // that is what lets a consumer clear branding cached from an earlier daemon.
-    sdkMocks.brand.mockRejectedValue(new Error('404 not found'));
+    // An older daemon answers 404 — the one definitive "no brand here"
+    // answer. Branding is cosmetic, so the failure is swallowed and the
+    // client falls back to its built-in brand rather than putting the whole
+    // shell into an error state. The fetch still SETTLES — that is what lets
+    // a consumer clear branding cached from an earlier daemon.
+    sdkMocks.brand.mockRejectedValue(
+      new DaemonHttpError(404, undefined, '404 not found'),
+    );
     let context: DaemonWorkspaceContextValue | undefined;
 
     function Harness() {
@@ -352,11 +356,40 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.error).toBeUndefined();
   });
 
+  it('does not settle the brand on a retryable failure', async () => {
+    // A 503 while the deferred runtime is still starting (likewise a 429 or a
+    // transport failure) means unknown, not "no brand configured". Settling
+    // would report an authoritative empty brand — resetting the tab title and
+    // deleting the pre-paint cache mid-session — over a blip that is never
+    // retried.
+    sdkMocks.brand.mockRejectedValue(
+      new DaemonHttpError(503, undefined, 'runtime starting'),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(false);
+    expect(context?.status).toBe('connected');
+    expect(context?.error).toBeUndefined();
+  });
+
   it('survives an SDK client that has no brand method at all', async () => {
     // `@qwen-code/sdk` is a peer dependency, so a host on an older SDK hands the
     // provider a client without `brand()`. Calling it throws a synchronous
     // TypeError, which must not escape the effect: branding is cosmetic and must
-    // never white-screen the shell.
+    // never white-screen the shell. A TypeError is indistinguishable from a
+    // transport failure, so the fetch is treated as unknown rather than absent
+    // — cached chrome is kept instead of cleared on a maybe-temporary state.
     sdkMocks.brand.mockImplementation(() => {
       throw new TypeError('client.brand is not a function');
     });
@@ -373,7 +406,7 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(context?.brand).toBeUndefined();
-    expect(context?.brandSettled).toBe(true);
+    expect(context?.brandSettled).toBe(false);
     expect(context?.status).toBe('connected');
     expect(context?.error).toBeUndefined();
   });
@@ -430,6 +463,123 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(context?.brand).toEqual({ name: 'Daemon B' });
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('resets a superseded brand while the new client fetches', async () => {
+    // A host that re-points AFTER daemon A resolved must not keep A's brand
+    // object while B's fetch is in flight: the catch path never clears
+    // `brand`, so without the reset on effect re-run, A's white-label would
+    // survive indefinitely on a shell connected to daemon B.
+    let resolveFirst!: (brand: unknown) => void;
+    let rejectSecond!: (error: unknown) => void;
+    const first = new Promise((r) => (resolveFirst = r));
+    const second = new Promise((_r, rej) => (rejectSecond = rej));
+    sdkMocks.brand
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveFirst({ name: 'Daemon A' });
+      await first;
+    });
+    expect(context?.brand).toEqual({ name: 'Daemon A' });
+    expect(context?.brandSettled).toBe(true);
+
+    // Re-point: the effect re-runs and resets before fetching B.
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:5173">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(false);
+
+    // B turns out to be an old daemon: the definitive 404 settles with no
+    // brand, so cached chrome from A's era can be cleared.
+    await act(async () => {
+      rejectSecond(new DaemonHttpError(404, undefined, '404 not found'));
+      await second.catch(() => undefined);
+    });
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('does not let a superseded client settle the new connection on failure', async () => {
+    // The catch-leg `disposed` guard: a late answer from the superseded client
+    // — even a definitive 404 — must not settle the NEW connection's in-flight
+    // fetch, or a dead daemon's ECONNREFUSED would clobber the tab title and
+    // cache while a healthy daemon B is still answering.
+    let rejectFirst!: (error: unknown) => void;
+    let resolveSecond!: (brand: unknown) => void;
+    const first = new Promise((_r, rej) => (rejectFirst = rej));
+    const second = new Promise((r) => (resolveSecond = r));
+    sdkMocks.brand
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:5173">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    await act(async () => {
+      rejectFirst(new DaemonHttpError(404, undefined, '404 not found'));
+      await first.catch(() => undefined);
+    });
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(false);
+
+    await act(async () => {
+      resolveSecond({ name: 'Daemon B' });
+      await second;
+    });
+    expect(context?.brand).toEqual({ name: 'Daemon B' });
+    expect(context?.brandSettled).toBe(true);
 
     act(() => root.unmount());
     container.remove();

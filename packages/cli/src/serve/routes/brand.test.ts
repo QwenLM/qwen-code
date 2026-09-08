@@ -73,13 +73,19 @@ describe('GET /brand', () => {
 
   it('resolves a logo file into a data URI', async () => {
     const logoPath = path.join(dir, 'logo.svg');
-    fs.writeFileSync(logoPath, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    fs.writeFileSync(
+      logoPath,
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>',
+    );
     stubSettings({ user: { ui: { brand: { logoPath } } } });
     const response = await request(makeApp()).get('/brand');
     expect(response.status).toBe(200);
     expect(response.body.logoDataUri).toBe(
-      `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"/>')}`,
+      `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>')}`,
     );
+    // A well-formed logo produces no advisory: the operator's stderr stays
+    // clean unless something actually needs their attention.
+    expect(writeStderrLine).not.toHaveBeenCalled();
   });
 
   it('never loads workspace settings', async () => {

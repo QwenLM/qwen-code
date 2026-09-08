@@ -7,11 +7,31 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoadedSettings, type SettingsFile } from '../config/settings.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveCustomBanner } from '../ui/utils/customBanner.js';
 import { resolveWebShellBrand } from './web-shell-brand.js';
+
+const fsActual = vi.hoisted(
+  () =>
+    ({}) as {
+      fstatSync: typeof import('node:fs').fstatSync;
+      realpathSync: typeof import('node:fs').realpathSync;
+    },
+);
+
+// Pass-through by default: roughly every case in this file reads through the
+// real filesystem via the same namespace import, so a plain mock would strip
+// `fs` from all of them. Only the two functions the TOCTOU and resolvability
+// cases need to perturb are wrapped, and beforeEach re-attaches the real
+// implementations so a leaked once-implementation cannot reach the next test.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  fsActual.fstatSync = actual.fstatSync;
+  fsActual.realpathSync = actual.realpathSync;
+  return { ...actual, fstatSync: vi.fn(), realpathSync: vi.fn() };
+});
 
 const LOGO_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>';
@@ -52,6 +72,10 @@ describe('resolveWebShellBrand', () => {
   let dir: string;
 
   beforeEach(() => {
+    vi.mocked(fs.fstatSync).mockReset().mockImplementation(fsActual.fstatSync);
+    vi.mocked(fs.realpathSync)
+      .mockReset()
+      .mockImplementation(fsActual.realpathSync);
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-shell-brand-'));
   });
 
@@ -306,6 +330,93 @@ describe('resolveWebShellBrand', () => {
       expect(brand.logoDataUri).toBeDefined();
     });
 
+    it('accepts a quoted `>` in an attribute value before the xmlns', () => {
+      // `>` is legal inside an XML attribute value; a scanner blind to quote
+      // state ends the root tag early and misattributes the rejection. The
+      // fixture carries a viewBox so only the quote handling is exercised.
+      const file = writeLogo(
+        '<svg viewBox="0 0 8 8" aria-label="Next >" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it("rejects an xmlns-shaped substring inside another attribute's value", () => {
+      // The document declares NO default namespace — the match sits inside
+      // `data-note`. Accepting it would ship a data URI that paints a blank
+      // mark with nothing on stderr, the failure the namespace rule exists to
+      // prevent.
+      const file = writeLogo(
+        '<svg viewBox="0 0 8 8" data-note=\'xmlns="http://www.w3.org/2000/svg"\'/>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('namespaced <svg>');
+    });
+
+    it('rejects a prefix-only xmlns binding with no default namespace', () => {
+      // Inkscape emits `xmlns:svg` beside the real `xmlns`; on its own it does
+      // not put the root element in the SVG namespace.
+      const file = writeLogo(
+        '<svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('namespaced <svg>');
+    });
+
+    it.each([
+      ['a system literal containing >', '<!DOCTYPE svg SYSTEM "a>b.dtd">\n'],
+      ['a system literal containing [', '<!DOCTYPE svg SYSTEM "svg[1.dtd">\n'],
+      [
+        'an internal subset entity containing ]',
+        '<!DOCTYPE svg [ <!ENTITY gt "]"> ]>\n',
+      ],
+    ])('accepts a DOCTYPE with %s', (_label, prolog) => {
+      // Quoted literals and the internal-subset bracket may hold `>`, `[` and
+      // `]`; the scanner must not treat any of them as the end of the DOCTYPE.
+      const file = writeLogo(prolog + LOGO_SVG);
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it('warns but accepts when the root has no viewBox or dimensions', () => {
+      // The browser loads this image successfully — no error event — but
+      // without a viewBox or explicit width+height it cannot scale the
+      // artwork into the fixed sidebar box and may paint a blank mark. The
+      // daemon's stderr is the only channel that can tell the operator, so
+      // the logo is accepted with an advisory rather than rejected.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warning).toContain('no viewBox or width/height');
+    });
+
+    it('does not warn when width and height stand in for a viewBox', () => {
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
     it('rejects a symlink, even one pointing at a valid SVG', (ctx) => {
       const target = writeLogo(LOGO_SVG);
       const link = path.join(dir, 'link.svg');
@@ -341,6 +452,59 @@ describe('resolveWebShellBrand', () => {
       // refused it — otherwise the operator debugs permissions and spelling.
       expect(brand.logoDataUri).toBeUndefined();
       expect(warning).toContain('hard links');
+    });
+
+    it('refuses a file swapped between the lstat and the open', () => {
+      // The fd identity re-check is the only thing that refuses a path whose
+      // target was replaced (or hard-linked) after the pre-open guards ran.
+      // Perturbing `ino` drives exactly that; deleting the re-check turns
+      // this red — and it is also the last FIFO defence, since O_NONBLOCK
+      // lets a read-only FIFO open succeed.
+      const logoPath = writeLogo(LOGO_SVG);
+      vi.mocked(fs.fstatSync).mockImplementationOnce(((fd: number) => {
+        const stat = fsActual.fstatSync(fd);
+        const fake = Object.create(Object.getPrototypeOf(stat)) as fs.Stats;
+        Object.assign(fake, stat, { ino: stat.ino + 1 });
+        return fake;
+      }) as never);
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('changed while it was being read');
+    });
+
+    it('soft-fails a path that cannot be statted', () => {
+      // logo.svg is a regular file, so logo.svg/nested.svg raises ENOTDIR on
+      // lstat — the soft-fail must keep the configured name and report the
+      // published `ui.brand.logoPath is not readable` line, not blow up.
+      const logoPath = writeLogo(LOGO_SVG);
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({
+          user: brandSettings({
+            name: 'QiuQiu Code',
+            logoPath: path.join(logoPath, 'nested.svg'),
+          }),
+        }),
+      );
+      expect(brand).toEqual({ name: 'QiuQiu Code' });
+      expect(warning).toContain('is not readable');
+    });
+
+    it('soft-fails when the path cannot be resolved', () => {
+      const logoPath = writeLogo(LOGO_SVG);
+      vi.mocked(fs.realpathSync).mockImplementationOnce((() => {
+        const error = new Error(
+          'too many levels of symbolic links',
+        ) as NodeJS.ErrnoException;
+        error.code = 'ELOOP';
+        throw error;
+      }) as never);
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('is not resolvable');
     });
 
     it('expands a leading tilde against the home directory', (ctx) => {
@@ -407,7 +571,7 @@ describe('resolveWebShellBrand', () => {
       // script nodes in the document) — this test stays green by design then,
       // which is exactly why that other test exists.
       const logoPath = writeLogo(
-        '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><script>alert(1)</script></svg>',
       );
       const { brand, warning } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),

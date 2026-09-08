@@ -157,18 +157,24 @@ export interface DaemonWorkspaceContextValue {
   /**
    * Web Shell branding resolved by the daemon from the operator settings scopes
    * (system defaults, user, system). Fetched once per client instance beside
-   * capabilities; stays `undefined` while the fetch is in flight, on a daemon
-   * too old to have the route, or when the daemon answered that no brand is
-   * configured. See {@link DaemonWorkspaceContextValue.brandSettled} to tell
-   * those apart — consumers that clear cached branding must key on that flag,
-   * because the in-flight undefined and the settled-with-no-brand outcome look
-   * identical here.
+   * capabilities; stays `undefined` while the fetch is in flight and on a
+   * daemon too old to have the route (whose 404 settles the fetch). A daemon
+   * that answered "no brand configured" resolves to an empty object `{}` —
+   * read that as "use the built-in brand", not as "still loading" (the SDK
+   * publishes the same contract). See
+   * {@link DaemonWorkspaceContextValue.brandSettled} to tell "no value yet"
+   * from "the definitive answer arrived" — consumers that clear cached
+   * branding must key on that flag rather than on `brand === undefined`, or
+   * they never fire on the most common deployment.
    */
   brand?: DaemonBrand;
   /**
-   * True once the brand fetch has finished, successfully or not. Only the
-   * settled-with-no-brand state may drive invalidation of cached branding;
-   * before this flips, `brand === undefined` just means "still loading".
+   * True once this client's brand fetch has reached a definitive outcome:
+   * the daemon answered (with a brand or `{}`), or answered 404 (no route,
+   * so no brand will ever exist there). A retryable failure — a 503 while
+   * the runtime starts, a 429, a transport error — is unknown rather than
+   * absent and leaves this false, so cached chrome survives a blip.
+   * Per-client: resets to false when the client instance changes.
    */
   brandSettled?: boolean;
   getCapabilities?: () => Promise<DaemonCapabilities>;

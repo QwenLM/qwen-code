@@ -328,7 +328,7 @@
               "default": ""
             },
             "logoPath": {
-              "description": "Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading \"~\" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file, not a symlink, at most 32 KiB, and its root element must be a namespaced <svg> — the xmlns attribute is what makes it renderable as an image. Leave empty to use the built-in logo.",
+              "description": "Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading \"~\" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file — not a symlink, and not reachable through more than one hard link — at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> — the xmlns attribute is what makes it renderable as an image. Leave empty to use the built-in logo.",
               "type": "string",
               "default": ""
             }
