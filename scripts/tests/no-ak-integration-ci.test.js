@@ -181,6 +181,7 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-inject.test.ts',
         './qwen-live-m2-permission.test.ts',
         './qwen-live-m2-steering.test.ts',
+        './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
