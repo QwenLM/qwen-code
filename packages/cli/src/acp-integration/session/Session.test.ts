@@ -7387,6 +7387,770 @@ describe('Session', () => {
     });
   });
 
+  describe('channel background observation', () => {
+    const makeTask = (id = 'observed-agent') => ({
+      id,
+      agentId: id,
+      description: 'Verify implementation',
+      isBackgrounded: true,
+      status: 'running',
+      notified: false,
+      abortController: new AbortController(),
+      result: undefined as string | undefined,
+      error: undefined as string | undefined,
+    });
+    const status = (entry: ReturnType<typeof makeTask>) =>
+      mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls[0][0](
+        entry,
+      );
+    const notify = (entry: ReturnType<typeof makeTask>) =>
+      mockBackgroundTaskRegistry.setNotificationCallback.mock.calls[0][0](
+        'Task finished',
+        '<task-notification>Task result</task-notification>',
+        { agentId: entry.id, status: entry.status },
+      );
+    const prompt = (channel = true) =>
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'Start task' }],
+        ...(channel ? { _meta: { [CHANNEL_PROMPT_META_KEY]: true } } : {}),
+      });
+    const observations = () =>
+      vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.flatMap(([params]) =>
+          params.update._meta?.['source'] === 'channel_background_task'
+            ? [params.update._meta['backgroundTask']]
+            : [],
+        );
+
+    const completions = () =>
+      vi.mocked(mockClient.sessionUpdate).mock.calls.flatMap(([params]) => {
+        const task = params.update._meta?.['backgroundTask'] as
+          | { notificationComplete?: boolean }
+          | undefined;
+        return task?.notificationComplete ? [task] : [];
+      });
+
+    const makeShell = (id = 'observed-shell') => ({
+      id,
+      shellId: id,
+      description: 'Background command',
+      status: 'running',
+      notified: false,
+      abortController: new AbortController(),
+    });
+    const shellStatus = (entry: ReturnType<typeof makeShell>) =>
+      mockBackgroundShellRegistry.setStatusChangeCallback.mock.calls[0][0](
+        entry,
+      );
+    const shellNotify = (entry: ReturnType<typeof makeShell>) =>
+      mockBackgroundShellRegistry.setNotificationCallback.mock.calls[0][0](
+        'Shell finished',
+        '<task-notification>Shell result</task-notification>',
+        { shellId: entry.id, status: entry.status },
+      );
+
+    it.each([true, false])(
+      'observes shell continuations only for channel prompts (%s)',
+      async (channel) => {
+        const shell = makeShell();
+        mockBackgroundShellRegistry.getAll.mockReturnValue([shell]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            shellStatus(shell);
+            return createEmptyStream();
+          })
+          .mockImplementation(() => createEmptyStream());
+        await prompt(channel);
+        shell.status = 'completed';
+        shell.notified = true;
+        shellNotify(shell);
+        shellStatus(shell);
+        await vi.waitFor(() =>
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ source: 'background_notification' }),
+          ),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(observations()).toHaveLength(channel ? 2 : 0);
+        await vi.waitFor(() =>
+          expect(completions()).toHaveLength(channel ? 1 : 0),
+        );
+        if (channel)
+          expect(completions()[0]).toMatchObject({
+            taskId: shell.id,
+            kind: 'shell',
+            executionId: (observations()[0] as { executionId: string })
+              .executionId,
+          });
+      },
+    );
+
+    it('attributes a shell spawned during notification continuation despite inherited agent context', async () => {
+      const first = makeShell('first-shell');
+      const next = makeShell('next-shell');
+      mockBackgroundShellRegistry.getAll.mockReturnValue([first, next]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          shellStatus(first);
+          return createEmptyStream();
+        })
+        .mockImplementationOnce(() => {
+          vi.spyOn(core, 'getCurrentAgentId').mockReturnValue('finished-agent');
+          shellStatus(next);
+          return createEmptyStream();
+        });
+      await prompt();
+      first.status = 'completed';
+      first.notified = true;
+      shellNotify(first);
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      expect(observations()).toHaveLength(2);
+      expect(observations()[1]).toMatchObject({
+        taskId: next.id,
+        parentExecutionId: (observations()[0] as { executionId: string })
+          .executionId,
+      });
+    });
+
+    it.each(['owned', 'unowned', 'replaced', 'cancelled'] as const)(
+      'attributes a shell launched after the main turn to its %s agent execution',
+      async (ownership) => {
+        const parent = makeTask();
+        const shell = makeShell();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([parent]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(parent);
+        mockBackgroundShellRegistry.getAll.mockReturnValue([shell]);
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          status(parent);
+          return createEmptyStream();
+        });
+        await prompt();
+        const parentId = (observations()[0] as { executionId: string })
+          .executionId;
+        vi.spyOn(core, 'getCurrentAgentId').mockReturnValue(
+          ownership === 'unowned' ? 'another-agent' : parent.id,
+        );
+        if (ownership === 'replaced')
+          parent.abortController = new AbortController();
+        if (ownership === 'cancelled') parent.abortController.abort();
+        shellStatus(shell);
+        if (ownership === 'owned') {
+          expect(observations()).toHaveLength(2);
+          expect(observations()[1]).toMatchObject({
+            taskId: shell.id,
+            status: 'running',
+            parentExecutionId: parentId,
+          });
+          shell.status = 'completed';
+          shell.notified = true;
+          shellNotify(shell);
+          shellStatus(shell);
+          await vi.waitFor(() => expect(completions()).toHaveLength(1));
+          expect(completions()[0]).toMatchObject({
+            kind: 'shell',
+            taskId: shell.id,
+            executionId: (observations()[1] as { executionId: string })
+              .executionId,
+          });
+        } else expect(observations()).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      [true, false, false],
+      [false, false, false],
+      [true, true, false],
+      [true, true, true],
+    ])(
+      'observes channel=%s with raw delivery failure=%s and empty result=%s without changing ordinary notification execution',
+      async (channel, rawDeliveryFails, emptyResult) => {
+        if (rawDeliveryFails) {
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async (params) => {
+              if (
+                params.update._meta?.['source'] === 'channel_background_task' &&
+                (params.update._meta['backgroundTask'] as { status?: string })
+                  .status === 'completed'
+              ) {
+                throw new Error('Raw terminal delivery failed');
+              }
+            },
+          );
+        }
+        const entry = makeTask();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            status(entry);
+            return createEmptyStream();
+          })
+          .mockImplementation(() =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Normal notification response' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+        await expect(prompt(channel)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+        expect(entry.status).toBe('running');
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        entry.status = 'completed';
+        entry.notified = true;
+        entry.result = emptyResult ? undefined : 'Raw agent result';
+        notify(entry);
+        status(entry);
+        await vi.waitFor(() =>
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ source: 'background_notification' }),
+          ),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(observations()).toHaveLength(channel ? 2 : 0);
+        if (channel)
+          expect(observations()[1]).toMatchObject({
+            status: 'completed',
+            executionId: expect.any(String),
+          });
+        const responses = vi.mocked(mockClient.sessionUpdate).mock.calls.filter(
+          ([params]) =>
+            params.update._meta?.['source'] ===
+              'background_notification_response' &&
+            !(
+              params.update._meta['backgroundTask'] as {
+                notificationComplete?: boolean;
+              }
+            ).notificationComplete,
+        );
+        const display = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.find(
+            ([params]) =>
+              params.update._meta?.['source'] === 'background_notification',
+          );
+        expect(display?.[0].update._meta?.['backgroundTask']).toMatchObject({
+          taskId: entry.id,
+        });
+        if (channel) {
+          expect(display?.[0].update._meta?.['backgroundTask']).toMatchObject({
+            executionId: (observations()[0] as { executionId: string })
+              .executionId,
+          });
+        } else {
+          expect(
+            display?.[0].update._meta?.['backgroundTask'],
+          ).not.toHaveProperty('executionId');
+        }
+        expect(responses).toHaveLength(1);
+        await vi.waitFor(() =>
+          expect(completions()).toHaveLength(channel ? 1 : 0),
+        );
+        expect(
+          responses[0][0].update._meta?.['suppressChannelDelivery'],
+        ).toBeUndefined();
+        expect(responses[0][0].update._meta?.['backgroundTask']).toMatchObject(
+          channel
+            ? {
+                executionId: (observations()[0] as { executionId: string })
+                  .executionId,
+              }
+            : { taskId: entry.id },
+        );
+        if (!channel) {
+          expect(
+            responses[0][0].update._meta?.['backgroundTask'],
+          ).not.toHaveProperty('executionId');
+          expect(
+            responses[0][0].update._meta?.['backgroundTask'],
+          ).not.toHaveProperty('result');
+        }
+      },
+    );
+
+    it.each(['', '[NO_REPLY]', 'error'])(
+      'completes the notification lifecycle for %s without requiring visible output',
+      async (output) => {
+        const entry = makeTask();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            status(entry);
+            return createEmptyStream();
+          })
+          .mockImplementation(() => {
+            if (output === 'error')
+              throw new Error('Notification model failed');
+            return createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: output }] } }],
+                },
+              },
+            ]);
+          });
+        await prompt();
+        entry.status = 'completed';
+        entry.notified = true;
+        status(entry);
+        expect(completions()).toHaveLength(0);
+        notify(entry);
+        await vi.waitFor(() => expect(completions()).toHaveLength(1));
+        expect(completions()[0]).toMatchObject({
+          executionId: (observations()[0] as { executionId: string })
+            .executionId,
+          turnComplete: true,
+          ...(output === 'error' ? { partial: true } : {}),
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('attributes tasks spawned by notification continuations to the parent execution', async () => {
+      const parent = makeTask('parent');
+      const child = makeTask('child');
+      const entries = [parent];
+      mockBackgroundTaskRegistry.getAll.mockImplementation(() => entries);
+      mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+        entries.find((entry) => entry.id === id),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          status(parent);
+          return createEmptyStream();
+        })
+        .mockImplementationOnce(() => {
+          entries.push(child);
+          status(child);
+          return createEmptyStream();
+        })
+        .mockImplementation(() => createEmptyStream());
+      await prompt();
+      const parentId = (observations()[0] as { executionId: string })
+        .executionId;
+      parent.status = 'completed';
+      parent.notified = true;
+      status(parent);
+      notify(parent);
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      expect(observations()[2]).toMatchObject({
+        taskId: 'child',
+        status: 'running',
+        parentExecutionId: parentId,
+      });
+      child.status = 'completed';
+      child.notified = true;
+      status(child);
+      notify(child);
+      await vi.waitFor(() => expect(completions()).toHaveLength(2));
+      expect(completions()[1]).toMatchObject({
+        executionId: (observations()[2] as { executionId: string }).executionId,
+      });
+    });
+
+    it('settles a deduplicated resumed execution without prematurely settling a notification retry', async () => {
+      const entry = makeTask();
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+      mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+      let release!: () => void;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          status(entry);
+          return createEmptyStream();
+        })
+        .mockImplementationOnce(async () => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return createEmptyStream();
+        })
+        .mockImplementation(() => {
+          status(entry);
+          return createEmptyStream();
+        });
+      const item = {
+        taskId: entry.id,
+        kind: 'agent' as const,
+        status: 'completed',
+        displayText: 'Done',
+        modelText: 'Done',
+      };
+      await prompt();
+      entry.status = 'completed';
+      entry.notified = true;
+      status(entry);
+      await session.enqueueBackgroundNotification(item);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      await session.enqueueBackgroundNotification(item);
+      expect(completions()).toHaveLength(0);
+      release();
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      entry.abortController = new AbortController();
+      entry.status = 'running';
+      entry.notified = false;
+      await prompt();
+      entry.status = 'completed';
+      entry.notified = true;
+      status(entry);
+      await session.enqueueBackgroundNotification(item);
+      expect(completions()).toHaveLength(2);
+      expect(completions()[1]).toMatchObject({
+        executionId: (observations()[2] as { executionId: string }).executionId,
+        partial: true,
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      await session.enqueueBackgroundNotification(item);
+      expect(completions()).toHaveLength(2);
+    });
+
+    it('acknowledges queued and active channel notifications when cancelled', async () => {
+      const entries = [makeTask('first'), makeTask('second')];
+      mockBackgroundTaskRegistry.getAll.mockReturnValue(entries);
+      mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+        entries.find((entry) => entry.id === id),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          for (const entry of entries) status(entry);
+          return createEmptyStream();
+        })
+        .mockImplementation(async (_parts, options) => {
+          await new Promise<void>((resolve) =>
+            options.config.abortSignal.addEventListener(
+              'abort',
+              () => resolve(),
+              { once: true },
+            ),
+          );
+          return createEmptyStream();
+        });
+      await prompt();
+      for (const entry of entries) {
+        entry.status = 'completed';
+        entry.notified = true;
+        status(entry);
+      }
+      notify(entries[0]);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      notify(entries[1]);
+      await session.cancelPendingPrompt();
+      await vi.waitFor(() => expect(completions()).toHaveLength(2));
+      expect(completions()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ taskId: 'first', partial: true }),
+          expect.objectContaining({ taskId: 'second', partial: true }),
+        ]),
+      );
+    });
+
+    it('acknowledges evicted notifications independently of the twenty-item queue', async () => {
+      const entries = Array.from({ length: 21 }, (_, i) =>
+        makeTask(`observed-${i}`),
+      );
+      mockBackgroundTaskRegistry.getAll.mockReturnValue(entries);
+      mockBackgroundTaskRegistry.get.mockImplementation((id) =>
+        entries.find((entry) => entry.id === id),
+      );
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() =>
+          (async function* () {
+            for (const entry of entries) status(entry);
+            for (const entry of entries) {
+              entry.status = 'completed';
+              entry.notified = true;
+              entry.result = `Result ${entry.id}`;
+              notify(entry);
+              status(entry);
+            }
+            await held;
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: { candidates: [] },
+            };
+          })(),
+        )
+        .mockImplementation(() => createEmptyStream());
+      const running = prompt();
+      await vi.waitFor(() => expect(observations()).toHaveLength(42));
+      expect(
+        observations().filter(
+          (event) => (event as { status: string }).status === 'completed',
+        ),
+      ).toHaveLength(21);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(
+        session
+          .collectActiveWorkHolds()
+          .filter((hold) => hold.category === 'notification'),
+      ).toHaveLength(20);
+      expect(completions()).toHaveLength(1);
+      expect(completions()[0]).toMatchObject({ partial: true });
+      release();
+      await running;
+      await vi.waitFor(() => expect(completions()).toHaveLength(21));
+    });
+
+    it.each([true, false])(
+      'assigns a new execution only when a restarted task is channel=%s',
+      async (channel) => {
+        const entry = makeTask();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          status(entry);
+          return createEmptyStream();
+        });
+        await prompt();
+        entry.status = 'completed';
+        entry.notified = true;
+        entry.result = 'First result';
+        status(entry);
+        const first = observations()[0] as { executionId: string };
+        entry.abortController = new AbortController();
+        entry.status = 'running';
+        entry.notified = false;
+        entry.result = undefined;
+        await prompt(channel);
+        entry.status = 'completed';
+        entry.notified = true;
+        entry.result = 'Second result';
+        status(entry);
+        expect(observations()).toHaveLength(channel ? 4 : 2);
+        if (channel) {
+          const restarted = observations()[2] as { executionId: string };
+          expect(restarted.executionId).not.toBe(first.executionId);
+          expect(observations()[3]).toMatchObject({
+            executionId: restarted.executionId,
+          });
+        }
+      },
+    );
+
+    it.each([true, false])(
+      'keeps a paused execution identity when resumed by channel=%s',
+      async (channel) => {
+        const entry = makeTask();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          status(entry);
+          return createEmptyStream();
+        });
+        await prompt();
+        entry.status = 'paused';
+        entry.abortController = new AbortController();
+        status(entry);
+        const first = observations()[0] as { executionId: string };
+        entry.abortController = new AbortController();
+        entry.status = 'running';
+        await prompt(channel);
+        entry.status = 'completed';
+        entry.notified = true;
+        entry.result = 'Resumed result';
+        status(entry);
+        expect(observations()).toHaveLength(4);
+        expect(observations()[1]).toMatchObject({
+          executionId: first.executionId,
+          status: 'paused',
+        });
+        expect(observations()[2]).toMatchObject({
+          executionId: first.executionId,
+          status: 'running',
+        });
+        expect(observations()[3]).toMatchObject({
+          executionId: first.executionId,
+        });
+      },
+    );
+
+    it('does not cancel background agents when the channel prompt is cancelled', async () => {
+      const cancel = vi.fn();
+      Object.assign(mockBackgroundTaskRegistry, { cancel });
+      const entry = makeTask();
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+      mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async (_params, options) => {
+          status(entry);
+          await new Promise<void>((resolve) =>
+            options.config.abortSignal.addEventListener(
+              'abort',
+              () => resolve(),
+              { once: true },
+            ),
+          );
+          return createEmptyStream();
+        });
+      const running = prompt();
+      await vi.waitFor(() => expect(observations()).toHaveLength(1));
+      await session.cancelPendingPrompt();
+      await running;
+      expect(cancel).not.toHaveBeenCalled();
+      expect(entry.abortController.signal.aborted).toBe(false);
+    });
+
+    it.each([true, false])(
+      'captures channel=%s notification ownership before persistence awaits a task restart',
+      async (channel) => {
+        const entry = makeTask();
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+        mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          status(entry);
+          return createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Normal result' }] } },
+                ],
+              },
+            },
+          ]);
+        });
+        await prompt(channel);
+        entry.status = 'completed';
+        entry.notified = true;
+        entry.result = 'Initial result';
+        status(entry);
+        let persist!: () => void;
+        mockChatRecordingService.recordNotificationStrict.mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              persist = resolve;
+            }),
+        );
+        const acceptance = session.enqueueBackgroundNotification({
+          taskId: entry.id,
+          kind: 'agent',
+          status: 'completed',
+          displayText: 'Initial result',
+          modelText: 'Initial result',
+        });
+        entry.abortController = new AbortController();
+        entry.status = 'running';
+        entry.notified = false;
+        entry.result = undefined;
+        await prompt(!channel);
+        persist();
+        await acceptance;
+        await vi.waitFor(() =>
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ source: 'background_notification' }),
+          ),
+        );
+        const responses = vi.mocked(mockClient.sessionUpdate).mock.calls.filter(
+          ([params]) =>
+            params.update._meta?.['source'] ===
+              'background_notification_response' &&
+            !(
+              params.update._meta['backgroundTask'] as {
+                notificationComplete?: boolean;
+              }
+            ).notificationComplete,
+        );
+        expect(responses).toHaveLength(1);
+        await vi.waitFor(() =>
+          expect(completions()).toHaveLength(channel ? 1 : 0),
+        );
+        expect(
+          responses[0][0].update._meta?.['suppressChannelDelivery'],
+        ).toBeUndefined();
+        expect(responses[0][0].update._meta?.['backgroundTask']).toMatchObject(
+          channel
+            ? {
+                executionId: (observations()[0] as { executionId: string })
+                  .executionId,
+              }
+            : { taskId: entry.id },
+        );
+        if (!channel) {
+          expect(
+            responses[0][0].update._meta?.['backgroundTask'],
+          ).not.toHaveProperty('executionId');
+          expect(
+            responses[0][0].update._meta?.['backgroundTask'],
+          ).not.toHaveProperty('result');
+        }
+      },
+    );
+
+    it('observes failure status without exposing raw results', async () => {
+      const entry = makeTask();
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+      mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        status(entry);
+        return createEmptyStream();
+      });
+      await prompt();
+      entry.status = 'failed';
+      entry.notified = true;
+      entry.error = 'Authentication failed';
+      entry.result = 'Partial output';
+      status(entry);
+      expect(observations()[1]).toMatchObject({
+        status: 'failed',
+      });
+      expect(entry.status).toBe('failed');
+    });
+
+    it('waits for cancelled finalization to observe terminal status', async () => {
+      const entry = makeTask();
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([entry]);
+      mockBackgroundTaskRegistry.get.mockReturnValue(entry);
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        status(entry);
+        return createEmptyStream();
+      });
+      await prompt();
+      entry.status = 'cancelled';
+      status(entry);
+      expect(observations()).toHaveLength(1);
+      entry.notified = true;
+      entry.result = 'Partial result';
+      status(entry);
+      expect(observations()).toHaveLength(2);
+      expect(observations()[1]).toMatchObject({
+        status: 'cancelled',
+      });
+    });
+  });
+
   describe('sendAvailableCommandsUpdate', () => {
     it('sends available_commands_update from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([

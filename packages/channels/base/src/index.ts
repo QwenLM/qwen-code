@@ -14,6 +14,7 @@ export {
 export type {
   AvailableCommand,
   BackgroundResponseContext,
+  BackgroundTaskEvent,
   BridgeSessionInfo,
   ChannelBtwResult,
   ChannelAgentBridge,

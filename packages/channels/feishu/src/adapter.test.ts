@@ -111,6 +111,7 @@ function createObservedContactChannel(
     'test',
     createConfig({
       blockStreaming: 'on',
+      outputMode: 'process_and_result',
       groupPolicy: 'open',
       groups: { '*': { requireMention: false } },
     }),
@@ -522,6 +523,7 @@ describe('FeishuChannel', () => {
         chatId: 'oc_chat_id',
         sessionId: 'session_1',
         runId: 'run-1',
+        outputMode: 'final_only',
         type: 'completed',
         identity: { id: 'channel:feishu', displayName: 'feishu' },
         memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
@@ -2830,7 +2832,7 @@ describe('FeishuChannel', () => {
     it('releases only output-card state at an input request and creates a second card later', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         const updateCard = vi.fn().mockResolvedValue(true);
         const createStreamingCard = vi.fn().mockResolvedValue({
           success: true,
@@ -2947,7 +2949,7 @@ describe('FeishuChannel', () => {
     ])(
       'compensates when input-request card finalization %s',
       async (_name, result) => {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         const updateCard = vi.fn();
         if (result instanceof Error) {
           updateCard.mockRejectedValue(result);
@@ -3021,7 +3023,7 @@ describe('FeishuChannel', () => {
     );
 
     it('recovers input-request card finalization with a table-stripped retry', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       const updateCard = vi
         .fn()
         .mockResolvedValueOnce(false)
@@ -3074,7 +3076,7 @@ describe('FeishuChannel', () => {
     });
 
     it('caps the input-request table-stripped retry at the card size limit', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       const updateCard = vi
         .fn()
         .mockResolvedValueOnce(false)
@@ -3130,7 +3132,7 @@ describe('FeishuChannel', () => {
       ['while card creation is in flight', { creating: true }],
       ['after card creation failed', { cardCreationFailed: true }],
     ])('preserves pre-question text %s', async (_name, state) => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       const sendMessage = vi.fn().mockResolvedValue(undefined);
       Object.assign(channel as unknown as Record<string, unknown>, {
         sendMessage,
@@ -6028,7 +6030,7 @@ describe('FeishuChannel', () => {
     it('keeps auxiliary maps when an abandoned creation never starts', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         const createStreamingCard = vi.fn();
         Object.assign(channel as unknown as Record<string, unknown>, {
           createStreamingCard,
@@ -6103,7 +6105,7 @@ describe('FeishuChannel', () => {
     it('anchors the creating-timeout at post-answer card creation start', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         // Never resolves: the pre-question creation stays in flight so the
         // clock can advance past it without side effects.
         const createStreamingCard = vi
@@ -6188,7 +6190,7 @@ describe('FeishuChannel', () => {
     it('blocks the throttled update before the input-request final patch', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         const updateCard = vi.fn().mockResolvedValue(true);
         Object.assign(channel as unknown as Record<string, unknown>, {
           updateCard,
@@ -6250,7 +6252,7 @@ describe('FeishuChannel', () => {
     it('awaits an in-flight throttled streaming PATCH before the final patch', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         let resolveStreaming!: (ok: boolean) => void;
         const updateCard = vi
           .fn()
@@ -6323,7 +6325,7 @@ describe('FeishuChannel', () => {
     });
 
     it('leaves the output card to the stop flow when stop is in flight before a question', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       let resolveCancel!: (ok: boolean) => void;
       (
         channel as unknown as {
@@ -6410,7 +6412,7 @@ describe('FeishuChannel', () => {
     });
 
     it('does not re-deliver stopped content when Stop settled before the input request', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       (
         channel as unknown as {
           requestActivePromptCancellation: (
@@ -6484,7 +6486,7 @@ describe('FeishuChannel', () => {
     });
 
     it('renders the stop label when Stop settles during input-request finalization', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       let resolveDrain!: () => void;
       const drain = new Promise<void>((resolve) => {
         resolveDrain = resolve;
@@ -6570,7 +6572,7 @@ describe('FeishuChannel', () => {
     });
 
     it('renders the stop label when Stop settles during the final patch await', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       let resolveFinalPatch!: (ok: boolean) => void;
       const finalPatch = new Promise<boolean>((resolve) => {
         resolveFinalPatch = resolve;
@@ -6717,7 +6719,7 @@ describe('FeishuChannel', () => {
     it('drops the coalesced trailing run when finalization drains the chain', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         let resolveStalled!: (ok: boolean) => void;
         const updateCard = vi
           .fn()
@@ -6793,7 +6795,7 @@ describe('FeishuChannel', () => {
     });
 
     it('carries a concurrent terminal status into the released card entry', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       let resolveFinalization!: (ok: boolean) => void;
       const updateCard = vi.fn().mockImplementation(
         () =>
@@ -6875,7 +6877,7 @@ describe('FeishuChannel', () => {
     it('deletes a late card when the input request lands mid-creation', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         let resolveCreate!: (value: {
           messageId: string;
           success: boolean;
@@ -6979,7 +6981,7 @@ describe('FeishuChannel', () => {
     it('skips cleanup when an abandoned creation timer fires late', async () => {
       vi.useFakeTimers();
       try {
-        const channel = createChannel();
+        const channel = createChannel({ outputMode: 'process_and_result' });
         const createStreamingCard = vi.fn();
         Object.assign(channel as unknown as Record<string, unknown>, {
           createStreamingCard,
@@ -7068,7 +7070,7 @@ describe('FeishuChannel', () => {
     });
 
     it('truncates oversized input-request card finalization', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       const updateCard = vi.fn().mockResolvedValue(true);
       Object.assign(channel as unknown as Record<string, unknown>, {
         updateCard,
@@ -7115,7 +7117,7 @@ describe('FeishuChannel', () => {
     });
 
     it('keeps the card cap when fence rebalancing prepends a fence', async () => {
-      const channel = createChannel();
+      const channel = createChannel({ outputMode: 'process_and_result' });
       const updateCard = vi.fn().mockResolvedValue(true);
       Object.assign(channel as unknown as Record<string, unknown>, {
         updateCard,
@@ -7239,5 +7241,155 @@ describe('FeishuChannel', () => {
       expect(msgToSenderId.has('msg_collect')).toBe(true);
       expect(cardSessions.has('msg_collect')).toBe(false);
     });
+  });
+});
+
+describe('request output projection', () => {
+  it('keeps the simplified output card running across input without a second card', async () => {
+    const channel = createChannel({ outputMode: 'final_only' });
+    const updateCard = vi.fn().mockResolvedValue(true);
+    const createStreamingCard = vi.fn();
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      updateCard,
+      createStreamingCard,
+    });
+    const states = getPrivateMethod<Map<string, Record<string, unknown>>>(
+      channel,
+      'cardSessions',
+    );
+    const mapping = getPrivateMethod<Map<string, string>>(
+      channel,
+      'sessionToInboundMsg',
+    );
+    mapping.set('s-simple', 'in-simple');
+    const state = {
+      messageId: 'card-simple',
+      created: true,
+      creating: false,
+      stopped: false,
+      accumulatedText: 'Need input',
+      lastUpdateAt: 0,
+    };
+    states.set('in-simple', state);
+    await getPrivateMethod<
+      (
+        chatId: string,
+        sessionId: string,
+        segment: unknown,
+        reason: string,
+      ) => Promise<void>
+    >(channel, 'onOutputSegmentEnd').call(
+      channel,
+      'chat-simple',
+      's-simple',
+      {},
+      'input_requested',
+    );
+    expect(states.get('in-simple')).toBe(state);
+    expect(updateCard).not.toHaveBeenCalled();
+    await getPrivateMethod<
+      (chatId: string, text: string, sessionId: string) => Promise<void>
+    >(channel, 'onResponseComplete').call(
+      channel,
+      'chat-simple',
+      'Final conclusion',
+      's-simple',
+    );
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    expect(updateCard.mock.calls[0][0]).toBe('card-simple');
+    expect(createStreamingCard).not.toHaveBeenCalled();
+  });
+
+  it('replaces cumulative progress without duplicating text or completing the card', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel();
+      const updateCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard,
+      });
+      const states = getPrivateMethod<Map<string, Record<string, unknown>>>(
+        channel,
+        'cardSessions',
+      );
+      const mapping = getPrivateMethod<Map<string, string>>(
+        channel,
+        'sessionToInboundMsg',
+      );
+      mapping.set('session-progress', 'inbound-progress');
+      states.set('inbound-progress', {
+        messageId: 'card-progress',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: '',
+        lastUpdateAt: 0,
+      });
+      const progress = getPrivateMethod<
+        (chatId: string, text: string, sessionId: string) => void
+      >(channel, 'onResponseProgress').bind(channel);
+      progress('chat-progress', 'First', 'session-progress');
+      progress('chat-progress', 'First answer', 'session-progress');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(states.get('inbound-progress')?.accumulatedText).toBe(
+        'First answer',
+      );
+      expect(updateCard).toHaveBeenLastCalledWith(
+        'card-progress',
+        'First answer',
+        false,
+        'inbound-progress',
+      );
+      progress('chat-progress', 'Background follow-up', 'session-progress');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(updateCard).toHaveBeenLastCalledWith(
+        'card-progress',
+        'Background follow-up',
+        false,
+        'inbound-progress',
+      );
+      expect(states.get('inbound-progress')?.completed).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finalizes the first detailed output once and sends the next output once through fallback', async () => {
+    const channel = createChannel({ outputMode: 'process_and_result' });
+    const updateCard = vi.fn().mockResolvedValue(true);
+    const sendFallbackMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      updateCard,
+      sendFallbackMessage,
+    });
+    getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+      'session-detailed',
+      'inbound-detailed',
+    );
+    getPrivateMethod<Map<string, Record<string, unknown>>>(
+      channel,
+      'cardSessions',
+    ).set('inbound-detailed', {
+      messageId: 'card-detailed',
+      created: true,
+      creating: false,
+      stopped: false,
+      accumulatedText: '',
+      lastUpdateAt: 0,
+    });
+    const complete = getPrivateMethod<
+      (chatId: string, text: string, sessionId: string) => Promise<void>
+    >(channel, 'onResponseComplete').bind(channel);
+    await complete('chat-detailed', 'First full output', 'session-detailed');
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    expect(updateCard.mock.calls[0][1]).toContain('First full output');
+    expect(sendFallbackMessage).not.toHaveBeenCalled();
+    await complete('chat-detailed', 'Second full output', 'session-detailed');
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    expect(sendFallbackMessage).toHaveBeenCalledExactlyOnceWith(
+      'chat-detailed',
+      'Second full output',
+      undefined,
+    );
   });
 });

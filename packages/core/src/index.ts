@@ -61,6 +61,7 @@ export * from './output/types.js';
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
 export {
+  getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,

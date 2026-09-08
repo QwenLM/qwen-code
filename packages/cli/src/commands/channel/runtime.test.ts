@@ -361,6 +361,38 @@ describe('registerPermissionRelay', () => {
 });
 
 describe('registerBackgroundResponseRelay', () => {
+  it('routes execution results only to the owning channel', () => {
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn((id: string) =>
+        id === 'session-1'
+          ? { channelName: 'telegram', chatId: 'chat1' }
+          : undefined,
+      ),
+    };
+    const channel = {
+      dispatchBackgroundTask: vi.fn(),
+    };
+    registerBackgroundResponseRelay(
+      bridge as never,
+      router as never,
+      new Map([['telegram', channel as never]]),
+    );
+    const event = {
+      sessionId: 'session-1',
+      taskId: 'a1',
+      executionId: 'execution-1',
+      description: 'Tests',
+      status: 'completed',
+      result: 'Raw result',
+    };
+    bridge.emit('backgroundTask', event);
+    bridge.emit('backgroundTask', { ...event, sessionId: 'unknown' });
+    expect(channel.dispatchBackgroundTask).toHaveBeenCalledExactlyOnceWith(
+      event,
+    );
+  });
+
   it('routes the final background response without joining the active prompt', async () => {
     const bridge = new EventEmitter();
     const router = {

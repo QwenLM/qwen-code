@@ -529,6 +529,12 @@ export async function parseChannelConfig(
     'multiSession',
     rawConfig['multiSession'],
   );
+  const outputMode = rawConfig['outputMode'] ?? 'final_only';
+  if (outputMode !== 'final_only' && outputMode !== 'process_and_result') {
+    throw new Error(
+      `Channel "${name}" field "outputMode" must be "final_only" or "process_and_result".`,
+    );
+  }
   const messagePrefix = optionalPlainStringField(
     name,
     'messagePrefix',
@@ -558,6 +564,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
+    outputMode,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

@@ -3383,6 +3383,13 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.outputMode': 'Output mode',
+  'channels.editor.field.shared.outputMode.description':
+    'Final result only (default): show the last complete reply when the request finishes. Process and results: retain one card per complete assistant output. Background continuations keep the request indicator active until they finish.',
+  'channels.editor.field.shared.outputMode.option.final_only':
+    'Final result only',
+  'channels.editor.field.shared.outputMode.option.process_and_result':
+    'Process and results',
   'channels.editor.field.shared.multiSession': 'Named tasks',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
@@ -6741,6 +6748,12 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.outputMode': '输出模式',
+  'channels.editor.field.shared.outputMode.description':
+    '仅最终结果（默认）：处理完成后，仅展示最后一次完整回复。过程与结果：每次完整的助手输出各保留一张卡片。后台续答结束前，持续显示处理中状态。',
+  'channels.editor.field.shared.outputMode.option.final_only': '仅最终结果',
+  'channels.editor.field.shared.outputMode.option.process_and_result':
+    '过程与结果',
   'channels.editor.field.shared.multiSession': '命名任务',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',

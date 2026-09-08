@@ -1436,6 +1436,20 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  protected override onResponseProgress(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext,
+  ): void {
+    const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
+    const cardState = inboundMsgId
+      ? this.cardSessions.get(inboundMsgId)
+      : undefined;
+    if (cardState && !cardState.stopped) cardState.accumulatedText = '';
+    this.onResponseChunk(chatId, text, sessionId, segment);
+  }
+
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
@@ -1660,6 +1674,11 @@ export class FeishuChannel extends ChannelBase {
       this.onResponseBoundary(chatId, sessionId);
       return;
     }
+    if (
+      reason === 'input_requested' &&
+      this.config.outputMode !== 'process_and_result'
+    )
+      return;
     if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
       return;
     }

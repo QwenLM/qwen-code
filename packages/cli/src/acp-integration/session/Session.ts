@@ -24,6 +24,7 @@ import type {
   ToolResult,
   ToolResultDisplay,
   ShellProgressData,
+  ShellTask,
   ChatRecord,
   HistoryGap,
   AgentEventEmitter,
@@ -58,6 +59,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
   BranchPoint,
+  BackgroundStatusChangeCallback,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -190,6 +192,7 @@ import {
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
+  getCurrentAgentId,
   todoWorkChainContext,
   dedupeToolCallsById,
   getFunctionCallFingerprint,
@@ -1471,9 +1474,17 @@ export interface BackgroundNotificationQueueItem {
   };
 }
 
+interface ChannelBackgroundExecution {
+  executionId: string;
+  controller: AbortController;
+  status: string;
+  notificationAccepted?: boolean;
+}
+
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+  channelExecution?: { executionId: string };
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -2047,6 +2058,19 @@ export class Session implements SessionContext {
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
   private notificationQueue: QueuedBackgroundNotification[] = [];
+  private channelObservation?: {
+    promptId: string;
+    signal: AbortSignal;
+    parentExecutionId?: string;
+  };
+  private readonly channelExecutions = new Map<
+    string,
+    ChannelBackgroundExecution
+  >();
+  private readonly channelShellExecutions = new Map<
+    string,
+    ChannelBackgroundExecution
+  >();
   private notificationProcessing = false;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
@@ -2085,7 +2109,7 @@ export class Session implements SessionContext {
   private unsubscribeChatRecordingFailure?: () => void;
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
-  #statusChangeCallback: (() => void) | undefined;
+  #statusChangeCallback: BackgroundStatusChangeCallback | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
   /**
@@ -2116,7 +2140,7 @@ export class Session implements SessionContext {
    */
   private workflowDeletionSeq = 0;
   private readonly workflowDeletionSeqByRunId = new Map<string, number>();
-  #shellStatusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: ((entry?: ShellTask) => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -4229,6 +4253,9 @@ export class Session implements SessionContext {
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
     this.hardSuspendTodoStopGuard();
+    for (const item of this.notificationQueue) {
+      void this.#completeChannelNotification(item, undefined, true);
+    }
     this.notificationQueue = [];
     this.cronQueue = [];
     for (const turn of this.goalQueue.splice(0)) {
@@ -4524,6 +4551,9 @@ export class Session implements SessionContext {
       this.notificationAbortController.abort();
       this.notificationAbortController = null;
     }
+    for (const item of this.notificationQueue) {
+      void this.#completeChannelNotification(item, undefined, true);
+    }
     this.notificationQueue = [];
     this.notificationProcessing = false;
 
@@ -4768,6 +4798,9 @@ export class Session implements SessionContext {
     if (this.notificationAbortController) {
       this.notificationAbortController.abort();
       this.notificationAbortController = null;
+      for (const item of this.notificationQueue) {
+        void this.#completeChannelNotification(item, undefined, true);
+      }
       this.notificationQueue = [];
       this.notificationProcessing = false;
     }
@@ -5234,6 +5267,8 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        if (channelTurn)
+          this.channelObservation = { promptId, signal: pendingSend.signal };
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
         const continuesCurrentWorkChain =
@@ -6321,6 +6356,9 @@ export class Session implements SessionContext {
         );
       },
     ).finally(() => {
+      if (this.channelObservation?.signal === pendingSend.signal) {
+        this.channelObservation = undefined;
+      }
       if (managedMemoryRecallStarted) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
@@ -9493,8 +9531,72 @@ export class Session implements SessionContext {
     // retract that. Under ACP nothing else claims the slot today, but a Session
     // must not clear a callback it did not install — the TUI uses the same
     // registry, and "clear on dispose" would silently unhook it.
-    this.#statusChangeCallback = () => {
+    this.#statusChangeCallback = (entry) => {
       this.#activeWorkChanged();
+      const retainedIds = new Set(
+        backgroundRegistry.getAll().map((task) => task.id),
+      );
+      for (const taskId of this.channelExecutions.keys()) {
+        if (!retainedIds.has(taskId)) this.channelExecutions.delete(taskId);
+      }
+      if (!entry?.isBackgrounded) return;
+      let execution = this.channelExecutions.get(entry.id);
+      if (
+        execution &&
+        ((execution.status === 'paused' && entry.status === 'running') ||
+          (entry.status === 'paused' &&
+            ['running', 'paused'].includes(execution.status)))
+      ) {
+        execution.controller = entry.abortController;
+      }
+      if (
+        entry.status === 'running' &&
+        (!execution ||
+          execution.controller !== entry.abortController ||
+          ['completed', 'failed', 'cancelled'].includes(execution.status))
+      ) {
+        this.channelExecutions.delete(entry.id);
+        if (
+          !this.channelObservation ||
+          this.channelObservation.signal.aborted ||
+          promptIdContext.getStore() !== this.channelObservation.promptId
+        )
+          return;
+        execution = {
+          executionId: randomUUID(),
+          controller: entry.abortController,
+          status: '',
+        };
+        this.channelExecutions.set(entry.id, execution);
+      }
+      if (
+        !execution ||
+        execution.controller !== entry.abortController ||
+        execution.status === entry.status ||
+        (entry.status === 'cancelled' && !entry.notified)
+      )
+        return;
+      execution.status = entry.status;
+      void this.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'channel_background_task',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: entry.id,
+            executionId: execution.executionId,
+            description: truncateNotificationLabel(entry.description),
+            status: entry.status,
+            ...(this.channelObservation?.parentExecutionId &&
+            promptIdContext.getStore() === this.channelObservation.promptId
+              ? { parentExecutionId: this.channelObservation.parentExecutionId }
+              : {}),
+          },
+        },
+      }).catch((error: unknown) => {
+        debugLogger.debug('Channel background observation failed', error);
+      });
     };
     backgroundRegistry.setStatusChangeCallback(this.#statusChangeCallback);
     backgroundRegistry.setNotificationCallback(
@@ -9558,8 +9660,68 @@ export class Session implements SessionContext {
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
-    this.#shellStatusChangeCallback = () => {
+    this.#shellStatusChangeCallback = (entry) => {
       this.#activeWorkChanged();
+      const retainedIds = new Set(
+        shellRegistry.getAll().map((task) => task.id),
+      );
+      for (const taskId of this.channelShellExecutions.keys()) {
+        if (!retainedIds.has(taskId))
+          this.channelShellExecutions.delete(taskId);
+      }
+      if (!entry) return;
+      let execution = this.channelShellExecutions.get(entry.id);
+      let parentExecutionId: string | undefined;
+      if (!execution || execution.controller !== entry.abortController) {
+        this.channelShellExecutions.delete(entry.id);
+        if (entry.status !== 'running') return;
+        const agentId = getCurrentAgentId();
+        if (
+          this.channelObservation &&
+          !this.channelObservation.signal.aborted &&
+          promptIdContext.getStore() === this.channelObservation.promptId
+        ) {
+          parentExecutionId = this.channelObservation.parentExecutionId;
+        } else if (agentId) {
+          const parent = this.channelExecutions.get(agentId);
+          const agent = backgroundRegistry.get(agentId);
+          if (
+            !parent ||
+            parent.controller !== agent?.abortController ||
+            parent.controller.signal.aborted ||
+            parent.status !== 'running'
+          )
+            return;
+          parentExecutionId = parent.executionId;
+        } else {
+          return;
+        }
+        execution = {
+          executionId: randomUUID(),
+          controller: entry.abortController,
+          status: '',
+        };
+        this.channelShellExecutions.set(entry.id, execution);
+      }
+      if (execution.status === entry.status) return;
+      execution.status = entry.status;
+      void this.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'channel_background_task',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: entry.id,
+            executionId: execution.executionId,
+            description: truncateNotificationLabel(entry.description),
+            status: entry.status,
+            ...(parentExecutionId ? { parentExecutionId } : {}),
+          },
+        },
+      }).catch((error: unknown) => {
+        debugLogger.debug('Channel shell observation failed', error);
+      });
     };
     shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
@@ -9674,7 +9836,43 @@ export class Session implements SessionContext {
     }
   }
 
+  #channelExecutionForNotification(
+    item: BackgroundNotificationQueueItem,
+  ): ChannelBackgroundExecution | undefined {
+    return item.kind === 'shell'
+      ? this.channelShellExecutions.get(item.taskId)
+      : item.kind === 'agent'
+        ? this.channelExecutions.get(item.taskId)
+        : undefined;
+  }
+
+  #channelNotificationExecution(
+    item: BackgroundNotificationQueueItem,
+  ): QueuedBackgroundNotification['channelExecution'] {
+    const observed = this.#channelExecutionForNotification(item);
+    const task =
+      item.kind === 'shell'
+        ? this.config.getBackgroundShellRegistry().get(item.taskId)
+        : item.kind === 'agent'
+          ? this.config.getBackgroundTaskRegistry().get(item.taskId)
+          : undefined;
+    if (!observed || observed.controller !== task?.abortController)
+      return undefined;
+    return { executionId: observed.executionId };
+  }
+
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
+    if (!item.persisted) {
+      const channelExecution = this.#channelNotificationExecution(item);
+      if (channelExecution) item = { ...item, channelExecution };
+    }
+    const observed = this.#channelExecutionForNotification(item);
+    if (
+      observed &&
+      observed.executionId === item.channelExecution?.executionId
+    ) {
+      observed.notificationAccepted = true;
+    }
     while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
       let evictedIndex = 0;
       if (
@@ -9691,16 +9889,20 @@ export class Session implements SessionContext {
           debugLogger.warn(
             `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
           );
+          void this.#completeChannelNotification(item, undefined, true);
           return;
         }
         if (evictedIndex < 0) {
           debugLogger.warn(
             `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`,
           );
+          void this.#completeChannelNotification(item, undefined, true);
           return;
         }
       }
       const [evicted] = this.notificationQueue.splice(evictedIndex, 1);
+      if (evicted)
+        void this.#completeChannelNotification(evicted, undefined, true);
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
@@ -9714,12 +9916,20 @@ export class Session implements SessionContext {
     item: BackgroundNotificationQueueItem,
   ): Promise<{ accepted: boolean }> {
     if (this.persistedBackgroundNotificationTaskIds.has(item.taskId)) {
+      await this.#completeDuplicateChannelNotification(item);
       return { accepted: true };
     }
     const existing = this.backgroundNotificationAcceptances.get(item.taskId);
-    if (existing) return { accepted: await existing };
+    if (existing) {
+      const accepted = await existing;
+      if (accepted) await this.#completeDuplicateChannelNotification(item);
+      return { accepted };
+    }
 
-    const acceptance = this.#persistDaemonBackgroundNotification(item);
+    const acceptance = this.#persistDaemonBackgroundNotification(
+      item,
+      this.#channelNotificationExecution(item),
+    );
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
     if (item.kind === 'agent' || item.kind === 'workflow') {
       this.activeNotificationAcceptances.add(item.taskId);
@@ -9740,8 +9950,23 @@ export class Session implements SessionContext {
     }
   }
 
+  async #completeDuplicateChannelNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    const channelExecution = this.#channelNotificationExecution(item);
+    const observed = this.#channelExecutionForNotification(item);
+    if (!channelExecution || !observed || observed.notificationAccepted) return;
+    observed.notificationAccepted = true;
+    await this.#completeChannelNotification(
+      { ...item, continuesTodoStopGuardWorkChain: false, channelExecution },
+      undefined,
+      true,
+    );
+  }
+
   async #persistDaemonBackgroundNotification(
     item: BackgroundNotificationQueueItem,
+    channelExecution: QueuedBackgroundNotification['channelExecution'],
   ): Promise<boolean> {
     if (this.disposed || this.closing) return false;
     const recording = this.config.getChatRecordingService();
@@ -9772,6 +9997,7 @@ export class Session implements SessionContext {
         continuesTodoStopGuardWorkChain:
           this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
         persisted: true,
+        ...(channelExecution ? { channelExecution } : {}),
       });
     }
     return true;
@@ -9922,12 +10148,22 @@ export class Session implements SessionContext {
         const ac = new AbortController();
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
+        if (item.channelExecution) {
+          promptIdContext.enterWith(promptId);
+          this.channelObservation = {
+            promptId,
+            signal: ac.signal,
+            parentExecutionId: item.channelExecution.executionId,
+          };
+        }
+        let notificationPartial = false;
         let responseSegmentEmitted = false;
         let responseTurnComplete = false;
         const finishBackgroundNotificationTurn = async (
           reason: PromptResponse['stopReason'],
           partial = false,
         ): Promise<void> => {
+          notificationPartial ||= partial;
           if (responseSegmentEmitted && !responseTurnComplete) {
             try {
               await this.#emitBackgroundNotificationResponse(
@@ -10218,6 +10454,14 @@ export class Session implements SessionContext {
           }
         } finally {
           this.config.endAutomaticActiveTodoWorkChain(promptId);
+          if (this.channelObservation?.signal === ac.signal) {
+            this.channelObservation = undefined;
+          }
+          await this.#completeChannelNotification(
+            item,
+            promptId,
+            notificationPartial || ac.signal.aborted,
+          );
           if (this.notificationAbortController === ac) {
             this.notificationAbortController = null;
           }
@@ -10226,8 +10470,38 @@ export class Session implements SessionContext {
     );
   }
 
+  async #completeChannelNotification(
+    item: QueuedBackgroundNotification,
+    turnId: string = randomUUID(),
+    partial = false,
+  ): Promise<void> {
+    if (!item.channelExecution) return;
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: item.taskId,
+            kind: item.kind,
+            status: item.status,
+            ...item.channelExecution,
+            turnId,
+            turnComplete: true,
+            notificationComplete: true,
+            ...(partial ? { partial: true } : {}),
+          },
+        },
+      });
+    } catch (error) {
+      debugLogger.debug('Channel notification completion failed', error);
+    }
+  }
+
   async #emitBackgroundNotificationDisplay(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
   ): Promise<void> {
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
@@ -10241,13 +10515,16 @@ export class Session implements SessionContext {
           kind: item.kind,
           toolUseId: item.toolUseId,
           ...item.structured,
+          ...item.channelExecution,
         },
       },
     });
   }
 
   async #emitBackgroundNotificationResponse(
-    item: BackgroundNotificationQueueItem,
+    item: BackgroundNotificationQueueItem & {
+      channelExecution?: QueuedBackgroundNotification['channelExecution'];
+    },
     text: string,
     signal: AbortSignal,
     turnId: string,
@@ -10268,6 +10545,7 @@ export class Session implements SessionContext {
         qwenDiscreteMessage: true,
         backgroundTask: {
           taskId: item.taskId,
+          ...item.channelExecution,
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,

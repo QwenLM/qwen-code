@@ -91,6 +91,9 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
+    if (field.key === 'outputMode') {
+      return field.default ?? 'final_only';
+    }
     if (instance) {
       if (field.key === 'senderPolicy') return 'allowlist';
       if (field.key === 'groupPolicy') return 'disabled';

@@ -154,7 +154,9 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 | `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
 | `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
 
-**Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
+**Output boundaries:** Result notifications use complete assistant outputs. Legacy paragraph block-stream settings do not split request output into extra messages.
+
+**Result notifications:** `outputMode` controls whether intermediate assistant outputs remain visible. Final result only (`final_only`, default) keeps an interactive card running through the whole request and replaces its content with the last complete assistant reply; non-interactive channels retain their processing indicator and send only that reply when the request finishes. Process and results (`process_and_result`) delivers each complete assistant output separately, including existing background-notification continuations. Raw task results, tool events, and stream chunks do not create cards. The initial prompt returning does not end the request while related background agent or shell continuations remain pending. This presentation lifetime does not change CLI scheduling or add model calls.
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -365,25 +367,13 @@ interface Attachment {
 
 ## Block Streaming
 
-When `blockStreaming: "on"` is set in a channel's config, the agent's response is delivered as multiple separate messages instead of one large wall of text. The `BlockStreamer` accumulates streaming chunks and emits completed blocks based on paragraph boundaries and size heuristics.
-
-**Config fields** (on `ChannelConfig`):
-
-| Field                    | Type                     | Default         | Description                                                                 |
-| ------------------------ | ------------------------ | --------------- | --------------------------------------------------------------------------- |
-| `blockStreaming`         | `'on' \| 'off'`          | `'off'`         | Enable/disable block streaming                                              |
-| `blockStreamingChunk`    | `{ minChars, maxChars }` | `{ 400, 1000 }` | `minChars`: don't emit until this size. `maxChars`: force-emit at this size |
-| `blockStreamingCoalesce` | `{ idleMs }`             | `{ 1500 }`      | Emit buffered text after this many ms of silence from the agent             |
-
-**How it works:**
-
-1. Text accumulates as the agent streams its response
-2. When the buffer reaches `minChars` and hits a paragraph break (`\n\n`), that block is sent as a separate message
-3. If the buffer reaches `maxChars` without a paragraph break, it force-splits at the best break point (newline > space)
-4. If the agent goes quiet for `idleMs`, the buffer is flushed (as long as it's past `minChars`)
-5. When the agent finishes, any remaining text is sent immediately regardless of `minChars`
-
-Block streaming and `onResponseChunk` work independently — plugins can override `onResponseChunk` for their own purposes while block streaming handles delivery.
+The legacy `blockStreaming`, `blockStreamingChunk`, and
+`blockStreamingCoalesce` fields remain accepted when reading existing settings.
+Request result delivery now follows `outputMode`: final
+conclusion only, or one message per complete assistant output. It does not flush
+partial output based on paragraph size or an idle timer. Interactive adapters
+can display provisional content through `onResponseProgress` while the request
+remains active.
 
 ## Further reading
 

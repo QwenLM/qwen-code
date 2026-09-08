@@ -165,12 +165,33 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
   });
 
+  it.each(['final_only', 'process_and_result'] as const)(
+    'parses output mode %s',
+    async (outputMode) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'bare',
+        outputMode,
+      });
+      expect(result.outputMode).toBe(outputMode);
+    },
+  );
+
+  it.each(['unknown', true, 1])(
+    'rejects invalid output mode %s',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', outputMode }),
+      ).rejects.toThrow('field "outputMode"');
+    },
+  );
+
   it('parses minimal valid config with defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
     });
 
     expect(result.type).toBe('bare');
+    expect(result.outputMode).toBe('final_only');
     expect(result.token).toBe('');
     expect(result.senderPolicy).toBe('allowlist');
     expect(result.allowedUsers).toEqual([]);

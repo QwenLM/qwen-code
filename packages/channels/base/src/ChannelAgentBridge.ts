@@ -90,6 +90,8 @@ export interface BackgroundResponseContext {
   turnId?: string;
   turnComplete?: boolean;
   partial?: boolean;
+  executionId?: string;
+  notificationComplete?: boolean;
 }
 
 export function parseBackgroundResponseContext(
@@ -116,11 +118,19 @@ export function parseBackgroundResponseContext(
   }
 
   const context: BackgroundResponseContext = { taskId, status, kind };
-  for (const field of ['toolUseId', 'label', 'turnId'] as const) {
+  for (const field of [
+    'toolUseId',
+    'label',
+    'turnId',
+    'executionId',
+  ] as const) {
     const fieldValue = record[field];
     if (typeof fieldValue === 'string' && fieldValue) {
       context[field] = fieldValue;
     }
+  }
+  if (typeof record['notificationComplete'] === 'boolean') {
+    context.notificationComplete = record['notificationComplete'];
   }
   if (typeof record['turnComplete'] === 'boolean') {
     context.turnComplete = record['turnComplete'];
@@ -131,7 +141,50 @@ export function parseBackgroundResponseContext(
   return context;
 }
 
+export interface BackgroundTaskEvent {
+  sessionId: string;
+  taskId: string;
+  executionId: string;
+  description: string;
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  parentExecutionId?: string;
+}
+
+export function readBackgroundTaskEvent(
+  sessionId: string,
+  value: unknown,
+): BackgroundTaskEvent | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const task = value as Record<string, unknown>;
+  if (
+    typeof task['taskId'] !== 'string' ||
+    !task['taskId'].trim() ||
+    typeof task['executionId'] !== 'string' ||
+    !task['executionId'].trim() ||
+    typeof task['description'] !== 'string' ||
+    typeof task['status'] !== 'string' ||
+    !['running', 'paused', 'completed', 'failed', 'cancelled'].includes(
+      task['status'],
+    ) ||
+    (task['parentExecutionId'] !== undefined &&
+      (typeof task['parentExecutionId'] !== 'string' ||
+        !task['parentExecutionId'].trim()))
+  )
+    return;
+  return {
+    sessionId,
+    taskId: task['taskId'],
+    executionId: task['executionId'],
+    description: task['description'],
+    status: task['status'] as BackgroundTaskEvent['status'],
+    ...(typeof task['parentExecutionId'] === 'string'
+      ? { parentExecutionId: task['parentExecutionId'] }
+      : {}),
+  };
+}
+
 interface ChannelAgentBridgeEventMap {
+  backgroundTask: [BackgroundTaskEvent];
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
   backgroundResponse: [

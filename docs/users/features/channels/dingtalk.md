@@ -105,31 +105,45 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
-### Background Agent Responses
+### Result notifications
 
-Background Agent output is sent as soon as each response segment is available.
-Every message is labeled with the Agent name so concurrent work remains
-attributable.
+`outputMode` controls whether intermediate assistant outputs
+remain visible. Interactive and non-interactive delivery use the same output
+boundaries. Tool activity and raw background-agent results do not create cards.
 
-To buffer each Agent's notification turn and send it as one labeled message,
-enable aggregation for the DingTalk channel in `settings.json`:
+- **Final result only** (`final_only`, default): deliver the last complete
+  assistant reply once the whole request finishes. An interactive card stays running and replaces its
+  progress text as the assistant continues. Without interactive cards, keep the
+  processing reaction and send only that last reply when the request ends.
+- **Process and results** (`process_and_result`): deliver each complete
+  assistant output separately, including replies produced by the existing background
+  notification flow. Stream chunks are not separate outputs. Five complete
+  outputs therefore produce five deliveries. The platform may split an oversized
+  output into several messages; this does not create additional logical outputs.
+  With interactive cards, continuing tool work or background tasks starts the
+  next running card before the next complete reply arrives. That card receives
+  subsequent text updates and is finalized with its complete output.
+
+The channel editor presents these options as **仅最终结果** and **过程与结果**.
 
 ```json
 {
-  "channels": {
-    "my-dingtalk": {
-      "type": "dingtalk",
-      "clientId": "$DINGTALK_CLIENT_ID",
-      "clientSecret": "$DINGTALK_CLIENT_SECRET",
-      "aggregateBackgroundAgentResponses": true
-    }
-  }
+  "outputMode": "final_only"
 }
 ```
 
-Aggregation is disabled by default. A partial labeled message is sent if the
-Agent turn is interrupted, fails before producing a final response, or does
-not finish within ten minutes.
+The request remains active after the initial prompt returns while its background
+agents and their assistant continuations are pending. Finishing an agent is not
+sufficient: its notification continuation must also finish. No extra model
+summary is generated, and CLI task scheduling is unchanged. Paragraph block
+streaming does not split these outputs into additional messages.
+
+Permission and user-input cards use their existing interaction path. Stopping a
+request ends its presentation without replaying progress text. Notification
+errors end the request as failed instead of leaving its indicator running.
+
+Request grouping is held in memory. After a channel worker restart, unrecognized
+background notifications use the existing standalone delivery path.
 
 ## Running
 

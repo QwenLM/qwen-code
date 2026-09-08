@@ -1527,19 +1527,6 @@ describe('群管理事件', () => {
         chatId: 'group-cron',
       });
 
-      // Populate streamState so Fix 1's streamState-based matching works.
-      const streamState = (ch as unknown as Record<string, unknown>)[
-        'streamState'
-      ] as Map<
-        string,
-        {
-          chatId: string;
-          buffer: string;
-          timer: ReturnType<typeof setTimeout> | null;
-          retryCount: number;
-        }
-      >;
-
       const cronBuffer = (ch as unknown as Record<string, unknown>)[
         'cronBuffer'
       ] as Map<
@@ -1555,19 +1542,6 @@ describe('群管理事件', () => {
         timer: setTimeout(() => {}, 8888),
       });
 
-      streamState.set('cron-sid-1', {
-        chatId: 'group-cron',
-        buffer: '',
-        timer: null,
-        retryCount: 0,
-      });
-      streamState.set('cron-sid-2', {
-        chatId: 'group-cron',
-        buffer: '',
-        timer: null,
-        retryCount: 0,
-      });
-
       const spy = vi.spyOn(globalThis, 'clearTimeout');
 
       const evt: GroupDelRobotEvent = {
@@ -1581,90 +1555,6 @@ describe('群管理事件', () => {
       expect(cronBuffer.has('cron-sid-2')).toBe(false);
       expect(spy).toHaveBeenCalledTimes(2);
       spy.mockRestore();
-    });
-
-    // B1: streamState cleanup
-    it('clears streamState entries and cancels timers for removed group', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const chp = ch as unknown as Record<string, unknown>;
-
-      // Pre-populate streamState with entries for the group
-      const streamState = chp['streamState'] as Map<
-        string,
-        {
-          chatId: string;
-          buffer: string;
-          timer: ReturnType<typeof setTimeout> | null;
-          retryCount: number;
-        }
-      >;
-      streamState.set('sid-1', {
-        chatId: 'group-del-stream',
-        buffer: 'pending text',
-        timer: setTimeout(() => {}, 9999),
-        retryCount: 0,
-      });
-      streamState.set('sid-2', {
-        chatId: 'other-group',
-        buffer: 'other text',
-        timer: null,
-        retryCount: 0,
-      });
-
-      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
-
-      const evt: GroupDelRobotEvent = {
-        group_openid: 'group-del-stream',
-        op_member_openid: 'admin-1',
-        timestamp: Date.now(),
-      };
-      pvt['handleGroupDelRobot'](evt);
-
-      // Entry for removed group is deleted
-      expect(streamState.has('sid-1')).toBe(false);
-      // Entry for other group is preserved
-      expect(streamState.has('sid-2')).toBe(true);
-      expect(streamState.get('sid-2')!.chatId).toBe('other-group');
-      // Timer was cancelled
-      expect(clearTimeoutSpy).toHaveBeenCalled();
-
-      clearTimeoutSpy.mockRestore();
-    });
-
-    // B2: detect type check — streamState entry has the right shape
-    it('detect type check: streamState entry has chatId and buffer fields for group-del cleanup', () => {
-      const ch = makeChannel();
-      const pvt = ch as unknown as QQChannelRaw;
-      const chp = ch as unknown as Record<string, unknown>;
-
-      const streamState = chp['streamState'] as Map<
-        string,
-        { chatId: string; buffer: string; timer: unknown; retryCount: number }
-      >;
-      streamState.set('sid-detect', {
-        chatId: 'group-detect',
-        buffer: 'test buffer',
-        timer: null,
-        retryCount: 0,
-      });
-
-      // Verify entry has correct shape before cleanup
-      const entry = streamState.get('sid-detect')!;
-      expect(entry.chatId).toBe('group-detect');
-      expect(entry.buffer).toBe('test buffer');
-      expect(entry.retryCount).toBe(0);
-
-      // handleGroupDelRobot iterates streamState checking state.chatId === groupId
-      // Verify the cleanup targets the right group
-      const evt: GroupDelRobotEvent = {
-        group_openid: 'group-detect',
-        op_member_openid: 'admin-1',
-        timestamp: Date.now(),
-      };
-      pvt['handleGroupDelRobot'](evt);
-
-      expect(streamState.has('sid-detect')).toBe(false);
     });
   });
 

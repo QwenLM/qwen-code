@@ -5,6 +5,7 @@ import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import type {
   SessionRouter,
   ChannelAgentBridge,
+  BackgroundTaskEvent,
   ChannelBase,
   ChannelBaseOptions,
   ChannelPlugin,
@@ -214,6 +215,10 @@ export function registerBackgroundResponseRelay(
   router: SessionRouter,
   channels: Map<string, ChannelBase>,
 ): void {
+  bridge.on('backgroundTask', (event: BackgroundTaskEvent) => {
+    const target = router.getTarget(event.sessionId);
+    if (target) channels.get(target.channelName)?.dispatchBackgroundTask(event);
+  });
   bridge.on(
     'backgroundResponse',
     (sessionId: string, text: string, context?: BackgroundResponseContext) => {

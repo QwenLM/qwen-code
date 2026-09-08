@@ -350,6 +350,39 @@ describe('ChannelEditorDialog', () => {
     ).toBe('checked');
   });
 
+  it('offers output modes with final result only selected by default', async () => {
+    await renderDialog({
+      descriptor: {
+        ...DINGTALK,
+        fields: [
+          ...DINGTALK.fields,
+          {
+            key: 'outputMode',
+            label: 'Descriptor label',
+            kind: 'enum',
+            required: true,
+            default: 'final_only',
+            options: [
+              { value: 'final_only', label: 'Final descriptor' },
+              { value: 'process_and_result', label: 'Process descriptor' },
+            ],
+          },
+        ],
+      },
+    });
+    const select = fieldByLabel('Output mode');
+    expect(document.body.textContent).toContain(
+      'show the last complete reply when the request finishes.',
+    );
+    expect(document.body.textContent).toContain(
+      'Background continuations keep the request indicator active until they finish.',
+    );
+    expect(select).not.toBeNull();
+    expect(select?.textContent).toContain('Final result only');
+    await selectOption('Output mode', 'Process and results');
+    expect(select?.textContent).toContain('Process and results');
+  });
+
   it('localizes named tasks and switches their session scope to user', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,

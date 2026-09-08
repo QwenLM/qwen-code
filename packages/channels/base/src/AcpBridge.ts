@@ -21,6 +21,7 @@ import {
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   parseBackgroundResponseContext,
+  readBackgroundTaskEvent,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
@@ -92,6 +93,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly knownSessionIds = new Set<string>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
+  private readonly notificationExecutions = new Map<string, string>();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -155,6 +157,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // channel start crash recovery, which reloads the persisted sessions.
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
+      this.notificationExecutions.clear();
       this.sessionBindingTokens.clear();
       this.connection = null;
       this.child = null;
@@ -394,6 +397,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return;
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
+    this.notificationExecutions.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
@@ -423,6 +427,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   stop(): void {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
+    this.notificationExecutions.clear();
     this.sessionBindingTokens.clear();
     if (this.child) {
       this.child.kill();
@@ -452,6 +457,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (typeof meta?.['parentToolCallId'] === 'string') {
           break;
         }
+        if (meta?.['source'] === 'background_notification') {
+          const context = parseBackgroundResponseContext(
+            meta['backgroundTask'],
+          );
+          if (context?.executionId) {
+            this.notificationExecutions.set(sessionId, context.executionId);
+          }
+        }
+        if (meta?.['source'] === 'channel_background_task') {
+          const event = readBackgroundTaskEvent(
+            sessionId,
+            meta['backgroundTask'],
+          );
+          if (event) this.emit('backgroundTask', event);
+          break;
+        }
         const content = update['content'] as
           | { type?: string; text?: string }
           | undefined;
@@ -463,6 +484,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],
             );
+            if (
+              context?.notificationComplete &&
+              context.executionId === this.notificationExecutions.get(sessionId)
+            ) {
+              this.notificationExecutions.delete(sessionId);
+            }
+
             if (
               content?.type === 'text' &&
               (content.text || context?.turnComplete)
@@ -579,6 +607,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   }
 
   private emitResponseBoundary(sessionId: string): void {
+    if (this.notificationExecutions.has(sessionId)) return;
     this.emit('responseBoundary', sessionId);
   }
 

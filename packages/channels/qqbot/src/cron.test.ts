@@ -118,6 +118,7 @@ function makeChannel(
     'test-bot',
     {
       type: 'qq',
+      outputMode: 'process_and_result',
       token: '',
       senderPolicy: 'open' as const,
       allowedUsers: [],
@@ -625,7 +626,10 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
   // every prompt-response chunk leaks into cronBuffer and is re-sent by the
   // 2s idle flush on top of the BlockStreamer delivery.
   it('item 1: blockStreaming=on prompt chunks during a cron flow are not duplicated into cronBuffer', async () => {
-    const ch = makeChannel({ blockStreaming: 'on' });
+    const ch = makeChannel({
+      blockStreaming: 'on',
+      outputMode: 'process_and_result',
+    });
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
@@ -655,7 +659,10 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
   // for the session) must still be buffered and delivered with
   // blockStreaming:'on'.
   it('item 1 regression: cron chunks without an active prompt are still delivered (blockStreaming=on)', async () => {
-    const ch = makeChannel({ blockStreaming: 'on' });
+    const ch = makeChannel({
+      blockStreaming: 'on',
+      outputMode: 'process_and_result',
+    });
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
     pvt['_inCronFlow'] = 1;
@@ -679,7 +686,7 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
   // subsequent cron textChunks for the same sessionId because the guard keys
   // on streamState. The guard must key on whether a prompt turn is actually
   // active, not on residual streaming state.
-  it('item 2: lingering streamState entry after prompt end does not block cron delivery', async () => {
+  it('prompt chunks leave no residual buffer that could block cron delivery', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
@@ -698,9 +705,7 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
     ).onResponseChunk('test-chat', 'partial answer', 'sess-leak');
     promptHooks(ch).onPromptEnd('test-chat', 'sess-leak');
 
-    // The streamState entry lingers until its idle flush settles.
-    const ss = pvt['streamState'] as Map<string, unknown>;
-    expect(ss.has('sess-leak')).toBe(true);
+    expect(pvt['streamState']).toBeUndefined();
 
     // A cron flow now emits output for the same session.
     pvt['_inCronFlow'] = 1;

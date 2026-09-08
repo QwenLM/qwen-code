@@ -8,6 +8,7 @@ import {
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   parseBackgroundResponseContext,
+  readBackgroundTaskEvent,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
@@ -327,6 +328,7 @@ export class DaemonChannelBridge
   private readonly options: DaemonChannelBridgeOptions;
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
+  private readonly notificationExecutions = new Map<string, string>();
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
   private readonly respondedRequestToSession = new Map<string, string>();
@@ -841,6 +843,7 @@ export class DaemonChannelBridge
 
   stop(): void {
     this.lifecycleGeneration++;
+    this.notificationExecutions.clear();
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
@@ -1009,6 +1012,22 @@ export class DaemonChannelBridge
         if (typeof meta?.['parentToolCallId'] === 'string') {
           break;
         }
+        if (meta?.['source'] === 'background_notification') {
+          const context = parseBackgroundResponseContext(
+            meta['backgroundTask'],
+          );
+          if (context?.executionId) {
+            this.notificationExecutions.set(sessionId, context.executionId);
+          }
+        }
+        if (meta?.['source'] === 'channel_background_task') {
+          const event = readBackgroundTaskEvent(
+            sessionId,
+            meta['backgroundTask'],
+          );
+          if (event) this.emit('backgroundTask', event);
+          break;
+        }
         const text = getTextContent(update['content']);
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
@@ -1018,6 +1037,13 @@ export class DaemonChannelBridge
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],
             );
+            if (
+              context?.notificationComplete &&
+              context.executionId === this.notificationExecutions.get(sessionId)
+            ) {
+              this.notificationExecutions.delete(sessionId);
+            }
+
             if (text || context?.turnComplete) {
               this.emit('backgroundResponse', sessionId, text ?? '', context);
             }
@@ -1252,6 +1278,7 @@ export class DaemonChannelBridge
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
+    this.notificationExecutions.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
     this.channelLoopDisabledSessions.delete(sessionId);
     this.abortActivePrompts(sessionId);
@@ -1363,6 +1390,7 @@ export class DaemonChannelBridge
   }
 
   private emitResponseBoundary(sessionId: string): void {
+    if (this.notificationExecutions.has(sessionId)) return;
     this.emit('responseBoundary', sessionId);
   }
 

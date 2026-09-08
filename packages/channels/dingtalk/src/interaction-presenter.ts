@@ -29,6 +29,7 @@ interface RunPresentation {
   sourceLabel?: string;
   cardDelivered?: { text: string; chatId: string; sessionId: string };
   terminal: boolean;
+  background: boolean;
 }
 
 interface SegmentPresentation {
@@ -38,6 +39,7 @@ interface SegmentPresentation {
 }
 
 export interface DingtalkInteractionPresenterOptions {
+  compactResults?: boolean;
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   sendFallback?(
@@ -104,13 +106,14 @@ export class DingtalkInteractionPresenter {
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
       ...(sourceLabel ? { sourceLabel } : {}),
       terminal: false,
+      background: false,
     });
   }
 
-  startStatusCard(runId: string): void {
+  startStatusCard(runId: string, segment?: ChannelOutputSegmentContext): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
-    const statusContext = this.ensureStatusContext(run);
+    const statusContext = this.ensureStatusContext(run, segment);
     void this.enqueue(run, () => {
       const statusCards = this.options.statusCards;
       const target = this.cardTarget(statusContext.target);
@@ -120,6 +123,11 @@ export class DingtalkInteractionPresenter {
         this.withSourcePrefix(run, ''),
       );
     });
+  }
+
+  markBackgroundRun(runId: string): void {
+    const run = this.runs.get(runId);
+    if (run && !run.terminal) run.background = true;
   }
 
   appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {
@@ -155,6 +163,18 @@ export class DingtalkInteractionPresenter {
     });
   }
 
+  replaceOutput(segment: ChannelOutputSegmentContext, text: string): void {
+    const existing = this.segments.get(segment.segmentId);
+    if (
+      existing &&
+      existing.run.ownerId === segment.owner.id &&
+      existing.run.target.chatId === segment.target.chatId &&
+      existing.run.runId === segment.runId
+    )
+      existing.content = '';
+    this.appendOutput(segment, text);
+  }
+
   closeOutput(
     segmentId: string,
     text: string,
@@ -177,6 +197,10 @@ export class DingtalkInteractionPresenter {
     return this.enqueue(run, async () => {
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
+      if (reason === 'completed' && segment?.requestFinal === false) {
+        run.statusContext = undefined;
+        run.cardDelivered = undefined;
+      }
       if (reason === 'failed') {
         statusCards?.ensure(
           statusContext,
@@ -191,6 +215,13 @@ export class DingtalkInteractionPresenter {
       }
       if (reason === 'cancelled') {
         return statusCards !== undefined;
+      }
+      if (
+        (run.background || this.options.compactResults) &&
+        (reason === 'response_boundary' || reason === 'input_requested')
+      ) {
+        await statusCards?.flushPending(statusContext.segmentId);
+        return true;
       }
       if (reason === 'response_boundary') {
         const deliveredViaCard =
@@ -330,7 +361,7 @@ export class DingtalkInteractionPresenter {
           runId,
           detail === 'cancel_command' ? 'cancel_command' : 'dropped',
         );
-        await this.redeliverCardDeliveredContent(run);
+        run.cardDelivered = undefined;
       } else {
         // Completing without a final segment (e.g. an empty response after the
         // last boundary) leaves the eagerly created card running forever.
@@ -384,7 +415,7 @@ export class DingtalkInteractionPresenter {
   }
 
   /**
-   * A failed or cancelled terminal overwrites the single continuity card,
+   * A failed terminal overwrites the single continuity card,
    * erasing content a boundary already declared delivered there. Send it as
    * a text message so it survives the overwrite.
    */

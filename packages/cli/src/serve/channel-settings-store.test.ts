@@ -206,6 +206,39 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).toBe('$BOT_TOKEN');
   });
 
+  it.each(['final_only', 'process_and_result'])(
+    'persists output mode %s',
+    async (outputMode) => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          outputMode,
+        },
+      });
+      expect(
+        (
+          readWorkspaceSettings()['channels'] as Record<
+            string,
+            Record<string, unknown>
+          >
+        )['bot']?.['outputMode'],
+      ).toBe(outputMode);
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            outputMode: 'invalid',
+          },
+        }),
+      ).rejects.toThrow('outputMode');
+    },
+  );
+
   it('accepts chat-and-thread session scope', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 

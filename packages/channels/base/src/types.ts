@@ -1,5 +1,8 @@
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  BackgroundTaskEvent,
+  ChannelAgentBridge,
+} from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
@@ -63,6 +66,8 @@ export interface ChannelConfig {
   sessionScope: SessionScope;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
+  /** Select which complete assistant outputs to deliver. Default: final_only. */
+  outputMode?: 'final_only' | 'process_and_result';
   cwd: string;
   approvalMode?: string;
   instructions?: string;
@@ -275,6 +280,7 @@ export interface ChannelUserInputRequestContext {
 }
 
 export interface ChannelOutputSegmentContext {
+  requestFinal?: boolean;
   channelName: string;
   sessionId: string;
   runId: string;
@@ -331,6 +337,10 @@ export type ChannelTaskCancellationReason =
 
 export type ChannelTaskLifecycleEvent =
   | (ChannelTaskLifecycleBase & { type: 'started' })
+  | (ChannelTaskLifecycleBase & {
+      type: 'background_task';
+      backgroundTask: BackgroundTaskEvent;
+    })
   /** `chunk` is raw model output — content, not metadata; deliberately unsanitized. */
   | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
   | (ChannelTaskLifecycleBase & {

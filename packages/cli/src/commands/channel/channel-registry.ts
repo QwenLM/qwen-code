@@ -111,6 +111,23 @@ function managementFieldsWithSharedControls(
             options: SESSION_SCOPE_OPTIONS,
           },
         ]),
+    ...(declared.has('outputMode')
+      ? []
+      : [
+          {
+            key: 'outputMode',
+            label: 'Output mode',
+            kind: 'enum' as const,
+            required: true,
+            default: 'final_only',
+            options: [
+              { value: 'final_only', label: 'Final result only' },
+              { value: 'process_and_result', label: 'Process and results' },
+            ],
+            description:
+              'Choose whether to deliver only the final conclusion or every complete assistant output. The processing indicator remains active until background continuations finish.',
+          },
+        ]),
     ...(declared.has('multiSession')
       ? []
       : [

@@ -81,12 +81,10 @@ export interface QQChannelConfig {
   chatTypes?: Record<string, 'c2c' | 'group'>;
   /** Enable experimental cron-msg features. Use at your own risk. */
   'cron-msg-experimental'?: boolean;
-  /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
+  /** Max buffer chars before forcing an immediate cron flush. Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */
   maxReconnectAttempts?: number;
-  /** Max flush retries for streaming message delivery. Default 3. 0 = unlimited. */
-  maxFlushRetries?: number;
   /** Max gateway retries per reconnect cycle. Default 5. 0 = unlimited. */
   maxGwRetries?: number;
 }

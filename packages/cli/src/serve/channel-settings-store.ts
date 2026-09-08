@@ -157,6 +157,7 @@ function assertSharedField(
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
+    outputMode: new Set(['final_only', 'process_and_result']),
     blockStreaming: new Set(['on', 'off']),
   };
   if (Object.hasOwn(enumValues, key)) {

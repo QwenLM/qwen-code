@@ -27,7 +27,6 @@ import type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
-import { BlockStreamer } from './BlockStreamer.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -60,6 +59,7 @@ import {
 import type {
   AvailableCommand,
   BackgroundResponseContext,
+  BackgroundTaskEvent,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -306,10 +306,31 @@ type NamedTurnBinding = {
   claimed: boolean;
   released: boolean;
 };
+type BackgroundExecution = BackgroundTaskEvent & {
+  notificationComplete: boolean;
+};
+type BackgroundDeliveryGroup = {
+  sessionId: string;
+  prompt: ActivePrompt;
+  tasks: Map<string, BackgroundExecution>;
+  done: Promise<void>;
+  resolve: () => void;
+};
+
 type ActivePrompt = {
   runId: string;
   owner?: ChannelPromptOwner;
   activeSegmentId?: string;
+  backgroundGroup?: BackgroundDeliveryGroup;
+  mainFinished?: boolean;
+  latestOutput?: string;
+  deferredOutputs?: string[];
+  outputDelivery?: Promise<void>;
+  outputError?: unknown;
+  notificationFailed?: boolean;
+  proactiveTarget?: SessionTarget;
+  deadline?: number;
+  cancelTimedOut?: () => Promise<void>;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -470,6 +491,15 @@ export abstract class ChannelBase {
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   private readonly activeBtw: Map<string, ActiveBtw> = new Map();
+  private readonly backgroundGroups = new Map<
+    string,
+    BackgroundDeliveryGroup
+  >();
+  private readonly backgroundExecutions = new Map<
+    string,
+    { group: BackgroundDeliveryGroup; task: BackgroundExecution }
+  >();
+  private readonly completedBackgroundExecutions = new Set<string>();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
@@ -488,6 +518,11 @@ export abstract class ChannelBase {
         );
       },
     );
+  };
+  private readonly bridgeBackgroundTaskListener = (
+    event: BackgroundTaskEvent,
+  ): void => {
+    this.dispatchBackgroundTask(event);
   };
   private readonly bridgeSessionDiedListener = (
     event: SessionDiedEvent,
@@ -546,16 +581,280 @@ export abstract class ChannelBase {
     this.onToolCall(chatId, event);
   }
 
+  dispatchBackgroundTask(event: BackgroundTaskEvent): void {
+    const key = JSON.stringify([event.sessionId, event.executionId]);
+    if (this.completedBackgroundExecutions.has(key)) return;
+    let execution = this.backgroundExecutions.get(key);
+    if (!execution) {
+      const parent = event.parentExecutionId
+        ? this.backgroundExecutions.get(
+            JSON.stringify([event.sessionId, event.parentExecutionId]),
+          )
+        : undefined;
+      if (event.parentExecutionId && !parent) return;
+      const active =
+        parent?.group.prompt ?? this.activePrompts.get(event.sessionId);
+      if (
+        event.status !== 'running' ||
+        !active ||
+        active.cancelled ||
+        active.cancelPending
+      )
+        return;
+      if (!parent && active.mainFinished) return;
+      let group = parent?.group ?? active.backgroundGroup;
+      if (!group) {
+        let resolve!: () => void;
+        const done = new Promise<void>((r) => {
+          resolve = r;
+        });
+        group = {
+          sessionId: event.sessionId,
+          prompt: active,
+          tasks: new Map(),
+          done,
+          resolve,
+        };
+        active.backgroundGroup = group;
+        this.backgroundGroups.set(active.runId, group);
+      }
+      const task: BackgroundExecution = {
+        ...event,
+        notificationComplete: false,
+      };
+      group.tasks.set(event.executionId, task);
+      execution = { group, task };
+      this.backgroundExecutions.set(key, execution);
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(active.chatId, event.sessionId, active.messageId),
+        type: 'background_task',
+        backgroundTask: event,
+      });
+    }
+    if (execution.task.taskId !== event.taskId) return;
+    Object.assign(execution.task, event);
+    this.settleBackgroundRequest(execution.group);
+  }
+
+  private settleBackgroundRequest(group: BackgroundDeliveryGroup): void {
+    if (
+      group.prompt.cancelled ||
+      (group.prompt.mainFinished &&
+        [...group.tasks.values()].every((task) => task.notificationComplete))
+    ) {
+      group.resolve();
+    }
+  }
+
+  private forgetBackgroundGroup(group: BackgroundDeliveryGroup): void {
+    group.resolve();
+    this.backgroundGroups.delete(group.prompt.runId);
+    for (const task of group.tasks.values()) {
+      const key = JSON.stringify([group.sessionId, task.executionId]);
+      this.backgroundExecutions.delete(key);
+      if (!task.notificationComplete) {
+        this.completedBackgroundExecutions.add(key);
+        if (this.completedBackgroundExecutions.size > 1024) {
+          const oldest = this.completedBackgroundExecutions
+            .values()
+            .next().value;
+          if (oldest) this.completedBackgroundExecutions.delete(oldest);
+        }
+      }
+    }
+  }
+
+  private updateRequestProgress(
+    sessionId: string,
+    prompt: ActivePrompt,
+    text: string,
+  ): void {
+    if (prompt.cancelled) return;
+    const segment = this.ensureOutputSegment(sessionId, prompt);
+    prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
+      .then(async () => {
+        if (!prompt.cancelled)
+          await this.onResponseProgress(
+            prompt.chatId,
+            text,
+            sessionId,
+            segment,
+          );
+      })
+      .catch((error: unknown) => {
+        prompt.outputError ??= error;
+      });
+  }
+
+  private queueRequestContinuation(
+    sessionId: string,
+    prompt: ActivePrompt,
+  ): void {
+    if (
+      this.config.outputMode !== 'process_and_result' ||
+      prompt.cancelled ||
+      prompt.cancelPending ||
+      prompt.activeSegmentId
+    )
+      return;
+    const segment = this.ensureOutputSegment(sessionId, prompt);
+    if (!segment) return;
+    prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
+      .then(async () => {
+        if (!prompt.cancelled)
+          await this.onResponsePending(prompt.chatId, sessionId, segment);
+      })
+      .catch((error: unknown) => {
+        prompt.outputError ??= error;
+      });
+  }
+
+  private queueRequestOutput(
+    sessionId: string,
+    prompt: ActivePrompt,
+    text: string,
+  ): void {
+    if (!text.trim() || text.trim() === '[NO_REPLY]' || prompt.cancelled)
+      return;
+    prompt.latestOutput = text;
+    const detailed = this.config.outputMode === 'process_and_result';
+    const segment = this.ensureOutputSegment(sessionId, prompt);
+    if (detailed) this.closeOutputSegment(sessionId, prompt);
+    prompt.outputDelivery = (prompt.outputDelivery ?? Promise.resolve())
+      .then(async () => {
+        if (prompt.cancelled) return;
+        if (detailed) {
+          if (prompt.proactiveTarget)
+            await this.pushProactive(prompt.proactiveTarget, text);
+          else
+            await this.onResponseComplete(
+              prompt.chatId,
+              text,
+              sessionId,
+              segment ? { ...segment, requestFinal: false } : undefined,
+            );
+        } else {
+          await this.onResponseProgress(
+            prompt.chatId,
+            text,
+            sessionId,
+            segment,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        prompt.outputError ??= error;
+      });
+  }
+
+  private async finishRequestOutput(
+    sessionId: string,
+    prompt: ActivePrompt,
+    response: string,
+  ): Promise<void> {
+    this.queueRequestOutput(sessionId, prompt, response);
+    prompt.mainFinished = true;
+    for (const output of prompt.deferredOutputs ?? [])
+      this.queueRequestOutput(sessionId, prompt, output);
+    prompt.deferredOutputs = undefined;
+    if (prompt.backgroundGroup) {
+      this.settleBackgroundRequest(prompt.backgroundGroup);
+      if (
+        [...prompt.backgroundGroup.tasks.values()].some(
+          (task) => !task.notificationComplete,
+        )
+      )
+        this.queueRequestContinuation(sessionId, prompt);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          prompt.backgroundGroup.done,
+          new Promise<never>((_, reject) => {
+            if (prompt.deadline === undefined) return;
+            timer = setTimeout(
+              () => reject(new Error(LOOP_TIMED_OUT_MESSAGE)),
+              Math.max(0, prompt.deadline - Date.now()),
+            );
+            timer.unref?.();
+          }),
+        ]);
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === LOOP_TIMED_OUT_MESSAGE
+        ) {
+          prompt.cancelled = true;
+          await prompt.cancelTimedOut?.();
+          this.emitTaskCancellation(prompt, sessionId, 'timeout');
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await prompt.outputDelivery;
+    if (prompt.cancelled) return;
+    if (prompt.outputError) throw prompt.outputError;
+    if (prompt.notificationFailed)
+      throw new Error('Background continuation did not finish successfully.');
+    if (
+      this.config.outputMode !== 'process_and_result' &&
+      prompt.latestOutput
+    ) {
+      prompt.deliveryStarted = true;
+      if (prompt.proactiveTarget)
+        await this.pushProactive(prompt.proactiveTarget, prompt.latestOutput);
+      else
+        await this.onResponseComplete(
+          prompt.chatId,
+          prompt.latestOutput,
+          sessionId,
+          this.ensureOutputSegment(sessionId, prompt),
+        );
+    }
+  }
+
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
-    _context?: BackgroundResponseContext,
+    context?: BackgroundResponseContext,
   ): Promise<void> {
-    if (text.trim().length === 0) return;
-    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-      return;
+    if (context?.executionId) {
+      const key = JSON.stringify([sessionId, context.executionId]);
+      if (this.completedBackgroundExecutions.has(key)) {
+        if (context.notificationComplete)
+          this.completedBackgroundExecutions.delete(key);
+        return;
+      }
+      const execution = this.backgroundExecutions.get(key);
+      if (execution && execution.task.taskId === context.taskId) {
+        const { task, group } = execution;
+        if (context.notificationComplete) {
+          task.notificationComplete = true;
+          if (context.partial) group.prompt.notificationFailed = true;
+          this.settleBackgroundRequest(group);
+          if (
+            group.prompt.mainFinished &&
+            [...group.tasks.values()].some((task) => !task.notificationComplete)
+          )
+            this.queueRequestContinuation(sessionId, group.prompt);
+        } else {
+          if (!group.prompt.mainFinished)
+            (group.prompt.deferredOutputs ??= []).push(text);
+          else {
+            this.queueRequestOutput(sessionId, group.prompt, text);
+            if (context.turnComplete === false)
+              this.queueRequestContinuation(sessionId, group.prompt);
+          }
+        }
+        await group.prompt.outputDelivery;
+        return;
+      }
     }
+    if (!text.trim() || text.trim() === '[NO_REPLY]') return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target)
+      return;
     await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
   }
 
@@ -601,6 +900,15 @@ export abstract class ChannelBase {
       } else {
         await this.pushProactive(target, text);
       }
+      return;
+    }
+    if (target.threadId !== this.router.getTarget(sessionId)?.threadId) {
+      await this.sendThreadMessage(
+        target.chatId,
+        target.threadId,
+        text,
+        sourceLabel,
+      );
       return;
     }
     if (sourceLabel) {
@@ -1174,7 +1482,13 @@ export abstract class ChannelBase {
       );
     }
     this.name = name;
-    this.config = config;
+    this.config = {
+      ...config,
+      outputMode: config.outputMode ?? 'final_only',
+      ...(config.blockStreaming === 'on'
+        ? { blockStreaming: 'off' as const }
+        : {}),
+    };
     this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
     this.proxy = options?.proxy;
@@ -1335,6 +1649,9 @@ export abstract class ChannelBase {
       return;
     }
     active.cancellationEmitted = true;
+    if (active.backgroundGroup) {
+      this.forgetBackgroundGroup(active.backgroundGroup);
+    }
     const segment = this.closeOutputSegment(sessionId, active);
     void this.notifyOutputSegmentEnd(
       active.chatId,
@@ -2016,6 +2333,8 @@ export abstract class ChannelBase {
 
       // Same hold-and-replay contract as handleInbound's onChunk: visible
       // sinks stay out of the transcript while a cancel is pending.
+      promptState.proactiveTarget = job.target;
+      let outputText = '';
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
@@ -2024,11 +2343,16 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(job.target.chatId, held, sessionId);
+          outputText += held;
+          this.updateRequestProgress(sessionId, promptState, outputText);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.mainFinished
+        ) {
           return;
         }
         heldChunks.push(chunk);
@@ -2039,13 +2363,16 @@ export abstract class ChannelBase {
       const onResponseBoundary = (sid: string) => {
         if (
           sid !== sessionId ||
+          promptState.mainFinished ||
           promptState.cancelled ||
           promptState.cancelPending
         ) {
           return;
         }
         heldChunks.length = 0;
-        this.onResponseBoundary(job.target.chatId, sessionId);
+        this.queueRequestOutput(sessionId, promptState, outputText);
+        outputText = '';
+        this.queueRequestContinuation(sessionId, promptState);
       };
       await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
@@ -2079,10 +2406,8 @@ export abstract class ChannelBase {
             'cancel_command',
           );
         }
-        if (response) {
-          promptState.deliveryStarted = true;
-          await this.pushProactive(job.target, response);
-        }
+        outputText = '';
+        await this.finishRequestOutput(sessionId, promptState, response);
         // Once delivery started the run counts as completed — a cancel settling
         // during/after the send must not convert a delivered run into a skip
         // (a one-shot loop would stay enabled and deliver twice).
@@ -2157,6 +2482,8 @@ export abstract class ChannelBase {
           this.activePrompts.delete(sessionId);
         }
         promptState.resolve();
+        if (promptState.backgroundGroup)
+          this.forgetBackgroundGroup(promptState.backgroundGroup);
         this.drainCollectBufferForCurrentPrompt(
           sessionId,
           stillCurrent,
@@ -2326,6 +2653,8 @@ export abstract class ChannelBase {
           `[${safeChannel}] onPromptStart threw in webhook ${safeTaskId} for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
         );
       }
+      promptState.proactiveTarget = target;
+      let outputText = '';
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
@@ -2334,11 +2663,16 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(target.chatId, held, sessionId);
+          outputText += held;
+          this.updateRequestProgress(sessionId, promptState, outputText);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.mainFinished
+        ) {
           return;
         }
         heldChunks.push(chunk);
@@ -2346,9 +2680,23 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
       };
+      const onResponseBoundary = (sid: string) => {
+        if (
+          sid !== sessionId ||
+          promptState.mainFinished ||
+          promptState.cancelled ||
+          promptState.cancelPending
+        )
+          return;
+        heldChunks.length = 0;
+        this.queueRequestOutput(sessionId, promptState, outputText);
+        outputText = '';
+        this.queueRequestContinuation(sessionId, promptState);
+      };
       await this.waitForBridgeRecovery();
       const promptBridge = this.bridge;
       promptBridge.on('textChunk', onChunk);
+      promptBridge.on('responseBoundary', onResponseBoundary);
 
       try {
         const response = await this.runLoopBridgePrompt(
@@ -2368,10 +2716,8 @@ export abstract class ChannelBase {
           );
         }
         releaseHeldChunks();
-        if (response) {
-          promptState.deliveryStarted = true;
-          await this.pushProactive(target, response);
-        }
+        outputText = '';
+        await this.finishRequestOutput(sessionId, promptState, response);
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
           if (promptState.cancelled) {
@@ -2419,6 +2765,7 @@ export abstract class ChannelBase {
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
+        promptBridge.off('responseBoundary', onResponseBoundary);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
@@ -2435,6 +2782,8 @@ export abstract class ChannelBase {
           this.activePrompts.delete(sessionId);
         }
         promptState.resolve();
+        if (promptState.backgroundGroup)
+          this.forgetBackgroundGroup(promptState.backgroundGroup);
         this.drainCollectBufferForCurrentPrompt(
           sessionId,
           stillCurrent,
@@ -2465,6 +2814,11 @@ export abstract class ChannelBase {
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
+    if (timeoutMs !== undefined) {
+      promptState.deadline = Date.now() + timeoutMs;
+      promptState.cancelTimedOut = () =>
+        this.cancelTimedOutLoopPrompt(promptBridge, sessionId, jobId);
+    }
     const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
@@ -2689,6 +3043,12 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   onSessionDied(sessionId: string): void {
+    for (const group of this.backgroundGroups.values()) {
+      if (group.sessionId === sessionId) {
+        group.prompt.cancelled = true;
+        this.forgetBackgroundGroup(group);
+      }
+    }
     this.cancelBtw(sessionId);
     this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
@@ -2701,6 +3061,7 @@ export abstract class ChannelBase {
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
     bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
+    bridge.on('backgroundTask', this.bridgeBackgroundTaskListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
@@ -2709,6 +3070,7 @@ export abstract class ChannelBase {
   private detachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.off('toolCall', this.bridgeToolCallListener);
     bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
+    bridge.off('backgroundTask', this.bridgeBackgroundTaskListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
@@ -2836,6 +3198,19 @@ export abstract class ChannelBase {
       this.router.getTarget(sessionId)?.threadId
     );
   }
+
+  protected onResponsePending(
+    _chatId: string,
+    _sessionId: string,
+    _segment: ChannelOutputSegmentContext,
+  ): void | Promise<void> {}
+
+  protected onResponseProgress(
+    _chatId: string,
+    _text: string,
+    _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
+  ): void | Promise<void> {}
 
   /**
    * Called when the agent's full response is ready.
@@ -6739,7 +7114,6 @@ export abstract class ChannelBase {
     // resurrect it while preprocessing runs before this queue.
     const generation =
       namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
-    const useBlockStreaming = this.config.blockStreaming === 'on';
     if (namedTurn) {
       namedTurn.claimed = true;
     } else {
@@ -6888,31 +7262,13 @@ export abstract class ChannelBase {
         );
       }
 
-      const streamer = useBlockStreaming
-        ? new BlockStreamer({
-            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
-            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
-            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) =>
-              this.sendResponseMessage(
-                envelope.chatId,
-                text,
-                sessionId,
-                sourceLabel,
-              ),
-          })
-        : null;
-      promptState.stopStreaming = () => streamer?.stop();
-
       // Chunks arriving while a cancel is PENDING are held here: pushing them
       // to any visible sink could send output the cancel can't recall. On a
       // failed cancel they're replayed; on success, discarded.
+      let outputText = '';
       const heldChunks: string[] = [];
-      let hasStreamedText = false;
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
-          hasStreamedText = true;
-          const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -6922,12 +7278,16 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
-          streamer?.push(held);
+          outputText += held;
+          this.updateRequestProgress(sessionId, promptState, outputText);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
+        if (
+          sid !== sessionId ||
+          promptState.cancelled ||
+          promptState.mainFinished
+        ) {
           return;
         }
         heldChunks.push(chunk);
@@ -6938,21 +7298,16 @@ export abstract class ChannelBase {
       const onResponseBoundary = (sid: string) => {
         if (
           sid !== sessionId ||
+          promptState.mainFinished ||
           promptState.cancelled ||
           promptState.cancelPending
         ) {
           return;
         }
         heldChunks.length = 0;
-        hasStreamedText = false;
-        const segment = this.closeOutputSegment(sessionId, promptState);
-        void this.notifyOutputSegmentEnd(
-          envelope.chatId,
-          sessionId,
-          segment,
-          'response_boundary',
-        );
-        streamer?.stop();
+        this.queueRequestOutput(sessionId, promptState, outputText);
+        outputText = '';
+        this.queueRequestContinuation(sessionId, promptState);
       };
       // Queue wait and memory recall can outlive a bridge crash. Capture the
       // bridge only after the latest recovery has restored session routing.
@@ -6974,27 +7329,8 @@ export abstract class ChannelBase {
           releaseHeldChunks();
         }
 
-        // If cancelled, skip sending the response
-        if (!promptState.cancelled && response) {
-          promptState.deliveryStarted = true;
-          if (streamer) {
-            if (!hasStreamedText) {
-              streamer.push(response);
-            }
-            await streamer.flush();
-          } else {
-            const segment = this.ensureOutputSegment(sessionId, promptState);
-            await this.onResponseComplete(
-              envelope.chatId,
-              response,
-              sessionId,
-              segment,
-            );
-            if (segment && promptState.activeSegmentId === segment.segmentId) {
-              promptState.activeSegmentId = undefined;
-            }
-          }
-        }
+        outputText = '';
+        await this.finishRequestOutput(sessionId, promptState, response);
         // Once delivery started the turn's outcome is fixed — don't let a
         // cancel settling during the send rewrite completed into cancelled.
         if (!promptState.deliveryStarted) {
@@ -7061,13 +7397,6 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        if (streamer) {
-          streamer.stop();
-          // Queued block sends belong to this turn: let them land before
-          // onPromptEnd settles turn-scoped adapter state, or a send racing
-          // the settle can recreate discarded state and leak unredacted text.
-          await streamer.drain();
-        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own
@@ -7115,6 +7444,8 @@ export abstract class ChannelBase {
         // /clear-evicted wedged turn must release it (its bounded wait already
         // timed out). (Steer no longer waits on done; it chains on the queue tail.)
         promptState.resolve();
+        if (promptState.backgroundGroup)
+          this.forgetBackgroundGroup(promptState.backgroundGroup);
 
         // Drain collect buffer if any messages accumulated — but only while we're
         // still the active turn, so a /clear-evicted wedged turn whose bridge.prompt

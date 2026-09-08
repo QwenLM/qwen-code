@@ -867,3 +867,62 @@ describe('Descriptor-driven senderPolicy', () => {
     });
   });
 });
+
+describe('output mode', () => {
+  const descriptor: DaemonChannelTypeDescriptor = {
+    ...DINGTALK,
+    fields: [
+      ...DINGTALK.fields,
+      {
+        key: 'outputMode',
+        label: 'Output mode',
+        kind: 'enum',
+        required: true,
+        default: 'final_only',
+        options: [
+          { value: 'final_only', label: 'Final result only' },
+          { value: 'process_and_result', label: 'Process and results' },
+        ],
+      },
+    ],
+  };
+
+  it('defaults new and unconfigured channels to final result only', () => {
+    expect(createChannelEditorDraft(descriptor).values['outputMode']).toBe(
+      'final_only',
+    );
+    expect(
+      createChannelEditorDraft(descriptor, configuredInstance()).values[
+        'outputMode'
+      ],
+    ).toBe('final_only');
+  });
+
+  it.each(['final_only', 'process_and_result'])(
+    'loads and saves explicit output mode %s',
+    (mode) => {
+      const instance = configuredInstance();
+      instance.config['outputMode'] = mode;
+      const draft = createChannelEditorDraft(descriptor, instance);
+      expect(draft.values['outputMode']).toBe(mode);
+      const request = buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-output',
+        instance,
+      );
+      expect(request.config['outputMode']).toBe(mode);
+      draft.values['outputMode'] =
+        mode === 'final_only' ? 'process_and_result' : 'final_only';
+      expect(
+        buildChannelUpsertRequest(
+          descriptor,
+          draft,
+          'revision-output',
+          instance,
+        ).config['outputMode'],
+      ).toBe(draft.values['outputMode']);
+      expect(instance.config['outputMode']).toBe(mode);
+    },
+  );
+});

@@ -102,7 +102,11 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'allowedUsers',
   'groupPolicy',
 ]);
-const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope', 'multiSession']);
+const SHARED_SESSION_FIELD_KEYS = new Set([
+  'sessionScope',
+  'multiSession',
+  'outputMode',
+]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   senderPolicy: 'channels.editor.field.shared.senderPolicy',
@@ -110,6 +114,7 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   groupPolicy: 'channels.editor.field.shared.groupPolicy',
   sessionScope: 'channels.editor.field.shared.sessionScope',
   multiSession: 'channels.editor.field.shared.multiSession',
+  outputMode: 'channels.editor.field.shared.outputMode',
 };
 
 export interface ChannelEditorDialogProps {
