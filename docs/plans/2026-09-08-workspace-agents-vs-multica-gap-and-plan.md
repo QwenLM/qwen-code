@@ -15,12 +15,17 @@ slot per agent. Multica's `PriorSessionID` is selected by
 the Agent identity is durable across the workspace, and its ACP session is
 durable only for one `(agent, thread)` pair.
 
-Two structural gaps remain and are not hidden behind UI glue:
+One structural gap remains and is not hidden behind UI glue:
 
-- a workspace Agent is still split between a reusable subagent definition and a
-  roster record instead of being one authoritative product object;
 - `runtimeId` and the hidden host session are not a first-class Runtime with
   provider, health and placement semantics.
+
+The primary Agent Builder now writes one workspace Agent record containing its
+identity instructions, model and concurrency. It does not create a subagent
+definition first. Existing definitions remain a secondary linking/template path
+for compatibility, not a prerequisite for a new persistent Agent.
+The existing Agents navigation now opens the runnable Agent roster and shared
+tasks first; reusable definition files are a secondary Definitions view.
 
 ## Current correction — task orchestration before process isolation
 
@@ -450,12 +455,11 @@ bookkeeping, and our `open` covers both.
 ### Stage D — the agent is configurable
 
 Multica's agent detail page has instructions, env, MCP servers, custom args,
-integrations and activity. Qwen Code already has a rich agent-definition editor
-with manual and model-assisted generation. The workspace identity adds only
-instructions, model, definition and concurrency overrides plus an explicit
-read-only ceiling. The product gap is joining those two concepts into one
-creation flow; a second prompt/tool editor should not be built beside the one
-Qwen Code already has.
+integrations and activity. Qwen Code reuses its rich Agent Builder UI, including
+model-assisted generation, but the primary collaboration flow submits directly
+to one workspace Agent record. The read-only v1 hides tool, MCP and hook options
+that cannot take effect. Existing definitions remain an optional compatibility
+path rather than a second required create step.
 
 Squads, inbox and projects come after this, and only if you want them; none is
 load-bearing for two agents collaborating on one thread.
@@ -563,17 +567,16 @@ session produced the visible result.
 Stage C landed items 1 and 2 of the four. Labels, project and due date are
 still display-only work and are not done.
 
-Stage D landed instructions, model, definition and concurrency as per-identity
-overrides, plus the capability ceiling as something a person can read. MCP
+Stage D landed instructions, model and concurrency as per-identity fields, plus
+the capability ceiling as something a person can read. MCP
 servers were deliberately not added: `classifyAgentTool` denies every name not
 in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
-The creation endpoint now accepts those effective identity fields in its first
-atomic roster write, and the list reports status from the live bridge session.
-The form selects from Qwen Code's existing definitions and can hand off to the
-existing manual/model-assisted builder, returning to shared threads on cancel
-or completion. This reuses the builder but remains a two-step definition plus
-roster flow rather than Multica's single studio.
+The creation endpoint accepts those identity fields in its first roster write,
+and the list reports status from live task sessions. The primary New Agent
+action opens Qwen Code's existing manual/model-assisted builder and submits that
+form directly to the roster. Linking an existing definition is a secondary
+compatibility action. This is one product object and one durable write.
 
 ### How this branch was verified
 

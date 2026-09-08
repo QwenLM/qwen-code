@@ -49,11 +49,9 @@ export interface WorkspaceAgentsFile {
 /**
  * A durable agent identity, scoped to one workspace.
  *
- * The persona (system prompt, tools, MCP servers, skills) is NOT duplicated
- * here: `agentType` names an existing agent definition and that definition
- * stays the single source of truth, so editing it changes every workspace agent
- * built on it. What lives here is identity and policy — who this agent is in
- * the workspace, and the limits it runs under.
+ * Identity instructions, model and scheduling policy live here. `agentType`
+ * optionally supplies a reusable base definition; an Agent created in the
+ * primary flow needs no second definition record.
  */
 export interface WorkspaceAgent {
   /** Stable id. Never reused, never derived from the name. */
@@ -69,17 +67,15 @@ export interface WorkspaceAgent {
   description?: string;
   /** Hex colour (`#rrggbb`) for UI attribution. */
   color?: string;
-  /** Name of the agent definition supplying this agent's persona. */
+  /** Optional existing definition supplying a base persona. */
   agentType?: string;
   /** Model override; absent inherits the workspace default. */
   model?: string;
   /**
    * What this identity is told on top of its definition's prompt.
    *
-   * An override rather than a replacement, because `agentType` is shared: two
-   * agents built on the same definition differ by who they are here, not by
-   * forking the definition. Appended to the persona at boot, so editing it
-   * reaches the next turn rather than only the next spawn.
+   * Appended to the optional base definition at boot, so editing the Agent
+   * reaches its next turn rather than only its next spawn.
    *
    * It cannot widen anything. The read-only capability boundary is derived
    * from the definition and applied after this, so instructions change what an

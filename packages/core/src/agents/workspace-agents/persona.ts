@@ -5,14 +5,13 @@
  */
 
 /**
- * @fileoverview Turning a roster entry into the persona its own process runs as.
+ * @fileoverview Turning a roster entry into its execution persona.
  *
  * An agent session is spawned with nothing but its identity — the bridge's
- * spawn request has no persona field — so the child resolves the rest here,
- * from the same workspace files the dispatcher reads. Doing it in the child
- * rather than passing a persona across the wire keeps one source of truth: the
- * agent definition on disk, read at the moment the body starts, which is also
- * what makes definition drift observable (§9.4) rather than frozen at spawn.
+ * spawn request has no persona field — so the session resolves the rest here,
+ * from the same workspace files the dispatcher reads. An optional linked
+ * definition supplies the base runtime configuration; the Agent record supplies
+ * its durable identity instructions and model.
  */
 
 import type { Config } from '../../config/config.js';
@@ -34,7 +33,7 @@ export type AgentPersonaResolution =
   | { status: 'unavailable'; error: string };
 
 /**
- * Resolves what this process should be, from the id it was spawned with.
+ * Resolves what this session should be, from the id it was spawned with.
  *
  * Fails closed in both directions that matter. An id with no roster entry means
  * the agent was deleted while its session was starting; a definition that will
@@ -119,7 +118,7 @@ export async function resolveAgentPersona(
       agent,
       definition,
       systemPrompt: appendInstructions(basePrompt, agent.instructions),
-      // The read-only ceiling is applied here, in the process that will run the
+      // The read-only ceiling is applied here, in the session that will run the
       // tools, so a session cannot be started with a wider surface than the
       // boundary allows and then narrowed afterwards.
       toolConfig: buildAgentToolConfig(runtime.toolConfig),

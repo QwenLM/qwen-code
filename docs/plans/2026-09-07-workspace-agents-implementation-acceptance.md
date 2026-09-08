@@ -21,20 +21,20 @@ and its observations. They are not proof of the replacement session adapter.
 Current run ids, timestamps and limitations are recorded in
 [`2026-09-08-workspace-agents-vs-multica-gap-and-plan.md`](./2026-09-08-workspace-agents-vs-multica-gap-and-plan.md).
 
-| Requirement | Current evidence / remaining work |
-| --- | --- |
-| Persistent identities and separate sessions | Existing leader/worker reused across tasks; leader continuation preserves its session id. Sessions share one ACP process. |
-| Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded. |
-| Child delegation and parent report | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run. |
-| Live human input | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open. |
-| Initial input receipt | A real assigned run persisted its initial prompt, consumed the matching trigger and reached review. The transcript-before-receipt crash window remains to be force-killed. |
-| Cancellation | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open. |
-| Running task after daemon restart | SIGKILL after a durable checkpoint exposed a startup-discovery defect; after its fix, the same run/session recovered as attempt 2 and reached human acceptance. Other crash windows remain open. |
-| Human resolves a blocker | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision. |
-| Automatic-turn gate | Isolated actual-source storage run: 12 running coalesces, posts 13/14 rejected, one pending turn-gate notification; human reply reset to 0, next agent delivery charged 1. Not a model experiment. |
-| Read-only boundary and ambient ownership | Guard wiring and direct source checks exist; full model-driven negative matrix has not been demonstrated. |
-| Storage and reliability gates in steps 3/7/8 | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix. |
-| External notifications | Consumer exists, but no recipient is configured for current acceptance; no external send authorized or observed. |
+| Requirement                                         | Current evidence / remaining work                                                                                                                                                                  |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Persistent identities and separate sessions         | Existing leader/worker reused across tasks; leader continuation preserves its session id. Sessions share one ACP process.                                                                          |
+| Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded.                                                                           |
+| Child delegation and parent report                  | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run.                                                                                     |
+| Live human input                                    | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open.                                                               |
+| Initial input receipt                               | A real assigned run persisted its initial prompt, consumed the matching trigger and reached review. The transcript-before-receipt crash window remains to be force-killed.                         |
+| Cancellation                                        | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open.                                                                                                     |
+| Running task after daemon restart                   | SIGKILL after a durable checkpoint exposed a startup-discovery defect; after its fix, the same run/session recovered as attempt 2 and reached human acceptance. Other crash windows remain open.   |
+| Human resolves a blocker                            | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision.                 |
+| Automatic-turn gate                                 | Isolated actual-source storage run: 12 running coalesces, posts 13/14 rejected, one pending turn-gate notification; human reply reset to 0, next agent delivery charged 1. Not a model experiment. |
+| Read-only boundary and ambient ownership            | Guard wiring and direct source checks exist; full model-driven negative matrix has not been demonstrated.                                                                                          |
+| Storage and reliability gates in steps 3/7/8        | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix.                                                      |
+| External notifications                              | Consumer exists, but no recipient is configured for current acceptance; no external send authorized or observed.                                                                                   |
 
 The 2026-09-08 delegation run after the Agent Builder reuse change exposed one
 routing false positive: the leader's summary containing the scoped package
@@ -383,6 +383,11 @@ the existing `demo-leader` and `demo-worker` sessions, and opening
 `demo-leader` loaded session `63465788-a16b-5328-92fc-8020330969a9` in the
 ordinary conversation page with its full ten-turn transcript. A hard reload
 preserved that transcript. No test suite, build, lint, typecheck, or CI ran.
+The Agents navigation now opens runnable workspace Agents and their shared tasks
+instead of leading with reusable subagent definition files. New Agent reuses the
+existing manual/model-assisted builder but writes one roster identity directly;
+Definitions and linking an existing definition remain secondary compatibility
+paths.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.

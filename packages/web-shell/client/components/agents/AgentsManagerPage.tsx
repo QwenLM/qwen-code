@@ -153,10 +153,8 @@ export function AgentsManagerPage({
   const [createOpen, setCreateOpen] = useState(() =>
     Boolean(initialCreateScope),
   );
-  const [createReturnsToSharedThreads, setCreateReturnsToSharedThreads] =
-    useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(() => !initialCreateScope);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -213,7 +211,10 @@ export function AgentsManagerPage({
   }, [agentsError]);
 
   useEffect(() => {
-    if (initialCreateScope) setCreateOpen(true);
+    if (initialCreateScope) {
+      setAgentsOpen(false);
+      setCreateOpen(true);
+    }
   }, [initialCreateScope]);
 
   function returnToList(): void {
@@ -255,12 +256,7 @@ export function AgentsManagerPage({
   ];
   const subpageTitle = editOpen
     ? t('agent.edit')
-    : (selectedName ??
-      (createOpen
-        ? t('agent.create.button')
-        : agentsOpen
-          ? 'Shared threads'
-          : null));
+    : (selectedName ?? (createOpen ? t('agent.create.button') : null));
 
   const standaloneNavigation = (
     <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
@@ -331,11 +327,7 @@ export function AgentsManagerPage({
         <ThreadsRoute
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           agentDefinitions={agents.map((agent) => agent.name)}
-          onCreateAgentDefinition={() => {
-            setCreateReturnsToSharedThreads(true);
-            setAgentsOpen(false);
-            setCreateOpen(true);
-          }}
+          onOpenDefinitions={() => setAgentsOpen(false)}
         />
       </div>
     );
@@ -348,22 +340,10 @@ export function AgentsManagerPage({
         {navigation}
         <AgentCreatePage
           initialScope={initialCreateScope ?? 'global'}
-          onCancel={() => {
-            if (!createReturnsToSharedThreads) {
-              returnToList();
-              return;
-            }
-            setCreateOpen(false);
-            setCreateReturnsToSharedThreads(false);
-            setAgentsOpen(true);
-          }}
+          onCancel={returnToList}
           onCreated={(name) => {
             setCreateOpen(false);
             setListNotice(t('agent.created', { name }));
-            if (createReturnsToSharedThreads) {
-              setCreateReturnsToSharedThreads(false);
-              setAgentsOpen(true);
-            }
             void reload();
           }}
         />

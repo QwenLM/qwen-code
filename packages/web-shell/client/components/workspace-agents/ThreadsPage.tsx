@@ -48,7 +48,8 @@ export interface ThreadsPageProps {
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
   onOpenAgentSession?: (sessionId: string) => void;
   agentDefinitions?: readonly string[];
-  onCreateAgentDefinition?: () => void;
+  onOpenAgentBuilder?: () => void;
+  onOpenDefinitions?: () => void;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => void;
   onPreviewThread?: (assignee?: string) => void;
@@ -182,7 +183,8 @@ export function ThreadsPage({
   onUpdateAgent,
   onOpenAgentSession,
   agentDefinitions = [],
-  onCreateAgentDefinition,
+  onOpenAgentBuilder,
+  onOpenDefinitions,
   capabilities,
   onCreateThread,
   onPreviewThread,
@@ -262,12 +264,29 @@ export function ThreadsPage({
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
-        <h1 className={styles.title}>Threads</h1>
+        <h1 className={styles.title}>Agents &amp; tasks</h1>
         <div className={styles.headerActions}>
+          {onOpenDefinitions ? (
+            <Button variant="ghost" size="sm" onClick={onOpenDefinitions}>
+              Definitions
+            </Button>
+          ) : null}
+          {onOpenAgentBuilder ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setCreating('agent')}
+            >
+              Link definition
+            </Button>
+          ) : null}
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setCreating('agent')}
+            onClick={() => {
+              if (onOpenAgentBuilder) onOpenAgentBuilder();
+              else setCreating('agent');
+            }}
           >
             <PlusIcon data-icon="inline-start" />
             Agent
@@ -280,14 +299,14 @@ export function ThreadsPage({
             }}
           >
             <PlusIcon data-icon="inline-start" />
-            Thread
+            Task
           </Button>
         </div>
       </header>
       <div className={styles.pageBody}>
         {creating === 'agent' ? (
           <form className={styles.createForm} onSubmit={submitAgent}>
-            <strong>New persistent agent</strong>
+            <strong>Link an existing definition</strong>
             <input
               className={styles.field}
               name="name"
@@ -307,11 +326,7 @@ export function ThreadsPage({
             />
             <label className={styles.configLabel}>
               Agent definition
-              <select
-                className={styles.field}
-                name="agentType"
-                defaultValue=""
-              >
+              <select className={styles.field} name="agentType" defaultValue="">
                 <option value="">Workspace default</option>
                 {agentDefinitions.map((name) => (
                   <option key={name} value={name}>
@@ -320,15 +335,6 @@ export function ThreadsPage({
                 ))}
               </select>
             </label>
-            {onCreateAgentDefinition ? (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={onCreateAgentDefinition}
-              >
-                Create or generate a definition with Qwen
-              </Button>
-            ) : null}
             <input
               className={styles.field}
               name="model"
@@ -346,8 +352,8 @@ export function ThreadsPage({
               />
             </label>
             <p className={styles.configNote}>
-              Runtime: this local daemon · one persistent ACP session · not a
-              separate OS process
+              Runtime: this local daemon · one conversation per Agent and task ·
+              not a separate OS process
             </p>
             <p className={styles.configNote}>
               Workspace agents are read-only. Definitions can narrow that
@@ -469,7 +475,7 @@ export function ThreadsPage({
         ) : null}
 
         <section className={styles.roster}>
-          <h2 className={styles.sectionTitle}>Persistent agents</h2>
+          <h2 className={styles.sectionTitle}>Persistent Agents</h2>
           {agents.length === 0 ? (
             <p className={styles.emptyRoster}>
               No agents yet. Add one to start handing work across shared

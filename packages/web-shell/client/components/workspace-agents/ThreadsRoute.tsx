@@ -19,6 +19,7 @@ import {
   type AgentCapabilitiesView,
 } from './ThreadsPage';
 import { ThreadView, type ThreadDetailView } from './ThreadView';
+import { AgentCreatePage } from '../agents/AgentCreatePage';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -124,14 +125,14 @@ export interface ThreadsRouteProps {
    * somewhere with no session view to switch to. */
   onOpenAgentSession?: (sessionId: string) => void;
   agentDefinitions?: readonly string[];
-  onCreateAgentDefinition?: () => void;
+  onOpenDefinitions?: () => void;
 }
 
 export function ThreadsRoute({
   api,
   onOpenAgentSession,
   agentDefinitions,
-  onCreateAgentDefinition,
+  onOpenDefinitions,
 }: ThreadsRouteProps) {
   const workspace = useWorkspace();
   const connection = useConnection();
@@ -157,6 +158,7 @@ export function ThreadsRoute({
     RoutingPreviewTarget[] | undefined
   >();
   const [pending, setPending] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
   const [refreshError, setRefreshError] = useState<string | undefined>();
   const [actionError, setActionError] = useState<string | undefined>();
   const error = actionError ?? refreshError;
@@ -286,6 +288,20 @@ export function ThreadsRoute({
     return <p role="alert">Open a workspace before using shared threads.</p>;
   }
 
+  if (creatingAgent) {
+    return (
+      <AgentCreatePage
+        initialScope="workspace"
+        onCancel={() => setCreatingAgent(false)}
+        onCreated={() => setCreatingAgent(false)}
+        onSaveWorkspaceAgent={async (input) => {
+          await client.createAgent(input);
+          await refresh();
+        }}
+      />
+    );
+  }
+
   if (openId && detail?.id !== openId) {
     return (
       <div>
@@ -367,7 +383,8 @@ export function ThreadsRoute({
         }
         {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
         {...(agentDefinitions ? { agentDefinitions } : {})}
-        {...(onCreateAgentDefinition ? { onCreateAgentDefinition } : {})}
+        onOpenAgentBuilder={() => setCreatingAgent(true)}
+        {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         onCreateThread={(input) =>
           void mutate(async () => {
