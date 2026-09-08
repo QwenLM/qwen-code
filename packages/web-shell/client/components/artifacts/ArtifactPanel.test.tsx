@@ -369,6 +369,66 @@ afterEach(() => {
   };
 });
 
+describe('ArtifactPanel context usage tabs', () => {
+  it('loads only the selected usage panel with its own actions', async () => {
+    const getContextUsage = vi.fn().mockResolvedValue({});
+    const getStats = vi.fn().mockResolvedValue({});
+    const contextActions = {
+      getContextUsage,
+    } as unknown as DaemonSessionActions;
+    const tokenActions = { getStats } as unknown as DaemonSessionActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (activeTabId: string) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'context',
+              kind: 'context_usage',
+              title: 'Context Usage',
+              sessionId: 'secondary',
+              sessionActions: contextActions,
+            },
+            {
+              id: 'token',
+              kind: 'token_usage',
+              title: 'Token Usage',
+              sessionId: 'primary',
+              sessionActions: tokenActions,
+            },
+          ]}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    await act(async () => root.render(renderPanel('token')));
+    expect(getStats).toHaveBeenCalledOnce();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    await act(async () => root.render(renderPanel('context')));
+    expect(getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(getStats).toHaveBeenCalledOnce();
+    expect(
+      container.querySelector('button[title="Token Usage"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[title="Context Usage"]'),
+    ).not.toBeNull();
+  });
+});
+
 describe('ArtifactPanel terminal tabs', () => {
   const renderPanel = (activeTabId: string, restoring = false) => (
     <I18nProvider language="en">
