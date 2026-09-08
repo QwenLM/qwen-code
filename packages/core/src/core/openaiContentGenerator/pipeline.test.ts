@@ -3370,7 +3370,7 @@ describe('ContentGenerationPipeline', () => {
         'test-prompt-id',
       );
 
-      const results = [];
+      const results: GenerateContentResponse[] = [];
       await expect(async () => {
         for await (const result of resultGenerator) {
           // Consume until the stream error after the held finish.
