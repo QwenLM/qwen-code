@@ -338,7 +338,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => {
-  const readReviewWorktreeLease = vi.fn((): unknown => null);
+  const readReviewWorktreeLease = vi.fn(
+    (_repositoryRoot: string, _target: string): unknown => null,
+  );
   return {
     clearReviewWorktreeLease: vi.fn(),
     clearReviewWorktreeLeaseIfOwned: vi.fn(),

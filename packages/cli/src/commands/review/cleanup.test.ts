@@ -38,7 +38,9 @@ const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
   clearReviewWorktreeLease: vi.fn(),
-  readReviewWorktreeLease: vi.fn((): unknown => null),
+  readReviewWorktreeLease: vi.fn(
+    (_repositoryRoot: string, _target: string): unknown => null,
+  ),
   reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
   // cleanup's two remaining git spawns go through `lib/git`'s gated wrappers:
   // both resolve their repository from `process.cwd()`, and a launch directory
