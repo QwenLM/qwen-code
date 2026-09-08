@@ -48,23 +48,6 @@ The configured pattern list is intentionally NOT echoed in `/capabilities` — a
 
 Loopback self-origin requests (e.g. the Web Shell calling the daemon at the same `127.0.0.1:port`) are handled by a **separate** Origin-strip shim that runs BEFORE the CORS middleware and removes the `Origin` header for `127.0.0.1:port` / `localhost:port` / `[::1]:port` / `host.docker.internal:port` or the exact bound loopback address and port. It also accepts the scheme-matched port-less forms that browsers send for default ports: `http://host` on port 80 and `https://host` on port 443. These requests pass through regardless of `--allow-origin` configuration — operators don't need to list the daemon's own port to make the Web Shell work.
 
-## API profiles
-
-`qwen serve --api-profile=minimal` exposes session REST/SSE and read-only file routes. It automatically disables Web Shell assets and ACP/WebSocket transports. `--api-profile=full` is the default and preserves the existing daemon surface. `--no-web` alone only disables Web Shell assets.
-
-The minimal profile allows these paths, with their existing methods and request/response contracts:
-
-- `/health`, `/capabilities`, `/session`, `/session/:id`.
-- `/session/:id/{prompt,cancel,events,status,transcript,context,export,pending-prompts,heartbeat,metadata,model,load,resume}`.
-- `/session/:id/permission/:requestId`, `/permission/:requestId`.
-- `/workspace/tools`, `/file`, `/file/bytes`, `/stat`, `/list`, `/glob`.
-
-Other HTTP paths, including channel webhooks, return `403 {code: "api_profile_disabled", apiProfile: "minimal", ...}` after bearer authentication. Unauthenticated requests retain their existing 401 response; the ordinary loopback health exemption and CORS preflight behavior are unchanged. WebSocket connections cannot upgrade. Browser launch and Local Control options require the full profile.
-
-`GET /capabilities` reports `apiProfile` during both startup and normal operation, and its `features` list includes only supported capabilities available through the selected profile. This profile targets direct REST integrations; the full Web Shell and general-purpose SDK methods need routes it excludes.
-
-This narrows direct HTTP and WebSocket entry points, not agent authority: prompts and permission approvals can still run tools that modify files or execute commands. Use the existing trust, approval, and deployment isolation controls for that boundary.
-
 ## Common error shape
 
 5xx responses carry the original error's `code` and `data` when present (JSON-RPC style — the ACP SDK forwards `{code, message, data}` from the agent):
@@ -3575,7 +3558,6 @@ The connection then closes.
 | `packages/cli/src/serve/server.ts`                   | Express app assembly, middleware ordering, and remaining direct routes                                     |
 | `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
-| `packages/cli/src/serve/api-profile.ts`              | `--api-profile` surface gate + the `minimal` path allowlist                                                |
 | `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
 | `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
 | `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |

@@ -6,7 +6,6 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import { DEFAULT_API_PROFILE, profileFeatures } from '../api-profile.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
@@ -35,7 +34,6 @@ interface RegisterCapabilitiesRoutesDeps {
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
-  apiProfile: ServeOptions['apiProfile'];
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
 }
@@ -72,10 +70,7 @@ export function registerCapabilitiesRoutes(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
-    const features = profileFeatures(
-      deps.currentServeFeatures(),
-      deps.apiProfile,
-    );
+    const features = deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
@@ -85,7 +80,6 @@ export function registerCapabilitiesRoutes(
         : {}),
       mode: deps.mode,
       features,
-      apiProfile: deps.apiProfile ?? DEFAULT_API_PROFILE,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.

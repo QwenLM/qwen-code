@@ -33,7 +33,6 @@ import type {
   ChannelWorkerSetResult,
   ChannelWorkerStopResult,
 } from './channel-worker-manager.js';
-import { apiProfileGate } from './api-profile.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -779,7 +778,6 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
-  if (opts.apiProfile === 'minimal') opts = { ...opts, serveWebShell: false };
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -974,8 +972,7 @@ export function createServeApp(
     webTerminalRegistry.dispose();
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
-  const acpHttpEnabledAtBoot =
-    opts.apiProfile !== 'minimal' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   const liveVoiceSurfaceAvailable =
     runtimePlatform === 'darwin' &&
@@ -2020,10 +2017,6 @@ export function createServeApp(
   // to join their log lines (and 404s) with the caller's trace.
   app.use(daemonInboundTraceIdCaptureMiddleware);
 
-  // Cover pre-auth assets and webhooks as well as normal REST routes.
-  const profileGate = apiProfileGate(opts.apiProfile);
-  if (profileGate) app.use(authenticate, profileGate);
-
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
@@ -2268,7 +2261,6 @@ export function createServeApp(
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
-    apiProfile: opts.apiProfile,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
   });

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ApiProfile } from './api-profile.js';
 import {
   SERVE_FEATURES,
   type ServeFeature,
@@ -217,8 +216,6 @@ export interface ServeOptions {
    * Web Shell assets aren't present in the build.
    */
   serveWebShell?: boolean;
-  /** API route profile; defaults to full. Minimal also disables Web Shell. */
-  apiProfile?: ApiProfile;
   /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
@@ -419,8 +416,6 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
-  /** Active API route profile; omitted by older daemons (equivalent to full). */
-  apiProfile?: ApiProfile;
   /**
    * Configured model services advertised over HTTP. **Stage 1 always
    * returns `[]`** — the agent uses its single default service and

@@ -5,7 +5,6 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { API_PROFILES, type ApiProfile } from '../serve/api-profile.js';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
 import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
@@ -212,7 +211,6 @@ interface ServeArgs {
   'tls-cert'?: string;
   'tls-key'?: string;
   web: boolean;
-  'api-profile': ApiProfile;
   open: boolean;
   'open-with-auth': boolean;
   'local-control': boolean;
@@ -379,12 +377,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Serve the Web Shell UI at the daemon root path. Use --no-web for an API-only daemon.',
       })
-      .option('api-profile', {
-        choices: API_PROFILES,
-        default: 'full' as const,
-        description:
-          'API surface: full (default), or minimal (session REST/SSE and file reads; disables Web Shell, webhooks, and WebSockets).',
-      })
       .option('open', {
         type: 'boolean',
         default: false,
@@ -409,14 +401,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
-        if (
-          argv['api-profile'] === 'minimal' &&
-          (argv['local-control'] || argv['open'] || argv['open-with-auth'])
-        ) {
-          throw new Error(
-            'Browser launch and Local Control require --api-profile=full.',
-          );
-        }
         // A wildcard or LAN primary bind already owns the port Local Control
         // needs on its selected address. Token and Origin settings remain
         // independent because the second listener owns those.
@@ -895,7 +879,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
-        apiProfile: argv['api-profile'],
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { apiProfileGate, profileFeatures } from './api-profile.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -2407,20 +2406,16 @@ function createBootstrapCapabilities(input: {
       ? { qwenCodeVersion: input.qwenCodeVersion }
       : {}),
     mode: input.opts.mode,
-    apiProfile: input.opts.apiProfile ?? 'full',
-    features: profileFeatures(
-      currentServeFeaturesForRunQwenServe(
-        input.opts,
-        input.sessionShellCommandEnabled,
-        input.sessionArtifactsPersistenceAvailable,
-        input.workspaceRuntimeAvailable,
-        input.currentSessionSchedulingAvailable,
-        input.env,
-        input.nativeDirectoryPickerAvailable,
-        input.localPathOpenAvailable,
-        input.localTerminalOpenAvailable,
-      ),
-      input.opts.apiProfile,
+    features: currentServeFeaturesForRunQwenServe(
+      input.opts,
+      input.sessionShellCommandEnabled,
+      input.sessionArtifactsPersistenceAvailable,
+      input.workspaceRuntimeAvailable,
+      input.currentSessionSchedulingAvailable,
+      input.env,
+      input.nativeDirectoryPickerAvailable,
+      input.localPathOpenAvailable,
+      input.localTerminalOpenAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2636,8 +2631,6 @@ function createBootstrapServeApp(input: {
   }
 
   app.use(bearerAuth(opts.token));
-  const profileGate = apiProfileGate(opts.apiProfile);
-  if (profileGate) app.use(profileGate);
 
   if (!exposeHealthPreAuth) {
     app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
@@ -3191,8 +3184,6 @@ export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
-  if (optsIn.apiProfile === 'minimal')
-    optsIn = { ...optsIn, serveWebShell: false };
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
   let restoreScrubbedLoaderEnv: (() => void) | undefined;

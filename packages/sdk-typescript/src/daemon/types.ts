@@ -480,8 +480,6 @@ export interface DaemonCapabilities {
    * `session_events`). Never gate UI off `mode`.
    */
   features: string[];
-  /** Active API route profile; omitted by older daemons (equivalent to full). */
-  apiProfile?: 'full' | 'minimal';
   /**
    * Numeric daemon limits. `null` means the daemon advertises the limit as
    * disabled; absence means an older daemon did not advertise it.

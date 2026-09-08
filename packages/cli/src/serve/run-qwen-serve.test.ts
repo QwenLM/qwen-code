@@ -11028,42 +11028,6 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('enforces the minimal API profile during failed bootstrap', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-minimal-')),
-    );
-    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
-      throw new Error('runtime boom');
-    });
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        apiProfile: 'minimal',
-      },
-      { resolveOnListen: true },
-    );
-    try {
-      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
-      const caps = await fetch(`${handle.url}/capabilities`).then((res) =>
-        res.json(),
-      );
-      expect(caps.apiProfile).toBe('minimal');
-      expect(caps.features).toContain('session_prompt');
-      expect(caps.features).not.toContain('workspace_settings');
-      const disabled = await fetch(`${handle.url}/daemon/status`);
-      expect(disabled.status).toBe(403);
-      expect(await disabled.json()).toMatchObject({
-        code: 'api_profile_disabled',
-      });
-      expect(handle.webShellMounted).toBe(false);
-    } finally {
-      await handle.close();
-    }
-  });
-
   it('reports bootstrap status and capabilities when fast path resolves on listen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),

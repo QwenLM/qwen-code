@@ -32,7 +32,6 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { MINIMAL_PROFILE_PATHS } from './api-profile.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
@@ -3126,146 +3125,6 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
-  it('enforces the minimal API profile across HTTP, webhooks and WebSockets', async () => {
-    const bridge = fakeBridge();
-    const app = createServeApp(
-      {
-        ...baseOpts,
-        token: 'secret',
-        apiProfile: 'minimal',
-        promptDeadlineMs: 10000,
-        writerIdleTimeoutMs: 10000,
-      },
-      undefined,
-      {
-        bridge,
-        enqueueChannelWebhookTask: vi.fn(),
-      },
-    );
-    const host = `127.0.0.1:${baseOpts.port}`;
-    for (const path of [
-      '/',
-      '/workspace/trust',
-      '/channels/test/webhooks/test',
-      '/acp',
-      '/file/write',
-    ]) {
-      await request(app).post(path).set('Host', host).expect(401);
-      const response = await request(app)
-        .post(path)
-        .set('Host', host)
-        .set('Authorization', 'Bearer secret')
-        .expect(403);
-      expect(response.body.code).toBe('api_profile_disabled');
-    }
-    const caps = await request(app)
-      .get('/capabilities')
-      .set('Host', host)
-      .set('Authorization', 'Bearer secret')
-      .expect(200);
-    expect(caps.body.apiProfile).toBe('minimal');
-    expect(caps.body.features).toContain('session_prompt');
-    expect(caps.body.features).toEqual(
-      expect.arrayContaining([
-        'non_blocking_prompt',
-        'prompt_absolute_deadline',
-        'writer_idle_timeout',
-      ]),
-    );
-    expect(caps.body.features).not.toContain('workspace_settings');
-    expect(caps.body.features).not.toContain('acp_http');
-    await request(app).get('/health').set('Host', host).expect(200);
-    await request(app)
-      .post('/session/session-A/prompt')
-      .set('Host', host)
-      .set('Authorization', 'Bearer secret')
-      .send({ prompt: [{ type: 'text', text: 'hi' }] })
-      .expect(202);
-    await vi.waitFor(() => expect(bridge.promptCalls).toHaveLength(1));
-    await request(app)
-      .post('/session/session-A/cancel')
-      .set('Host', host)
-      .set('Authorization', 'Bearer secret')
-      .expect(204);
-
-    const server = app.listen(0, '127.0.0.1');
-    await new Promise<void>((resolve) => server.once('listening', resolve));
-    const handle = app.locals['acpHandle'] as AcpHttpHandle | undefined;
-    handle?.attachServer(server);
-    expect(handle).toBeUndefined();
-    const port = (server.address() as AddressInfo).port;
-    try {
-      for (const path of [
-        '/acp',
-        '/voice/stream',
-        '/terminal',
-        '/live/host',
-        '/cdp',
-        '/workspaces/test/acp',
-      ]) {
-        await new Promise<void>((resolve, reject) => {
-          const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
-            headers: { Host: host, Authorization: 'Bearer secret' },
-            handshakeTimeout: 1000,
-          });
-          ws.on('open', () => {
-            ws.terminate();
-            reject(new Error('Unexpected WebSocket upgrade'));
-          });
-          ws.on('error', (error) => {
-            if (error.message !== 'Unexpected server response: 403')
-              reject(error);
-            else resolve();
-          });
-        });
-      }
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
-  it('keeps every minimal-profile path pointed at a route the app registers', () => {
-    // The gate matches request paths against a hand-maintained list, so a route
-    // renamed or removed upstream leaves a dead entry behind: the profile
-    // quietly stops serving something it claims to, and every other test still
-    // passes. Walk a real full-profile app and require each entry to resolve.
-    //
-    // Param names are normalised because this guards the path *shape* the gate
-    // matches on, not what a handler happens to call its parameter.
-    const app = createServeApp({ ...baseOpts }, undefined, {
-      bridge: fakeBridge(),
-    });
-    const normalise = (routePath: string) =>
-      routePath.replace(/:[^/]+/g, ':p').replace(/(.)\/$/, '$1');
-
-    const registered = new Set<string>();
-    const walk = (layers: unknown[]): void => {
-      for (const entry of layers) {
-        const layer = entry as {
-          route?: { path?: unknown };
-          handle?: { stack?: unknown[] };
-        };
-        const routePath = layer.route?.path;
-        if (typeof routePath === 'string') registered.add(normalise(routePath));
-        else if (Array.isArray(routePath)) {
-          for (const one of routePath) {
-            if (typeof one === 'string') registered.add(normalise(one));
-          }
-        }
-        if (layer.handle?.stack) walk(layer.handle.stack);
-      }
-    };
-    walk(
-      (app as unknown as { router: { stack: unknown[] } }).router.stack ?? [],
-    );
-
-    expect(
-      MINIMAL_PROFILE_PATHS.filter(
-        (profilePath) => !registered.has(normalise(profilePath)),
-      ),
-    ).toEqual([]);
-  });
-
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
@@ -4122,23 +3981,6 @@ describe('createServeApp', () => {
 
     afterEach(async () => {
       await fsp.rm(webShellDir, { recursive: true, force: true });
-    });
-
-    it('blocks real Web Shell GET requests in the minimal profile', async () => {
-      const app = createServeApp(
-        { ...baseOpts, token: 'secret', apiProfile: 'minimal' },
-        undefined,
-        { bridge: fakeBridge(), webShellDir },
-      );
-      for (const route of ['/', '/assets/app.js']) {
-        await request(app).get(route).set('Host', host).expect(401);
-        const response = await request(app)
-          .get(route)
-          .set('Host', host)
-          .set('Authorization', 'Bearer secret')
-          .expect(403);
-        expect(response.body.code).toBe('api_profile_disabled');
-      }
     });
 
     it('serves the shell at the root with security headers', async () => {
