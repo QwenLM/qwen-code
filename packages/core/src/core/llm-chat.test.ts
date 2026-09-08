@@ -11455,6 +11455,75 @@ describe('LlmChat', async () => {
       }
     });
 
+    it('retries the statusless Anthropic SSE throttle and completes the next attempt', async () => {
+      vi.useFakeTimers();
+      try {
+        const error = new Error(
+          JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: JSON.stringify({
+                message:
+                  'Too many requests, please wait before trying again. You have sent too many requests.  Wait before trying again.',
+              }),
+            },
+          }),
+        );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw error;
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered from SSE throttle' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'sse-throttle',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        const retry = await iterator.next();
+        expect(retry.value.type).toBe(StreamEventType.RETRY);
+        expect(retry.value.retryInfo.delayMs).toBeGreaterThan(0);
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(retry.value.retryInfo.delayMs);
+        const events = [(await next).value];
+        for (;;) {
+          const event = await iterator.next();
+          if (event.done) break;
+          events.push(event.value);
+        }
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered from SSE throttle',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should use Retry-After delay for streamed rate-limit errors', async () => {
       vi.useFakeTimers();
 

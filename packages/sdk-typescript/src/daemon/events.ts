@@ -928,6 +928,9 @@ export type DaemonMcpServerChangedEvent = DaemonEventEnvelope<
 export interface DaemonExtensionsChangedData {
   readonly refreshed: number;
   readonly failed: number;
+  // Daemons advertising `extension_activation_explicit_refresh` commit
+  // activation without broadcasting it; `enabled`/`disabled` statuses arrive
+  // only from older daemons, newer ones converge via a status-less broadcast.
   readonly status?:
     | 'installed'
     | 'enabled'

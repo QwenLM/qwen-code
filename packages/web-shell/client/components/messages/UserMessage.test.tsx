@@ -484,6 +484,26 @@ describe('UserMessage', () => {
     ).toContain('flash');
   });
 
+  it.each([
+    ['report.HTML', 'text/html', 'HTML', 'html'],
+    ['README', 'text/plain', 'text/plain', 'file-text'],
+    ['LICENSE', '', 'FILE', 'file'],
+  ])('renders attachment metadata for %s', (name, mimeType, type, icon) => {
+    const container = render(
+      <UserMessage content="" files={[{ name, mimeType }]} />,
+    );
+    const card = container.querySelector('[data-web-shell-user-files]');
+    expect(card?.querySelector(`[title="${name}"]`)?.textContent).toBe(name);
+    expect(card?.querySelector(`[title="${type}"]`)?.textContent).toBe(type);
+    expect(
+      card?.querySelector(
+        icon === 'file-text'
+          ? 'svg.lucide-file-text'
+          : `[data-file-type-icon="${icon}"]`,
+      ),
+    ).not.toBeNull();
+  });
+
   it('previews a sent text attachment when its chip is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = render(
@@ -632,6 +652,8 @@ describe('UserMessage', () => {
       name: 'notes.txt',
       workspacePath: 'docs/notes.txt',
     });
+    expect(container.querySelector('svg.lucide-file-text')).not.toBeNull();
+    expect(container.textContent).toContain('docs/notes.txt');
   });
 
   it('does not make a sent directory tag previewable', () => {

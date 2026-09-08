@@ -1,0 +1,21 @@
+.root {
+  container-type: inline-size;
+}
+
+.navigation {
+  display: none;
+}
+
+@container (min-width: 600px) {
+  .navigation {
+    display: flex;
+  }
+
+  /* The in-flow navigation rail (w-16, see GlobalTurnNavigation) narrows this
+     column, so the margin-centered content column sits half a rail width
+     right of the pane axis the composer below is centered on. Mirror the
+     rail on the right to keep both on one axis. */
+  .columnWithRail {
+    padding-right: 4rem;
+  }
+}
