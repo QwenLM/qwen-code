@@ -376,33 +376,69 @@ function toStoreFiles(
   }));
 }
 
-// The daemon renders an image-only prompt with this placeholder
-// (`extractPromptText` in packages/acp-bridge/src/bridge.ts), so a local row
-// whose text is empty can only bind to it through this value.
+// The daemon renders a text-less prompt with an image block as this
+// placeholder (`extractPromptText` in packages/acp-bridge/src/bridge.ts); a
+// text-less prompt without one renders as ''.
 const IMAGE_ONLY_PROMPT_TEXT = '[image]';
-
-function pendingPromptTextsMatch(localText: string, serverText: string) {
-  return (
-    localText === serverText ||
-    (localText.trim().length === 0 && serverText === IMAGE_ONLY_PROMPT_TEXT)
-  );
-}
 
 /**
  * Whether a local row still in flight is the same message as a server-side
- * prompt. Attachments normally rule a text match out, because the daemon's
- * summary loses them; a row resubmitted after an idle rejection may bind
- * anyway, since this hook is the one that put it back on the ordinary path.
+ * prompt. A rendered text is not an identity: the daemon renders every
+ * text-less prompt with an image block as the same '[image]' placeholder,
+ * and one without an image block as ''. A row without attachments binds by
+ * exact text; the daemon omits the originator when the submitter had no
+ * client id, which is still possibly ours, so that route fails open. A row
+ * carrying attachments may claim a server prompt only through the guarded
+ * placeholder route: stamped with this client's id, rendered text-less, and
+ * carrying fully hydrated media identical to the row's — anything that
+ * cannot be compared is refused.
  */
-function matchesUnboundSubmittingRow(item: QueuedPrompt, text: string) {
-  return (
-    !item.serverPromptId &&
-    item.serverState === 'submitting' &&
-    ((item.images?.length ?? 0) === 0 ||
-      item.resubmittedAfterIdleRejection === true) &&
-    ((item.files?.length ?? 0) === 0 ||
-      item.resubmittedAfterIdleRejection === true) &&
-    pendingPromptTextsMatch(item.text, text)
+function matchesUnboundSubmittingRow(
+  item: QueuedPrompt,
+  server: {
+    text: string;
+    originatorClientId?: string | undefined;
+    content?: readonly PromptContentBlock[] | undefined;
+  },
+  clientId: string | undefined,
+): boolean {
+  if (item.serverPromptId || item.serverState !== 'submitting') return false;
+  const hasAttachments =
+    (item.images?.length ?? 0) > 0 || (item.files?.length ?? 0) > 0;
+  if (!hasAttachments) {
+    return (
+      item.text === server.text &&
+      (server.originatorClientId === undefined ||
+        server.originatorClientId === clientId)
+    );
+  }
+  if (
+    server.originatorClientId === undefined ||
+    server.originatorClientId !== clientId
+  ) {
+    return false;
+  }
+  // A prompt with text renders that text, so only a text-less row can own a
+  // placeholder rendering.
+  if (item.text.trim().length > 0) return false;
+  if (server.text !== IMAGE_ONLY_PROMPT_TEXT && server.text !== '') {
+    return false;
+  }
+  if (server.content === undefined) {
+    // The started event carries no content to compare media with; only a
+    // resubmitted row may bind there — an ordinary submission's echo waits
+    // for its own admission id.
+    return item.resubmittedAfterIdleRejection === true;
+  }
+  // Files never hydrate into the summary and a degraded or unhydrated image
+  // yields no payload, so only fully comparable images can prove ownership.
+  if ((item.files?.length ?? 0) > 0) return false;
+  const serverImages = contentToImages(server.content);
+  if (!serverImages || contentToFiles(server.content)) return false;
+  const itemImages = item.images ?? [];
+  if (itemImages.length !== serverImages.length) return false;
+  return itemImages.every(
+    (image, index) => image.data === serverImages[index]?.data,
   );
 }
 
@@ -512,6 +548,17 @@ export function useQueuedPrompts({
   );
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
+  /**
+   * The in-flight pending-prompts GET, if any. Refreshes are single-flight
+   * per session: concurrent callers share the snapshot instead of bumping
+   * the sequence number, which two re-awaiting submit bodies would
+   * otherwise use to invalidate each other forever.
+   */
+  const inflightRefreshRef = useRef<{
+    sessionId: string;
+    ownerToken: typeof ownerToken;
+    promise: Promise<RefreshPendingPromptsResult>;
+  } | null>(null);
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
   const midTurnReconcileSeqRef = useRef(0);
   const restoredPromptIdsRef = useRef<Set<number>>(new Set());
@@ -683,35 +730,45 @@ export function useQueuedPrompts({
           };
           continue;
         }
-        // A rendered text is not an identity: the daemon renders every
-        // image-only prompt as the same '[image]' placeholder, so an
-        // unbound row may claim only a prompt this client could have
-        // submitted. The daemon omits the field when the submitter had no
-        // client id, which is still possibly ours.
-        const submittingMatches =
+        const couldBeOurs =
           serverPrompt.originatorClientId === undefined ||
-          serverPrompt.originatorClientId === clientId
-            ? next.filter((p) =>
-                matchesUnboundSubmittingRow(p, serverPrompt.text),
-              )
-            : [];
+          serverPrompt.originatorClientId === clientId;
+        const submittingMatches = next.filter((p) =>
+          matchesUnboundSubmittingRow(p, serverPrompt, clientId),
+        );
         if (submittingMatches.length === 1) {
-          const submittingIndex = next.indexOf(submittingMatches[0]!);
-          if (hasDisplayedPrompt) {
-            // Remember the claim: a submit body that later finds this row
-            // gone must not read the splice as a user cancellation.
-            syncClaimedSubmittingRowIdsRef.current.add(
-              submittingMatches[0]!.id,
-            );
-            next.splice(submittingIndex, 1);
+          const submittingRow = submittingMatches[0]!;
+          // An attachment row claims through a placeholder rendering, so the
+          // match must be unique on the server side too: with two prompts it
+          // could own, it claims neither and waits for its body to bind by
+          // id.
+          const rowHasAttachments =
+            (submittingRow.images?.length ?? 0) > 0 ||
+            (submittingRow.files?.length ?? 0) > 0;
+          const serverSideUnique =
+            !rowHasAttachments ||
+            serverQueued.filter((candidate) =>
+              matchesUnboundSubmittingRow(submittingRow, candidate, clientId),
+            ).length === 1;
+          if (serverSideUnique) {
+            const submittingIndex = next.indexOf(submittingRow);
+            if (hasDisplayedPrompt) {
+              // Remember the claim: a resubmitted submit body that later
+              // finds this row gone must not read the splice as a user
+              // cancellation. Only flagged rows have a body that reads it.
+              if (submittingRow.resubmittedAfterIdleRejection === true) {
+                syncClaimedSubmittingRowIdsRef.current.add(submittingRow.id);
+              }
+              next.splice(submittingIndex, 1);
+              continue;
+            }
+            next[submittingIndex] = {
+              ...submittingRow,
+              serverPromptId: serverPrompt.promptId,
+              serverState: serverPrompt.state,
+            };
             continue;
           }
-          next[submittingIndex] = {
-            ...submittingMatches[0]!,
-            serverPromptId: serverPrompt.promptId,
-            serverState: serverPrompt.state,
-          };
-          continue;
         }
         if (serverPrompt.state === 'running' || hasDisplayedPrompt) {
           continue;
@@ -723,7 +780,10 @@ export function useQueuedPrompts({
             ((prompt.images?.length ?? 0) > 0 ||
               (prompt.files?.length ?? 0) > 0),
         );
-        if (hasUnboundAttachmentSubmission) continue;
+        // The suppression guards against duplicating an in-flight attachment
+        // submission of THIS client; a prompt the originator already proved
+        // foreign cannot be its duplicate and must materialize.
+        if (couldBeOurs && hasUnboundAttachmentSubmission) continue;
         next.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
@@ -752,41 +812,64 @@ export function useQueuedPrompts({
   );
 
   const refreshPendingPrompts = useCallback(
-    async (
-      targetSessionId = sessionId,
-    ): Promise<RefreshPendingPromptsResult> => {
-      if (!connected || !targetSessionId) return { status: 'skipped' };
+    (targetSessionId = sessionId): Promise<RefreshPendingPromptsResult> => {
+      if (!connected || !targetSessionId)
+        return Promise.resolve({ status: 'skipped' });
       if (latestSessionIdRef.current !== targetSessionId)
-        return { status: 'skipped' };
+        return Promise.resolve({ status: 'skipped' });
+      const inflight = inflightRefreshRef.current;
+      if (
+        inflight &&
+        inflight.sessionId === targetSessionId &&
+        isCurrentOwnerTokenRef.current(inflight.ownerToken)
+      ) {
+        return inflight.promise;
+      }
       const ownerToken = ownerTokenRef.current;
       const requestSeq = ++refreshRequestSeqRef.current;
-      try {
-        const result = await sessionActions.getPendingPrompts({
-          sessionId: targetSessionId,
-        });
-        if (requestSeq !== refreshRequestSeqRef.current)
-          return { status: 'superseded' };
-        if (
-          !isCurrentOwnerTokenRef.current(ownerToken) ||
-          latestSessionIdRef.current !== targetSessionId
-        ) {
-          return { status: 'skipped' };
+      // The finally clears the ref through the closure; the async body
+      // always yields at the GET await before the finally can run, so
+      // `promise` is assigned by then.
+      const runRefresh = async (): Promise<RefreshPendingPromptsResult> => {
+        try {
+          const result = await sessionActions.getPendingPrompts({
+            sessionId: targetSessionId,
+          });
+          if (requestSeq !== refreshRequestSeqRef.current)
+            return { status: 'superseded' };
+          if (
+            !isCurrentOwnerTokenRef.current(ownerToken) ||
+            latestSessionIdRef.current !== targetSessionId
+          ) {
+            return { status: 'skipped' };
+          }
+          syncServerQueuedPrompts(
+            result.pendingPrompts.filter(
+              (p) => p.state === 'queued' || p.state === 'running',
+            ),
+            targetSessionId,
+            clientId,
+          );
+          return {
+            status: 'refreshed',
+            pendingPrompts: result.pendingPrompts,
+          };
+        } catch (error) {
+          console.warn('Failed to refresh pending prompts', error);
+          return { status: 'failed' };
+        } finally {
+          if (inflightRefreshRef.current?.promise === promise) {
+            inflightRefreshRef.current = null;
+          }
         }
-        syncServerQueuedPrompts(
-          result.pendingPrompts.filter(
-            (p) => p.state === 'queued' || p.state === 'running',
-          ),
-          targetSessionId,
-          clientId,
-        );
-        return {
-          status: 'refreshed',
-          pendingPrompts: result.pendingPrompts,
-        };
-      } catch (error) {
-        console.warn('Failed to refresh pending prompts', error);
-        return { status: 'failed' };
-      }
+      };
+      const promise = runRefresh();
+      inflightRefreshRef.current = {
+        sessionId: targetSessionId,
+        ownerToken,
+        promise,
+      };
+      return promise;
     },
     [clientId, connected, sessionActions, sessionId, syncServerQueuedPrompts],
   );
@@ -1227,6 +1310,7 @@ export function useQueuedPrompts({
     displayedServerPromptIdsRef.current = new Set();
     settledServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
+    syncClaimedSubmittingRowIdsRef.current = new Set();
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
@@ -1327,6 +1411,19 @@ export function useQueuedPrompts({
         ) {
           const eventText =
             typeof event.data.text === 'string' ? event.data.text : '';
+          // A rendered text is not an identity, so ambiguity degrades to no
+          // echo: each submit body echoes its own row once its admission
+          // resolves.
+          const unboundMatches = queuedPromptsRef.current.filter((item) =>
+            matchesUnboundSubmittingRow(
+              item,
+              {
+                text: eventText,
+                originatorClientId: event.originatorClientId,
+              },
+              clientId,
+            ),
+          );
           const prompt =
             queuedPromptsRef.current.find(
               (item) => item.serverPromptId === promptId,
@@ -1335,9 +1432,7 @@ export function useQueuedPrompts({
               (item) => item.midTurnMessageId === promptId,
             ) ??
             pendingMidTurnPrompt ??
-            queuedPromptsRef.current.find((item) =>
-              matchesUnboundSubmittingRow(item, eventText),
-            );
+            (unboundMatches.length === 1 ? unboundMatches[0] : undefined);
           if (prompt) {
             if (prompt.onComplete) {
               settleCompletionCallback(promptId, prompt.onComplete);
@@ -1524,19 +1619,12 @@ export function useQueuedPrompts({
             latestSessionActiveRef.current &&
             !localMessageAppended
           ) {
-            // An unrelated refresh supersedes this one's sequence number
-            // and discards its payload; re-await so the decisions below read
-            // the newest snapshot instead of a discarded one. The UI-side
-            // writes stay behind the sequence fence inside
-            // `refreshPendingPrompts`.
-            let refresh = await refreshPendingPrompts(targetSessionId);
-            while (
-              refresh.status === 'superseded' &&
-              isCurrentOwnerTokenRef.current(ownerToken) &&
-              latestSessionIdRef.current === targetSessionId
-            ) {
-              refresh = await refreshPendingPrompts(targetSessionId);
-            }
+            // Refreshes are single-flight per session, so this shares any
+            // in-flight GET instead of superseding it: the snapshot is by
+            // construction the newest, and a concurrent body cannot
+            // invalidate it. The UI-side writes stay behind the sequence
+            // fence inside `refreshPendingPrompts`.
+            const refresh = await refreshPendingPrompts(targetSessionId);
             refreshedInBody = refresh.status === 'refreshed';
             if (
               !isCurrentOwnerTokenRef.current(ownerToken) ||
