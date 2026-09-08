@@ -1540,6 +1540,7 @@ export function WebShellSidebar({
     workspace.client,
     {
       enabled: workspaceSessionLiveStateEnabled,
+      pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
       workspaceCwds: liveStateWorkspaceCwds,
       groupWorkspaceCwds: liveStateGroupWorkspaceCwds,
     },

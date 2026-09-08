@@ -2088,6 +2088,34 @@ export class ChatRecordingService {
   }
 
   /**
+   * Evidence-bearing tool results recorded in the Goal turn that is currently
+   * open. Single entry for the same reason the spend is.
+   */
+  private goalTurnToolResults?: { turnId: string; count: number };
+
+  private accumulateGoalTurnToolResult(turnId: string): void {
+    if (this.goalTurnToolResults?.turnId !== turnId) {
+      this.goalTurnToolResults = { turnId, count: 0 };
+    }
+    this.goalTurnToolResults.count += 1;
+  }
+
+  /**
+   * The evidence-bearing tool results `turnId` recorded, consuming them so a
+   * turn is counted once.
+   *
+   * `get_goal` and `update_goal` results are excluded: they are the Goal
+   * runtime talking to itself, and a turn that only reads its own state is
+   * exactly the idling this count exists to notice.
+   */
+  takeGoalTurnToolResults(turnId: string): number {
+    if (this.goalTurnToolResults?.turnId !== turnId) return 0;
+    const { count } = this.goalTurnToolResults;
+    this.goalTurnToolResults = undefined;
+    return count;
+  }
+
+  /**
    * Records an assistant turn with all available data.
    * Queues the write immediately on the serialized async writer.
    *
@@ -2356,6 +2384,9 @@ export class ChatRecordingService {
         record.toolCallResult = recordingToolCallResult;
       }
 
+      if (options?.goalContext && options.provenance !== 'goal_runtime') {
+        this.accumulateGoalTurnToolResult(options.goalContext.turnId);
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving tool result:', error);

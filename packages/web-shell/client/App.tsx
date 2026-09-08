@@ -3274,6 +3274,7 @@ export function App({
       .map((entry) => entry.cwd);
   }, [sidebarOptions.enabled, workspaces]);
   useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
       sidebarlessLiveStateWorkspaceCwds.length > 0 &&
         connection.capabilities?.features?.includes(
