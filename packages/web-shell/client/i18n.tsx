@@ -1628,7 +1628,7 @@ const EN: Messages = {
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
-    'A running session cannot be archived; archiving would end its turn',
+    'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -5136,7 +5136,7 @@ const ZH: Messages = {
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
-    '不能归档运行中的会话，归档会终止其当前回合',
+    '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
