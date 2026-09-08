@@ -106,7 +106,6 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  */
 function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
   if (entry.role !== 'user' || !entry.parts) return false;
-  if (isClearedMediaPlaceholder(targetText)) return false;
   return entry.parts.some((part) => 'text' in part && part.text === targetText);
 }
 
@@ -295,9 +294,41 @@ export function computeApiTruncationIndex(
       }
       return true;
     };
+    // Round-32: the round-30 demotion refused the text proof outright
+    // whenever the target's own text is a cleared-media placeholder. That
+    // shape is not always an impostor — it is also this PR's headline
+    // reproduction, a genuine prompt the user typed whose whole text equals
+    // the generated placeholder, whose own entry IS the match. Refusing it
+    // sent the exact case #9437 was filed for back to the positional walk,
+    // which excludes placeholders from its count and lands one turn late.
+    //
+    // Text alone cannot separate the two: a cleared media-only entry and a
+    // genuine placeholder-texted prompt are byte-identical once serialized.
+    // Their ORDINAL differs, though. The target has `uiUserTurnCount` real
+    // UI turns before it, so its own entry must have exactly that many user
+    // prompt entries before it — counted with the UNFILTERED classifier, so
+    // cleared entries still occupy the ordinal the walk skips. A cleared
+    // entry wearing a re-minted mark sits at some other ordinal.
+    //
+    // The check is scoped to placeholder-texted targets on purpose. Ordinal
+    // agreement is a positional proof, so it breaks down exactly where
+    // positions have desynced — an absorbed turn — which is the case
+    // identity exists to resolve and which the round-28 tests pin. Those
+    // targets carry ordinary text and never reach this branch.
+    const matchOrdinalAgrees = (matchIndex: number): boolean => {
+      let counted = 0;
+      for (let i = startIndex; i < matchIndex; i++) {
+        if (isApiUserPrompt(apiHistory[i]!)) counted++;
+      }
+      return counted === uiUserTurnCount;
+    };
+    const ownershipProven = (matchIndex: number): boolean =>
+      isApiEntryOwnedByText(apiHistory[matchIndex]!, target.text) &&
+      (!isClearedMediaPlaceholder(target.text) ||
+        matchOrdinalAgrees(matchIndex));
     if (
       identifiedIndex !== -1 &&
-      isApiEntryOwnedByText(apiHistory[identifiedIndex]!, target.text) &&
+      ownershipProven(identifiedIndex) &&
       ownershipProofIsUnique()
     ) {
       // Round-30 backstop: even a unique, ownership-proven match cannot be

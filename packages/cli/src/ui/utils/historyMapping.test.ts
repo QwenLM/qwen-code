@@ -1452,17 +1452,15 @@ describe("this PR's own headline reproduction (#9437)", () => {
   //      be absent from the model-bound history.
   //
   // This is the collision #9437 was filed for and the one the PR's A/B
-  // evidence measures. It is RED at the time this test was added: the
-  // round-30 demotion in `isApiEntryOwnedByText` refuses the ownership proof
-  // whenever the target's own text is a cleared-media placeholder — which is
-  // this exact turn — so the unique identity match is discarded and the
-  // positional walk runs. The walk excludes placeholders from its count, so
-  // it lands one turn late (4 instead of 2), leaving the selected prompt and
-  // its response in model context: the PR's documented "before" state.
+  // evidence measures, so it is pinned here directly rather than only
+  // through the gate's component conditions.
   //
-  // Do not delete or relax this test to get the suite green. Either the gate
-  // resolves this turn, or the PR's central claim and its Reviewer Test Plan
-  // need to be amended to say it does not.
+  // It regressed once already: round 30 refused the ownership proof for any
+  // placeholder-texted target, which sent this turn to the positional walk —
+  // and that walk excludes placeholders from its count, so it landed one
+  // turn late (4 where the boundary is 2), leaving the selected prompt and
+  // its response in model context. The refusal is now scoped to targets
+  // whose ordinal also disagrees; see `matchOrdinalAgrees`.
   it('removes the selected turn when its text equals the cleared-media placeholder', () => {
     const PLACEHOLDER = '[Old inline media cleared: image/png]';
     const withPromptId = (
@@ -1498,7 +1496,7 @@ describe("this PR's own headline reproduction (#9437)", () => {
     ];
 
     // Truncating at 2 keeps [hello, response 1]. Truncating at 4 keeps the
-    // selected prompt and its response — the bug.
+    // selected prompt and its response — the regression this pins.
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
   });
 });

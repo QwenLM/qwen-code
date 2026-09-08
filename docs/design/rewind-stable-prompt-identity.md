@@ -40,38 +40,42 @@ another entrance). A match is accepted only when **all** hold:
    `promptIdFileKeyOnly` (a `/restore`d item, whose id is a file-snapshot key
    only — the checkpoint's `clientHistory` is JSON and carries no marks);
 2. exactly one post-`startIndex` entry carries the id;
-3. that entry's text equals the target's text (the ownership proof), and the
-   target's text is not itself a cleared-media placeholder;
-4. the proof is unique — no other real, non-file-key-only UI turn claims the
+3. that entry's text equals the target's text (the ownership proof);
+4. if the target's own text is itself a cleared-media placeholder, the match's
+   ordinal also agrees — it has exactly `uiUserTurnCount` user prompt entries
+   before it, counted with the unfiltered classifier;
+5. the proof is unique — no other real, non-file-key-only UI turn claims the
    same id with the same text, and at most one post-`startIndex` entry carries
    the target's text;
-5. the positional walk does not land earlier than the match.
+6. the positional walk does not land earlier than the match.
 
 Anything else falls through to the positional walk, whose loud -1 is the safe
 refusal. So the change can only make rewind more accurate than it was, never
 less: it never introduces a refusal on a session that previously rewound.
 
-### Known open case
+### Why condition 4 is scoped the way it is
 
-Condition 3's placeholder clause re-opens the collision this work was filed
-for. When a user types a prompt whose entire text equals a generated
-`[Old inline media cleared: …]` placeholder, the ownership proof refuses, the
-unique identity match is discarded, and the positional walk runs — and that
-walk excludes placeholders from its count, so it lands one turn late and
-leaves the selected turn's prompt and response in model context.
+A cleared media-only entry and a genuine prompt whose entire text equals the
+generated placeholder are byte-identical once serialized, so the text proof
+cannot separate them. Their ordinal can: the target has `uiUserTurnCount` real
+UI turns before it, so its own entry carries exactly that many user prompt
+entries ahead of it, while a cleared entry wearing a re-minted mark sits
+elsewhere. The count uses the unfiltered classifier deliberately — a cleared
+entry still occupies the ordinal that the rewind walk skips.
 
-The clause is not gratuitous: a cleared-media entry and a genuine
-placeholder-texted prompt are byte-identical once serialized, so no text
-comparison can separate them. A positional (ordinal-agreement) proof separates
-those two, but then fails exactly where identity is most needed — a turn
-absorbed by compression desyncs positions, which is the case identity exists to
-resolve. The two requirements are in direct tension under any proof derived
-from content or from position.
+Ordinal agreement is a positional proof, so it stops holding exactly where
+positions desync: a turn absorbed by compression. That is the case identity
+exists to resolve, so the check must not apply to it — and it does not, because
+those targets carry ordinary text and never reach condition 4. Scoping is what
+lets both hold at once; an unconditional ordinal proof resolves the collision
+but breaks absorbed-turn exactness, and an unconditional placeholder refusal
+does the reverse. Both directions are pinned: removing the scope reds the
+round-30 same-text impostor probe, and removing the ordinal clause reds the
+headline reproduction.
 
-The durable close is per-entry provenance: ids that cannot be re-minted, issued
-at the mint sites, so a match needs no proof beyond itself. Until then this case
-is pinned red by `historyMapping.test.ts` →
-_this PR's own headline reproduction (#9437)_.
+The durable close remains per-entry provenance — ids that cannot be re-minted,
+issued at the mint sites — which would remove the need for any ownership proof.
+Conditions 3-5 are the interim.
 
 ## Scope
 
