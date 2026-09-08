@@ -3647,6 +3647,14 @@ export class DingtalkChannel extends ChannelBase {
     return escapeDingTalkMarkdown(normalized || '后台任务');
   }
 
+  /**
+   * Body-identical to the base implementation — this override exists only to
+   * widen the signature, which the base seam does not declare. The background
+   * aggregation flush passes `prepared` so the body it already projected isn't
+   * projected a second time (that would re-upload its files), and
+   * `failOnHttpError` so a failed send throws instead of being swallowed,
+   * letting the flush capture the delivery plan for the next retry.
+   */
   protected override async deliverBackgroundReply(
     chatId: string,
     text: string,

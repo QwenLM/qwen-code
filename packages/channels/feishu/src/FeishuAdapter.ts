@@ -2212,8 +2212,9 @@ export class FeishuChannel extends ChannelBase {
         // to avoid leaking state if onResponseComplete was skipped.
         this.cleanupCard(inboundMsgId);
       } else if (!cs) {
-        // No card session created (gate rejection) —
-        // clean up auxiliary maps populated by processMessage.
+        // onPromptStart's isKnownInboundMessageId gate rejected this message, so
+        // no card session exists — clean up the auxiliary maps processMessage
+        // populated.
         this.msgToQuestion.delete(inboundMsgId);
         this.msgToSenderName.delete(inboundMsgId);
         this.msgToSenderId.delete(inboundMsgId);

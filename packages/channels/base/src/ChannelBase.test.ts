@@ -15928,7 +15928,7 @@ describe('ChannelBase', () => {
     });
   });
 
-  describe('response delivery', () => {
+  describe('final response delivery and held chunks', () => {
     it('passes the prompt session to response delivery', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
