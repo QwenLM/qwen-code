@@ -74,14 +74,19 @@ Before `runQwenServe()` starts this sequence, the CLI-only `--open-with-auth` mo
 
 1. **Resolve the token** from `opts.token` or `QWEN_SERVER_TOKEN`, trimmed so a
    trailing newline from `cat token.txt` cannot silently break bearer
-   comparison. When the bind is non-loopback and **neither** source is present,
+   comparison. When the requested `--hostname` is non-loopback (the literal
+   `localhost` resolved once first) and **neither** source is present,
    generate an ephemeral 128-bit (16-byte) bearer as 22 base64url characters
    instead of refusing; it is printed once by the remote quickstart after
    `listen()` and rotates on every restart. Loopback binds never generate, so
-   they keep the trusted token-less mode. An **explicitly empty** source
-   (`--token ''` or `QWEN_SERVER_TOKEN=''`) is not "absent": it shadows the
-   other source, resolves to no token, and therefore still fails the guards
-   below.
+   they keep the trusted token-less mode. An **explicitly blank** source
+   (`--token ''`, or `QWEN_SERVER_TOKEN` set to an empty or whitespace-only
+   value) is not "absent", so it always suppresses generation — but blankness
+   decides the resolved token in one direction only: a blank `--token`
+   shadows a set env value and resolves to no token, whereas a blank env
+   resolves to no token only when `--token` is not passed (a non-blank
+   `--token` still wins); in both shapes a non-loopback bind with no
+   resolved token still fails the guards below.
 2. **Hostname typo guard**: `--hostname localhost:4170` errors and suggests `--port`.
 3. **Auth preflight**: a non-loopback bind with no _resolved_ token refuses — reachable through an explicitly empty source, or through a `localhost` bind whose one-time resolution lands off-loopback (generation keys on the spelling, so nothing was generated there); `--require-auth` refuses on a token-less bind, which after step 1 means a loopback bind with no configured source. Wildcard and non-loopback HTTP(S) `--allow-origin` guards read the same resolved token, so on a non-loopback bind the generated bearer satisfies them and those refusals are loopback-only too.
 4. **Workspace validation**: absolute path, exists, directory. `EACCES` / `EPERM` are wrapped to point at the flag.
@@ -159,7 +164,7 @@ See [`17-configuration.md`](./17-configuration.md) for the merged reference.
 ## Caveats and known limits
 
 - Direct `createServeApp` without `deps.fsFactory` or `deps.bridge` defaults to `trusted: false`; agent-side ACP `writeTextFile` rejects as `untrusted_workspace`. The warning is printed once.
-- The runtime app runs `allowOriginCors` over the mutable allowlist; unmatched `Origin` values get the 403 deny envelope (the unconditional `denyBrowserOriginCors` wall survives only in the bootstrap app). The **loopback** Web Shell works because another middleware strips matching loopback same-origin values first; on a non-loopback bind with a token the shell's same-origin XHRs are bearer-authenticated and their `Origin` stripped ahead of the wall, so they need no `--allow-origin`. Three cases still require an allowlist entry: WebSocket upgrades (terminal, voice), a TLS-terminating front proxy whose `https` origin never matches the plain socket, and any plain-HTTP intermediary that rewrites the `Host` header — nginx's default `proxy_set_header Host $proxy_host` and k8s Ingress both do. Port translation alone (`ssh -L`, `docker -p`) needs nothing: the check compares `Origin` against the normalized `Host` only, so a verbatim forwarded `Host` still matches (just the scheme-default `:80`/`:443` are stripped; a non-default port must survive verbatim in it). The remedy for the WebSocket and TLS-terminating cases is `--allow-origin <origin>`; a Host-rewriting intermediary can instead be configured to forward `Host` verbatim — which cannot help once TLS terminates at the proxy, because the scheme is read from the daemon's own socket.
+- The runtime app runs `allowOriginCors` over the mutable allowlist; unmatched `Origin` values get the 403 deny envelope (the unconditional `denyBrowserOriginCors` wall survives only in the bootstrap app). The **loopback** Web Shell works because another middleware strips matching loopback same-origin values first; on a non-loopback bind with a token the shell's same-origin XHRs are bearer-authenticated and their `Origin` stripped ahead of the wall, so they need no `--allow-origin`. Three cases still require an allowlist entry: WebSocket upgrades (terminal, voice), a TLS-terminating front proxy whose `https` origin never matches the plain socket, and any plain-HTTP intermediary that rewrites the `Host` header — nginx's default `proxy_set_header Host $proxy_host` and k8s Ingress both do. Port translation alone needs nothing **on a non-loopback bind** (`docker -p 8080:4170`): the check compares `Origin` against the normalized forwarded `Host` only and never consults the listening port (just the scheme-default `:80`/`:443` are stripped; a non-default port must survive verbatim in it). On the default **loopback** bind it does not: the DNS-rebinding Host allowlist only accepts the daemon's own port, so a port-translating tunnel (`ssh -L 8080:localhost:4170`) is rejected with `403 Invalid Host header` for every request including the shell document, and `--allow-origin` cannot override it — forward the same port or bind non-loopback. The remedy for the WebSocket and TLS-terminating cases is `--allow-origin <origin>`; a Host-rewriting intermediary can instead be configured to forward `Host` verbatim — which cannot help once TLS terminates at the proxy, because the scheme is read from the daemon's own socket.
 - Body-parser ordering: routes using `mutate({ strict: true })` return 401 only after `express.json()`. The worst case is `--max-connections × express.json({limit: '10mb'})`, up to about 2.5 GB of transient memory on a saturated loopback listener; this tradeoff is intentional.
 - Multiple daemons in one process must use per-handle `childEnvOverrides`; mutating `process.env` races because `defaultSpawnChannelFactory` snapshots env at spawn time.
 
