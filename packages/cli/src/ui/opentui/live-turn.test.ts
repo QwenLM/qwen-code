@@ -33,6 +33,7 @@ const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
   declines: new Set<number>(),
+  signals: [] as AbortSignal[],
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -40,9 +41,10 @@ vi.mock('./live-session.js', () => ({
   async *livePromptEvents(
     _config: unknown,
     prompt: unknown,
-    _signal: unknown,
+    signal: AbortSignal,
     options: unknown,
   ) {
+    live.signals.push(signal);
     live.turns.push({ prompt, options });
     if (live.turns.length === 1) {
       await new Promise<void>((resolve) => live.waiters.push(resolve));
@@ -113,6 +115,51 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.turns.length = 0;
     live.waiters.length = 0;
     live.declines.clear();
+    live.signals.length = 0;
+  });
+
+  it('fires onComplete once when a turn completes without an abort', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('plain prompt', undefined, { onComplete });
+    });
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire onComplete when the turn ends on an aborted signal (R6-6)', async () => {
+    // Esc while a tool batch is out: the generator's abort paths (the
+    // all-cancelled batch above them) end with a normal return, so the seq
+    // guard alone passes and the signal has to settle it — a command's
+    // onComplete (e.g. /dream's manual-run recording) must not run for a turn
+    // the user cancelled.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('dream prompt', undefined, { onComplete });
+    });
+    act(() => {
+      result.current.interrupt();
+    });
+    expect(live.signals[0]?.aborted).toBe(true);
+
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it('forwards per-turn options through the idle submit hop (R1-4)', () => {
@@ -288,6 +335,6 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     });
 
     expect(result.current.queueLength).toBe(0);
-    expect(popped).toBe('steer me\nthen @b.ts\nqueued after');
+    expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
   });
 });
