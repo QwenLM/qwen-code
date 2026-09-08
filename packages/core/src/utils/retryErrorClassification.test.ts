@@ -514,6 +514,50 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('fails fast on a permanent provider code scraped from the message', () => {
+    // The permanence guard reads the merged providerCode
+    // (`details.providerCode ?? providerFields.providerCode`), and the
+    // message-scraped half has no other pin: making that reader object-only
+    // would flip this moderation rejection from fail-fast to retryable with
+    // the whole suite green. The sibling case above is satisfied by the
+    // anchored pattern alone — KeyError stays unlisted and retryable.
+    const error = new Error(
+      'id:1\nevent:error\ndata:{"request_id":"req-stream","code":"data_inspection_failed","message":"Output data may contain inappropriate content."}',
+    );
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'sse-provider',
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+      providerCode: 'data_inspection_failed',
+      requestId: 'req-stream',
+    });
+    expect(isRetryableUpstreamError(error)).toBe(false);
+  });
+
+  it('fails fast on a permanent provider code nested under .error', () => {
+    // `getProviderErrorPayload`'s isApiError fallback reads a nested
+    // `.error.code` when no JSON survives in the message — a second input
+    // shape that reaches the permanence guard only through the scraped half
+    // of the providerCode merge.
+    const error = Object.assign(new Error('moderation rejection'), {
+      error: {
+        code: 'data_inspection_failed',
+        message: 'Output data may contain inappropriate content.',
+      },
+      requestID: 'req-nested',
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+      providerCode: 'data_inspection_failed',
+      requestId: 'req-nested',
+    });
+    expect(isRetryableUpstreamError(error)).toBe(false);
+  });
+
   it('fails fast on a permanent provider code even when the request is traced', () => {
     // A request id decides upstream vs. local, not transient vs. permanent.
     // Moderation, credential/billing and malformed-request rejections arrive
@@ -565,6 +609,25 @@ describe('classifyRetryError', () => {
       diagnosis: 'fail-fast',
       reason: 'permanent-provider-code',
     });
+  });
+
+  it('fails fast on a permanent provider type from the real SDK error', () => {
+    // The hand-built case above pins the guard's reaction to an assumed SDK
+    // output; this drives the real constructor, so a dependency bump that
+    // stops mapping the body's `type` onto the instance property reds it —
+    // the `.type` sibling of the requestID oracle above.
+    const error = new APIError(
+      undefined,
+      { type: 'invalid_request_error', code: null, message: 'x is required' },
+      undefined,
+      new Headers({ 'x-request-id': 'req-1' }),
+    );
+
+    expect(classifyRetryError(error)).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+    });
+    expect(isRetryableUpstreamError(error)).toBe(false);
   });
 
   it('does not treat every provider type as permanent', () => {

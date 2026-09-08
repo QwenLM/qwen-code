@@ -3598,6 +3598,19 @@ describe('AnthropicContentGenerator', () => {
           code: 'ECONNREFUSED',
         }),
       },
+      {
+        // LlmChat's mid-stream boundary deliberately admits this class while
+        // this release gate stays transport-only: releasing the closed batch
+        // would flip the delivered-output flags and shut both of LlmChat's
+        // recovery gates. The fixture must carry no allow-listed socket code
+        // at any cause level, or it classifies as transport and the batch IS
+        // released — the opposite of what this case pins.
+        case: 'a status-less upstream error the provider traced with a request id',
+        error: Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'req-1',
+        }),
+      },
     ])(
       'does not release a closed call before rethrowing $case',
       async ({ error }) => {

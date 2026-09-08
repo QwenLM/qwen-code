@@ -3574,8 +3574,16 @@ export class LlmChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
+            // A terminal finish reason means the attempt's answer already
+            // completed — the failure landed while the SDK was absorbing
+            // trailing metadata, so there is nothing to resume and a
+            // continuation would only fabricate a tail into durable history.
+            // MAX_TOKENS stays continuable: it marks a *truncated* answer,
+            // the exact shape this arm exists for.
             const canContinueAfterStreamCut =
               isRetryableStreamCut &&
+              (lastFinishReason === undefined ||
+                lastFinishReason === FinishReason.MAX_TOKENS) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <

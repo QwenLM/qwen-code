@@ -4879,6 +4879,75 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('compacts a status-less payload overflow instead of replaying it', async () => {
+      // The byte-size sibling of the context-length case above: a reverse
+      // proxy can reject the serialized request with a bare 413 reason phrase
+      // — no token wording, no HTTP status surviving, but a request id
+      // attached — so the error classifies as a retryable upstream failure
+      // and only the payload-overflow exclusion keeps it out of the replay
+      // gate. Re-sending cannot shrink a request.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+
+      const overflowError = Object.assign(
+        new Error('413 Request Entity Too Large'),
+        { requestID: 'req-1' },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw overflowError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-statusless-payload-overflow-compacts',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Compaction ran, and it came first. A replay would have emitted a plain
+      // RETRY with no COMPRESSED event at all and never called compress.
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'answer after compact',
+        ),
+      ).toBe(true);
+    });
+
     it('uses the configured context window when reactive overflow has no token counts', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
@@ -9817,9 +9886,86 @@ describe('LlmChat', async () => {
             )
             .join('');
           expect(delivered).toBe('<html><body></body></html>');
+          // The continuation log carries the same classifier fields as the
+          // replay log: the reason names the cause, and the request id is the
+          // only handle a gateway ticket can be filed against.
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Transport stream continuation scheduled',
+            expect.objectContaining({
+              classificationReason: 'upstream-error-without-status',
+              providerCode: 'KeyError',
+              requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            }),
+          );
         } finally {
           vi.useRealTimers();
         }
+      });
+
+      it('propagates a status-less upstream error that lands after the terminal finish reason', async () => {
+        // The SDK's error scan is position-independent and the pipeline keeps
+        // pulling the iterator after the finish chunk to absorb trailing usage
+        // metadata, so a gateway that fails while writing that tail throws the
+        // same status-less frame *after* the answer already completed. There
+        // is nothing to resume: continuing would send a "connection dropped
+        // mid-response" instruction that is false for this shape and fold a
+        // fabricated tail into durable history.
+        const upstreamError = Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('a complete answer', 'STOP');
+              throw upstreamError;
+            })(),
+          )
+          // Consumed only if the gate wrongly resumes the finished answer:
+          // the continuation would land here and appear to succeed, so a
+          // regression reports as a call count rather than as a hang.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-upstream-statusless-after-finish',
+        );
+        // No fake timers: nothing retries on this path, so there is no
+        // backoff to advance through (see the permanent-rejection case in the
+        // retry describe above).
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(String(caughtError)).toContain("'id'");
+        // The durable layers keep the delivered answer out of the error path
+        // entirely: the turn was complete, and no fabricated continuation may
+        // be merged into history.
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'user',
+          parts: [{ text: 'test' }],
+        });
+        // Recovery not taken, and the attribution log still carries the
+        // classifier fields — the request id is the only handle a gateway
+        // ticket can be filed against.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry not taken',
+          expect.objectContaining({
+            classificationReason: 'upstream-error-without-status',
+            providerCode: 'KeyError',
+            requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          }),
+        );
       });
 
       it('stitches the delivered text into durable history', async () => {
