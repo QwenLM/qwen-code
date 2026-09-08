@@ -35,11 +35,16 @@ Multica has shipped this product shape, and four of its decisions are worth adop
 
 A chat log with a status badge is what Slack, Linear and Multica's issue view all look like, and built here it would hide the thing this system knows that they do not: who owes what, and what the thread is waiting on. A badge reading `blocked` above twelve messages makes the reader scroll to find out why. Three consequences:
 
-- The thread header is a **sentence**, not a badge. `resolveThreadStatus` already returns a `reason` — _"run rn_7 asked a question and is waiting for a person"_, _"2 runs still queued, running, finishing or cancelling"_. Render it. The UI must not derive a second, shorter status vocabulary; the resolver is the only place a thread's state is decided.
+- The thread header is a **sentence**, not a badge. `resolveThreadStatus` already returns a `reason` — _"an Agent asked a question and is waiting for you"_, _"2 Agent runs active"_. Render it. Exact run ids stay in the run inspector; they are not useful collection-page labels. The UI must not derive a second status vocabulary; the resolver is the only place a thread's state is decided.
 - Every run row carries its **close obligation** where Multica carries a task status. Same shape, more information: _asked a question_, _submitted for review_, _waiting on a sub-thread_, _ended without a hand-off_, _failed at launch_.
 - **System triggers are not chat messages.** An assignment and a child report are `authorKind: 'system'` carrying the run that caused them. They are ledger entries and must not be dressed as someone talking.
 
 ## 4. Surfaces
+
+The existing Agents entry has three views: **Agents**, **Tasks**, and
+**Runtime**. They share one backend snapshot but are not stacked into one long
+page. This mirrors Multica's product boundaries without adding another shell
+navigation system.
 
 ### 4.1 Roster, inside the existing Agents page
 
@@ -68,28 +73,34 @@ Threads
 
   Needs you  2
   ┃ Investigate the web-shell smoke-test flake
-  ┃ alice asked a question · 4m                                  th_4f2
+  ┃ alice asked a question · 4m
   ┃ Retry-path audit
-  ┃ bob submitted a summary for review · 1h                      th_91c
+  ┃ bob submitted a summary for review · 1h
 
   Running  1
     Trace the daemon restart loop
-    2 runs in flight · started 12m                               th_a03
+    2 runs in flight · started 12m
 
   Idle  1
-    Notes on channel workers · nobody assigned                   th_77b
+    Notes on channel workers · nobody assigned
 
   Done  14   ›
 ```
 
 `blocked` and `in_review` share one attention treatment — a 2px left edge in `--status-attention-fg`, carried by nothing else on the page. They are opposite in valence but they are the same query for the reader: _this is waiting on me_. Two colours would split that scan in two. They are told apart by the sentence, which is where the difference actually lives. Done collapses behind its count; finished work is evidence, not a task.
 
-### 4.3 Thread view
+### 4.3 Runtime
+
+The demo exposes the actual `local` binding and whether the serving daemon is
+online. It does not invent remote placement, heartbeat history, or process
+isolation. Those belong to a later runtime registry.
+
+### 4.4 Thread view
 
 Two columns, following Multica's proportions: content left, runs right.
 
 ```
-Investigate the web-shell smoke-test flake              th_4f2   [alice working]
+Investigate the web-shell smoke-test flake                        [alice working]
 
 ┌──────────────────────────────────────────────┐  ┌───────────────────────────┐
 │ alice asked a question and is waiting for    │  │ Runs                      │

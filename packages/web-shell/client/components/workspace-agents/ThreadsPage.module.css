@@ -33,6 +33,11 @@
   margin-inline-start: auto;
 }
 
+.viewTabs {
+  display: flex;
+  gap: 2px;
+}
+
 .createForm {
   display: grid;
   gap: 10px;
@@ -62,6 +67,34 @@
   gap: 2px;
   padding-bottom: 18px;
   border-bottom: 1px solid var(--border);
+}
+
+.runtimeCard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 20px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.runtimeTitle {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.runtimeStatus {
+  color: var(--status-running-fg);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.runtimeId {
+  grid-column: 1 / -1;
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 
 .sectionTitle {
@@ -204,7 +237,7 @@
 
 .row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   gap: 2px 12px;
   padding: 8px 10px 9px;
   border: 0;
@@ -256,15 +289,6 @@
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.rowId {
-  grid-row: 1 / span 2;
-  grid-column: 2;
-  align-self: center;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 12px;
 }
 
 .emptyState {

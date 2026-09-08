@@ -13,6 +13,8 @@ import {
 import {
   ThreadsPage,
   type WorkspaceAgentSummaryView,
+  type WorkspaceAgentRuntimeView,
+  type AgentWorkspaceView,
   type NewWorkspaceAgent,
   type NewThread,
   type AgentConfigPatch,
@@ -32,6 +34,7 @@ interface CreateThreadResult {
 export interface ThreadsApi {
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
+    runtime?: WorkspaceAgentRuntimeView;
     capabilities?: AgentCapabilitiesView;
   }>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
@@ -148,6 +151,8 @@ export function ThreadsRoute({
     [api, workspace.baseUrl, workspace.token, workspaceCwd],
   );
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
+  const [runtime, setRuntime] = useState<WorkspaceAgentRuntimeView>();
+  const [view, setView] = useState<AgentWorkspaceView>('agents');
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
   const [openId, setOpenId] = useState<string | undefined>();
@@ -193,6 +198,7 @@ export function ThreadsRoute({
       }
       appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
+      setRuntime(nextAgents.runtime);
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
@@ -370,6 +376,9 @@ export function ThreadsRoute({
       <ThreadsPage
         agents={agents}
         threads={threads}
+        view={view}
+        onViewChange={setView}
+        {...(runtime ? { runtime } : {})}
         createPreview={createPreview}
         pending={pending}
         onOpenThread={openThread}

@@ -37,13 +37,6 @@
   outline: none;
 }
 
-.threadId {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
 .assigneeSelect {
   min-height: 30px;
   padding: 4px 7px;

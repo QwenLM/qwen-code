@@ -249,19 +249,18 @@ export function ThreadView({
           size="icon"
           className={styles.backButton}
           onClick={onBack}
-          aria-label="Back to threads"
+          aria-label="Back to tasks"
         >
           <ArrowLeftIcon />
         </Button>
         <h1 className={styles.title}>{thread.title}</h1>
-        <span className={styles.threadId}>{thread.id}</span>
         {onAssign ? (
           <select
             className={styles.assigneeSelect}
             value={thread.assigneeName ?? ''}
             onChange={(event) => onAssign(event.target.value || undefined)}
             disabled={thread.status === 'done' || replyPending}
-            aria-label="Thread assignee"
+            aria-label="Task assignee"
           >
             <option value="">No assignee</option>
             {thread.assigneeName &&
@@ -347,7 +346,7 @@ export function ThreadView({
 
           {thread.children && thread.children.length > 0 ? (
             <section className={styles.children}>
-              <h2 className={styles.sectionTitle}>Sub-threads</h2>
+              <h2 className={styles.sectionTitle}>Subtasks</h2>
               {thread.children.map((child) => (
                 <button
                   key={child.id}
@@ -409,8 +408,8 @@ export function ThreadView({
               className={styles.composerInput}
               value={draft}
               onChange={(event) => onDraftChange(event.target.value)}
-              placeholder="Reply to this thread"
-              aria-label="Reply to this thread"
+              placeholder="Reply to this task"
+              aria-label="Reply to this task"
             />
             {preview && draft.trim() ? (
               <RoutingPreview targets={preview} />
@@ -432,7 +431,7 @@ export function ThreadView({
             <h2 className={styles.sectionTitle}>Runs</h2>
             {live.length === 0 && past.length === 0 ? (
               <p className={styles.budgetLine}>
-                Nothing has run on this thread yet.
+                Nothing has run on this task yet.
               </p>
             ) : null}
             {live.map((row) => (

@@ -445,6 +445,12 @@ export function registerWorkspaceAgentRoutes(
         listThreads(root),
       ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
+      const localRuntime = {
+        id: LOCAL_AGENT_RUNTIME_ID,
+        kind: 'local' as const,
+        label: 'Local daemon',
+        status: 'online' as const,
+      };
       res.json({
         agents: agents.map((agent) => {
           const active = threads.find((thread) =>
@@ -510,10 +516,8 @@ export function registerWorkspaceAgentRoutes(
             enabled: agent.enabled !== false,
             status,
             runtime: {
+              ...localRuntime,
               id: agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID,
-              kind: 'local',
-              label: 'Local daemon',
-              status: 'online',
             },
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
@@ -539,6 +543,7 @@ export function registerWorkspaceAgentRoutes(
             waiting,
           };
         }),
+        runtime: localRuntime,
         // What every agent may do, sent once rather than per agent because it
         // is a property of the subsystem and not of an identity. Shown so the
         // boundary is something a person can read before trusting an agent

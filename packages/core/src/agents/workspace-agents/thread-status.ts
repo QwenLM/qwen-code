@@ -173,7 +173,7 @@ export function resolveThreadStatus(
   if (live.length > 0) {
     return {
       status: 'in_progress',
-      reason: `${live.length} run(s) still queued, running, finishing or cancelling`,
+      reason: `${live.length} Agent run(s) active`,
       outstanding,
     };
   }
@@ -188,12 +188,12 @@ export function resolveThreadStatus(
       status: 'blocked',
       reason:
         first.kind === 'blocked'
-          ? `run ${first.runId} asked a question and is waiting for a person`
+          ? 'an Agent asked a question and is waiting for you'
           : first.kind === 'cancelled'
-            ? `run ${first.runId} was cancelled and no successor is runnable`
+            ? 'an Agent run was cancelled and no successor is runnable'
             : first.kind === 'failure'
-              ? `run ${first.runId} failed and no successor is runnable`
-              : `run ${first.runId} ended without a hand-off`,
+              ? 'an Agent run failed and no successor is runnable'
+              : 'an Agent ended without a hand-off',
       outstanding,
     };
   }
@@ -206,7 +206,7 @@ export function resolveThreadStatus(
   if (strandedWait && !input.hasLiveChildDependency) {
     return {
       status: 'blocked',
-      reason: `run ${strandedWait.runId} is waiting on work that no longer exists`,
+      reason: 'an Agent is waiting on work that no longer exists',
       outstanding,
     };
   }
@@ -226,7 +226,7 @@ export function resolveThreadStatus(
   if (review) {
     return {
       status: 'in_review',
-      reason: `run ${review.runId} submitted a summary for review`,
+      reason: 'an Agent submitted a summary for review',
       outstanding,
     };
   }
@@ -234,7 +234,7 @@ export function resolveThreadStatus(
   if (strandedWait) {
     return {
       status: 'in_progress',
-      reason: `run ${strandedWait.runId} is waiting on a live sub-thread`,
+      reason: 'an Agent is waiting on a live subtask',
       outstanding,
     };
   }

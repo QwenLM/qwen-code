@@ -41,6 +41,9 @@ export interface AgentCapabilitiesView {
 export interface ThreadsPageProps {
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
+  runtime?: WorkspaceAgentRuntimeView;
+  view: AgentWorkspaceView;
+  onViewChange: (view: AgentWorkspaceView) => void;
   onOpenThread: (threadId: string) => void;
   onCreateAgent: (input: NewWorkspaceAgent) => void;
   onDeleteAgent: (agentId: string) => void;
@@ -70,12 +73,7 @@ export interface WorkspaceAgentSummaryView {
   maxConcurrentRuns?: number;
   enabled: boolean;
   status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
-  runtime: {
-    id: string;
-    kind: 'local';
-    label: string;
-    status: 'online' | 'offline';
-  };
+  runtime: WorkspaceAgentRuntimeView;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
   workingOn?: {
@@ -85,6 +83,15 @@ export interface WorkspaceAgentSummaryView {
   };
   waiting: number;
 }
+
+export interface WorkspaceAgentRuntimeView {
+  id: string;
+  kind: 'local';
+  label: string;
+  status: 'online' | 'offline';
+}
+
+export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
 
 export interface NewWorkspaceAgent {
   name: string;
@@ -128,7 +135,6 @@ function ThreadRow({
           derive a second, shorter vocabulary: the shorter one would win
           because it is the one on screen, and the two would drift. */}
       <span className={styles.rowReason}>{thread.reason}</span>
-      <span className={styles.rowId}>{thread.id}</span>
     </button>
   );
 }
@@ -136,14 +142,16 @@ function ThreadRow({
 function Group({
   group,
   onOpenThread,
+  hidden,
 }: {
   group: ThreadGroup;
   onOpenThread: (threadId: string) => void;
+  hidden?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(group.collapsedByDefault);
   const collapsible = group.collapsedByDefault;
   return (
-    <section className={styles.group}>
+    <section className={styles.group} hidden={hidden}>
       <button
         type="button"
         className={
@@ -176,6 +184,9 @@ function Group({
 export function ThreadsPage({
   agents,
   threads,
+  runtime,
+  view,
+  onViewChange,
   onOpenThread,
   onCreateAgent,
   onDeleteAgent,
@@ -260,17 +271,47 @@ export function ThreadsPage({
     setCreating(undefined);
   };
 
+  const openView = (next: AgentWorkspaceView) => {
+    onViewChange(next);
+    setCreating(undefined);
+    setConfiguring(undefined);
+    onPreviewThread?.(undefined);
+  };
+
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
-        <h1 className={styles.title}>Agents &amp; tasks</h1>
+        <h1 className={styles.title}>
+          {view === 'agents'
+            ? 'Agents'
+            : view === 'tasks'
+              ? 'Tasks'
+              : 'Runtime'}
+        </h1>
+        <nav className={styles.viewTabs} aria-label="Agent workspace views">
+          {(['agents', 'tasks', 'runtime'] as const).map((item) => (
+            <Button
+              key={item}
+              variant={view === item ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={view === item}
+              onClick={() => openView(item)}
+            >
+              {item === 'agents'
+                ? 'Agents'
+                : item === 'tasks'
+                  ? 'Tasks'
+                  : 'Runtime'}
+            </Button>
+          ))}
+        </nav>
         <div className={styles.headerActions}>
-          {onOpenDefinitions ? (
+          {view === 'agents' && onOpenDefinitions ? (
             <Button variant="ghost" size="sm" onClick={onOpenDefinitions}>
               Definitions
             </Button>
           ) : null}
-          {onOpenAgentBuilder ? (
+          {view === 'agents' && onOpenAgentBuilder ? (
             <Button
               variant="ghost"
               size="sm"
@@ -279,31 +320,35 @@ export function ThreadsPage({
               Link definition
             </Button>
           ) : null}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              if (onOpenAgentBuilder) onOpenAgentBuilder();
-              else setCreating('agent');
-            }}
-          >
-            <PlusIcon data-icon="inline-start" />
-            Agent
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => {
-              setCreating('thread');
-              onPreviewThread?.(undefined);
-            }}
-          >
-            <PlusIcon data-icon="inline-start" />
-            Task
-          </Button>
+          {view === 'agents' ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (onOpenAgentBuilder) onOpenAgentBuilder();
+                else setCreating('agent');
+              }}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Agent
+            </Button>
+          ) : null}
+          {view === 'tasks' ? (
+            <Button
+              size="sm"
+              onClick={() => {
+                setCreating('thread');
+                onPreviewThread?.(undefined);
+              }}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Task
+            </Button>
+          ) : null}
         </div>
       </header>
       <div className={styles.pageBody}>
-        {creating === 'agent' ? (
+        {view === 'agents' && creating === 'agent' ? (
           <form className={styles.createForm} onSubmit={submitAgent}>
             <strong>Link an existing definition</strong>
             <input
@@ -374,9 +419,9 @@ export function ThreadsPage({
           </form>
         ) : null}
 
-        {creating === 'thread' ? (
+        {view === 'tasks' && creating === 'thread' ? (
           <form className={styles.createForm} onSubmit={submitThread}>
-            <strong>New shared thread</strong>
+            <strong>New task</strong>
             <input
               className={styles.field}
               name="title"
@@ -440,7 +485,7 @@ export function ThreadsPage({
                     const explained =
                       target.reason === 'no_target'
                         ? {
-                            what: 'this thread has no assignee',
+                            what: 'this task has no assignee',
                             fix: 'Choose an assignee to start it.',
                           }
                         : explainSkip(target.reason ?? '', target.agentName);
@@ -467,18 +512,17 @@ export function ThreadsPage({
                 Cancel
               </Button>
               <Button type="submit" size="sm" disabled={pending}>
-                Create thread
+                Create task
               </Button>
             </div>
           </form>
         ) : null}
 
-        <section className={styles.roster}>
+        <section className={styles.roster} hidden={view !== 'agents'}>
           <h2 className={styles.sectionTitle}>Persistent Agents</h2>
           {agents.length === 0 ? (
             <p className={styles.emptyRoster}>
-              No agents yet. Add one to start handing work across shared
-              threads.
+              No Agents yet. Add one to start handing out shared tasks.
             </p>
           ) : (
             agents.map((agent) => (
@@ -545,7 +589,7 @@ export function ThreadsPage({
                       onClick={() => {
                         if (
                           window.confirm(
-                            `Retire agent "${agent.name}"? It stops taking work. Its posts stay on every thread, and its name stays taken so nothing else can post as it.`,
+                            `Retire Agent "${agent.name}"? It stops taking work. Its posts stay on every task, and its name stays taken so nothing else can post as it.`,
                           )
                         ) {
                           onDeleteAgent(agent.id);
@@ -599,7 +643,7 @@ export function ThreadsPage({
                       />
                     </label>
                     <label className={styles.configLabel}>
-                      Threads at once
+                      Tasks at once
                       <input
                         className={styles.field}
                         name="maxConcurrentRuns"
@@ -635,7 +679,7 @@ export function ThreadsPage({
               <h3 className={styles.ceilingTitle}>What agents can do here</h3>
               <p className={styles.ceilingText}>
                 {capabilities.readOnly
-                  ? 'Agents read the workspace and post to threads. They cannot edit files, run commands, or reach the network. Instructions and definitions change what an agent is for, never what it may do.'
+                  ? 'Agents read the workspace and post to tasks. They cannot edit files, run commands, or reach the network. Instructions and definitions change what an Agent is for, never what it may do.'
                   : 'Agents run without the read-only boundary.'}
               </p>
               <p className={styles.ceilingTools}>
@@ -646,19 +690,39 @@ export function ThreadsPage({
         </section>
 
         {loading && threads.length === 0 ? null : groups.length === 0 ? (
-          <div className={styles.emptyState}>
+          <div className={styles.emptyState} hidden={view !== 'tasks'}>
             {/* An empty screen is an invitation, not a shrug. */}
-            <p className={styles.emptyLead}>No threads yet.</p>
-            <p>
-              A thread is a piece of work you hand to an agent. Assign one when
-              you open it and the agent starts straight away.
-            </p>
+            <p className={styles.emptyLead}>No tasks yet.</p>
+            <p>Create a task, assign an Agent, and it starts immediately.</p>
           </div>
         ) : (
           groups.map((group) => (
-            <Group key={group.key} group={group} onOpenThread={onOpenThread} />
+            <Group
+              key={group.key}
+              group={group}
+              onOpenThread={onOpenThread}
+              hidden={view !== 'tasks'}
+            />
           ))
         )}
+
+        {view === 'runtime' ? (
+          <section className={styles.runtimeCard}>
+            <div>
+              <h2 className={styles.runtimeTitle}>
+                {runtime?.label ?? 'Local daemon'}
+              </h2>
+              <p className={styles.configNote}>
+                Hosts top-level Agent sessions for this workspace. Conversation
+                state is isolated per Agent and task.
+              </p>
+            </div>
+            <strong className={styles.runtimeStatus}>
+              {runtime?.status ?? 'offline'}
+            </strong>
+            <code className={styles.runtimeId}>{runtime?.id ?? 'local'}</code>
+          </section>
+        ) : null}
       </div>
     </div>
   );

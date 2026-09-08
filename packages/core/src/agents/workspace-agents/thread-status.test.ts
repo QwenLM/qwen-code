@@ -94,7 +94,7 @@ describe('resolveThreadStatus', () => {
     );
 
     expect(result.status).toBe('in_progress');
-    expect(result.reason).toContain('1 run(s) still queued');
+    expect(result.reason).toBe('1 Agent run(s) active');
   });
 
   it('reports in_review once the last run is quiescent', () => {

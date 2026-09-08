@@ -366,16 +366,17 @@ envelope; interrupted-run recovery; mid-run steering with rebook. None of this
 knows how a body is started. It addresses agents by id and threads by file, so
 it survives the change below.
 
-**Implemented, but narrower than Multica.** Each identity owns a top-level ACP
-session with its own persona, model setting and transcript. It is no longer a
-background subagent. The ACP bridge still multiplexes those sessions in one
-process, and there is no first-class runtime registry, host binding or heartbeat.
+**Implemented, but narrower than Multica.** Each identity owns a task-scoped
+top-level ACP session with its own persona, model setting and transcript. It is
+no longer a background subagent, and work on another task gets another session.
+The ACP bridge still multiplexes those sessions in one process. The produced
+`local` binding and Runtime view are real, but there is no remote registry,
+placement or heartbeat protocol.
 
-**Missing entirely.** Runtime registry and binding; labels and due date on the
-work item; squads; inbox; projects. Priority, acceptance criteria, per-agent
-instructions/model/definition and concurrency have landed. Agent creation is
-still split between Qwen Code's definition builder and the persistent roster
-instead of presenting one Multica-shaped flow.
+**Missing entirely.** Remote Runtime registry and placement; labels and due date
+on the work item; squads; inbox; projects. Priority, acceptance criteria,
+per-Agent instructions/model/concurrency and direct persistent-Agent creation
+have landed. Reusable definitions are now an optional compatibility path.
 
 ## 3. Why the percentages I gave were wrong
 
@@ -655,12 +656,12 @@ question for whoever owns that surface.
 
 **Multica 实际是什么**：Linear 形态的 issue tracker，assignee 可以是 agent，外加一层 runtime 注册。`agent_runtime` 是独立实体（workspace + daemon_id + provider，带在线状态和心跳），agent 绑定到它上面；`agent_task_queue` 是 agent × issue 的派发队列；`issue` 有优先级、7 种状态、验收标准、截止日期、标签、项目；对话就是 issue 上的 comment。页面里有独立的 runtimes 和 runtimes/[id]。
 
-**我们的状态**：底层协作规则已经具备；每个 agent 也已经是独立的顶层 ACP session，不再是 background subagent。仍然缺的是 Multica 式一等 runtime：这些 session 共享一个 ACP 进程，没有 host 注册、心跳、远程放置或进程级故障隔离。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
+**我们的状态**：底层协作规则已经具备；每个 `(agent, task)` 都是独立的顶层 ACP session，不再是 background subagent，同一 Agent 处理不同任务也不会共用 transcript。本地 `runtimeId` 已产生、校验并在面板展示，但这些 session 仍共享一个 ACP daemon；远程 host 注册、心跳、放置和进程级故障隔离尚未实现。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
 
-**之前那个七八成错在哪**：我拿自己那份设计文档当卷子打分，而文档 §1 就把执行模型定错了、§10 还把真正的进程隔离划到范围外。按你的目标看，runtime 这层是零。
+**之前那个七八成错在哪**：我拿自己那份设计文档当卷子打分，而文档 §1 当时就把执行模型定错了。现在修正的是本地 demo 主链路；若按 Multica 完整产品计算，远程 Runtime、权限、项目和收件箱仍然不存在，不能再用百分比掩盖不同分母。
 
 **方案四步**：A 让 agent 变成顶层 session（靠 sourceType 认领身份并加载人格），但不谎称它已有独立进程；B agent 的完整执行记录复用 Qwen Code 原有会话，shared thread 继续保存跨 agent 的指派、状态、@ 与验收，再复用现有列表壳和消息组件；C 工作项补上验收标准和优先级，标签和截止日期次之；D agent 变成可配置对象，并把已有 definition builder 与 persistent roster 合成一条创建路径。squad/inbox/projects 排在最后，且不是两个 agent 协作的必要条件。
 
-**动手前需要你定三件事**：每个 agent 允不允许并发多任务；agent 的 session 要不要出现在普通会话列表里；删除 agent 时线程怎么处理。
+**已定的三件事**：每个 Agent 可按 `maxConcurrentRuns` 并发多个任务；每个 task-scoped session 进入普通会话列表；删除采用退役语义，停止接活但保留任务内历史署名。
 
 </details>

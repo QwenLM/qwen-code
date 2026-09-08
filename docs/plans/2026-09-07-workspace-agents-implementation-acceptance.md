@@ -388,6 +388,13 @@ instead of leading with reusable subagent definition files. New Agent reuses the
 existing manual/model-assisted builder but writes one roster identity directly;
 Definitions and linking an existing definition remain secondary compatibility
 paths.
+The same entry now separates Agents, Tasks and Runtime into three views. Browser
+HMR confirmed the view switch, task-detail return preserving the Tasks view,
+the task-scoped transcript entry staying on the run rather than the Agent row,
+and the local Runtime card. The already-running daemon was not restarted, so
+its new `runtime: online` response and idle-without-session status were source
+checked but not claimed as a browser observation. No test suite, build, lint,
+typecheck or CI ran.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.
