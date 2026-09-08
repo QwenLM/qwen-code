@@ -371,7 +371,7 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it('collects pasted images and lets plain text paste natively', async () => {
+  it('collects image-only paste and lets mixed text/image paste natively', async () => {
     mockTouchDevice();
     await mount();
     const preventDefault = vi.fn();
@@ -388,7 +388,12 @@ describe('useComposerCore mobile textarea backend', () => {
       cancelable: true,
     });
     Object.defineProperty(imageEvent, 'clipboardData', {
-      value: { files: [], items: [imageItem], types: ['Files'] },
+      value: {
+        files: [],
+        items: [imageItem],
+        types: ['Files'],
+        getData: () => '',
+      },
     });
     await act(async () => {
       imageEvent.preventDefault = preventDefault;
@@ -407,8 +412,12 @@ describe('useComposerCore mobile textarea backend', () => {
     Object.defineProperty(textEvent, 'clipboardData', {
       value: {
         files: [],
-        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
-        types: ['text/plain'],
+        items: [
+          imageItem,
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? 'PPT 文字' : ''),
       },
     });
     act(() => {
@@ -416,6 +425,8 @@ describe('useComposerCore mobile textarea backend', () => {
       container!.querySelector('textarea')!.dispatchEvent(textEvent);
     });
     expect(textPreventDefault).not.toHaveBeenCalled();
+    expect(latest!.pastedImages).toHaveLength(1);
+    expect(latest!.pendingImageBatchCount).toBe(0);
   });
 
   it('saves the draft immediately on blur before the debounce timer fires', async () => {
