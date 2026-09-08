@@ -6,7 +6,6 @@
 
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -14,6 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -130,7 +130,7 @@ function setupAcpTest(
   // exits (measured: memory/projects/usage_record files landing ~300 ms after
   // cleanup() returns), so inside rig.testDir those late writes race the
   // global teardown's recursive rm with ENOTEMPTY.
-  const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-acp-home-'));
+  const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
 
   const agent = spawn(
     'node',
@@ -306,18 +306,7 @@ function setupAcpTest(
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
-    try {
-      // Retry around the post-exit writes noted at qwenHome above; a cleanup
-      // that cannot finish must not turn an all-green run red.
-      await rm(qwenHome, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 200,
-      });
-    } catch (e) {
-      console.error(`Warning: could not remove ${qwenHome}:`, e);
-    }
+    await removeScratchDir(qwenHome);
   };
 
   return {
