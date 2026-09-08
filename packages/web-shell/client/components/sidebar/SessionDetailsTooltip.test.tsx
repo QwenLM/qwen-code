@@ -56,7 +56,9 @@ describe('SessionDetailsTooltip', () => {
       { hasActivePrompt: true, isWaitingForUserQuestion: true },
       'User input needed',
     ],
-    [{ hasActivePrompt: true }, 'Running'],
+    [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Active work'],
+    [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
   ])(
     'prioritizes blocked states over an active prompt: %s',
     async (flags, expected) => {

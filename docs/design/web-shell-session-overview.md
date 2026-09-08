@@ -27,7 +27,8 @@ uses only its Git-specific variant.
   an internally scrolling surface; keyboard focus stays visible when it opens.
   When hover replaces focused details, move focus to the incoming title
   before opening its preview. Ordinary hover preserves an external input's
-  focus, and Tab continues from the row after the preview closes.
+  focus, including when portals live in a ShadowRoot, and Tab continues from
+  the row after the preview closes.
 - Make the popover status agree with the overview's derived live state,
   including older daemons that provide pending approvals via status reports.
 - Open a session when its row or title is clicked. Checkboxes exclusively
@@ -35,6 +36,7 @@ uses only its Git-specific variant.
   behavior. Show batch actions only when a selection exists.
   Dragging to select text does not navigate. Clicking a plain cell during an
   inline rename preserves the draft; Enter saves and Escape cancels.
+  Sorting ends the rename and keeps keyboard focus on the sort header.
   Starting rename closes details. If the edited row leaves the visible page,
   discard the hidden draft so it cannot disable navigation or return later.
   Preserve row state across the temporary empty page while a shrinking catalog

@@ -333,6 +333,65 @@ test('replaces clicked details when hovering another entry @smoke', async ({
   ).toBeFocused();
 });
 
+for (const count of [4, 11]) {
+  test(`sorting during rename preserves keyboard navigation with ${count} sessions @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      workspaceCwd,
+      sessionId: 'sort-0',
+      sessions: Array.from({ length: count }, (_, index) => ({
+        sessionId: `sort-${index}`,
+        workspaceCwd,
+        displayName: `Sort session ${index}`,
+        updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
+      })),
+      capabilities: {
+        features: [
+          'session_events',
+          'session_source_metadata',
+          'workspace_session_metadata',
+        ],
+      },
+    });
+    await installMockDaemon(page, scenario, {
+      baseURL: String(testInfo.project.use.baseURL),
+    });
+    await page.evaluate(() =>
+      localStorage.setItem('qwen-web-shell-session-overview-page-size', '10'),
+    );
+    await page.goto('/');
+    await page
+      .getByRole('button', { name: 'Session Overview', exact: true })
+      .click();
+    const panel = page.locator('[data-web-shell-session-panel]');
+    await panel
+      .getByRole('row')
+      .filter({ hasText: 'Sort session 0' })
+      .getByRole('button', { name: 'Rename', exact: true })
+      .click();
+    const editor = panel.getByRole('textbox', {
+      name: 'Rename: Sort session 0',
+      exact: true,
+    });
+    await editor.fill('Unsaved name');
+    const sort = panel.getByRole('button', { name: 'Time', exact: true });
+    await sort.click();
+    await expect(
+      panel.getByRole('columnheader', { name: 'Time', exact: true }),
+    ).toHaveAttribute('aria-sort', 'ascending');
+    await expect(editor).toHaveCount(0);
+    await expect(sort).toBeFocused();
+    await expect(
+      panel.getByRole('button', { name: 'Sort session 0', exact: true }),
+    ).toHaveCount(count === 4 ? 1 : 0);
+    await page.keyboard.press('Tab');
+    await expect(
+      panel.locator('tbody').getByRole('checkbox').first(),
+    ).toBeFocused();
+  });
+}
+
 test('hover details preserve a focused search field @smoke', async ({
   page,
 }) => {
@@ -350,6 +409,48 @@ test('hover details preserve a focused search field @smoke', async ({
   await expect(search).toBeFocused();
   await search.fill('Running fixture');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(search).toBeFocused();
+});
+
+test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
+  page,
+}) => {
+  await page.goto('/e2e/session-overview-shadow-dom.html');
+  await page
+    .getByRole('button', { name: 'Session Overview', exact: true })
+    .click();
+  const panel = page.locator('[data-web-shell-session-panel]');
+  await panel.getByRole('button', { name: 'Details for Idle fixture' }).click();
+  const copy = page.getByRole('button', { name: 'Copy session ID' });
+  await expect(copy).toBeFocused();
+  expect(
+    await copy.evaluate(
+      (element) => element.getRootNode() instanceof ShadowRoot,
+    ),
+  ).toBe(true);
+  const title = panel.getByRole('button', {
+    name: 'Approve fixture',
+    exact: true,
+  });
+  await title.hover();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(
+    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+  ).toHaveAttribute('data-state', 'open');
+  await expect(title).toBeFocused();
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(title).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(panel.getByRole('link', { name: /#4567/ })).toBeFocused();
+  const search = panel.getByRole('textbox', {
+    name: 'Search title, branch, PR or ID…',
+  });
+  await search.focus();
+  await title.hover();
+  await expect(
+    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+  ).toHaveAttribute('data-state', 'open');
   await expect(search).toBeFocused();
 });
 

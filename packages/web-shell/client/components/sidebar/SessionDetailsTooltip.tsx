@@ -95,9 +95,13 @@ export function SessionDetailsTooltip({
       ? t('sessionsOverview.status.askUserQuestion')
       : session.hasActivePrompt
         ? t('sidebar.running')
-        : completedUnread
-          ? t('sidebar.completedUnread')
-          : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
+        : session.activeWorkState === 'active'
+          ? t('sidebar.activeWork')
+          : session.activeWorkState === 'unknown'
+            ? t('sidebar.activityUnknown')
+            : completedUnread
+              ? t('sidebar.completedUnread')
+              : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
     return () => {
@@ -125,13 +129,17 @@ export function SessionDetailsTooltip({
     window.clearTimeout(openTimerRef.current);
     openTimerRef.current = window.setTimeout(() => {
       const anchor = anchorRef.current;
+      let activeElement = anchor?.ownerDocument.activeElement;
+      while (activeElement?.shadowRoot?.activeElement) {
+        activeElement = activeElement.shadowRoot.activeElement;
+      }
       // Move focus before replacing its owner so the new hover stays open.
       if (
-        anchor?.ownerDocument.activeElement?.closest(
+        activeElement?.closest(
           `[data-web-shell-session-details-content="${detailsOwner}"]`,
         )
       ) {
-        anchor.focus({ preventScroll: true });
+        anchor?.focus({ preventScroll: true });
       }
       setOpen(true);
     }, 300);

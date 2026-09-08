@@ -52,6 +52,7 @@ let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
 let scopedSessionsOptions: { pollIntervalMs?: number };
 let workspaceLiveStateOptions: {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds?: string[];
 };
 let statusReportOptions: { autoLoad?: boolean; detail?: string };
@@ -120,7 +121,11 @@ vi.mock('../hooks/useScopedSessions', () => ({
 vi.mock('../session-catalog/workspace-session-live-state', () => ({
   useWorkspaceSessionLiveState: (
     _client: unknown,
-    options: { enabled: boolean; workspaceCwds?: string[] },
+    options: {
+      enabled: boolean;
+      workspaceCwds?: string[];
+      pollIntervalMs?: number;
+    },
   ) => {
     workspaceLiveStateOptions = options;
     return new Map();
@@ -761,6 +766,46 @@ describe('SessionOverviewPanel', () => {
     expect(input.value).toBe('Renamed');
     expect(document.activeElement).toBe(input);
   });
+
+  it.each([4, 11])(
+    'ends rename and focuses the sort header with %i sessions',
+    async (count) => {
+      connectionState.sessionId = 's0';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: count }, (_, index) =>
+        session(`s${index}`, {
+          displayName: `Session ${index}`,
+          updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
+        }),
+      );
+      render();
+      act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+      const input = container!.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename: Session 0"]',
+      )!;
+      act(() => setInputValue(input, 'Unsaved name'));
+      const sortButton = () =>
+        container!.querySelector<HTMLButtonElement>(
+          'thead th:nth-child(4) button',
+        )!;
+      act(() => click(sortButton()));
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Session 0"]'),
+      ).toBeNull();
+      expect(
+        container!
+          .querySelector('thead th:nth-child(4)')
+          ?.getAttribute('aria-sort'),
+      ).toBe('ascending');
+      expect(document.activeElement).toBe(sortButton());
+      expect(rowTitles().includes('Session 0')).toBe(count === 4);
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     'keeps only one details popover when hovering after click (same row: %s)',
@@ -3000,6 +3045,21 @@ describe('SessionOverviewPanel', () => {
 });
 
 describe('SessionOverviewPanel polling', () => {
+  it('uses the polling interval advertised by the workspace daemon', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+    };
+    workspaceCapabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      sessionLiveStatePollIntervalMs: 10_000,
+    };
+    render();
+    expect(workspaceLiveStateOptions.enabled).toBe(true);
+    expect(workspaceLiveStateOptions.pollIntervalMs).toBe(10_000);
+  });
+
   it('keeps the old status-report details fresh', async () => {
     sessionsState.sessions = [session('s')];
     vi.useFakeTimers();

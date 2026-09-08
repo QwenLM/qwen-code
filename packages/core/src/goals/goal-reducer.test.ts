@@ -1558,3 +1558,104 @@ describe('budget wind-down marker', () => {
     ).toBeUndefined();
   });
 });
+
+describe('no-progress streak', () => {
+  const control = (
+    request: Extract<
+      Parameters<typeof reduceGoalControl>[1]['request'],
+      { action: 'edit' | 'resume' }
+    >,
+  ) => ({
+    request,
+    now: 200,
+    nextGoalId: 'g-next',
+    cursor: { recordId: 'r-200' } as const,
+  });
+
+  it('records a streak a finished turn reports, and spells zero as no field', () => {
+    const counted = reduceGoalTurnFinished(goalRecord(), {
+      now: 200,
+      noProgressTurns: 2,
+    });
+    expect(counted).toMatchObject({ turnCount: 1, noProgressTurns: 2 });
+
+    const cleared = reduceGoalTurnFinished(counted, {
+      now: 300,
+      noProgressTurns: 0,
+    });
+    expect(cleared).not.toHaveProperty('noProgressTurns');
+  });
+
+  it('leaves the streak untouched when a finished turn reports none', () => {
+    // The runtime reports nothing when it cannot tell a quiet turn from a
+    // busy one. "Unmeasured" must not read as "idle" or as "made progress".
+    const finished = reduceGoalTurnFinished(
+      goalRecord({ noProgressTurns: 2 }),
+      { now: 200 },
+    );
+    expect(finished).toMatchObject({ noProgressTurns: 2 });
+  });
+
+  it('clears the streak on edit', () => {
+    const edited = reduceGoalControl(goalRecord({ noProgressTurns: 2 }), {
+      ...control({
+        action: 'edit',
+        objective: 'deliver the rest',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      }),
+    });
+    expect(edited).not.toHaveProperty('noProgressTurns');
+  });
+
+  it.each([
+    ['paused', { status: 'paused' as const }],
+    [
+      'budget-limited',
+      { status: 'usage_limited' as const, limitKind: 'token_budget' as const },
+    ],
+    [
+      'evidence-limited',
+      {
+        status: 'usage_limited' as const,
+        limitKind: 'evidence_catalog' as const,
+      },
+    ],
+  ])('clears the streak when a %s Goal resumes', (_label, state) => {
+    // Resuming is the user asking for another run at the objective. Starting
+    // that run three-quarters of the way to the bound would end it after a
+    // single quiet turn.
+    const resumed = reduceGoalControl(
+      goalRecord({ ...state, noProgressTurns: 2 }),
+      control({
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      }),
+    );
+
+    expect(resumed).toMatchObject({ status: 'active' });
+    expect(resumed).not.toHaveProperty('noProgressTurns');
+  });
+
+  it('restores a persisted streak and rejects a malformed one', () => {
+    const idling = snapshot(goalRecord({ noProgressTurns: 2 }));
+    expect(parseGoalSnapshotV2(idling)).toEqual(idling);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: 0 })))?.goal,
+    ).not.toHaveProperty('noProgressTurns');
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: -1 }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: 1.5 }))),
+    ).toBeUndefined();
+  });
+
+  it('restores a Goal persisted before the streak existed', () => {
+    const goal = goalRecord();
+    expect(parseGoalSnapshotV2(snapshot(goal))?.goal).not.toHaveProperty(
+      'noProgressTurns',
+    );
+  });
+});
