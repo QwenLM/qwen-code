@@ -679,6 +679,28 @@ describe('SessionOverviewPanel', () => {
     ).toBeNull();
   });
 
+  it('counts background work as running even without an active prompt', () => {
+    sessionsState.sessions = [
+      session('s-bg', {
+        displayName: 'Background',
+        hasActivePrompt: false,
+        activeWorkState: 'active',
+      }),
+      session('s-idle', { displayName: 'Plain idle' }),
+    ];
+    render();
+    const state = rows()[0]!.querySelector('[data-web-shell-session-status]');
+    expect(state?.textContent).toBe('Running');
+    expect(
+      state?.querySelector('[data-web-shell-session-loading]'),
+    ).not.toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('1');
+    expect(statusFilterButton('Idle').textContent).toContain('1');
+    // A session with live background work is not safe to archive or delete.
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(rows()[0]!, 'Delete').disabled).toBe(true);
+  });
+
   it('opens the owning session on row click and selects only with the checkbox', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
@@ -765,6 +787,26 @@ describe('SessionOverviewPanel', () => {
     expect(input.isConnected).toBe(true);
     expect(input.value).toBe('Renamed');
     expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps an inline rename draft when clicking the details button', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    const details = rowActionButton(rows()[0]!, 'Details for One');
+    expect(details.disabled).toBe(true);
+    // Native activation: a click on the disabled button fires nothing, so
+    // the popover cannot steal focus and blur-cancel the draft.
+    act(() => details.click());
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it.each([4, 11])(
@@ -1035,7 +1077,9 @@ describe('SessionOverviewPanel', () => {
         candidate.textContent?.includes('Target'),
       )!;
       await act(async () => click(rowActionButton(row, 'Details for Target')));
-      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      expect(dialog!.contains(document.activeElement)).toBe(true);
       sessionsState.sessions = sessionsState.sessions.map((entry) =>
         entry.sessionId === 'target'
           ? { ...entry, isWaitingForPermission: false }
@@ -1045,6 +1089,11 @@ describe('SessionOverviewPanel', () => {
       await flushAsync();
       expect(rowTitles()).not.toContain('Target');
       expect(document.querySelector('[role="dialog"]')).toBeNull();
+      // The pinned popover held focus when its row left; the handoff must
+      // land on the panel, not <body> or a detached node.
+      expect(document.activeElement).toBe(
+        container!.querySelector('[data-web-shell-session-panel]'),
+      );
       sessionsState.sessions = sessionsState.sessions.map((entry) =>
         entry.sessionId === 'target' ? target : entry,
       );

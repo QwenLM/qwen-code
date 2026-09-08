@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactElement } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+} from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   CheckIcon,
@@ -36,6 +43,7 @@ interface SessionDetailsTooltipProps {
   ownerToken?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  side?: 'right' | 'bottom';
   children: ReactElement;
 }
 
@@ -49,6 +57,7 @@ export function SessionDetailsTooltip({
   ownerToken,
   open: controlledOpen,
   onOpenChange,
+  side = 'right',
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
@@ -64,6 +73,7 @@ export function SessionDetailsTooltip({
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
   // The overview shares one token so its own entry points replace each
@@ -72,7 +82,12 @@ export function SessionDetailsTooltip({
   const selfOwnerToken = useId();
   const detailsOwner = ownerToken ?? selfOwnerToken;
   const collisionBoundary = open
-    ? resolveSessionDetailsCollisionBoundary(anchorRef.current)
+    ? side === 'bottom'
+      ? [
+          anchorRef.current?.closest<HTMLElement>('[data-pane-session-id]'),
+          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]'),
+        ].filter((element): element is HTMLElement => Boolean(element))
+      : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
   const branch = session.worktree?.branch ?? session.branch?.name;
@@ -109,6 +124,26 @@ export function SessionDetailsTooltip({
       window.clearTimeout(closeTimerRef.current);
       window.clearTimeout(copyResetTimerRef.current);
       copyAttemptRef.current += 1;
+    };
+  }, []);
+
+  // A click-pinned popover unmounts together with its anchor row (e.g. live
+  // state re-sorts the row off the page). Layout cleanups run before the
+  // row's DOM is removed, so if the popover still holds focus, hand it to
+  // the panel root here — otherwise the browser drops it to <body>.
+  useLayoutEffect(() => {
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- read at unmount, a mount-time copy would always be null
+      const content = contentRef.current;
+      if (!content) return;
+      let active: Element | null = content.ownerDocument.activeElement;
+      while (active?.shadowRoot?.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      if (!active || !content.contains(active)) return;
+      anchorRef.current
+        ?.closest<HTMLElement>('[data-web-shell-session-panel]')
+        ?.focus({ preventScroll: true });
     };
   }, []);
 
@@ -195,7 +230,8 @@ export function SessionDetailsTooltip({
         </PopoverAnchor>
       )}
       <PopoverContent
-        side="right"
+        ref={contentRef}
+        side={side}
         align="start"
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}

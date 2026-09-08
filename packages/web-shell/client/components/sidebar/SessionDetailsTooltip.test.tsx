@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, forwardRef, type ComponentProps } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,21 @@ import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { Button } from '../ui/button';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
+
+const popoverContentProps = vi.hoisted(() => vi.fn());
+vi.mock('../ui/popover', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ui/popover')>();
+  return {
+    ...actual,
+    PopoverContent: forwardRef<
+      HTMLDivElement,
+      ComponentProps<typeof actual.PopoverContent>
+    >(function ObservedPopoverContent(props, ref) {
+      popoverContentProps(props);
+      return <actual.PopoverContent {...props} ref={ref} />;
+    }),
+  };
+});
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -248,6 +263,9 @@ describe('SessionDetailsTooltip', () => {
 
     await openDetails(container);
 
+    expect(popoverContentProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ side: 'right' }),
+    );
     const details = document.querySelector('[role="dialog"]');
     expect(details?.textContent).toContain('Improve sidebar');
     expect(details?.textContent).toContain('2 weeks ago');

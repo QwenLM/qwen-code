@@ -221,7 +221,8 @@ export function deriveSessionCards(
         ? 'needsApproval'
         : askUserQuestion
           ? 'askUserQuestion'
-          : (session.hasActivePrompt ?? status?.hasActivePrompt)
+          : (session.hasActivePrompt ?? status?.hasActivePrompt) ||
+              session.activeWorkState === 'active'
             ? 'running'
             : 'idle',
       updatedAt: session.updatedAt || session.createdAt,
@@ -1309,6 +1310,7 @@ function SessionOverviewPanelInner({
                   variant="ghost"
                   size="icon-xs"
                   className="shrink-0 text-muted-foreground hover:text-foreground"
+                  disabled={Boolean(editingIdentity)}
                   aria-label={t('sessionsOverview.details', {
                     name: card.label,
                   })}
@@ -1641,6 +1643,7 @@ function SessionOverviewPanelInner({
   return (
     <div
       ref={panelRef}
+      tabIndex={-1}
       className={styles.panel}
       data-web-shell-session-panel
       onMouseDownCapture={(event) => {
