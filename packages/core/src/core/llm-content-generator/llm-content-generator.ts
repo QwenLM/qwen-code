@@ -29,6 +29,11 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 import type { Config } from '../../config/config.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
+import {
+  expandDynamicHeaders,
+  hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
+} from '../outbound-dynamic-headers.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -79,7 +84,19 @@ export class LlmContentGenerator implements ContentGenerator {
     contentGeneratorConfig?: ContentGeneratorConfig,
     cliConfig?: Config,
   ) {
-    const customHeaders = contentGeneratorConfig?.customHeaders;
+    // Only placeholder-free entries may be baked into the client: a
+    // placeholder value put here would be frozen at whatever the session
+    // was when the client was built, and overriding it later would rely
+    // on the SDK letting request-level headers win over client-level
+    // ones. `buildHttpOptions` supplies the placeholder-bearing entries
+    // per request instead, so the literal never reaches the client.
+    const allCustomHeaders = contentGeneratorConfig?.customHeaders;
+    if (cliConfig) warnIfDynamicHeadersDisabled(allCustomHeaders, cliConfig);
+    const staticEntries = Object.entries(allCustomHeaders ?? {}).filter(
+      ([, value]) => typeof value !== 'string' || !hasDynamicPlaceholder(value),
+    );
+    const customHeaders =
+      staticEntries.length > 0 ? Object.fromEntries(staticEntries) : undefined;
     const finalOptions = customHeaders
       ? (() => {
           const baseHttpOptions = options.httpOptions;
@@ -105,15 +122,30 @@ export class LlmContentGenerator implements ContentGenerator {
   }
 
   private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
-    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
-    if (!this.cliConfig || !destination) return httpOptions;
+    if (!this.cliConfig) return httpOptions;
 
-    const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);
-    if (Object.keys(sessionHeaders).length === 0) return httpOptions;
+    // The placeholder-bearing entries were deliberately kept out of the
+    // client options (see the constructor), so this is the only place
+    // they are supplied — resolved fresh for each request.
+    const dynamicHeaders = expandDynamicHeaders(
+      this.contentGeneratorConfig?.customHeaders,
+      this.cliConfig,
+    );
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
+    const sessionHeaders = destination
+      ? buildSessionIdHeaders(this.cliConfig, destination)
+      : {};
+    if (
+      Object.keys(sessionHeaders).length === 0 &&
+      Object.keys(dynamicHeaders).length === 0
+    ) {
+      return httpOptions;
+    }
     return {
       ...httpOptions,
       headers: {
         ...httpOptions?.headers,
+        ...dynamicHeaders,
         ...sessionHeaders,
       },
     };
