@@ -607,8 +607,6 @@ export function useQueuedPrompts({
           return false;
         }
         if (!p.serverPromptId) return true;
-        if (removingServerPromptIdsRef.current.has(p.serverPromptId))
-          return false;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
@@ -1530,6 +1528,13 @@ export function useQueuedPrompts({
                 return;
               }
               removingServerPromptIdsRef.current.add(result.promptId);
+              // The confirming sync above may have materialized a row for the
+              // prompt the user already cleared; drop it before the DELETE.
+              const next = queuedPromptsRef.current.filter(
+                (item) => item.serverPromptId !== result.promptId,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
               sessionActions
                 .removePendingPrompt(result.promptId, {
                   sessionId: targetSessionId,
@@ -1588,6 +1593,30 @@ export function useQueuedPrompts({
                 if (prompt.onComplete) {
                   settleCompletionCallback(result.promptId, prompt.onComplete);
                 }
+              }
+              return;
+            }
+            // Bind by the id the daemon returned, not by rendered text:
+            // identical resubmissions carrying attachments suppress both the
+            // text binding and the materialization, and the fall-through
+            // below echoes a message the daemon still holds queued.
+            const queuedInSnapshot = refresh.pendingPrompts.some(
+              (p) => p.promptId === result.promptId && p.state === 'queued',
+            );
+            if (bound === undefined && queuedInSnapshot) {
+              const next = queuedPromptsRef.current.map((item) =>
+                item.id === localId
+                  ? {
+                      ...item,
+                      serverPromptId: result.promptId,
+                      serverState: 'queued' as const,
+                    }
+                  : item,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
               }
               return;
             }

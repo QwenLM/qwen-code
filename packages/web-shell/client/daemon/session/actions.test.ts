@@ -3873,6 +3873,22 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('forwards a daemon idle rejection across the session hop', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockResolvedValueOnce({ accepted: false, reason: 'session_idle' }),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    // Every hook consumer injects this actions object, so a narrowing at this
+    // seam would silently drop the idle verdict the client keys on.
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).resolves.toEqual({ accepted: false, reason: 'session_idle' });
+  });
+
   it('does not mark a stable-id admission started without a session', async () => {
     const onAdmissionStarted = vi.fn();
     const { actions } = createActionsHarness();
