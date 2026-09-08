@@ -4,6 +4,36 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### ACP same-run input — live evidence
+
+The session adapter now uses the existing queue-only mid-turn channel, carrying
+daemon-owned run metadata and the delivery id. The child checks that metadata
+against the active ambient run before injection, flushes its mid-turn transcript
+record, then records the consumed context window under the workspace lock.
+Queue acceptance alone still does not acknowledge consumption. A stale run is
+rejected; an unrecorded receipt remains eligible for durable follow-up.
+
+Chrome task `th_028860cd-ee68-48e4-a792-1869a281fbe1` used the existing demo-worker
+session. While it was working, a human correction requested
+`MIDTURN-RECEIPT-4827`. One run, `rn_d1d4a0ec-f71b-4314-b944-c73379c499a2`,
+started at 1788847915707 and completed at 1788847952361 with closeKind=review.
+The correction (`ms_6e5516a8-20c7-409d-8d46-fcd719eac773`, sequence 3) is in
+that run's consumed ids, and its committed watermark is 3. The active transcript
+contains one matching mid_turn_user_message at 2026-09-08T06:12:17.797Z,
+UUID `130194d1-bc5a-4e6c-8dda-186b10288f06`. The final thread_review includes the
+marker and says this is partial demo acceptance. No successor run was created.
+
+The model also called thread_read, so the final marker alone does not isolate
+the queue path; the persisted mid-turn record and receipt provide that evidence.
+Its summary repeated historical, superseded startup limitations from this doc;
+that prose is not accepted as a factual architecture audit. The task remains
+in_review. The panel displayed 398.4k tokens across this task's run.
+
+Direct source checks rejected a stale attempt and a mismatched watermark and
+recorded a valid repeated receipt once. No build, lint, typecheck or test suite
+ran. Crash/late-drain/close races on the new ACP path still require live checks;
+this supersedes earlier statements below that live input is unconnected.
+
 #### Unread input at close
 
 Source inspection found that explicit close used to promote every accepted id
@@ -30,10 +60,9 @@ To repeat: open Shared threads, select that completed task, and check its Routin
 lines against the stored message outcomes. Skip/coalescence rendering still needs
 a browser scenario; only dispatch outcomes were observed in this pass.
 
-This does not implement immediate mid-turn steering. The existing bridge queue
-acceptance is not a durable model-consumption receipt, so it must not be used to
-mark consumedMessageIds. The current dispatcher retains its durable follow-up
-path; the live-delivery acknowledgment remains outstanding.
+This UI change itself did not implement mid-turn steering. The subsequent ACP
+implementation and live evidence are recorded above; queue admission labels
+still intentionally make no claim about consumption.
 
 #### Session capability wiring follow-up
 

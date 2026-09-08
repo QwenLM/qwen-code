@@ -19,6 +19,7 @@ import {
 } from './store.js';
 import {
   closeRun,
+  consumeAgentInput,
   finishRunInTransaction,
   hasLiveDescendant,
   RunCloseRejectedError,
@@ -31,7 +32,7 @@ import {
   type Thread,
   type ThreadRun,
 } from './types.js';
-import type { AgentRunContext } from './run-context.js';
+import { runWithAgentRunContext, type AgentRunContext } from './run-context.js';
 
 const PROJECT_ROOT = '/agent-lifecycle-test';
 const ALICE: WorkspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
@@ -106,6 +107,28 @@ describe('agent run lifecycle', () => {
   afterEach(async () => {
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('records a drained window only for the active ambient attempt', async () => {
+    const thread = await seed({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'correction',
+    });
+    const message = (await readThread(PROJECT_ROOT, thread.id))!.messages[0]!;
+    await expect(
+      runWithAgentRunContext(context(thread.id, { attempt: 2 }), () =>
+        consumeAgentInput(PROJECT_ROOT, message.id, message.sequence),
+      ),
+    ).rejects.toThrow(/no longer the active attempt/);
+    await runWithAgentRunContext(context(thread.id), () =>
+      consumeAgentInput(PROJECT_ROOT, message.id, message.sequence),
+    );
+    const stored = (await readThread(PROJECT_ROOT, thread.id))!;
+    expect(stored.runs[0]!.consumedMessageIds).toContain(message.id);
+    expect(stored.deliveryByAgent[ALICE.id]?.committedThroughSequence).toBe(
+      message.sequence,
+    );
   });
 
   it('posts the question, records the close, and ends the turn without finishing the run', async () => {

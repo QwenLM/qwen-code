@@ -230,6 +230,9 @@ import {
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
   runWithAgentRunContext,
+  requireAgentRunContext,
+  consumeAgentInput,
+  type AgentRunContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { parsePromptAgentRun } from './agent-run-meta.js';
@@ -1078,6 +1081,8 @@ type DrainedMidTurnMessage =
       content: ContentBlock[];
       displayText: string;
       attachmentReferences?: SessionAttachmentReference[];
+      messageId?: string;
+      agentRun?: AgentRunContext;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1383,6 +1388,10 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               willPersistReferences,
             ),
             ...(attachmentReferences ? { attachmentReferences } : {}),
+            ...(typeof item['messageId'] === 'string'
+              ? { messageId: item['messageId'] }
+              : {}),
+            agentRun: parsePromptAgentRun({ _meta: item['_meta'] }),
           },
         ];
       },
@@ -8609,6 +8618,16 @@ export class Session implements SessionContext {
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
+      if (message.kind === 'structured' && message.agentRun) {
+        try {
+          requireAgentRunContext('mid-turn agent input');
+          // Refuse a different run before its text can enter this turn.
+          runWithAgentRunContext(message.agentRun, () => {});
+        } catch (error) {
+          debugLogger.warn('Rejected stale agent input', error);
+          continue;
+        }
+      }
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -8672,6 +8691,31 @@ export class Session implements SessionContext {
         }
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
+      }
+      if (message.kind === 'structured' && message.agentRun) {
+        try {
+          if (
+            !recorder ||
+            !message.messageId ||
+            message.agentRun.contextThroughSequence === undefined
+          ) {
+            throw new Error(
+              'Agent input requires a transcript and delivery watermark',
+            );
+          }
+          await recorder.flush();
+          await consumeAgentInput(
+            this.config.getWorkingDir(),
+            message.messageId,
+            message.agentRun.contextThroughSequence,
+          );
+        } catch (error) {
+          // No receipt means durable replay; don't discard other built inputs.
+          debugLogger.warn(
+            'Agent input receipt failed; replay remains pending',
+            error,
+          );
+        }
       }
       parts.push(...built);
     }

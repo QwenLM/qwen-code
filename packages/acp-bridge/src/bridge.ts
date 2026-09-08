@@ -13406,6 +13406,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedMessage: MidTurnQueueEntry = {
         messageId,
         text: trimmed,
+        ...(options?.queueOnly && !originatorClientId && context?.agentRun
+          ? { agentRun: context.agentRun }
+          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly

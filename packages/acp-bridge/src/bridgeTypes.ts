@@ -1186,6 +1186,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
+  agentRun?: BridgeClientRequestContext['agentRun'];
   /**
    * Image content blocks attached to the message. The drain
    * combines them with `text` into structured `items` for the ACP child;

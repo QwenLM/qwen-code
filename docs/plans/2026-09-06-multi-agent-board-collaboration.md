@@ -413,7 +413,11 @@ across the root's thread tree under the workspace lock.
 Message sequence is monotonic per thread. `triggerMessageIds` means durably
 booked; `acceptedMessageIds` means the runtime queue accepted those inputs;
 `consumedMessageIds` is recorded from the correlated `EXTERNAL_MESSAGE` event
-when the runtime drains them. `committedThroughSequence` advances only across a
+when the old background runtime drains them. In the ACP session path, daemon
+queue-only input carries the run metadata and delivery id; the child checks the
+ambient binding, flushes its mid-turn transcript record, then records the consumed
+window under the workspace lock. Queue acceptance is not that receipt.
+`committedThroughSequence` advances only across a
 contiguous consumed context window. On a failed enqueue, execution failure, or
 daemon restart, reconciliation rebooks everything not consumed and committed.
 Delivery is therefore at-least-once: a duplicate is acceptable, silent loss is

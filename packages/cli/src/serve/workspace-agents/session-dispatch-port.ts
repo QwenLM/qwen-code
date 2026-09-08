@@ -41,6 +41,7 @@ export type AgentSessionBridge = Pick<
   | 'spawnOrAttach'
   | 'resumeSession'
   | 'sendPrompt'
+  | 'enqueueMidTurnMessage'
   | 'listWorkspaceSessions'
   | 'cancelSession'
   | 'getSessionStatsStatus'
@@ -219,11 +220,25 @@ export function createSessionDispatchPort(
       }
     },
 
-    async deliver(): Promise<boolean> {
-      // sendPrompt queues another whole turn, not an input to the active one.
-      // Let the dispatcher durably rebook the reply until mid-turn drain
-      // acknowledgements are connected to the run's delivery watermark.
-      return false;
+    async deliver({ agent, prompt, deliveryId, ...context }): Promise<boolean> {
+      const execution = executions.get(agent.id);
+      const session = sessionFor(bridge, workspaceCwd, agent);
+      if (
+        !session ||
+        execution?.kind !== 'running' ||
+        execution.threadId !== context.threadId ||
+        execution.runId !== context.runId ||
+        execution.attempt !== context.attempt
+      ) {
+        return false;
+      }
+      return bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        prompt,
+        { agentRun: { ...context, agentId: agent.id } },
+        deliveryId,
+        { queueOnly: true },
+      ).accepted;
     },
 
     async totalTokens(agent): Promise<number | undefined> {

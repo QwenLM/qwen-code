@@ -31,7 +31,7 @@ import {
   acknowledgeCloseObligations,
   resolveThreadStatus,
 } from './thread-status.js';
-import type { AgentRunContext } from './run-context.js';
+import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
 import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
@@ -85,6 +85,63 @@ export async function requireLiveRunInTransaction(
     );
   }
   return thread;
+}
+
+export async function consumeAgentInput(
+  projectRoot: string,
+  deliveryId: string,
+  throughSequence: number,
+): Promise<void> {
+  const context = requireAgentRunContext('consumeAgentInput');
+  await withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await requireLiveRunInTransaction(
+      transaction,
+      context,
+      'consumeAgentInput',
+    );
+    if (
+      !thread.messages.some(
+        (message) =>
+          message.id === deliveryId && message.sequence === throughSequence,
+      )
+    ) {
+      throw new Error('Agent delivery does not match its thread watermark');
+    }
+    const previous =
+      thread.deliveryByAgent[context.agentId]?.committedThroughSequence ?? 0;
+    const ids = thread.messages
+      .filter(
+        (message) =>
+          message.sequence > previous && message.sequence <= throughSequence,
+      )
+      .map((message) => message.id);
+    await transaction.writeThread({
+      ...thread,
+      deliveryByAgent: {
+        ...thread.deliveryByAgent,
+        [context.agentId]: {
+          committedThroughSequence: Math.max(previous, throughSequence),
+        },
+      },
+      runs: thread.runs.map((run) =>
+        run.id === context.runId
+          ? {
+              ...run,
+              acceptedMessageIds: Array.from(
+                new Set([...run.acceptedMessageIds, ...ids]),
+              ),
+              consumedMessageIds: Array.from(
+                new Set([...run.consumedMessageIds, ...ids]),
+              ),
+              contextThroughSequence: Math.max(
+                run.contextThroughSequence ?? 0,
+                throughSequence,
+              ),
+            }
+          : run,
+      ),
+    });
+  });
 }
 
 /**

@@ -69,6 +69,7 @@ export {
   classifyAgentTool,
 } from './workspace-agents/capability.js';
 export {
+  consumeAgentInput,
   finishRunInTransaction,
   hasLiveDescendant,
 } from './workspace-agents/run-lifecycle.js';
