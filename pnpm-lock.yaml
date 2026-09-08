@@ -1363,7 +1363,7 @@ importers:
         version: 1.1.2(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
     devDependencies:
       '@playwright/test':
-        specifier: ^1.57.0
+        specifier: 1.61.1
         version: 1.61.1
       '@qwen-code/sdk':
         specifier: workspace:*
