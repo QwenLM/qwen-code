@@ -1259,13 +1259,15 @@ describe('ShellExecutionService', () => {
       postPromoteExitHandler({ exitCode: 0 });
     });
 
-    it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
-      // Pin that omitting `postPromote` preserves the PR-2 detach-
-      // everything contract. The pre-existing post-promote test at
-      // line ~680 already covers this for the data path; this one
-      // adds the symmetric guarantee for the exit path — natural
-      // post-promote exit must NOT invoke any callback the caller
-      // didn't provide.
+    it('PR-2.5 backwards compat: without postPromote, no data listener is re-attached and no caller callback fires', async () => {
+      // Pin the caller-visible half of the PR-2 detach-everything contract:
+      // omitting `postPromote` re-attaches no data listener and invokes no
+      // callback the caller didn't provide. The settle listener itself IS
+      // attached — it is the only path left that can release a promoted
+      // shell's ConPTY host and conout worker (#11303), and `firePostSettle`
+      // early-returns before any forwarding when there is no onSettle handler.
+      // Pinned by 'releases host and conout worker when a promote passed no
+      // postPromote handlers' below.
       const onDataCalls: ShellOutputEvent[] = [];
       const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
       const { result } = await simulateExecution(
@@ -1287,7 +1289,9 @@ describe('ShellExecutionService', () => {
       // registration count stays at 1.
       expect(onDataRegistrations.length).toBe(1);
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      expect(onExitRegistrations.length).toBe(1);
+      // TWO: the foreground handler (disposed at promote) plus the
+      // unconditional settle/release handler.
+      expect(onExitRegistrations.length).toBe(2);
       // Caller-provided handlers were never invoked.
       expect(onDataCalls).toHaveLength(0);
       expect(onSettleCalls).toHaveLength(0);
@@ -1965,12 +1969,22 @@ describe('ShellExecutionService', () => {
       });
 
       expect(result.exitCode).toBe(0);
+      // Direct witness for the guard, and the one that survives a refactor of
+      // how the process-exit reap spawns taskkill: `resolve(...)` sits in
+      // finalize()'s try and `disposeForegroundPtyResources()` — which owns
+      // both the release and activePtys.delete — is in its finally, so the
+      // finally body has already run by the time the awaited result resumes.
+      // Remove the try/catch around _conoutSocketWorker.dispose() in
+      // conpty-host.ts and this comes back true.
+      expect(ShellExecutionService['activePtys'].has(mockPtyProcess.pid)).toBe(
+        false,
+      );
 
       ShellExecutionService.cleanup();
       ShellExecutionService['activePtys'].delete(mockPtyProcess.pid);
 
-      // The pid was already dropped, so the exit cleanup has nothing to
-      // tree-kill. This is the assertion that goes red without the guard.
+      // End-to-end consequence of the same invariant: the pid was already
+      // dropped, so the exit cleanup has nothing to tree-kill.
       expect(mockSpawnSync).not.toHaveBeenCalledWith(
         TASKKILL,
         ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
@@ -2046,6 +2060,59 @@ describe('ShellExecutionService', () => {
 
       // The promote branch already dropped this pid from activePtys, so the
       // process-exit cleanup() cannot reach it: settle is the last chance.
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('releases host and conout worker when a promote passed no postPromote handlers', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_11303_no_handlers',
+          } satisfies ShellAbortReason);
+        },
+        // No options arg → postPromote unset → PR-2 detach contract.
+      );
+      expect(result.promoted).toBe(true);
+      // Promote itself must not tear anything down — the caller owns the child.
+      expect(mockPtyNativeKill).not.toHaveBeenCalled();
+
+      // The settle listener is attached even without postPromote: it is the
+      // only path that can still reach this PTY, because the promote branch
+      // dropped the pid from activePtys and disposed exitDisposable. Wrapping
+      // the attach in `if (postPromote)` again must turn this red.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBe(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
+      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+    });
+
+    it('still releases after a cancel that landed before the terminal was ready', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // WindowsTerminal.kill() runs its whole teardown through _deferNoArgs,
+      // which queues it until `_isReady` — and that flag flips only on the
+      // conout socket's first data byte. A cancel before that point (Esc during
+      // pwsh startup, `timeout /t 30 >nul`) queues a teardown that may never
+      // run, so it must not be recorded as a release: the finalizer still owes
+      // the conout worker. Noting it unconditionally — the previous code —
+      // makes both release assertions below fail.
+      (mockPtyProcess as unknown as { _isReady: boolean })._isReady = false;
+
+      const { result } = await simulateExecution('timeout /t 30', (pty, ac) => {
+        ac.abort();
+        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
       expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });

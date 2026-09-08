@@ -2158,46 +2158,52 @@ export class ShellExecutionService {
               );
             }
           }
-          if (postPromote) {
-            try {
-              postPromoteExitDisposable = ptyProcess.onExit(
-                ({
-                  exitCode,
-                  signal,
-                }: {
-                  exitCode: number;
-                  signal?: number;
-                }) => {
-                  firePostSettle({
-                    exitCode,
-                    signal: signal === 0 ? null : (signal ?? null),
-                    endTime: Date.now(),
-                  });
-                },
-              );
-            } catch (e) {
-              debugLogger.warn(
-                `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-            try {
-              postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
-                if (isExpectedPtyReadExitError(err)) {
-                  return;
-                }
+          // The settle path is attached UNCONDITIONALLY, unlike the onData
+          // forwarding above. `firePostSettle` is the only thing that reaps a
+          // promoted shell and releases its ConPTY host and conout worker
+          // (#11303), and the promote branch already dropped this pid from
+          // `activePtys`, so with no listener a promote that passes no
+          // `postPromote` leaks both resources for the life of the CLI and
+          // nothing left can reach them. Only the *forwarding* to caller
+          // handlers stays gated: `firePostSettle` early-returns on
+          // `!postPromote?.onSettle` after the reap and the release, so the
+          // PR-2 detach-everything contract still holds for callers that did
+          // not opt in — no data listener is attached and no caller callback
+          // fires. Attaching the 'error' listener unconditionally also keeps a
+          // post-promote pty error from being emitted on an EventEmitter with
+          // no listener.
+          try {
+            postPromoteExitDisposable = ptyProcess.onExit(
+              ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
                 firePostSettle({
-                  error: err,
-                  exitCode: null,
-                  signal: null,
+                  exitCode,
+                  signal: signal === 0 ? null : (signal ?? null),
                   endTime: Date.now(),
                 });
-              };
-              ptyProcess.on('error', postPromoteErrorListener);
-            } catch (e) {
-              debugLogger.warn(
-                `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
+              },
+            );
+          } catch (e) {
+            debugLogger.warn(
+              `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
+              if (isExpectedPtyReadExitError(err)) {
+                return;
+              }
+              firePostSettle({
+                error: err,
+                exitCode: null,
+                signal: null,
+                endTime: Date.now(),
+              });
+            };
+            ptyProcess.on('error', postPromoteErrorListener);
+          } catch (e) {
+            debugLogger.warn(
+              `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
+            );
           }
 
           // Drain in-flight chain work (already-enqueued
@@ -2358,17 +2364,31 @@ export class ShellExecutionService {
             // listener plus that timeout), so the #6067 collateral-kill mode is
             // still reachable on this path. That is tracked separately and
             // deliberately out of scope here — do not read this call as
-            // evidence the shell is alive. Record the release either way so the
-            // finalizer's releaseConPtyHost does not close the same
+            // evidence the shell is alive. Record the release when it actually
+            // ran so the finalizer's releaseConPtyHost does not close the same
             // pseudo-console twice: while the shell is alive, native PtyKill
             // closes the HPCON but leaves the baton in its handle list, so a
             // second close is a double-free. See #11303.
             try {
               ptyProcess.kill();
+              // `WindowsTerminal.kill()` routes its whole teardown through
+              // `_deferNoArgs`, which QUEUES it until the terminal is ready —
+              // and `_isReady` flips only inside the conout socket's first
+              // 'data' callback. A cancel that lands before the shell's first
+              // output byte (Esc during pwsh startup, `timeout /t 30 >nul`)
+              // therefore queues a teardown that may never run, so noting a
+              // release there would permanently suppress the finalizer's
+              // releaseConPtyHost and leak the conout worker — the one resource
+              // this path can still release. Reading the optional `_isReady`
+              // degrades to the previous behavior if the field is ever renamed
+              // (undefined !== false).
+              if ((ptyProcess as { _isReady?: boolean })._isReady !== false) {
+                noteConPtyHostReleased(ptyProcess);
+              }
             } catch {
-              // already gone
+              // already gone — kill() threw, so nothing was torn down and the
+              // finalizer's release must still run.
             }
-            noteConPtyHostReleased(ptyProcess);
           } else {
             try {
               // Send SIGTERM first to allow graceful shutdown
