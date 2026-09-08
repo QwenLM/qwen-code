@@ -399,7 +399,7 @@ export class OpenTuiSlashDispatcher {
   }
 
   /** Whether {@link handle} processes this input instead of handing it back. */
-  private takesAsSlashCommand(trimmed: string): boolean {
+  takesAsSlashCommand(trimmed: string): boolean {
     if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
       return false;
     }
