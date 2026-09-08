@@ -22,9 +22,10 @@ const DEFAULT_AGENT_RESUME_TIMEOUT_MS = 70_000;
 
 interface AgentHostBridge {
   recordHeartbeat(sessionId: string): unknown;
-  resumeSession(
-    request: Parameters<AcpSessionBridge['resumeSession']>[0],
-  ): Promise<unknown>;
+  // Not narrowed to `Promise<unknown>`: the same object is handed to the
+  // dispatch port as an `AgentSessionBridge`, which is a `Pick` of the real
+  // bridge, so a looser return here makes it unassignable there.
+  resumeSession: AcpSessionBridge['resumeSession'];
   // Not narrowed to `{ sessionId }`: the same object is handed to the dispatch
   // port as an `AgentSessionBridge`, which is a `Pick` of the real bridge, so
   // a narrower return here makes it unassignable there.
@@ -40,6 +41,9 @@ interface AgentHostBridge {
   // Read by the port's `totalTokens`: an agent session reports what it has
   // spent, and the per-tree budget charges the difference across a run.
   getSessionStatsStatus: AcpSessionBridge['getSessionStatsStatus'];
+  // Mid-turn delivery: the port hands a message to a session that is already
+  // working, so the host's bridge surface has to carry it too.
+  enqueueMidTurnMessage: AcpSessionBridge['enqueueMidTurnMessage'];
 }
 
 export interface AgentHostSessionOwner {

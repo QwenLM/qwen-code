@@ -37,6 +37,7 @@ BASELINE = {
     'getAgentsDir': 'path helper, exported for tests',
     'getThreadsDir': 'path helper, exported for tests',
     'getAgentsFilePath': 'path helper, exported for tests',
+    'getAgentHostsFilePath': 'path helper used inside store.ts; the sweep does not count the defining file as a caller',
     'getThreadPath': 'path helper, exported for tests',
     'getWorkspaceFilePath': 'path helper, exported for tests',
     'listThreadIds': 'store helper, exported for tests',

@@ -1721,11 +1721,41 @@ const personaCfg = {
     }),
   }),
 };
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_none', name: 'noinstr', createdAt: 1 },
+]);
 const blankPersona = await M.resolveAgentPersona(personaCfg, 'ag_blank');
+const noPersona = await M.resolveAgentPersona(personaCfg, 'ag_none');
+// Compared against an identity with no instructions at all rather than
+// against a literal: the persona now carries a standing identity contract in
+// front of the definition's prompt, and pinning the old literal only pinned
+// the shape it happened to have. What must hold is that blank instructions
+// add nothing an absent one would not.
 ok(
-  'whitespace-only instructions leave the prompt exactly as the definition',
-  blankPersona.status === 'resolved' && blankPersona.systemPrompt === 'BASE',
-  JSON.stringify(blankPersona.systemPrompt),
+  'whitespace-only instructions add nothing at all',
+  blankPersona.status === 'resolved' &&
+    noPersona.status === 'resolved' &&
+    blankPersona.systemPrompt.replace(/blank/g, 'X') ===
+      noPersona.systemPrompt.replace(/noinstr/g, 'X'),
+  JSON.stringify(blankPersona.systemPrompt.slice(-120)),
+);
+ok(
+  'while real instructions do get appended',
+  (
+    await (async () => {
+      await M.updateWorkspaceAgents(ROOT, (a) => [
+        ...a,
+        {
+          id: 'ag_instr',
+          name: 'instr',
+          createdAt: 1,
+          instructions: 'Always check the changelog.',
+        },
+      ]);
+      return M.resolveAgentPersona(personaCfg, 'ag_instr');
+    })()
+  ).systemPrompt.includes('Always check the changelog.'),
 );
 
 // Clearing an assignee that was never set changes nothing and is not an error.

@@ -532,8 +532,7 @@ export function registerWorkspaceAgentRoutes(
             0,
           );
           const sessionsForAgent = agentSessions.filter(
-            (candidate) =>
-              candidate.sourceId === agent.id,
+            (candidate) => candidate.sourceId === agent.id,
           );
           const runtimeId = agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID;
           const runtimeAvailable = runtimeId === LOCAL_AGENT_RUNTIME_ID;
@@ -1163,6 +1162,15 @@ export function registerWorkspaceAgentRoutes(
           res.status(400).json({ error: config.error });
           return;
         }
+        // Narrowed on `apply` rather than on `error`: the success branch types
+        // `error` as an optional undefined, which never discriminated the
+        // union, so the guard above reads well and proves nothing to the
+        // compiler. This one both proves it and survives into the callback.
+        const applyConfig = config.apply;
+        if (!applyConfig) {
+          res.status(500).json({ error: 'config_patch_unavailable' });
+          return;
+        }
         let created: WorkspaceAgent | undefined;
         let duplicate = false;
         // A retired agent still holds its name. Saying so is the difference
@@ -1178,7 +1186,7 @@ export function registerWorkspaceAgentRoutes(
             duplicateRetired = clash.retiredAt !== undefined;
             return agents;
           }
-          created = config.apply({
+          created = applyConfig({
             id: generateAgentId(),
             name,
             runtimeId: LOCAL_AGENT_RUNTIME_ID,
