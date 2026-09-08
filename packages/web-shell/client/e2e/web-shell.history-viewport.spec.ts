@@ -230,6 +230,24 @@ for (const pageRecords of [16, 200]) {
           .poll(() => fixture.requests.length)
           .toBeGreaterThan(previous);
         const anchor = await readingAnchor(viewport);
+        const pill = viewport.locator('[role="status"]').locator('..');
+        await expect(pill).toBeVisible();
+        const row = viewport.locator('[data-web-shell-message-row]').first();
+        const composer = page.locator('[data-web-shell-composer]');
+        for (const content of [row, composer]) {
+          await expect
+            .poll(async () => {
+              const pillBox = await pill.boundingBox();
+              const contentBox = await content.boundingBox();
+              if (!pillBox || !contentBox) return Infinity;
+              return Math.abs(
+                pillBox.x +
+                  pillBox.width / 2 -
+                  (contentBox.x + contentBox.width / 2),
+              );
+            })
+            .toBeLessThanOrEqual(1);
+        }
         fixture.release();
         await expect(viewport.locator('[role="status"]')).toHaveCount(0);
         await expect(viewport.locator('[role="alert"]')).toHaveCount(0);
