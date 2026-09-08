@@ -61,6 +61,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { isTransientSessionReadError } from '../../utils/sessionErrors.js';
 import {
   getPersistedClientId,
   persistStableClientId,
@@ -2074,23 +2075,41 @@ export function createDaemonSessionActions({
     },
 
     async getContextUsage(opts) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load context usage failed',
-        'load_context_usage',
-      );
+      // Mirrors getStats: a missing session rethrows raw without a notice.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(
           session.contextUsage(opts),
           'Load context usage timed out',
         );
       } catch (error) {
+        // Opt-in silence for surfaces that re-collect automatically (the
+        // context panel): notifying there would stack identical notices for
+        // as long as the session is down. User-initiated callers keep the
+        // attributed notice and the suppressed duplicate toast.
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
+        // Route through noticeForSession so the dedupe registry stays
+        // session-scoped, and only register dedupe keys while this session is
+        // still live, so a stale in-flight failure neither toasts for a
+        // session the user left nor suppresses the current session's notice.
+        const live = sessionRef.current === session;
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Load context usage failed',
           error,
           'load_context_usage',
+          opts?.silent && live
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey(
+                  'load_context_usage',
+                  error,
+                ),
+              }
+            : undefined,
         );
       }
     },
