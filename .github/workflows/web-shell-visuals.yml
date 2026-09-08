@@ -166,6 +166,7 @@ jobs:
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
       - name: 'Build base packages'
+        id: 'base_build'
         if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
@@ -186,7 +187,7 @@ jobs:
       # (flows.spec.ts) and the animation-harness test (harness.spec.ts) stay
       # out — the base arm discards recordings, so rendering them is waste.
       - name: 'Capture before (base) screenshots'
-        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' && steps.base_build.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
         env:
