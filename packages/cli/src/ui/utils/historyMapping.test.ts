@@ -984,33 +984,45 @@ describe('positional fallback when identity does not resolve', () => {
       modelContent('response 3'),
     ];
 
-    // Rewinding to the first unmarked turn keeps nothing.
+    // Rewinding to either unmarked turn maps positionally.
     expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
-    // Rewinding to the second unmarked turn truncates before its entry.
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
-    // Rewinding to the marked turn still resolves through identity.
-    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    // NOTE: deliberately no assertion on the marked turn 5 here. The walk and
+    // the identity gate agree on it (both give 4), so it would pin nothing.
+    // Identity acceptance is pinned where the two DISAGREE: the round-28
+    // absorbed-turn tests and the headline reproduction below.
   });
 
   it('falls back positionally instead of refusing on a duplicated identity', () => {
     // Two entrances re-minted the same id. Before identities existed this
     // session rewound positionally; failing closed here would be a
     // regression against that behavior, so the duplicate is simply ignored.
+    //
+    // The target must NOT be the first UI turn: `uiUserTurnCount === 0`
+    // returns startIndex before the identity gate runs, so a first-turn
+    // fixture pins nothing about duplicate handling.
     const first = userContent('one');
     const second = userContent('two');
     markApiHistoryPrompt(first, 'dup-id');
     markApiHistoryPrompt(second, 'dup-id');
     const ui: HistoryItem[] = [
-      userItemWithPromptId(1, 'one', 'dup-id'),
+      userItemWithPromptId(1, 'zero', 'session########0'),
       llmItem(2),
+      userItemWithPromptId(3, 'one', 'dup-id'),
+      llmItem(4),
     ];
     const api: Content[] = [
+      userContent('zero'),
+      modelContent('r0'),
       first,
       modelContent('r1'),
       second,
       modelContent('r2'),
     ];
-    expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    // Ambiguous id -> the walk, which lands on the target's own entry (2).
+    // A fail-closed gate would return -1 here, which is the regression this
+    // pins against.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
   });
 
   it('falls back positionally when the target identity reaches no entry', () => {
@@ -1439,6 +1451,74 @@ describe('round-30: the proof cannot distinguish the target from a same-text imp
       modelContent('r2'),
     ];
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+});
+
+describe('promptIdFileKeyOnly guards', () => {
+  // `/restore` keeps `promptId` on restored UI items because it doubles as
+  // the file-history snapshot key, and flags them `promptIdFileKeyOnly`: the
+  // checkpoint's `clientHistory` is JSON and carries no Symbol marks, so
+  // those ids must never resolve a model entry. Two guards enforce that, and
+  // neither had a test that fails when it is deleted.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+    fileKeyOnly?: boolean,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & {
+      promptId: string;
+      promptIdFileKeyOnly?: boolean;
+    };
+    item.promptId = promptId;
+    if (fileKeyOnly) item.promptIdFileKeyOnly = true;
+    return item;
+  }
+
+  it('never resolves a file-key-only target through identity', () => {
+    // Guard 1 (gate entry). An unrelated earlier entry wears the restored
+    // turn's id AND its text — the only entry with that text, and no UI turn
+    // claims it — so every other conjunct of the ownership proof passes.
+    // Only the gate-entry guard stops the resolution; without it the boundary
+    // collapses to 0 and silently truncates everything after it.
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'hello', 'session########0', true),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1', true),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      impostor,
+      modelContent('r0'),
+      userContent('unrelated later entry'),
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('ignores a file-key-only twin when proving ownership', () => {
+    // Guard 2 (claimant scan). A restored item shares BOTH the target's id
+    // and its text. It can never own a marked entry, so it must not count as
+    // a twin claimant; without the guard the proof is demoted as ambiguous
+    // and the exact boundary (0) degrades to the walk's answer (2).
+    const targetEntry = userContent('run tests');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########1', true),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      targetEntry,
+      modelContent('r0'),
+      userContent('later turn'),
+      modelContent('r1'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(0);
   });
 });
 
