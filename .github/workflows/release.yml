@@ -546,8 +546,16 @@ jobs:
         env:
           QWEN_SANDBOX: 'docker'
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
+          RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
+          SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}'
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh'
+
+      - name: 'Remove job-owned release containers'
+        if: "${{ always() && runner.environment == 'self-hosted' }}"
+        env:
+          RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
+        run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'

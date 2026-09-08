@@ -11,6 +11,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import {
   ignoreBrokenPipe,
   writeStderrLine,
@@ -231,6 +232,12 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
 
   const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
     failedBridge.on('disconnected', () => {
+      // A dead bridge never settles its in-flight turns; let every channel
+      // clear turn-scoped transient state. Crash recovery restores the
+      // sessions, so routing state must stay.
+      for (const channel of channels.values()) {
+        channel.onBridgeDisconnected();
+      }
       if (isShuttingDown() || failedBridge !== getBridge()) return;
       if (recoveryTask) {
         if (failedBridge !== recoverySourceBridge) recoveryRequested = true;
@@ -351,6 +358,7 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -411,6 +419,7 @@ async function startSingle(
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
+    ...(displayLanguage ? { displayLanguage } : {}),
     ...channelMemoryOptions(() => bridge, config.cwd),
     ...(loopController ? { loopController } : {}),
     bridgeRecovery: bridgeReadiness.current,
@@ -507,6 +516,7 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -575,6 +585,7 @@ async function startAll(
       await createChannel(name, config, bridge, {
         router,
         proxy,
+        ...(displayLanguage ? { displayLanguage } : {}),
         ...channelMemoryOptions(() => bridge, config.cwd),
         ...(loopController ? { loopController } : {}),
         bridgeRecovery: bridgeReadiness.current,
@@ -704,10 +715,15 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
+    const displayLanguage = resolveLanguage(
+      resolveLanguageSetting(
+        settings.merged.general?.language as string | undefined,
+      ),
+    );
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled);
+      await startSingle(argv.name, proxy, cronEnabled, displayLanguage);
     } else {
-      await startAll(proxy, cronEnabled);
+      await startAll(proxy, cronEnabled, displayLanguage);
     }
   },
 };
