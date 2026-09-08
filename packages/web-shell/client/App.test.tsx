@@ -995,6 +995,7 @@ vi.mock('./components/ChatEditor', async () => {
             'data-artifact-image-renderer': String(
               Boolean(customization.artifact?.renderImage),
             ),
+            'data-file-drop-action': customization.fileDropAction,
           },
           React.createElement(
             'button',
@@ -34957,6 +34958,18 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
 });
 
 describe('fileUploadEnabled customization plumbing', () => {
+  it.each(['upload', 'attach'] as const)(
+    'passes the %s drop preference to composers',
+    (fileDropAction) => {
+      const { container } = renderApp({ fileDropAction });
+      expect(
+        container
+          .querySelector('[data-web-shell-composer]')
+          ?.getAttribute('data-file-drop-action'),
+      ).toBe(fileDropAction);
+    },
+  );
+
   it('reaches the composer customization when the host disables upload', () => {
     const { container } = renderApp({ fileUploadEnabled: false });
     const composer = container.querySelector('[data-web-shell-composer]');
