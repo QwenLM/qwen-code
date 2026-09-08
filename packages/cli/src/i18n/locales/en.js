@@ -734,6 +734,7 @@ export default {
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
+  'Show Tool Call Arguments': 'Show Tool Call Arguments',
   'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
@@ -2854,6 +2855,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
   'Kept model as {{model}}': 'Kept model as {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    'Review messages held from other Qwen Code sessions (accept | deny)',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
 };

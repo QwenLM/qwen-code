@@ -86,6 +86,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   permission_vote: { since: 'v1' },
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
+  workspace_skills_config_runtime: { since: 'v1' },
   workspace_providers: { since: 'v1' },
   workspace_acp_preheat: { since: 'v1' },
   workspace_acp_status: { since: 'v1' },
@@ -312,7 +313,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // can pre-flight whether the daemon will honor their cross-origin
   // request before issuing it (and parsing a 403). The configured
   // pattern list is intentionally NOT echoed in the capabilities
-  // envelope — browser webui knows its own origin, and surfacing the
+  // envelope — a browser client knows its own origin, and surfacing the
   // list would let an unauthenticated `/capabilities` reader
   // enumerate every trusted origin, which is useful recon for a
   // misconfigured deployment.
@@ -450,6 +451,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Worktree-backed session create/load responses are durably persisted and
   // carry per-response `persisted-v1` attestation.
   session_worktree_persistence_v1: { since: 'v1' },
+  // Worktree ownership transfer: `POST /session/:id/worktree-reset` moves a
+  // session's checkout ownership to a fresh replacement session, and the
+  // restore surface reports the superseded / interrupted / missing-marker
+  // classifications as typed 409s.
+  session_worktree_reset_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -700,6 +706,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_skills_config_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [

@@ -191,9 +191,7 @@ describe('hooks constants', () => {
 
     it('should return description for PermissionDenied', () => {
       const desc = getHookShortDescription(HookEventName.PermissionDenied);
-      expect(desc).toBe(
-        'When a tool call is denied before a permission dialog is displayed',
-      );
+      expect(desc).toBe('When AUTO-mode classification denies a tool call');
     });
 
     it('should return empty string for unknown event', () => {
@@ -388,7 +386,7 @@ describe('hooks constants', () => {
 
       expect(info.event).toBe(HookEventName.PermissionDenied);
       expect(info.shortDescription).toBe(
-        'When a tool call is denied before a permission dialog is displayed',
+        'When AUTO-mode classification denies a tool call',
       );
       expect(info.description).toContain('tool_use_id');
       expect(info.exitCodes).toHaveLength(2);
