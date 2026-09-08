@@ -33,9 +33,8 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
-  readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
-  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
 import { untrustedGitfile, untrustedRepositoryFrom } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
@@ -908,15 +907,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `concurrent session.`,
     );
   }
-  const holder = readReviewWorktreeLease(process.cwd(), leaseTarget);
-  if (reviewLeaseHeldByAnotherSession(holder)) {
+  const holder = readReviewWorktreeLeaseAt(process.cwd(), leaseTarget);
+  if (holder && reviewLeaseHeldByAnotherSession(holder.lease)) {
     throw new Error(
       `PR #${prNumber} is already being reviewed by another session ` +
-        `(session ${holder.sessionId}). Same-PR reviews share one worktree ` +
+        `(session ${holder.lease.sessionId}). Same-PR reviews share one worktree ` +
         `path and cannot run concurrently, so this run refuses rather than ` +
         `destroy the other session's state. Wait for that session to finish ` +
         `— its cleanup releases the lease — or, only if that session is ` +
-        `gone, delete ${reviewLeasePath(process.cwd(), leaseTarget)} and ` +
+        `gone, delete ${holder.path} and ` +
         `re-run.`,
     );
   }

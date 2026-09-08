@@ -337,15 +337,29 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: producerMocks.writeStderrLine,
 }));
 
-vi.mock('../../services/review-worktree-lease.js', () => ({
-  clearReviewWorktreeLease: vi.fn(),
-  clearReviewWorktreeLeaseIfOwned: vi.fn(),
-  createReviewWorktreeLease: vi.fn(),
-  readReviewWorktreeLease: vi.fn((): unknown => null),
-  reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
-}));
+vi.mock('../../services/review-worktree-lease.js', () => {
+  const readReviewWorktreeLease = vi.fn((): unknown => null);
+  return {
+    clearReviewWorktreeLease: vi.fn(),
+    clearReviewWorktreeLeaseIfOwned: vi.fn(),
+    createReviewWorktreeLease: vi.fn(),
+    readReviewWorktreeLease,
+    // The found-at variant the held-lease refusal uses: delegate so the
+    // `mockReturnValueOnce` steering above reaches both.
+    readReviewWorktreeLeaseAt: (repositoryRoot: string, target: string) => {
+      const lease = readReviewWorktreeLease(repositoryRoot, target);
+      return lease
+        ? {
+            lease,
+            path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+          }
+        : null;
+    },
+    reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
+    reviewLeasePath: (repositoryRoot: string, target: string) =>
+      `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+  };
+});
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/gh.js')>();
