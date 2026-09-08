@@ -46,6 +46,7 @@ function getSettledAssistantMessage(
     ) {
       continue;
     }
+    if (message.isStreaming) return undefined;
     return {
       id: message.id,
       content: message.content,
