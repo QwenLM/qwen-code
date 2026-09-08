@@ -1,6 +1,11 @@
 name: 'Release SDK'
 
 on:
+  # The SDK bundles the CLI, so a CLI fix reaches SDK consumers only when the
+  # SDK is published. Publishing a CLI release therefore triggers an SDK release
+  # that bundles the CLI built from that same tag.
+  release:
+    types: ['published']
   workflow_dispatch:
     inputs:
       version:
@@ -52,7 +57,17 @@ jobs:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/sdk-typescript-${{ steps.version.outputs.RELEASE_TAG }}'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{
+        github.repository == 'QwenLM/qwen-code' &&
+        (
+          github.event_name != 'release' ||
+          (
+            vars.RELEASE_SDK_SYNC_PUBLISH != 'false' &&
+            startsWith(github.event.release.tag_name, 'v') &&
+            github.event.release.prerelease == false
+          )
+        )
+      }}
     permissions:
       contents: 'write'
       packages: 'write'
@@ -66,7 +81,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Set booleans for simplified logic'
@@ -342,7 +357,7 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           HAS_PERSISTED_SOURCE: '${{ steps.persist_source.outputs.HAS_PERSISTED_SOURCE }}'
-          REF: '${{ github.event.inputs.ref || github.sha }}'
+          REF: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           CLI_VERSION: "${{ steps.cli_source.outputs.mode == 'npm_latest' && steps.cli_version_npm.outputs.CLI_VERSION || steps.cli_build.outputs.CLI_VERSION }}"
           CLI_SOURCE_MODE: '${{ steps.cli_source.outputs.mode }}'
         run: |-

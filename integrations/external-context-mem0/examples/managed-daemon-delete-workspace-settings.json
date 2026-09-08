@@ -1,0 +1,25 @@
+{
+  "$version": 4,
+  "tools": {
+    "approvalMode": "default"
+  },
+  "permissions": {
+    "ask": ["mcp__external-context-mem0-delete__context_forget"]
+  },
+  "mcpServers": {
+    "external-context-mem0-delete": {
+      "command": "/absolute/path/to/node",
+      "args": [
+        "/administrator/path/to/external-context-mem0/dist/delete-main.js"
+      ],
+      "cwd": "/workspace/project",
+      "env": {
+        "QWEN_EXTERNAL_CONTEXT_MEM0_DELETE_CONFIG": "/etc/qwen/external-context/delete.instance.json",
+        "MEMORY_DELETE_API_KEY": "${MEMORY_DELETE_API_KEY}"
+      },
+      "includeTools": ["context_get", "context_forget"],
+      "alwaysLoadTools": true,
+      "trust": false
+    }
+  }
+}

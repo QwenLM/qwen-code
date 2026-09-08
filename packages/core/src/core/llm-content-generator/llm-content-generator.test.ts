@@ -118,6 +118,7 @@ describe('LlmContentGenerator', () => {
     const getSessionId = vi.fn().mockReturnValue('session-1');
     const cliConfig = {
       getSessionId,
+      getOutboundAllowDynamicHeaderValues: () => true,
     } as unknown as Config;
     const sessionGenerator = new LlmContentGenerator(
       {
@@ -129,6 +130,7 @@ describe('LlmContentGenerator', () => {
       {
         model: 'gemini-1.5-flash',
         baseUrl: 'https://routify-pub.alibaba-inc.com/protocol/vertex',
+        customHeaders: { session_id: 'custom-${session_id}' },
       },
       cliConfig,
     );
@@ -153,6 +155,53 @@ describe('LlmContentGenerator', () => {
       googleGenAI.models.generateContent.mock.calls[1][0].config.httpOptions
         .headers,
     ).toEqual({ session_id: 'session-2' });
+  });
+
+  it('warns when Gemini dynamic headers are disabled', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      void new LlmContentGenerator(
+        { apiKey: 'test-api-key' },
+        {
+          model: 'gemini-1.5-flash',
+          customHeaders: { 'X-Gemini-Session': '${session_id}' },
+        },
+        {
+          getOutboundAllowDynamicHeaderValues: () => false,
+        } as unknown as Config,
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('X-Gemini-Session'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('expands Gemini dynamic headers without a base URL', async () => {
+    const sessionGenerator = new LlmContentGenerator(
+      { apiKey: 'test-api-key' },
+      {
+        model: 'gemini-1.5-flash',
+        customHeaders: { 'X-Gemini-Session': '${session_id}' },
+      },
+      {
+        getSessionId: () => 'session-1',
+        getOutboundAllowDynamicHeaderValues: () => true,
+      } as unknown as Config,
+    );
+    const googleGenAI = vi.mocked(GoogleGenAI).mock.results.at(-1)?.value;
+    googleGenAI.models.generateContent.mockResolvedValue({});
+
+    await sessionGenerator.generateContent(
+      { model: 'gemini-1.5-flash', contents: [] },
+      'prompt-1',
+    );
+
+    expect(
+      googleGenAI.models.generateContent.mock.calls[0][0].config.httpOptions
+        .headers,
+    ).toEqual({ 'X-Gemini-Session': 'session-1' });
   });
 
   it('uses the constructor base URL for Gemini session ID injection', async () => {

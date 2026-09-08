@@ -66,6 +66,57 @@ export interface WriteRuntimeConfiguration {
   credential: string;
 }
 
+export interface DeleteInstanceConfigV5 extends InstanceConfigBase {
+  schemaVersion: 5;
+  repositoryRoot: string;
+}
+
+export interface DeleteDialectV1 {
+  deleteDialectVersion: 1;
+  id: string;
+  auth: AuthenticationKind;
+  record: {
+    pathPrefix: string;
+    pathSuffix: '' | '/';
+    idField: 'id' | 'memory_id';
+    contentField: 'memory' | 'content' | 'text';
+    notFound: 'http-404' | 'null-200';
+  };
+}
+
+export interface DeleteRuntimeConfiguration {
+  instance: DeleteInstanceConfigV5;
+  dialect: DeleteDialectV1;
+  credential: string;
+}
+
+export type GetMemoryResult =
+  | { status: 'found'; memoryId: string; content: string }
+  | { status: 'unavailable' | 'failed'; memoryId?: string };
+
+export type ForgetReason =
+  | 'invalid_input'
+  | 'target_unavailable'
+  | 'target_changed'
+  | 'verification_failed'
+  | 'cancelled';
+
+export type ForgetResult =
+  | { status: 'deleted' | 'unknown'; memoryId: string }
+  | { status: 'not_deleted'; memoryId?: string; reason: ForgetReason };
+
+export interface DeleteProvider {
+  get(input: {
+    memoryId: string;
+    signal: AbortSignal;
+  }): Promise<GetMemoryResult>;
+  forget(input: {
+    memoryId: string;
+    expectedContent: string;
+    signal: AbortSignal;
+  }): Promise<ForgetResult>;
+}
+
 export type RememberResult =
   | { status: 'stored'; memoryId: string }
   | { status: 'accepted'; providerOperationId: string }

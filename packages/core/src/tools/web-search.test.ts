@@ -25,6 +25,7 @@ const TEST_ENV_KEY = 'WEB_SEARCH_TEST_DS_KEY';
 const DASHSCOPE_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 interface ConfigOverrides {
+  allowDynamicHeaderValues?: boolean;
   settings?: {
     enabled?: boolean;
     model?: string;
@@ -74,6 +75,8 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
         : undefined;
     },
     getSessionId: () => 'session-1',
+    getOutboundAllowDynamicHeaderValues: () =>
+      overrides.allowDynamicHeaderValues ?? false,
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
     getModel: () => 'main-model',
@@ -661,6 +664,36 @@ describe('WebSearchTool execute', () => {
     };
     expect(opts.defaultHeaders['X-Gateway-Route']).toBe('ds');
     expect(opts.defaultHeaders['User-Agent']).toContain('QwenCode/');
+  });
+
+  it('installs dynamic header expansion on the search client fetch', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
+    );
+    const config = makeConfig({
+      allowDynamicHeaderValues: true,
+      models: [
+        {
+          id: 'qwen3.6-plus',
+          authType: 'openai',
+          envKey: TEST_ENV_KEY,
+          baseUrl: DASHSCOPE_BASE_URL,
+          generationConfig: {
+            customHeaders: { 'X-Session': '${session_id}' },
+          },
+        },
+      ],
+    });
+    const getSessionId = vi.spyOn(config, 'getSessionId');
+    await runSearch(config);
+    const opts = mockCtorOpts.current as {
+      defaultHeaders: Record<string, string>;
+      fetch: typeof globalThis.fetch;
+    };
+
+    await opts.fetch('data:text/plain,ok', { headers: opts.defaultHeaders });
+
+    expect(getSessionId).toHaveBeenCalledOnce();
   });
 
   it('truncates an oversized answer while preserving source URLs and the safety footer', async () => {
