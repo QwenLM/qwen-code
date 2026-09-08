@@ -128,8 +128,6 @@ import {
 // the chips remain removable through their close buttons.
 // Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
 // or iPadOS 13+ maxTouchPoints).
-// Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
-// or iPadOS 13+ maxTouchPoints).
 export const isIosCodeMirrorComposer =
   /Apple Computer/.test(navigator.vendor) &&
   (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
