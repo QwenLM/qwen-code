@@ -66,9 +66,13 @@ not block configured nested effort; sampling flat fields do unless explicit
 configured capabilities inject the nested object.
 
 Explicitly disabling a non-mandatory model still works. Blocked raw overrides
-advertise `enableValue: 'default'` so the thinking switch can restore configured
-raw defaults after disabling, while direct tier commands remain strict. This is
-a reset, so a raw configuration or model default that is off stays off. When
+advertise `enableValue: 'default'` only when the raw state permits thinking and
+the configured reasoning default is not disabled. The thinking switch can then
+restore the configured raw defaults after disabling. Otherwise, `canEnable: false`
+disables the off switch without changing the saved preference. This also covers
+configured tiers without a default and toggle-only controls. Direct blocked tier
+requests still fail. Explicit `default` commands retain their reset semantics,
+including off defaults. When
 mandatory cleanup removes a raw flat `none` after it suppressed the configured
 tier, controls report the model default and reject ineffective changes.
 Generalizing CLI/SDK override reporting is

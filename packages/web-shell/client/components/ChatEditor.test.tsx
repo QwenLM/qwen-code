@@ -1794,6 +1794,28 @@ describe('ChatEditor toolbar popovers', () => {
     [
       {
         enabled: false,
+        effort: 'default',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      undefined,
+    ],
+    [
+      { enabled: false, effort: 'default', efforts: [], canEnable: false },
+      undefined,
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'high',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      'none',
+    ],
+    [
+      {
+        enabled: false,
         effort: 'medium',
         defaultEffort: 'medium',
         enableValue: 'default',
@@ -1811,7 +1833,7 @@ describe('ChatEditor toolbar popovers', () => {
       'none',
     ],
   ] as const)(
-    'toggles thinking using the supported default tier for %j',
+    'toggles thinking only when the requested direction is available for %j',
     async (reasoning, expected) => {
       const onSelectReasoningEffort = vi.fn();
       const container = renderChatEditor({
@@ -1831,7 +1853,15 @@ describe('ChatEditor toolbar popovers', () => {
       );
       expect(toggle).not.toBeNull();
       await act(async () => toggle?.click());
-      expect(onSelectReasoningEffort).toHaveBeenCalledWith(expected, 'toggle');
+      expect(toggle?.disabled).toBe(expected === undefined);
+      if (expected === undefined) {
+        expect(onSelectReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(onSelectReasoningEffort).toHaveBeenCalledWith(
+          expected,
+          'toggle',
+        );
+      }
     },
   );
 

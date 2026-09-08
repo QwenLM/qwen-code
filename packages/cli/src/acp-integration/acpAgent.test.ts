@@ -30,6 +30,7 @@ const realFsPromises =
   await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
+import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
 // Mock cleanup module before importing anything else
@@ -3652,6 +3653,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       (sessionId: string) =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -3960,6 +3962,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       (sessionId: string) =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -4029,6 +4032,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       (sessionId: string) =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -4229,6 +4233,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       (sessionId: string) =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -4361,6 +4366,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('test-session-id'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -4567,6 +4573,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(sessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -4814,7 +4821,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
-          getDefaultReasoningConfig: vi.fn(),
+          getDefaultReasoningConfig: vi.fn(() =>
+            getDefaultReasoningConfig(createdConfig, _settings),
+          ),
           reloadReasoningSelection: vi.fn(),
           persistReasoningSelection: vi.fn(),
           setSessionReasoningSelection: vi.fn(),
@@ -9627,9 +9636,274 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
-  it.each(['extra_body', 'samplingParams'] as const)(
-    'restores the GPT raw default through switch metadata after off (%s)',
-    async (layer) => {
+  it.each(
+    (['extra_body', 'samplingParams'] as const).flatMap((layer) => [
+      {
+        layer,
+        model: 'gpt-5.5',
+        baseUrl: 'https://api.openai.com/v1',
+        raw: { reasoning_effort: 'none' },
+      },
+      {
+        layer,
+        model: 'gpt-5.5',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        raw: { reasoning: { enabled: false } },
+      },
+      {
+        layer,
+        model: 'gpt-5.4',
+        baseUrl: 'https://api.openai.com/v1',
+        raw: { reasoning: null },
+      },
+      {
+        layer,
+        model: 'gpt-5.5',
+        baseUrl: 'https://api.openai.com/v1',
+        raw: { reasoning: { effort: 'high' } },
+        disabledDefault: true,
+      },
+    ]),
+  )(
+    'does not offer a reset as enable when $layer restores disabled thinking ($model, $baseUrl)',
+    async (testCase) => {
+      const { layer, model, baseUrl, raw } = testCase;
+      const disabledDefault = 'disabledDefault' in testCase;
+      const sessionId = 'gpt-raw-disable-switch';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => model);
+      if (disabledDefault) {
+        Object.assign(innerConfig, {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getResolvedModelConfig: vi.fn(() => ({
+            generationConfig: { reasoning: false },
+            capabilities: {},
+          })),
+        });
+      }
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model,
+        baseUrl,
+        reasoning: disabledDefault ? false : { effort: 'high' },
+        [layer]: raw,
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        let options = session.configOptions;
+        for (const off of [false, true]) {
+          if (off) {
+            options = (
+              (await agent.setSessionConfigOption({
+                sessionId,
+                configId: 'reasoning_effort',
+                value: 'none',
+              })) as SetSessionConfigOptionResponse
+            ).configOptions;
+          }
+          const option = options?.find(
+            (option) => option.id === 'reasoning_effort',
+          );
+          expect(option?.currentValue).toBe('none');
+          const metadata = option?._meta?.['qwenCode/reasoning'];
+          expect(metadata).toMatchObject({ defaultEffort: 'medium' });
+          expect(metadata).not.toHaveProperty('enableValue');
+          expect(metadata).toMatchObject({ canEnable: false });
+          await expect(
+            agent.setSessionConfigOption({
+              sessionId,
+              configId: 'reasoning_effort',
+              value: 'medium',
+              _meta: { 'qwenCode/persistReasoningSelection': true },
+            }),
+          ).rejects.toThrow('Reasoning selection was not applied: medium');
+          expect(generation.reasoning).toEqual(
+            off || disabledDefault ? false : { effort: 'high' },
+          );
+          expect(generation[layer]).toEqual(raw);
+          expect(
+            lastSessionMock?.persistReasoningSelection,
+          ).not.toHaveBeenCalled();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    {
+      thinking: true,
+      efforts: ['low', 'high'],
+      disableField: 'reasoning_effort',
+    },
+    { thinking: true, toggleOnly: true, disableField: 'reasoning_effort' },
+  ] as const)(
+    'disables ON for a raw disable with configured capabilities %j',
+    async (reasoning) => {
+      const sessionId = 'gpt-configured-off';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+      Object.assign(innerConfig, {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: { reasoning },
+        })),
+      });
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-5.5',
+        reasoning: { effort: 'high' },
+        extra_body: { reasoning_effort: 'none' },
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const response = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        const option = response.configOptions?.find(
+          (option) => option.id === 'reasoning_effort',
+        );
+        expect(option?.currentValue).toBe('none');
+        expect(option?._meta?.['qwenCode/reasoning']).toMatchObject({
+          canEnable: false,
+        });
+        expect(option?._meta?.['qwenCode/reasoning']).not.toHaveProperty(
+          'defaultEffort',
+        );
+        expect(
+          lastSessionMock?.persistReasoningSelection,
+        ).not.toHaveBeenCalled();
+        const reset = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          reset.configOptions.find(
+            (option) => option.id === 'reasoning_effort',
+          ),
+        ).toMatchObject({
+          currentValue: 'none',
+          _meta: { 'qwenCode/reasoning': { canEnable: false } },
+        });
+        expect(lastSessionMock?.persistReasoningSelection).toHaveBeenCalledWith(
+          'default',
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([false, undefined] as const)(
+    'uses the session default %s after another workspace changes the agent settings cache',
+    async (sessionDefault) => {
+      const sessionId = 'gpt-session-default';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+      Object.assign(innerConfig, {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getResolvedModelConfig: vi.fn(() => undefined),
+      });
+      vi.mocked(loadSettings).mockReturnValue(
+        makeSessionSettings({
+          mcpServers: {},
+          model: { generationConfig: { reasoning: sessionDefault } },
+        }),
+      );
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-5.5',
+        reasoning: false,
+        extra_body: { reasoning: { effort: 'high' } },
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp/workspace-a', mcpServers: [] });
+        const firstSession = lastSessionMock!;
+        await setupSessionMocks('other-workspace');
+        vi.mocked(loadSettings).mockReturnValue(
+          makeSessionSettings({
+            mcpServers: {},
+            model: {
+              generationConfig: {
+                reasoning: sessionDefault === false ? undefined : false,
+              },
+            },
+          }),
+        );
+        await agent.newSession({ cwd: '/tmp/workspace-b', mcpServers: [] });
+        const off = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        })) as SetSessionConfigOptionResponse;
+        const metadata = off.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        )?._meta?.['qwenCode/reasoning'] as {
+          enableValue?: string;
+          defaultEffort: string;
+        };
+        expect(metadata.enableValue).toBe(
+          sessionDefault === false ? undefined : 'default',
+        );
+        const enable = agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: metadata.enableValue ?? metadata.defaultEffort,
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        });
+        if (sessionDefault === false) {
+          await expect(enable).rejects.toThrow(
+            'Reasoning selection was not applied: medium',
+          );
+          expect(generation.reasoning).toBe(false);
+          expect(firstSession.persistReasoningSelection).not.toHaveBeenCalled();
+        } else {
+          await expect(enable).resolves.toMatchObject({
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'reasoning_effort',
+                currentValue: 'medium',
+              }),
+            ]),
+          });
+          expect(generation.reasoning).toBeUndefined();
+          expect(firstSession.persistReasoningSelection).toHaveBeenCalledWith(
+            'default',
+          );
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    ['extra_body', { effort: 'high' }],
+    ['samplingParams', { effort: 'high' }],
+    ['extra_body', { enabled: false }],
+    ['samplingParams', { enabled: false }],
+  ] as const)(
+    'restores the GPT raw default through switch metadata after off (%s, %j)',
+    async (layer, reasoning) => {
       const sessionId = 'gpt-opaque-override-session';
       const innerConfig = await setupSessionMocks(sessionId);
       innerConfig.getModel = vi.fn(() => 'gpt-5.5');
@@ -9637,7 +9911,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       Object.assign(generation, {
         model: 'gpt-5.5',
         reasoning: undefined,
-        [layer]: { reasoning: { effort: 'high' } },
+        [layer]: { reasoning },
       });
       innerConfig.getReasoningEffort = vi.fn(() =>
         generation.reasoning ? generation.reasoning.effort : undefined,
@@ -9680,7 +9954,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             ?.currentValue,
         ).toBe('medium');
         expect(generation.reasoning).toBeUndefined();
-        expect(generation[layer]).toEqual({ reasoning: { effort: 'high' } });
+        expect(generation[layer]).toEqual({ reasoning });
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -11877,6 +12151,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('remember-session'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -11956,6 +12231,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('remember-noop-session'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -12035,6 +12311,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('remember-fail-session'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -19901,6 +20178,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const sessionId = args[0] as string;
       const cfg = sessionId === 'session-end-a' ? innerConfigA : innerConfigB;
       return {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(sessionId),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -21436,6 +21714,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(liveSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -23501,6 +23780,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     vi.mocked(Session).mockImplementation(() => {
       const releaseCloseGate = vi.fn();
       const sessionMock = {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue('persisted-1'),
         shouldHintAskUserQuestionRestore: vi
           .fn()
@@ -24967,6 +25247,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       ).sendUpdate(replayUpdate);
     });
     const liveSession = {
+      getDefaultReasoningConfig: vi.fn(),
       getId: vi.fn().mockReturnValue('persisted-1'),
       shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
       getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -27668,6 +27949,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const cfg = sessionConfigs[sessionIdx]!;
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       const mock = {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -27774,6 +28056,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const cfg = sessionConfigs[sessionIdx] ?? cfgB;
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       const mock = {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -27860,6 +28143,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       sessionIdx++;
       return {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -27969,6 +28253,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const cfg = configs[index]!;
       const id = cfg.getSessionId();
       return {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -28097,6 +28382,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-reload'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -28185,6 +28471,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-plan-reload'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -28291,6 +28578,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-workflow-reload'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -28405,6 +28693,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-workflow-stale-reload'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -28512,6 +28801,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-workflow-swapped-settings'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -28610,6 +28900,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-approval-swapped-settings'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -28724,6 +29015,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-runtime-mode'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -28839,6 +29131,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-reload-retry'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn(() => idle),
@@ -28959,6 +29252,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-mode-removal'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29073,6 +29367,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-mode-invalid'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29165,6 +29460,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-invalid-roundtrip'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29259,6 +29555,7 @@ describe('sessionLanguage multi-session propagation', () => {
         isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
       });
       const session = {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         getConfig: vi.fn().mockReturnValue(cfg),
         isIdle: vi.fn(() => !busySessionIds.has(id)),
@@ -29393,6 +29690,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-mode-alias'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29477,6 +29775,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-mode-case'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29558,6 +29857,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-safe-mode'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29646,6 +29946,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-bare-mode'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
@@ -29738,6 +30039,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-wf-reload'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -29826,6 +30128,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       (id) =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue(id),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
@@ -29911,6 +30214,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('skill-content'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(sessionConfig),
@@ -30034,6 +30338,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-state'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -30148,6 +30453,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-ext'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -30252,6 +30558,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-ext'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -30330,6 +30637,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-ext'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
@@ -30478,6 +30786,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       sessionIdx++;
       return {
+        getDefaultReasoningConfig: vi.fn(),
         getId: vi.fn().mockReturnValue(id),
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
@@ -30548,6 +30857,7 @@ describe('sessionLanguage multi-session propagation', () => {
     vi.mocked(Session).mockImplementation(
       () =>
         ({
+          getDefaultReasoningConfig: vi.fn(),
           getId: vi.fn().mockReturnValue('s-a'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfgA),

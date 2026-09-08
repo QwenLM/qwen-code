@@ -16,6 +16,7 @@ import {
   type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
+import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
 
 export type ModelReasoningConfiguration =
@@ -101,7 +102,30 @@ export type ModelReasoningConfigState = {
   effort?: ReasoningEffort;
   thinkingMandatory?: boolean;
   enableValue?: typeof REASONING_EFFORT_DEFAULT;
+  canEnable?: false;
 };
+
+export function getDefaultReasoningConfig(
+  config: Config,
+  settings: LoadedSettings,
+): ContentGeneratorConfig['reasoning'] {
+  // Runtime snapshots already include the persisted selection, not its defaults.
+  const authType = config.getAuthType?.();
+  const model =
+    authType && !config.getActiveRuntimeModelSnapshot?.()
+      ? config.getResolvedModelConfig?.(
+          authType,
+          config.getModel(),
+          config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
+        )
+      : undefined;
+  if (model) return model.generationConfig.reasoning;
+  return (
+    settings.merged.model?.generationConfig as
+      | Partial<ContentGeneratorConfig>
+      | undefined
+  )?.reasoning;
+}
 
 export function getGptReasoningOverrideState(
   generation: ContentGeneratorConfig,
@@ -468,10 +492,12 @@ export function buildModelReasoningConfigOption(
       'qwenCode/reasoning': reasoning.toggleOnly
         ? {
             toggleOnly: true,
+            ...(state.canEnable === false ? { canEnable: false } : {}),
             ...(canDisable ? {} : { thinkingMandatory: true }),
           }
         : {
             ...(state.enableValue ? { enableValue: state.enableValue } : {}),
+            ...(state.canEnable === false ? { canEnable: false } : {}),
             ...(reasoning.defaultEffort
               ? { defaultEffort: reasoning.defaultEffort }
               : {}),

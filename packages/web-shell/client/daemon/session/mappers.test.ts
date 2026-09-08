@@ -190,6 +190,30 @@ describe('mapReasoningControls', () => {
     },
   );
 
+  it.each([false, true, 'false', null, undefined])(
+    'preserves only an explicit cannot-enable capability %j for tiered and toggle-only controls',
+    (canEnable) => {
+      for (const toggleOnly of [false, true]) {
+        const result = mapReasoningControls([
+          {
+            id: 'reasoning_effort',
+            currentValue: 'none',
+            options: [
+              { value: 'none' },
+              { value: 'default' },
+              ...(toggleOnly ? [] : [{ value: 'low' }, { value: 'high' }]),
+            ],
+            _meta: { 'qwenCode/reasoning': { canEnable, toggleOnly } },
+          },
+        ]);
+        expect(result?.enabled).toBe(false);
+        if (canEnable === false)
+          expect(result).toHaveProperty('canEnable', false);
+        else expect(result).not.toHaveProperty('canEnable');
+      }
+    },
+  );
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([

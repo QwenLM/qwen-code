@@ -5,6 +5,7 @@
  */
 
 import {
+  type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
@@ -282,6 +283,7 @@ import {
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
   getGptReasoningOverrideState,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
@@ -5079,7 +5081,10 @@ class QwenAgent implements Agent {
             sessionId: session.getId(),
             models: this.buildAvailableModels(config),
             modes: this.buildModesData(config),
-            configOptions: this.buildConfigOptions(config),
+            configOptions: this.buildConfigOptions(
+              config,
+              session.getDefaultReasoningConfig(),
+            ),
           }));
         },
         parentContext ? { parentContext } : {},
@@ -5171,7 +5176,10 @@ class QwenAgent implements Agent {
                 ({
                   modes: this.buildModesData(config),
                   models: this.buildAvailableModels(config),
-                  configOptions: this.buildConfigOptions(config),
+                  configOptions: this.buildConfigOptions(
+                    config,
+                    liveSession.getDefaultReasoningConfig(),
+                  ),
                   ...(projection?.artifactSnapshot
                     ? { artifactSnapshot: projection.artifactSnapshot }
                     : {}),
@@ -5325,7 +5333,10 @@ class QwenAgent implements Agent {
         profiler.timeSync('response_build', () => ({
           modes: this.buildModesData(config),
           models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(config),
+          configOptions: this.buildConfigOptions(
+            config,
+            getDefaultReasoningConfig(config, settings),
+          ),
           ...(projection?.runtime.artifactSnapshot
             ? { artifactSnapshot: projection.runtime.artifactSnapshot }
             : {}),
@@ -5649,7 +5660,10 @@ class QwenAgent implements Agent {
                   ({
                     modes: this.buildModesData(config),
                     models: this.buildAvailableModels(config),
-                    configOptions: this.buildConfigOptions(config),
+                    configOptions: this.buildConfigOptions(
+                      config,
+                      liveSession.getDefaultReasoningConfig(),
+                    ),
                     ...(projection?.artifactSnapshot
                       ? { artifactSnapshot: projection.artifactSnapshot }
                       : {}),
@@ -5738,7 +5752,10 @@ class QwenAgent implements Agent {
               response = profiler.timeSync('response_build', () => ({
                 modes: this.buildModesData(config),
                 models: this.buildAvailableModels(config),
-                configOptions: this.buildConfigOptions(config),
+                configOptions: this.buildConfigOptions(
+                  config,
+                  getDefaultReasoningConfig(config, settings),
+                ),
                 ...(projection?.runtime.artifactSnapshot
                   ? { artifactSnapshot: projection.runtime.artifactSnapshot }
                   : {}),
@@ -5936,7 +5953,8 @@ class QwenAgent implements Agent {
         case 'reasoning_effort': {
           const config = session.getConfig();
           const generation = config.getContentGeneratorConfig();
-          const option = this.buildConfigOptions(config).find(
+          const defaultReasoning = session.getDefaultReasoningConfig();
+          const option = this.buildConfigOptions(config, defaultReasoning).find(
             (candidate) => candidate.id === 'reasoning_effort',
           );
           const modelReasoning = this.getModelReasoningConfiguration(config);
@@ -5984,7 +6002,6 @@ class QwenAgent implements Agent {
               'Reasoning effort cannot be applied while thinking is disabled',
             );
           }
-          const defaultReasoning = session.getDefaultReasoningConfig();
           const previous = {
             reasoning: generation.reasoning,
             extra_body: generation.extra_body,
@@ -6008,7 +6025,10 @@ class QwenAgent implements Agent {
                   : selected,
               );
             }
-            const configOptions = this.buildConfigOptions(config);
+            const configOptions = this.buildConfigOptions(
+              config,
+              defaultReasoning,
+            );
             const confirmedValue = configOptions.find(
               (candidate) => candidate.id === 'reasoning_effort',
             )?.currentValue;
@@ -6056,7 +6076,10 @@ class QwenAgent implements Agent {
       }
 
       return {
-        configOptions: this.buildConfigOptions(session.getConfig()),
+        configOptions: this.buildConfigOptions(
+          session.getConfig(),
+          session.getDefaultReasoningConfig(),
+        ),
       };
     });
   }
@@ -7849,7 +7872,10 @@ class QwenAgent implements Agent {
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
-        configOptions: this.buildConfigOptions(config),
+        configOptions: this.buildConfigOptions(
+          config,
+          session.getDefaultReasoningConfig(),
+        ),
       },
     };
   }
@@ -14597,7 +14623,10 @@ class QwenAgent implements Agent {
     };
   }
 
-  private buildConfigOptions(config: Config): SessionConfigOption[] {
+  private buildConfigOptions(
+    config: Config,
+    defaultReasoning: ContentGeneratorConfig['reasoning'],
+  ): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
     const modelOptions = this.buildSelectableModelOptions(config);
     const rawCurrentModelId = (config.getModel() || '').trim();
@@ -14742,7 +14771,9 @@ class QwenAgent implements Agent {
             enabled: reasoningEnabled,
             effort: effectiveModelEffort,
             ...(gptEnableOverride?.blocksTierChange
-              ? { enableValue: REASONING_EFFORT_DEFAULT }
+              ? gptEnableOverride.enabled && defaultReasoning !== false
+                ? { enableValue: REASONING_EFFORT_DEFAULT }
+                : { canEnable: false }
               : {}),
             thinkingMandatory: generation.thinkingMandatory === true,
           },

@@ -1119,7 +1119,12 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy || !onSelect || reasoning.canDisable === false}
+          disabled={
+            busy ||
+            !onSelect ||
+            reasoning.canDisable === false ||
+            (!reasoning.enabled && reasoning.canEnable === false)
+          }
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>

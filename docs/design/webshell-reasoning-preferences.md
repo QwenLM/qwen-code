@@ -41,9 +41,13 @@ operation. Requested persistence completes before the daemon reports success.
 
 Turning thinking off sends `none`. Turning it on sends the advertised default
 effort for a tiered model, or `default` for toggle-only models. A GPT raw
-request override that blocks configured tiers advertises `enableValue: 'default'`; its switch resets the session override and restores the raw
-configuration. The confirmed state may remain off when that raw configuration
-or the model default is off. Explicit tier choices remain strict and are never
+request override that blocks configured tiers advertises `enableValue: 'default'`
+only when restoring the raw configuration can enable thinking and the model's
+configured reasoning default is not disabled. Otherwise, `canEnable: false`
+disables ON while retaining the saved preference, including for controls without
+a default tier or with only a toggle. OFF remains available while thinking is
+on. Explicit `default` commands remain
+resets, even for off defaults. Explicit tier choices remain strict and are never
 silently treated as reset commands.
 
 On Welcome, an on intent selected by the thinking switch belongs to the

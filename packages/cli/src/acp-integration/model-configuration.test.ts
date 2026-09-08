@@ -5,19 +5,57 @@
  */
 
 import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
-import { describe, expect, it } from 'vitest';
+import type { LoadedSettings } from '../config/settings.js';
+import { describe, expect, it, vi } from 'vitest';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
   getModelConfiguration,
   getGptReasoningOverrideState,
   type ModelReasoningConfiguration,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
+
+describe('default reasoning configuration', () => {
+  it.each([
+    [{ reasoning: false }, { effort: 'high' }, false, false],
+    [{}, false, false, undefined],
+    [undefined, false, false, false],
+    [{ reasoning: { effort: 'max' } }, false, true, false],
+  ] as const)(
+    'resolves model defaults %j with legacy default %j and runtime %s',
+    (generationConfig, legacyDefault, runtime, expected) => {
+      const resolve = vi.fn(() =>
+        generationConfig ? { generationConfig } : undefined,
+      );
+      const config = {
+        getAuthType: () => 'openai',
+        getModel: () => 'gpt-5.5',
+        getCurrentModelRegistryBaseUrl: () => 'https://selected.example/v1',
+        getActiveRuntimeModelSnapshot: () => (runtime ? {} : undefined),
+        getResolvedModelConfig: resolve,
+      } as unknown as Config;
+      const settings = {
+        merged: { model: { generationConfig: { reasoning: legacyDefault } } },
+      } as unknown as LoadedSettings;
+      expect(getDefaultReasoningConfig(config, settings)).toEqual(expected);
+      if (runtime) {
+        expect(resolve).not.toHaveBeenCalled();
+      } else {
+        expect(resolve).toHaveBeenCalledWith(
+          'openai',
+          'gpt-5.5',
+          'https://selected.example/v1',
+        );
+      }
+    },
+  );
+});
 
 describe('model configuration manifest', () => {
   it.each([

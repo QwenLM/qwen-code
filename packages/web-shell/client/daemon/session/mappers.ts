@@ -188,6 +188,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: 'default',
       efforts: [],
+      ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
@@ -204,6 +205,7 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
+    ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
     ...(reasoningMeta?.['enableValue'] === 'default'
       ? { enableValue: 'default' as const }
       : {}),

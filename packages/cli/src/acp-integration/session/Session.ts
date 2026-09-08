@@ -351,6 +351,7 @@ import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
@@ -10668,22 +10669,7 @@ export class Session implements SessionContext {
   }
 
   getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
-    // Runtime snapshots already include the persisted selection, not its defaults.
-    const authType = this.config.getAuthType?.();
-    const model =
-      authType && !this.config.getActiveRuntimeModelSnapshot?.()
-        ? this.config.getResolvedModelConfig?.(
-            authType,
-            this.config.getModel(),
-            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
-          )
-        : undefined;
-    if (model) return model.generationConfig.reasoning;
-    return (
-      this.settings.merged.model?.generationConfig as
-        | Partial<ContentGeneratorConfig>
-        | undefined
-    )?.reasoning;
+    return getDefaultReasoningConfig(this.config, this.settings);
   }
 
   reloadReasoningSelection(): void {
