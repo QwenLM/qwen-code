@@ -20,7 +20,7 @@ const sdkClientFactory = vi.hoisted(() => ({
 // literal here on purpose: the escalation tests step to just before and just
 // after the deadline, so a grace that changes without these tests changing
 // fails them instead of silently widening or vacating the pin.
-const SHUTDOWN_GRACE_MS = 40_000;
+const SHUTDOWN_GRACE_MS = 45_000;
 
 // AcpConnection imports AcpFileHandler which imports vscode.
 // Mock vscode so it can be resolved without the actual VS Code runtime.

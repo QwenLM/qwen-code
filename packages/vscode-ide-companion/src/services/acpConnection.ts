@@ -52,12 +52,14 @@ import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
  * `process.on('exit')` cleanup this teardown exists to protect. On the
  * ide_close path the CLI budgets 8s for the MCP pool drain
  * (`shutdownMcpPool(8_000)`) plus 30s for the session drain
- * (`SESSION_DRAIN_TIMEOUT_MS`), both in acpAgent.ts, so 40s covers the two
- * stages that always run. SessionEnd hooks are user-configured and can still
+ * (`SESSION_DRAIN_TIMEOUT_MS`), both in acpAgent.ts, plus up to 5s for
+ * `runExitCleanup()` (`OVERALL_CLEANUP_TIMEOUT_MS`) in the `finally` wrapping
+ * `runAcpAgent` (llm.tsx) — 43s bounded — so 45s covers all three stages
+ * that always run. SessionEnd hooks are user-configured and can still
  * exceed it (`DEFAULT_HOOK_TIMEOUT` is 60s each), so the escalation stays as
  * the backstop rather than being removed.
  */
-const SHUTDOWN_GRACE_MS = 40_000;
+const SHUTDOWN_GRACE_MS = 45_000;
 
 // Resolve taskkill by absolute System32 path, never the bare name: on Windows
 // a bare command is resolved through PATH *and* the current directory, so a
