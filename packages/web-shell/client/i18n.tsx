@@ -3203,6 +3203,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -6605,6 +6607,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
