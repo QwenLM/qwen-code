@@ -28937,11 +28937,11 @@ describe('App session callbacks', () => {
       await act(async () => report(ownerIds));
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
-      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
-      mockUseDaemonActivePromptBridge.mockClear();
+      expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
+      mockUseDaemonSessionActivityBridge.mockClear();
       for (const ids of [['foreign-session'], ['another-session'], []]) {
         await act(async () => report([...ownerIds, ...ids]));
-        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+        expect(mockUseDaemonSessionActivityBridge).not.toHaveBeenCalled();
       }
     },
   );
