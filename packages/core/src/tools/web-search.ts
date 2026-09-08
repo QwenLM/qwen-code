@@ -405,7 +405,22 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     // model's provider. An explicit `enabled: true`, or an env-declared
     // backend missing its model, still names the missing piece instead.
     if (settings?.enabled !== true && !settings?.baseUrl) {
-      return resolveAutoBackend(config, settings);
+      try {
+        return resolveAutoBackend(config, settings);
+      } catch (e) {
+        // Derivation is opportunistic and runs while the tool registry is
+        // being built: an unexpected Config shape must cost the user web
+        // search, not every other tool in the registry.
+        gateDebugLogger.debug(
+          `[WebSearch] auto backend derivation threw: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return {
+          ok: false,
+          silent: true,
+          notice:
+            'WebSearch is not configured and no backend could be derived automatically.',
+        };
+      }
     }
     return {
       ok: false,

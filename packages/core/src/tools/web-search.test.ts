@@ -837,6 +837,25 @@ describe('evaluateWebSearchGate auto derivation', () => {
     }
   });
 
+  it('stays silently off instead of throwing when the config surface is incomplete', () => {
+    // The gate runs while the tool registry is being built, for whatever
+    // Config shape the caller has. A missing accessor must cost web search,
+    // not every other tool in the registry.
+    const broken = {
+      getWebSearchSettings: () => undefined,
+      getModel: () => 'some-model',
+      getCurrentAuthType: () => 'openai',
+      getCurrentModelRegistryBaseUrl: () => undefined,
+      getAllConfiguredModels: () => [],
+      getModelsConfig: () => ({}),
+    } as unknown as Config;
+    const gate = evaluateWebSearchGate(broken);
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
   it('prefers an explicitly configured search model over derivation', () => {
     vi.stubEnv(STANDARD.envKey, 'sk-standard');
     const gate = evaluateWebSearchGate(
