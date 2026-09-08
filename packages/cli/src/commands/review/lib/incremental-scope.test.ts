@@ -8,10 +8,20 @@
 // testable without a repository. The selection it widens comes from the real
 // `selectNarrowing`, so these exercise the pair as the command wires it.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { widenScope } from './incremental-scope.js';
 import { assembleSections, selectNarrowing } from './narrow-diff.js';
 import { buildDiffPlan, parseDiff } from './diff-plan.js';
+import { loadTypeScript } from './import-graph.js';
+
+// One test below needs the seam oracle unresolvable (#10136 R18-2). The
+// mock delegates EVERYTHING to the real module — the delegation is what
+// lets this file keep exercising the real scan in every other case — and
+// the one test flips `loadTypeScript` alone.
+vi.mock('./import-graph.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./import-graph.js')>();
+  return { ...actual, loadTypeScript: vi.fn(actual.loadTypeScript) };
+});
 
 /** A one-hunk section for `path`, as `parseDiff` reads it. */
 function section(path: string): string {
@@ -473,6 +483,39 @@ describe('widenScope seam bound (#10104)', () => {
     )?.toString('utf8');
     expect(diff).toContain('-gone 0');
     expect(diff).toContain('+new 0');
+  });
+
+  it('an unresolvable parser records the oracle state and republishes whole with no census (#10136 R18-2)', () => {
+    // A global install resolves no `typescript` (a build-time dependency
+    // of the CLI; the published package declares no runtime
+    // dependencies): `seamLines` would answer the doubt shape for every
+    // file — correctly republishing everything in full — but the plan,
+    // the capture note and the posted body could not tell "the oracle
+    // never ran" from "nothing needed bounding". The scope names the
+    // state instead: no census, no hunkKeep, the pre-bound behaviour
+    // byte-identical.
+    vi.mocked(loadTypeScript).mockReturnValueOnce(null);
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? IMP_SOURCE : null),
+      seamBound: true,
+    });
+    expect(widened.scope.seamOracle).toBe('unavailable');
+    expect(widened.hunkKeep).toBeUndefined();
+    expect(widened.scope.interaction).toEqual([
+      { path: 'src/imp.ts', importsChanged: ['src/changed.ts'] },
+    ]);
+    // Both hunks republish — the file comes out exactly as the unbounded
+    // widening would have emitted it.
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('+const a = moved();');
+    expect(diff).toContain('+  return 1;');
   });
 
   it('a seam line on a hunk boundary keeps the hunk — both ends inclusive (#10136)', () => {

@@ -42,6 +42,7 @@ import type { NarrowSelection } from './narrow-diff.js';
 import {
   dependentsOfChanged,
   discoverWorkspacePackages,
+  loadTypeScript,
   seamLines,
 } from './import-graph.js';
 import { classifyHeavy } from './heavy.js';
@@ -69,6 +70,18 @@ export interface IncrementalScope {
   interaction: InteractionFile[];
   /** Clean source files the widening considered and did NOT pull in. */
   contextFileCount: number;
+  /**
+   * Set exactly when the seam bound was asked for but no TypeScript
+   * parser could be resolved at run time (#10136 R18-2): every
+   * interaction file republished in full with NO census — byte-identical
+   * to the pre-bound widening — and the capture note and the posted body
+   * name the oracle's absence instead of reading as "no interaction file
+   * needed seam-bounding". TypeScript is a build-time dependency of the
+   * CLI and the published package carries no runtime dependencies, so
+   * this is the steady state of a global install; the seam bound only
+   * ever runs where a parser resolves.
+   */
+  seamOracle?: 'unavailable';
 }
 
 export interface WidenedScope {
@@ -149,7 +162,20 @@ export function widenScope(input: WidenInput): WidenedScope {
   // exactly the rounds the bound runs.
   const hunkKeep = new Map<string, ReadonlySet<number>>();
   const seams = new Map<string, { kept: number; total: number }>();
-  if (seamBound === true && interaction.size > 0) {
+  // The oracle's unavailable state is named, not doubted through (#10136
+  // R18-2). `seamLines` answers the doubt shape for every file when no
+  // parser resolves, which republishes everything whole correctly — but
+  // the plan, the capture's note and the posted body could not then tell
+  // "the oracle never ran" from "nothing needed bounding", and the round
+  // would certify the narrowed shape while running the full one (a
+  // global install resolves no `typescript`: it is a build-time
+  // dependency of the CLI and the published package carries no runtime
+  // dependencies). Record it instead: every interaction file republishes
+  // in full with NO census — the pre-bound behaviour, byte-identical —
+  // and `seamOracle` says why.
+  const oracleUnavailable =
+    seamBound === true && interaction.size > 0 && loadTypeScript() === null;
+  if (seamBound === true && interaction.size > 0 && !oracleUnavailable) {
     const byPath = new Map(selection.sections.map((f) => [f.path, f]));
     // The full capture's lines, for the kept slice's own +/- counts — the
     // second heaviness classification below reads them exactly as a
@@ -252,6 +278,7 @@ export function widenScope(input: WidenInput): WidenedScope {
           ...(seams.has(path) ? { seam: seams.get(path) } : {}),
         })),
       contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
+      ...(oracleUnavailable ? { seamOracle: 'unavailable' as const } : {}),
     },
     ...(hunkKeep.size > 0 ? { hunkKeep } : {}),
   };

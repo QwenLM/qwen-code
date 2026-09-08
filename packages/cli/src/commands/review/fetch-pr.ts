@@ -1507,14 +1507,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
                 `territory fan-out over the delta, ` +
                 (bounded.length > 0
                   ? `interaction files seam-bounded to ${kept} of ${total} hunk(s).`
-                  : continuityProven || widened.scope.interaction.length === 0
-                    ? `no interaction file needed seam-bounding.`
-                    : `interaction files republished in full — merge-base ` +
-                      `continuity with the previous round is unproven (${
-                        prevMergeBase === null
-                          ? 'no base recorded yet'
-                          : 'the base moved'
-                      }), so the seam bound stayed off.`),
+                  : widened.scope.seamOracle === 'unavailable'
+                    ? `interaction files republished in full — the seam ` +
+                      `oracle could not resolve a TypeScript parser at run ` +
+                      `time, so the bound never ran.`
+                    : continuityProven || widened.scope.interaction.length === 0
+                      ? `no interaction file needed seam-bounding.`
+                      : `interaction files republished in full — merge-base ` +
+                        `continuity with the previous round is unproven (${
+                          prevMergeBase === null
+                            ? 'no base recorded yet'
+                            : 'the base moved'
+                        }), so the seam bound stayed off.`),
             );
           }
           // The published hunks are byte-identical hunks of

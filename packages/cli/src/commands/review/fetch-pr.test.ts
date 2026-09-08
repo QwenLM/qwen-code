@@ -18,6 +18,7 @@ import {
   resolveIncrementalAnchor,
   type AnchorProbe,
 } from './fetch-pr.js';
+import { loadTypeScript } from './lib/import-graph.js';
 import {
   clearReviewWorktreeLease,
   clearReviewWorktreeLeaseIfOwned,
@@ -367,6 +368,15 @@ vi.mock('./lib/git.js', () => ({
 vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: producerMocks.resolveMergeBase,
 }));
+
+// One test below needs the seam oracle unresolvable (#10136 R18-2). The
+// mock delegates EVERYTHING to the real module — the seam scan, the
+// widening and the corpus all run for real in every other test — and the
+// one test flips `loadTypeScript` alone.
+vi.mock('./lib/import-graph.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/import-graph.js')>();
+  return { ...actual, loadTypeScript: vi.fn(actual.loadTypeScript) };
+});
 
 // The ledger append is the wiring under test here, not the ledger itself
 // (run-ledger.test.ts owns that): a silently unwritten ledger would make a
@@ -1677,6 +1687,58 @@ describe('fetch-pr report assembly', () => {
       { path: 'b.ts', importsChanged: ['a.ts'] },
     ]);
     expect(writtenDiff() ?? '').toContain('+y2');
+  });
+
+  it('records and names the seam oracle as unavailable when no parser resolves (#10136 R18-2)', async () => {
+    // The review workflow's deployment: the CLI is installed globally,
+    // whose published dependency set is empty, and the base-branch
+    // checkout's devDependencies were never installed — so no
+    // `typescript` resolves at run time. Every interaction file
+    // republishes in full (the pre-bound behaviour), and the plan plus
+    // the capture note SAY the bound never ran, instead of reading as
+    // "no interaction file needed seam-bounding".
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+          mergeBaseSha: BASE,
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    vi.mocked(loadTypeScript).mockReturnValueOnce(null);
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.scope.seamOracle).toBe('unavailable');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    // Full republication — the file's non-seam hunk is still published.
+    expect(writtenDiff() ?? '').toContain('+y2');
+    const err = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain('could not resolve a TypeScript parser');
+    expect(err).not.toContain('no interaction file needed seam-bounding');
   });
 
   it("stamps this round's merge base into the side file for the next round's gate (#10136 R18-3)", async () => {

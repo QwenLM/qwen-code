@@ -2828,7 +2828,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
     );
     expect(r.body).toContain(
-      'a yield, an uncertified receipt or no audit history keeps a chunk in the wave; a dry receipt stale against a same-digest yield or uncertified receipt returns it to the ordinary retirement rules',
+      'a yield, an uncertified receipt or no audit history keeps a chunk in the wave; a dry receipt that shows no evidence of having seen an earlier yield or uncertified receipt — same list, same entries modulo verification tags, or no entry for the filed finding — returns it to the ordinary retirement rules',
     );
     expect(r.body).not.toContain('chunks whose previous wave yielded');
   });
@@ -2857,7 +2857,7 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       '按普通退役规则重发 delta 领地（两次干燥的只在其冷检轮重发）',
     );
     expect(r.body).toContain(
-      '出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据对同摘要的发现或未认证收据已过时，则让它回到普通退役规则',
+      '出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据若没有证据表明见过此前的发现或未认证收据',
     );
     expect(r.body).toContain('1 个按接缝收窄：重发 2/7 个 hunk');
     expect(r.body).not.toContain('上一波出过发现的 chunk');
@@ -2938,6 +2938,49 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
   it('renders the explicit-floor cause by name', () => {
     const r = composeReview(rcInput({ ...POSTURE, postureCause: 'explicit' }));
     expect(r.body).toContain('engaged by the operator-set critical floor');
+  });
+
+  it('names a seam oracle that never ran instead of describing a bound that kept everything (#10136 R18-2)', () => {
+    // The capture recorded `seamOracle: 'unavailable'` — no TypeScript
+    // parser resolvable at run time, so the bound never executed and
+    // every interaction file republished in full. The round-shape
+    // sentence must say THAT; the plain reading ("plus their import-seam
+    // interaction files" with no census clause) is exactly what a round
+    // where the bound ran and kept everything renders.
+    const r = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          seamOracle: 'unavailable',
+          interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
+        },
+      }),
+    );
+    expect(r.body).toContain(
+      'the seam oracle could not resolve a TypeScript parser at run time, so every interaction file republished in full',
+    );
+    expect(r.body).not.toContain('seam-bounded:');
+    expect(r.body).not.toContain('republished whole');
+    // The zh twin of the same clause, through the same bilingual switch.
+    const hanBody = (() => {
+      const input = base({ criticalsInline: 1 });
+      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+        han: true,
+        incremental: {
+          ...POSTURE,
+          scope: {
+            ...POSTURE.scope,
+            seamOracle: 'unavailable',
+            interaction: [{ path: 'src/b.ts', importsChanged: ['src/a.ts'] }],
+          },
+        } as never,
+      });
+      return composeReview(input).body;
+    })();
+    expect(hanBody).toContain(
+      '接缝 oracle 在运行时无法解析到 TypeScript 解析器，所有 interaction 文件均按全量重新发布',
+    );
   });
 
   it('a census that kept every hunk is named as kept whole, never as a shed (#10136 R1-7)', () => {

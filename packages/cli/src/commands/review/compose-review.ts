@@ -3515,6 +3515,13 @@ function fixAuditShapeFacts(planPath: string | undefined): {
   seamTotal: number;
   /** Entries whose census kept every hunk (`kept === total`). */
   wholeFiles: number;
+  /**
+   * The capture recorded that no TypeScript parser could be resolved, so
+   * the seam bound never ran and every interaction file republished in
+   * full (#10136 R18-2) — named, or the sentence below would describe a
+   * bound that never executed.
+   */
+  oracleUnavailable: boolean;
 } | null {
   try {
     if (!planPath) return null;
@@ -3571,6 +3578,8 @@ function fixAuditShapeFacts(planPath: string | undefined): {
       seamKept,
       seamTotal,
       wholeFiles,
+      oracleUnavailable:
+        (scope as { seamOracle?: unknown }).seamOracle === 'unavailable',
     };
   } catch {
     return null;
@@ -6474,24 +6483,33 @@ function composeReviewBody(
   // it among the seam-bounded ones claimed a shed that never was. Files
   // the scan kept whole are named as such; files with no census at all
   // (a doubt state) republished in full and are not counted either way.
+  // An oracle that never ran is named as such (#10136 R18-2): with no
+  // parser resolvable the bound never executed, and the sentence must not
+  // read as if it ran and kept everything.
   const fixAuditSeamEn =
-    fixAudit && fixAudit.seamFiles > 0
-      ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
-        (fixAudit.wholeFiles > 0
-          ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
-          : ')')
-      : fixAudit && fixAudit.wholeFiles > 0
-        ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
-        : '';
+    fixAudit && fixAudit.oracleUnavailable
+      ? ' — but the seam oracle could not resolve a TypeScript parser at ' +
+        'run time, so every interaction file republished in full'
+      : fixAudit && fixAudit.seamFiles > 0
+        ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
+          (fixAudit.wholeFiles > 0
+            ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+            : ')')
+        : fixAudit && fixAudit.wholeFiles > 0
+          ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+          : '';
   const fixAuditSeamZh =
-    fixAudit && fixAudit.seamFiles > 0
-      ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
-        (fixAudit.wholeFiles > 0
-          ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
-          : '）')
-      : fixAudit && fixAudit.wholeFiles > 0
-        ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
-        : '';
+    fixAudit && fixAudit.oracleUnavailable
+      ? '——但接缝 oracle 在运行时无法解析到 TypeScript 解析器，' +
+        '所有 interaction 文件均按全量重新发布'
+      : fixAudit && fixAudit.seamFiles > 0
+        ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
+          (fixAudit.wholeFiles > 0
+            ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+            : '）')
+        : fixAudit && fixAudit.wholeFiles > 0
+          ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+          : '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
         {
@@ -6508,9 +6526,11 @@ function composeReviewBody(
             `rules (a twice-dry one only on its cold-check rounds) and ` +
             `non-delta chunks the previous waves could not certify dry (a ` +
             `yield, an uncertified receipt or no audit history keeps a chunk ` +
-            `in the wave; a dry receipt stale against a same-digest yield or ` +
-            `uncertified receipt returns it to the ordinary retirement ` +
-            `rules). ${fixAuditFloorEn}`,
+            `in the wave; a dry receipt that shows no evidence of having ` +
+            `seen an earlier yield or uncertified receipt — same list, same ` +
+            `entries modulo verification tags, or no entry for the filed ` +
+            `finding — returns it to the ordinary retirement rules). ` +
+            `${fixAuditFloorEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
@@ -6519,8 +6539,9 @@ function composeReviewBody(
               : '（没有仍然干净的 importer 重新进入范围）') +
             `，反向审计各波按普通退役规则重发 delta ` +
             `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
-            `chunk（出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据对` +
-            `同摘要的发现或未认证收据已过时，则让它回到普通退役规则）。` +
+            `chunk（出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据若` +
+            `没有证据表明见过此前的发现或未认证收据——同一份清单、仅验证标记不同的` +
+            `同批条目、或清单中找不到该发现的条目——则让它回到普通退役规则）。` +
             `${fixAuditFloorZh}`,
         },
       ]
