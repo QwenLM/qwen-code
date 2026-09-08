@@ -14,6 +14,7 @@ import {
 } from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
 import { findProviderByCredentials } from '../providers/all-providers.js';
+import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
 import {
   buildRuntimeFetchOptions,
   preloadRuntimeFetchModule,
@@ -272,17 +273,27 @@ function findPrimaryModelEntry(
       registryBaseUrl: entry.registryBaseUrl,
     };
   }
-  // Env-only configuration (OPENAI_BASE_URL + OPENAI_API_KEY) declares no
-  // `modelProviders` entry, and the AvailableModel synthesized for it carries
-  // neither baseUrl nor envKey — the runtime snapshot is the only source.
-  const snapshot = config.getActiveRuntimeModelSnapshot();
-  if (snapshot?.baseUrl && snapshot.apiKeyEnvKey) {
-    return {
-      authType: snapshot.authType,
-      modelId: snapshot.modelId,
-      baseUrl: snapshot.baseUrl,
-      envKey: snapshot.apiKeyEnvKey,
-    };
+  // Env-only configuration (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) declares no
+  // `modelProviders` entry, so the search above finds nothing usable. The
+  // resolved generation config carries the endpoint and is populated in the
+  // ModelsConfig constructor, unlike the runtime model snapshot, which
+  // `detectAndCaptureRuntimeModel()` only captures after the tool registry
+  // has been built.
+  const generation = config.getModelsConfig().getGenerationConfig();
+  if (generation.baseUrl && generation.authType) {
+    // A pure env configuration supplies the key's value, never its variable
+    // name (`apiKeyEnvKey` is only filled in from a modelProviders entry), so
+    // fall back to the auth type's documented default variable.
+    const envKey =
+      generation.apiKeyEnvKey ?? getDefaultApiKeyEnvVar(generation.authType);
+    if (process.env[envKey]?.trim()) {
+      return {
+        authType: generation.authType,
+        modelId: generation.model ?? modelId,
+        baseUrl: generation.baseUrl,
+        envKey,
+      };
+    }
   }
   return undefined;
 }

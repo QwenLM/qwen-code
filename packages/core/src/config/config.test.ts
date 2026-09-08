@@ -9906,6 +9906,76 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('registers web_search for an env-only configuration pointing at a DashScope host', async () => {
+      // No modelProviders entry at all: the endpoint comes from
+      // OPENAI_BASE_URL and the key variable is the auth type's default. The
+      // runtime model snapshot is not captured until after the tool registry
+      // is built, so the gate must read the resolved generation config.
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          // What the CLI resolver produces from OPENAI_BASE_URL /
+          // OPENAI_API_KEY: an endpoint but no key variable name.
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('leaves web_search off for an env-only configuration on a non-DashScope host', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-5',
+          generationConfig: {
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-5',
+            baseUrl: 'https://api.openai.com/v1',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('leaves web_search off without a notice when the primary model runs on a provider that cannot back it', async () => {
       process.env['OPENROUTER_API_KEY'] = 'sk-or-test';
       try {

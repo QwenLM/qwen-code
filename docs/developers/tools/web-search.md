@@ -13,15 +13,15 @@ The built-in tool issues a self-contained search request to a small auxiliary mo
 
 If you configured nothing under `tools.webSearch`, the tool registers whenever the model you are running can back the search request with the same credentials:
 
-| How you signed in                                                                           | Built-in search                           |
-| ------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| Alibaba ModelStudio → **Standard API Key**                                                  | on                                        |
-| Alibaba ModelStudio → **Token Plan**                                                        | on                                        |
-| Alibaba ModelStudio → **Coding Plan**                                                       | off — configure it explicitly (see below) |
-| A hand-written `modelProviders` entry on a DashScope host                                   | on                                        |
-| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints, local models | off                                       |
+| How you signed in                                                                                          | Built-in search                           |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Alibaba ModelStudio → **Standard API Key**                                                                 | on                                        |
+| Alibaba ModelStudio → **Token Plan**                                                                       | on                                        |
+| Alibaba ModelStudio → **Coding Plan**                                                                      | off — configure it explicitly (see below) |
+| A hand-written `modelProviders` entry, or a Custom Provider entry, on a DashScope host                     | on                                        |
+| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models | off                                       |
 
-Searches bill the same key as your main model, and the first search asks for confirmation like any other tool. When your provider cannot back the tool, it simply does not appear — no startup warning.
+Searches bill the same key as your main model. In the default Auto approval mode the classifier approves them without prompting, like other read-only tools; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear — no startup warning.
 
 To turn it off:
 
@@ -85,7 +85,7 @@ Notes:
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
 - Automatic activation follows the model you are currently running: switching to a provider that cannot back the tool turns it off for the next session.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
-- Searches bill your DashScope key (`usage.x_tools` counts). The tool asks for confirmation by default; approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
+- Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
 
 ## MCP alternatives

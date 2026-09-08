@@ -42,10 +42,13 @@ interface ConfigOverrides {
   }>;
   /** Model id the registry currently has selected (drives the auto path). */
   primaryModel?: string;
-  /** Runtime snapshot for env-only configurations (no modelProviders entry). */
-  runtimeSnapshot?: {
-    modelId: string;
-    authType: string;
+  /**
+   * Resolved generation config, the only source for env-only setups. Mirrors
+   * the real shape: a pure env configuration carries no `apiKeyEnvKey`.
+   */
+  generationConfig?: {
+    model?: string;
+    authType?: string;
     baseUrl?: string;
     apiKeyEnvKey?: string;
   };
@@ -96,7 +99,9 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
     // `refreshAuth` fills in the content generator config.
     getCurrentAuthType: () => 'openai',
     getCurrentModelRegistryBaseUrl: () => undefined,
-    getActiveRuntimeModelSnapshot: () => overrides.runtimeSnapshot,
+    getModelsConfig: () => ({
+      getGenerationConfig: () => overrides.generationConfig ?? {},
+    }),
     getFastModel: () => undefined,
   } as unknown as Config;
 }
@@ -680,22 +685,58 @@ describe('evaluateWebSearchGate auto derivation', () => {
     }
   });
 
-  it('derives the backend from a runtime model snapshot', () => {
-    // Env-only configuration declares no modelProviders entry.
-    vi.stubEnv('DASHSCOPE_API_KEY', 'sk-env-only');
+  it('derives the backend from an env-only generation config', () => {
+    // OPENAI_BASE_URL + OPENAI_API_KEY declare no modelProviders entry, and
+    // carry the key's value rather than its variable name — the auth type's
+    // default variable is the only way to name it.
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
     const gate = evaluateWebSearchGate(
       autoConfig([], 'env-model', {
-        runtimeSnapshot: {
-          modelId: 'env-model',
+        generationConfig: {
+          model: 'env-model',
           authType: 'openai',
           baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnvKey: 'DASHSCOPE_API_KEY',
         },
       }),
     );
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
+      expect(gate.backend.apiKeyEnvKey).toBe('OPENAI_API_KEY');
+    }
+  });
+
+  it('stays silently off when the env-only key variable is unset', () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: 'openai',
+          baseUrl: DASHSCOPE_BASE_URL,
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off for an env-only config on a non-DashScope host', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
     }
   });
 
