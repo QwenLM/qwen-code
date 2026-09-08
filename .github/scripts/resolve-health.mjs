@@ -15,8 +15,10 @@
 // carry a `/resolve` request in the last WINDOW_DAYS, read through the same
 // APIs a maintainer would. Two signals:
 //   - the trailing run of failed attempts (skips do not count either way);
-//   - requests that never got a result comment and are older than STALE_HOURS
-//     (a workflow file that fails to parse produces exactly this).
+//   - requests that never got a result comment and are older than
+//     STALE_HOURS, counted once the producer acknowledged them — or all of
+//     them when the lane produced no output at all (a workflow file that
+//     fails to parse produces exactly this).
 // One open issue at a time, found by an exact body marker matched client-side
 // (GitHub search tokenizes the marker away). Its body is written once; every
 // later change is a comment; recovery comments and closes it.
@@ -285,17 +287,55 @@ export function assess(prs, options = {}) {
   // three read-only collaborators asking inside one window no longer file
   // "0 consecutive failures, 3 unanswered requests" against a healthy lane,
   // and no single refused request arms the veto for the rest of the window.
-  // One grace covers the queue gap: the reaction lands seconds-to-minutes
-  // after the comment (queue, authorize, the job's first steps), so a
-  // request younger than ackHours is owed even before it can have landed —
-  // a genuinely in-flight request must still veto a recovery close. The
+  // One grace covers the ordinary landing delay: the reaction lands
+  // seconds-to-minutes after the comment (queue, authorize, the job's first
+  // steps), so a request younger than ackHours is owed even before it can
+  // have landed — a genuinely in-flight request must still veto a recovery
+  // close. The grace stays short on purpose. The real delay can be hours:
+  // the producer serialises a PR's runs under one concurrency group whose
+  // slot an autofix round can hold for its whole 345-minute timeout, and
+  // the ack POST's failure is swallowed by design (its step ends with
+  // `|| echo ... continuing`), so an accepted request can sit
+  // unacknowledged long past any grace. Widening the grace to cover
+  // that would re-admit refused requests to the roster past staleHours, so
+  // the close gate carries the long-queue case on its own arm below. The
   // count cannot say WHO reacted; a requester reacting to their own refused
   // request re-arms only the failure this gate removes, never more.
   const isOwed = (c) =>
     (c.eyes ?? 0) > 0 ||
     now.getTime() - Date.parse(c.created_at) < opts.ackHours * 3_600_000;
+  // The per-request signal goes blind exactly where the watch needs it
+  // most: a lane that never ran produces no acknowledgements either, so the
+  // owed gate reads the outage this file exists for (the thirteen days in
+  // the header) as a lane full of refusals, and the roster goes quiet for
+  // as long as the outage lasts. What no per-request signal can say, the
+  // window can: requests exist and the lane produced NO observable output
+  // anywhere — no classified result comment, no acknowledgement on any
+  // request. Then the missing reactions are the outage, not refusals, and
+  // every stale request counts whatever its reaction. One live result or
+  // one acknowledgement anywhere switches the per-request reading back on,
+  // so a refused request on a demonstrably healthy lane still never alarms.
+  let laneSilent = true;
+  for (const pr of prs) {
+    for (const c of pr.comments) {
+      if (c.created_at < windowStart) {
+        continue;
+      }
+      if (c.user === opts.bot) {
+        // An edited result comment is not the producer's word (below), so
+        // it is not evidence of life either.
+        if (c.updated_at === c.created_at && classifyResult(c.body)) {
+          laneSilent = false;
+        }
+      } else if ((c.eyes ?? 0) > 0 && isRequest(c.body)) {
+        laneSilent = false;
+      }
+    }
+  }
   const isAnswerableRequest = (c) =>
-    isRequestShaped(c) && c.updated_at === c.created_at && isOwed(c);
+    isRequestShaped(c) &&
+    c.updated_at === c.created_at &&
+    (isOwed(c) || laneSilent);
   for (const pr of prs) {
     const comments = [...pr.comments]
       .filter((c) => c.created_at >= windowStart)
@@ -404,13 +444,27 @@ export function assess(prs, options = {}) {
           prResults.some((r) => r.at > e[1]),
       )
       .map((e) => ({ id: e[0], created_at: e[1] }));
-    // The live arm owes a result only to a request the producer
-    // acknowledged (isOwed): a still-live refused request — inside the
-    // association set, refused in silence — otherwise holds this gate's veto
-    // for the rest of the window, the same fact the vanished arm's guard
-    // reads on the recorded side.
+    // The live arm owes a result to a request the producer acknowledged
+    // (isOwed): a still-live refused request — inside the association set,
+    // refused in silence — otherwise holds this gate's veto for the rest of
+    // the window, the same fact the vanished arm's guard reads on the
+    // recorded side. The acknowledgement cannot carry the veto alone: the
+    // real queue delay dwarfs the grace (see isOwed above), so an accepted
+    // request can read exactly like a refused one while its PR's slot is
+    // parked. A request therefore also holds the veto while its own PR
+    // shows the lane in the window: a result there means the lane accepted
+    // this PR's work, so its silence toward this one request cannot be told
+    // apart from a parked queue — and when that result postdates the
+    // request the pairing below spends it on this request anyway, so the
+    // veto only survives while the lane showed up on this PR but not since.
+    // A request on a PR with no in-window result at all still reads as
+    // refused, or one read-only collaborator re-arms the veto this gate
+    // exists to drop. The veto only ever refuses a close, so the
+    // conservative side is the safe side.
     const gateRequests = [
-      ...comments.filter((c) => isRequestShaped(c) && isOwed(c)),
+      ...comments.filter(
+        (c) => isRequestShaped(c) && (isOwed(c) || prResults.length > 0),
+      ),
       ...vanished,
     ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
     // The close gate's own attribution, which the roster's proxy below cannot
@@ -804,7 +858,7 @@ export function renderIssueBody(assessment, options = {}) {
     stateMarker(stateOf(assessment)),
     '`@qwen-code /resolve` is failing in a row. Its baseline is ~84% of agent runs pushing a resolution, so a streak this long almost always means the lane itself is broken — an npm `latest` that does not resolve, a sandbox image that was never published, a workflow file that no longer parses — not the conflicts. Re-running requests will not help until the cause is fixed.',
     '',
-    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at); only requests from someone the lane would have served are counted, since it refuses anyone without write access in silence.',
+    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at); only requests from someone the lane would have served are counted, since it refuses anyone without write access in silence — and on a lane that is demonstrably alive, only requests the producer acknowledged; when the lane produced no output anywhere, every stale request counts, because a lane that answers nothing is the outage this issue tracks.',
     '',
     renderReport(assessment, options),
     'This issue is maintained by `.github/workflows/qwen-resolve-health.yml`; it comments when the picture changes and closes itself once a `/resolve` succeeds again.',

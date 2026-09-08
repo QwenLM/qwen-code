@@ -981,6 +981,138 @@ describe('resolve-health: assessment', () => {
     );
   });
 
+  it('counts stale unacknowledged requests when the lane produced no output anywhere', () => {
+    // The window-level arm of the owed gate: three requests, each on its
+    // own open PR, all older than staleHours, none acknowledged — and not
+    // one result comment or acknowledgement anywhere in the window. The
+    // missing reactions are then the outage itself (a workflow that fails
+    // to parse, Actions disabled, an expired PAT), not three refusals, and
+    // the roster must say so: this is the thirteen-day silence from the
+    // header, which the acknowledgement gate alone reads as all-refused.
+    const lane = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${6 + h}:00:00Z`,
+          51 + h,
+          'maintainer',
+          undefined,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const silent = assess(lane, { now });
+    assert.equal(silent.unanswered.length, 3);
+    assert.equal(silent.alarm, true);
+    assert.deepEqual(
+      decide(silent, null).map((a) => a.type),
+      ['create'],
+    );
+    // One acknowledgement anywhere switches the per-request reading back
+    // on: the lane demonstrably ran, so an unacknowledged request is a
+    // refusal again — and the acknowledged one, still owed its result,
+    // counts alone.
+    const acked = request('2026-08-27T09:00:00Z', 90);
+    const alive = assess(
+      [...lane, { number: 90, state: 'open', comments: [acked] }],
+      { now },
+    );
+    assert.deepEqual(
+      alive.unanswered.map((u) => u.id),
+      [acked.id],
+    );
+    assert.equal(alive.alarm, false);
+  });
+
+  it('keeps the close-gate veto for an unacknowledged request on a PR the lane has served', () => {
+    // A retry typed while an autofix round holds the PR's shared
+    // concurrency slot can wait that round's whole 345-minute timeout for
+    // its acknowledgement, and the ack POST's failure is swallowed by the
+    // producer — so past the short grace, an accepted request reads exactly
+    // like a refused one. This one is seven hours old, never acknowledged,
+    // and a healthy push lands on ANOTHER PR after it: the grace alone
+    // would drop the veto and post "Recovered" over a run that has not
+    // started (it is exactly what the code did before this arm). What
+    // separates it from a refusal is its own PR: the lane served this PR
+    // earlier in the window, so its silence toward this one request cannot
+    // be told apart from the parked queue.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    const lane = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            result('2026-08-27T04:30:00Z', PUSHED, 81),
+            request(
+              '2026-08-27T05:00:00Z',
+              81,
+              'maintainer',
+              undefined,
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T05:05:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lane, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
+  it('floors the recovery barrier at a request the owed gate does not read', () => {
+    // newestRequest deliberately keeps its looser predicate: an
+    // accepted-but-unacknowledged request the owed gate excludes must still
+    // stop a recovery close, because the barrier cannot tell "accepted,
+    // ack lost" from "refused, will never run". Here the request is
+    // unacknowledged and hours old on a PR the lane never served, so
+    // neither the roster nor the veto claims it — only the barrier does,
+    // and the predating push must not close over it. Inserting the owed
+    // gate into newestRequest drops that floor and closes.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    const lane = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            request(
+              '2026-08-27T05:00:00Z',
+              81,
+              'maintainer',
+              undefined,
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T04:30:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(lane.unserved, null);
+    assert.equal(lane.newestRequest, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lane, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
   it('does not count a comment edited into a request', () => {
     // The producer fires on comment creation only; an edit never starts a
     // run, so an edited comment never receives a result and must not be
@@ -3740,6 +3872,18 @@ describe('resolve-health: end to end against a recording gh', () => {
     // orphaning the live tracking issue (found by the old label) and
     // filing a duplicate beside it.
     assert.equal(DEFAULTS.label, 'scope/ci-cd');
+  });
+
+  it('pins the acknowledgement grace at or below the stale window', () => {
+    // The value itself, not only its use: the suite greens at every
+    // ackHours in (0.5, 10], so an unreviewed change of the constant would
+    // ship silently. It must stay at or below staleHours — past it a
+    // refused request re-enters the roster on age alone (measured:
+    // unanswered=1 at ackHours=4) — and no value under that ceiling covers
+    // the producer's own 345-minute queue budget, which is why the close
+    // gate does not rest on the grace alone.
+    assert.equal(DEFAULTS.ackHours, 1);
+    assert.ok(DEFAULTS.ackHours <= DEFAULTS.staleHours);
   });
 
   it('honours the unanswered-request knob through main()', () => {
