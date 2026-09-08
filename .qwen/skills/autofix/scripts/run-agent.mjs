@@ -2,6 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import {
+  constants,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -221,6 +222,11 @@ function runQwen(options, prompt) {
   let stdoutCarry = '';
   let discardingOversizedStdoutLine = false;
   let terminalResult;
+  // The stream's init event carries the RESOLVED model and the CLI version —
+  // what actually ran, versus the configured OPENAI_MODEL the workflow knows.
+  // finish() writes them to agent-model for the report footers.
+  let initModel = '';
+  let initVersion = '';
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
@@ -262,6 +268,24 @@ function runQwen(options, prompt) {
         const event = JSON.parse(line);
         lastOutputAt = Date.now();
         if (event?.type === 'result') terminalResult = event;
+        // First init event wins; newlines are flattened so the sentinel file
+        // stays two lines (the read sites allowlist further). The caps EQUAL
+        // the read sites' published bounds (cut -c1-100 / -c1-40), so a
+        // legitimate value is never written long and silently truncated on
+        // its way into the footer — a contract test pins the two pairs
+        // together.
+        if (
+          !initModel &&
+          event?.type === 'system' &&
+          event?.subtype === 'init' &&
+          typeof event.model === 'string'
+        ) {
+          initModel = event.model.split('\n')[0].slice(0, 100);
+          initVersion =
+            typeof event.qwen_code_version === 'string'
+              ? event.qwen_code_version.split('\n')[0].slice(0, 40)
+              : '';
+        }
         if (event?.type !== 'stream_event') {
           process.stdout.write(`${line}${terminated ? '\n' : ''}`);
         }
@@ -329,6 +353,37 @@ function runQwen(options, prompt) {
         apiErrorKind: apiErrorInfo.kind,
         sandboxRemoval,
       };
+      // Written on EVERY settle path — a crashed or timed-out round is exactly
+      // when the diagnosis footer needs to name the model that died. The open
+      // is non-following and non-blocking (af-053's rule for agent-writable
+      // paths, the shape run-ledger.ts's noFollow writes use): WORKDIR is
+      // bind-mounted rw into the sandbox as this same uid, so the round that
+      // just ran can leave a FIFO here — a plain O_WRONLY open would block
+      // forever at this point, after finish() has already disarmed every
+      // watchdog — or a symlink, which O_TRUNC would follow to truncate a
+      // host file while the round reports success. O_NOFOLLOW turns the
+      // symlink into ELOOP and O_NONBLOCK the readerless FIFO into ENXIO
+      // (undefined O_NOFOLLOW on Windows folds to 0; neither shape exists
+      // there), both landing in the best-effort catch.
+      if (initModel || initVersion) {
+        try {
+          writeFileSync(
+            file(options.workdir, 'agent-model'),
+            `${initModel}\n${initVersion}\n`,
+            {
+              flag:
+                constants.O_WRONLY |
+                constants.O_CREAT |
+                constants.O_TRUNC |
+                (constants.O_NOFOLLOW ?? 0) |
+                constants.O_NONBLOCK,
+            },
+          );
+        } catch {
+          // Best-effort: a write failure must not change the run outcome; the
+          // read sites fall back to the configured model.
+        }
+      }
       if (log.destroyed) {
         resolve(payload);
       } else {
