@@ -88,12 +88,9 @@ export function hasDynamicPlaceholder(value: string): boolean {
  * putting a wrong value on the wire:
  *
  * - The `outboundCorrelation.allowDynamicHeaderValues` gate is off (the
- *   default). This is the consent decision: a static header is a string
- *   the user typed, while an expanded one carries live process state to
- *   a third party. It also means a preset or extension that ships a
- *   `customHeaders` entry cannot turn it into an identity header behind
- *   the user's back — provenance is lost once presets and user settings
- *   are merged, so the gate is what distinguishes them.
+ *   default). The gate controls whether `${session_id}` may be expanded
+ *   from live process state; it cannot recover a header's provenance after
+ *   settings are merged.
  * - A placeholder resolves to nothing (no session yet).
  * - `Config` cannot answer at all.
  *
@@ -104,6 +101,7 @@ export function resolveDynamicHeaderValue(
   value: string,
   config: Config,
 ): string | undefined {
+  if (typeof value !== 'string') return undefined;
   if (!hasDynamicPlaceholder(value)) return value;
   try {
     if (!config.getOutboundAllowDynamicHeaderValues()) {
@@ -170,7 +168,7 @@ export function expandDynamicHeaders(
   if (!customHeaders) return {};
   const expanded: Record<string, string> = {};
   for (const [key, value] of Object.entries(customHeaders)) {
-    if (!hasDynamicPlaceholder(value)) continue;
+    if (typeof value !== 'string' || !hasDynamicPlaceholder(value)) continue;
     const resolved = resolveDynamicHeaderValue(value, config);
     if (resolved !== undefined) expanded[key] = resolved;
   }

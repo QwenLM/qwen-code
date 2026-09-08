@@ -122,8 +122,7 @@ export class LlmContentGenerator implements ContentGenerator {
   }
 
   private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
-    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
-    if (!this.cliConfig || !destination) return httpOptions;
+    if (!this.cliConfig) return httpOptions;
 
     // The placeholder-bearing entries were deliberately kept out of the
     // client options (see the constructor), so this is the only place
@@ -132,7 +131,10 @@ export class LlmContentGenerator implements ContentGenerator {
       this.contentGeneratorConfig?.customHeaders,
       this.cliConfig,
     );
-    const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
+    const sessionHeaders = destination
+      ? buildSessionIdHeaders(this.cliConfig, destination)
+      : {};
     if (
       Object.keys(sessionHeaders).length === 0 &&
       Object.keys(dynamicHeaders).length === 0

@@ -126,6 +126,20 @@ describe('expandDynamicHeaders', () => {
     ).toEqual({ 'x-opencode-session': 'session-1' });
   });
 
+  it('ignores non-string runtime values', () => {
+    const numericValue = 30 as unknown as string;
+    expect(
+      expandDynamicHeaders(
+        {
+          'x-timeout': numericValue,
+          'x-opencode-session': '${session_id}',
+        },
+        config(),
+      ),
+    ).toEqual({ 'x-opencode-session': 'session-1' });
+    expect(resolveDynamicHeaderValue(numericValue, config())).toBeUndefined();
+  });
+
   it('omits an entry the gate refuses rather than emitting the literal', () => {
     expect(
       expandDynamicHeaders(

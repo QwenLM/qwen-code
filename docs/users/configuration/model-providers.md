@@ -606,8 +606,8 @@ The header is never sent with a literal `${session_id}` in it.
 
 The switch is global because it is a consent decision, separate from _where_ the
 value goes: an expanded value carries live session state to whoever receives it,
-and the switch also stops a provider preset or an extension from quietly turning
-a `customHeaders` entry it ships into an identity header.
+and the switch controls only whether `${session_id}` may be expanded. It does not
+identify which settings source supplied the header.
 
 **Privacy note:** the session ID is a stable identifier for the life of a
 conversation, so any host you send it to can group every request of that

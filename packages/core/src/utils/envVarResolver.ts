@@ -34,7 +34,11 @@ export function resolveEnvVarsInString(
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
-    if (match === '${session_id}' || isInternalSecretEnvVar(varName)) {
+    if (
+      match === '${session_id}' ||
+      match === '${QWEN_CODE_SESSION_ID}' ||
+      isInternalSecretEnvVar(varName)
+    ) {
       return match;
     }
     if (customEnv && typeof customEnv[varName] === 'string') {

@@ -654,11 +654,8 @@ export interface OutboundCorrelationSettings {
    * This is the consent decision, and it is the only part of the feature
    * that is global: *which* hosts may receive the value, and *what* the
    * header is called, are already answered by the provider entry the
-   * header is attached to. The gate also means a preset or extension
-   * that ships a `customHeaders` entry cannot quietly turn it into an
-   * identity header — provenance is lost once presets and user settings
-   * are merged, so the switch is what separates "I typed this" from
-   * "something shipped this".
+   * header is attached to. It controls only `${session_id}` expansion and
+   * cannot recover a header's provenance after settings are merged.
    */
   allowDynamicHeaderValues?: boolean;
 }
