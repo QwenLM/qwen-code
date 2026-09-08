@@ -32,11 +32,10 @@ import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
- * Tiers the qwen3.8-max family accepts in `reasoning_effort`. This family's
- * ladder stops at `xhigh`, and a `max` above it is rejected with a 400 that
- * then repeats on every later request in the session. Declaring the supported
- * subset lets `clampReasoningEffort` cap the tier the same way the Anthropic
- * generator caps tiers its model lacks.
+ * Legacy input ladder for routes without an explicit reasoning capability.
+ * DashScope accepts high/max as xhigh aliases; configured presets expose only
+ * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'low',
@@ -583,13 +582,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Cap a configured tier at what the qwen3.8-max family actually accepts.
-   * This family does not take `max`, and the rejection is a 400 on every
-   * subsequent request rather than a one-off, so the tier is clamped to the
-   * strongest supported tier and reported once. Only the
-   * configured `reasoning.effort` passes through here: an explicit
-   * `extra_body` / `samplingParams` `reasoning_effort` is a documented
-   * verbatim override and is merged after this, so it still ships unchanged.
+   * Preserve the legacy clamp for a route without an explicit capability.
+   * Only the unified reasoning.effort preference reaches this fallback;
+   * extra_body and samplingParams remain verbatim provider overrides.
    */
   private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
     const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);

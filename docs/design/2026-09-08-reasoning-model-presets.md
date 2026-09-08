@@ -41,6 +41,15 @@ Token Plan 补充已列出的 Qwen 3.8 Flash 和 DeepSeek V4 Pro-0813，保留
 兼容别名保留。Coding Plan 只补已有混合思考条目的能力，不增加模型。
 原生 DeepSeek 的稳定 ID 已指向新快照；不把阿里云的快照 ID 猜测为原生 API ID。
 
+## 原生档位与兼容输入
+
+Qwen 3.8 的原生选项为 low / medium / xhigh。官方 Chat 参数文档同时规定
+high、max 映射到 xhigh，因此旧兼容表包含 high 并不代表新增了一个原生档位。
+显式 capability 只展示原生选项；不在声明中的持久化值被省略，采用 provider
+默认值（Qwen 3.8 为 xhigh）。未声明 capability 的路由继续使用原有 clamp
+和警告，以保留兼容行为；显式 extra_body / samplingParams 仍作为 provider
+参数透传。这是有意的配置优先规则，不代表 provider 会拒绝 high 或 max。
+
 ## 实现与验收
 
 修改 moonshot、deepseek、alibaba-standard、alibaba-token-plan 和
