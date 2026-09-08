@@ -1321,6 +1321,42 @@ describe('HookRunner', () => {
       );
     });
 
+    it('falls back to a direct SIGKILL when taskkill of a surviving Windows hook fails', async () => {
+      // taskkillProcessTree resolves false when execFile reports an error
+      // (ERROR_ACCESS_DENIED from an elevated or AV-intercepted System32) or
+      // when it exceeds its own 2s timeout. The caller has to honour that
+      // boolean, or the hook's cmd.exe tree keeps running with nothing left
+      // to reap it.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9913;
+      const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(new Error('ERROR_ACCESS_DENIED'));
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      // The liveness probe (signal 0) passed, so taskkill was attempted.
+      expect(mockExecFile).toHaveBeenCalledWith(
+        expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+        ['/f', '/t', '/pid', String(survivingPid)],
+        expect.anything(),
+        expect.any(Function),
+      );
+      expect(killSpy).toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+    });
+
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');
       mockSpawn.mockReturnValue(mockProcess);

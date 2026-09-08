@@ -496,7 +496,19 @@ async function terminateSurvivingHookProcessGroup(
     if (!isProcessAlive(pid)) {
       return;
     }
-    await taskkillProcessTree(pid);
+    // `taskkillProcessTree` resolves false when execFile errors or when
+    // taskkill exceeds WINDOWS_TASKKILL_TIMEOUT_MS — both reachable on a deep
+    // tree or a locked-down System32. Dropping that boolean leaves the hook's
+    // cmd.exe tree running with nothing else able to reap it, which is exactly
+    // the leak this branch exists to close. Mirrors the fallback in
+    // terminateWindowsHookProcessTree above.
+    if (!(await taskkillProcessTree(pid))) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The process already exited.
+      }
+    }
     return;
   }
 
