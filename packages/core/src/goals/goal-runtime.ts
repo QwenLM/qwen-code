@@ -1655,10 +1655,9 @@ export function createGoalRuntime(
             proposal && persistedSnapshot.goal?.status === 'active'
               ? proposal
               : undefined;
-          const nextCheckpoint =
-            !activeProposal && !noProgressLimitReached
-              ? createCheckpointAttempt(permit, nextGoal)
-              : undefined;
+          const nextCheckpoint = !activeProposal
+            ? createCheckpointAttempt(permit, nextGoal)
+            : undefined;
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: 'turn_finished',
@@ -1731,7 +1730,7 @@ export function createGoalRuntime(
                   controller: new AbortController(),
                 }
               : undefined;
-          checkpointAttempt = nextCheckpoint;
+          checkpointAttempt = noProgressSnapshot ? undefined : nextCheckpoint;
           const verifying = Boolean(
             pendingProposal || verificationAttempt || checkpointAttempt,
           );

@@ -5945,15 +5945,52 @@ describe('goal runtime', () => {
       expect(host.started).toHaveLength(GOAL_NO_PROGRESS_TURN_LIMIT);
     });
 
-    it('lets a waiting user turn outrank the bound', async () => {
-      const { host, runtime } = noProgressHarness();
-      await runtime.dispatch({ action: 'create', objective: 'ship' });
-      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT - 1; turn++) {
-        await finishAutonomousTurn(runtime, host.started[turn]!);
-      }
+    it('lets a waiting user turn outrank the bound and keeps its checkpoint', async () => {
+      const checkpointVerifier = vi.fn(async () => ({
+        claims: [
+          {
+            proofKind: 'delivered_output' as const,
+            claim: 'The implementation result was delivered.',
+            sourceRefs: ['assistant-evidence-79'],
+          },
+        ],
+      }));
+      const { host, runtime, setEvidence } = noProgressHarness({
+        checkpointVerifier,
+      });
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship',
+              status: 'active',
+              evidenceCursor: { recordId: 'record-0' },
+              turnCount: 2,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            activity: 'idle',
+          },
+          'turn_finished',
+        ),
+      ]);
+      await vi.waitFor(() => expect(host.started).toHaveLength(1));
 
       // The user typed while the third turn was still running.
-      const last = host.started[GOAL_NO_PROGRESS_TURN_LIMIT - 1]!;
+      const last = host.started[0]!;
+      setEvidence(
+        verifierEvidenceWindow(
+          last,
+          runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+          80,
+        ),
+      );
       expect(runtime.beginTurn('user-turn')).toBeUndefined();
       await finishAutonomousTurn(runtime, last);
 
@@ -5965,6 +6002,8 @@ describe('goal runtime', () => {
         noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
       });
       expect(runtime.permitForTurn('user-turn')).toBeDefined();
+      expect(checkpointVerifier).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toHaveProperty('evidenceCheckpoint');
     });
 
     it('serves a user turn reserved while the pause was being written', async () => {
