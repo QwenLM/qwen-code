@@ -217,7 +217,7 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).not.toHaveBeenCalled();
   });
 
-  it('uses separate cards for complete detailed responses and no empty card at request end', async () => {
+  it('does not create another card after the final detailed output closes its segment', async () => {
     const { presenter, client } = createHarness();
     presenter.startStatusCard('run-1');
     await presenter.closeOutput(

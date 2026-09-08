@@ -370,8 +370,8 @@ interface Attachment {
 
 The legacy `blockStreaming`, `blockStreamingChunk`, and
 `blockStreamingCoalesce` fields remain accepted when reading existing settings.
-Request result delivery now follows `outputMode`: final
-conclusion only, or one message per complete assistant output. It does not flush
+Request result delivery now follows `outputMode`: the last complete
+assistant reply only, or one message per complete assistant output. It does not flush
 partial output based on paragraph size or an idle timer. Interactive adapters
 can display provisional content through `onResponseProgress` while the request
 remains active.

@@ -122,7 +122,9 @@ boundaries. Tool activity and raw background-agent results do not create cards.
   output into several messages; this does not create additional logical outputs.
   With interactive cards, continuing tool work or background tasks starts the
   next running card before the next complete reply arrives. That card receives
-  subsequent text updates and is finalized with its complete output.
+  subsequent text updates and is finalized with its complete output. If the
+  assistant ends without another output, that already-created card remains as
+  an empty completed card; withdrawing it is not currently supported.
 
 The channel editor presents these options as **仅最终结果** and **过程与结果**.
 
