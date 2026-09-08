@@ -1442,6 +1442,67 @@ describe('round-30: the proof cannot distinguish the target from a same-text imp
   });
 });
 
+describe("this PR's own headline reproduction (#9437)", () => {
+  // The Reviewer Test Plan in the PR body, as a permanent pin:
+  //
+  //   1. Start an interactive session with at least three prompts, using
+  //      `[Old inline media cleared: image/png]` as the middle prompt.
+  //   2. Rewind to that exact middle prompt.
+  //   3. The selected prompt and its following assistant response must both
+  //      be absent from the model-bound history.
+  //
+  // This is the collision #9437 was filed for and the one the PR's A/B
+  // evidence measures. It is RED at the time this test was added: the
+  // round-30 demotion in `isApiEntryOwnedByText` refuses the ownership proof
+  // whenever the target's own text is a cleared-media placeholder — which is
+  // this exact turn — so the unique identity match is discarded and the
+  // positional walk runs. The walk excludes placeholders from its count, so
+  // it lands one turn late (4 instead of 2), leaving the selected prompt and
+  // its response in model context: the PR's documented "before" state.
+  //
+  // Do not delete or relax this test to get the suite green. Either the gate
+  // resolves this turn, or the PR's central claim and its Reviewer Test Plan
+  // need to be amended to say it does not.
+  it('removes the selected turn when its text equals the cleared-media placeholder', () => {
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // Truncating at 2 keeps [hello, response 1]. Truncating at 4 keeps the
+    // selected prompt and its response — the bug.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+});
+
 describe('isRealUserTurn', () => {
   it('returns true for normal user prompts', () => {
     expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);
