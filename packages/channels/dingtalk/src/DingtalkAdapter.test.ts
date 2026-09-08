@@ -18,6 +18,7 @@ import type {
   BackgroundResponseContext,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -1065,6 +1066,15 @@ function getUserInputHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'presentUserInputRequest'
   ] as (context: ChannelUserInputRequestContext) => Promise<{ kind: string }>;
+  return fn.bind(channel);
+}
+
+function getPermissionHook(
+  channel: DingtalkChannelInstance,
+): (context: ChannelPermissionRequestContext) => Promise<{ kind: string }> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'presentPermissionRequest'
+  ] as (context: ChannelPermissionRequestContext) => Promise<{ kind: string }>;
   return fn.bind(channel);
 }
 
@@ -2495,6 +2505,149 @@ describe('DingtalkChannel question cards', () => {
     await expect(
       getUserInputHook(channel)({ ...context, runId: 'unknown' }),
     ).resolves.toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('DingtalkChannel permission cards', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function permissionContext(runId = 'run-1'): ChannelPermissionRequestContext {
+    return {
+      requestId: 'perm-1',
+      sessionId: 'session-1',
+      runId,
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      toolName: 'run_shell_command',
+      title: 'Run a command',
+      decisions: [
+        { kind: 'allow_once', label: 'Allow' },
+        { kind: 'deny', label: 'Reject' },
+      ],
+      onSettled: () => () => {},
+      respond: vi.fn().mockResolvedValue(true),
+    };
+  }
+
+  it('initializes the permission controller when cards are enabled', () => {
+    const channel = createChannel();
+    expect(
+      (
+        channel as unknown as {
+          permissionCardController?: unknown;
+        }
+      ).permissionCardController,
+    ).toBeDefined();
+  });
+
+  it('leaves the permission controller out when independently disabled', () => {
+    const channel = createChannel({
+      interactiveCards: { permissionCard: { enabled: false } },
+    });
+    expect(
+      (
+        channel as unknown as {
+          permissionCardController?: unknown;
+        }
+      ).permissionCardController,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    undefined,
+    { enabled: false },
+    { permissionCard: { enabled: false } },
+  ])(
+    'returns unsupported when permission cards are disabled: %j',
+    async (interactiveCards) => {
+      const channel = createChannel({ interactiveCards });
+      const respond = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+        'run-disabled',
+        {
+          ownerId: 'owner-1',
+          target: { chatId: 'cid-1', isGroup: true },
+        },
+      );
+      const context = permissionContext('run-disabled');
+      context.respond = respond;
+
+      await expect(getPermissionHook(channel)(context)).resolves.toEqual({
+        kind: 'unsupported',
+      });
+      expect(respond).not.toHaveBeenCalled();
+    },
+  );
+
+  it('presents a permission card through the matching attended run only', async () => {
+    const channel = createChannel();
+    const presentPermission = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'presented' })
+      .mockResolvedValueOnce({ kind: 'unsupported' });
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          presentPermission: typeof presentPermission;
+        };
+        cardRuns: Map<string, unknown>;
+      }
+    ).interactionPresenter = { presentPermission };
+    (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+      'run-perm',
+      {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      },
+    );
+
+    const context = permissionContext('run-perm');
+    await expect(getPermissionHook(channel)(context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(presentPermission).toHaveBeenCalledWith(context);
+
+    await expect(
+      getPermissionHook(channel)(permissionContext('unknown-run')),
+    ).resolves.toEqual({ kind: 'unsupported' });
+  });
+
+  it('routes permission card callbacks after the question controller', () => {
+    const channel = createChannel();
+    const claim = vi.fn().mockReturnValue({
+      kind: 'accepted',
+      execute: vi.fn().mockResolvedValue(undefined),
+    });
+    (
+      channel as unknown as {
+        permissionCardController: { claim: typeof claim };
+      }
+    ).permissionCardController = { claim };
+    const route = (
+      channel as unknown as {
+        routeCardCallback(
+          callback: DingtalkCardCallback,
+        ): DingtalkCardCallbackResult;
+      }
+    ).routeCardCallback.bind(channel);
+    const callback = {
+      outTrackId: 'qwen-permission-routed',
+      actionId: 'submit',
+      actorId: 'owner-1',
+      formData: { permission_decision: 'Allow' },
+    } as DingtalkCardCallback;
+
+    const result = route(callback);
+
+    expect(result.kind).toBe('accepted');
+    expect(claim).toHaveBeenCalledWith(callback);
   });
 });
 

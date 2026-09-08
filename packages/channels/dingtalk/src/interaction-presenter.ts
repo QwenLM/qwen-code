@@ -3,12 +3,14 @@ import { sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   SessionTarget,
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
+import type { PermissionCardController } from './permission-card-controller.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
   CONTENT_LIMIT,
@@ -40,6 +42,7 @@ interface SegmentPresentation {
 export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
+  permissionCards?: PermissionCardController;
   sendFallback?(
     chatId: string,
     text: string,
@@ -281,6 +284,24 @@ export class DingtalkInteractionPresenter {
     return questionCards.present(context, this.cardTarget(context.target));
   }
 
+  presentPermission(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.runs.get(context.runId);
+    if (
+      !run ||
+      run.terminal ||
+      run.ownerId !== context.owner.id ||
+      run.target.chatId !== context.target.chatId ||
+      run.target.isGroup !== context.target.isGroup
+    ) {
+      return Promise.resolve({ kind: 'unsupported' });
+    }
+    const permissionCards = this.options.permissionCards;
+    if (!permissionCards) return Promise.resolve({ kind: 'unsupported' });
+    return permissionCards.present(context, this.cardTarget(context.target));
+  }
+
   terminalizeRun(
     runId: string,
     terminal: 'completed' | 'failed' | 'cancelled',
@@ -288,13 +309,13 @@ export class DingtalkInteractionPresenter {
   ): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
-    this.options.questionCards?.cancelRun(
-      runId,
+    const runTerminalState =
       terminal === 'cancelled' &&
-        (detail === 'cancel_command' || detail === 'clear')
+      (detail === 'cancel_command' || detail === 'clear')
         ? 'cancelled'
-        : 'expired',
-    );
+        : 'expired';
+    this.options.questionCards?.cancelRun(runId, runTerminalState);
+    this.options.permissionCards?.cancelRun(runId, runTerminalState);
     run.terminal = true;
     const activeSegmentId = run.activeSegmentId;
     run.activeSegmentId = undefined;

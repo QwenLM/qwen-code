@@ -274,6 +274,36 @@ export interface ChannelUserInputRequestContext {
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
+/** The tool-permission decisions a presenter may offer for one request. */
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionDecisionOption {
+  kind: ChannelPermissionDecision;
+  label: string;
+}
+
+/**
+ * Adapter-neutral presentation context for one ordinary (non
+ * `ask_user_question`) tool permission request. The decisions array carries
+ * only the choices the permission request actually advertised; the adapter
+ * never invents an option ID, and `respond` is the same one-shot responder
+ * used by semantic user-input presentations and text permission commands.
+ */
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  sourceLabel?: string;
+  toolName: string;
+  title: string;
+  parameterSummary?: string;
+  decisions: ChannelPermissionDecisionOption[];
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
+}
+
 export interface ChannelOutputSegmentContext {
   channelName: string;
   sessionId: string;

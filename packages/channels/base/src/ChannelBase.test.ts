@@ -8,6 +8,7 @@ import type {
   ChannelMemoryEntry,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -104,6 +105,13 @@ class TestChannel extends ChannelBase {
   userInputPresentationHandler?: (
     context: ChannelUserInputRequestContext,
   ) => Promise<UserInputPresentationResult>;
+  permissionPresentations: ChannelPermissionRequestContext[] = [];
+  permissionPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  permissionPresentationHandler?: (
+    context: ChannelPermissionRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -149,6 +157,16 @@ class TestChannel extends ChannelBase {
       return this.userInputPresentationHandler(context);
     }
     return this.userInputPresentationResult;
+  }
+
+  protected async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.permissionPresentations.push(context);
+    if (this.permissionPresentationHandler) {
+      return this.permissionPresentationHandler(context);
+    }
+    return this.permissionPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -2361,6 +2379,238 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toBe(
         'No pending permission request with that id for this chat.',
       );
+
+      await active.finish();
+    });
+
+    it('presents ordinary permissions with the advertised decisions', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-card');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        requestId: 'req-card',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        toolName: 'run_shell_command',
+        title: 'Run req-card',
+        parameterSummary: 'command',
+        decisions: [
+          { kind: 'allow_once', label: 'Allow' },
+          { kind: 'allow_always', label: 'Always Allow in project' },
+          { kind: 'deny', label: 'Reject' },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('hides the persistent-grant decision when the request omits it', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-once-only', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: 'Allow' },
+        { kind: 'deny', label: 'Reject' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('sends the text permission message when presentation is unsupported', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'unsupported' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-text-fallback');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+
+      await active.finish();
+    });
+
+    it('sends the text permission message when card delivery fails', async () => {
+      const ch = createChannel();
+      let deliveries = 0;
+      ch.permissionPresentationHandler = async () => {
+        deliveries++;
+        // Mirrors PermissionCardController: a failed card delivery returns
+        // `unsupported` while the request stays pending for the text path.
+        return { kind: 'unsupported' };
+      };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-delivery-failed');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(deliveries).toBe(1);
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain('/approve'),
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('does not present a permission card without an active attended prompt', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-inactive');
+
+      expect(ch.permissionPresentations).toEqual([]);
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+    });
+
+    it('never routes user-question requests to the permission presenter', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-is-question');
+
+      await vi.waitFor(() => expect(ch.sent.at(-1)?.text).toBeDefined());
+      expect(ch.permissionPresentations).toEqual([]);
+      expect(ch.sent.at(-1)?.text).toContain('/approve');
+
+      await active.finish();
+    });
+
+    it('never routes malformed user-question requests to the permission presenter', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-malformed-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-malformed',
+            kind: 'other',
+            title: 'Ask user 1 question',
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: 'not-an-array',
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', kind: 'allow_once', name: 'Submit' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent.at(-1)?.text).toBeDefined());
+      expect(ch.permissionPresentations).toEqual([]);
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+
+      await active.finish();
+    });
+
+    it('maps permission decisions onto the original options', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-allow-once');
+      emitPermission(active.sessionId, 'req-allow-always');
+      emitPermission(active.sessionId, 'req-deny');
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(3),
+      );
+
+      await ch.permissionPresentations[0]!.respond('allow_once');
+      expect(respondToPermissionMock()).toHaveBeenLastCalledWith(
+        'req-allow-once',
+        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+      );
+      await ch.permissionPresentations[1]!.respond('allow_always');
+      expect(respondToPermissionMock()).toHaveBeenLastCalledWith(
+        'req-allow-always',
+        {
+          outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
+        },
+      );
+      await ch.permissionPresentations[2]!.respond('deny');
+      expect(respondToPermissionMock()).toHaveBeenLastCalledWith('req-deny', {
+        outcome: { outcome: 'selected', optionId: 'cancel' },
+      });
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(3);
+
+      await active.finish();
+    });
+
+    it('shares one response promise between the card and text commands', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-race');
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      const context = ch.permissionPresentations[0]!;
+
+      await ch.handleInbound(
+        envelope({ senderId: 'owner-1', text: '/approve' }),
+      );
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+
+      await expect(context.respond('deny')).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+
+      await active.finish();
+    });
+
+    it('notifies the card when the request is resolved outside it', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-outside');
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      const context = ch.permissionPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+
+      (bridge as unknown as EventEmitter).emit('permissionResolved', {
+        requestId: 'req-outside',
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
+      await expect(context.respond('allow_once')).resolves.toBe(false);
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
       await active.finish();
     });

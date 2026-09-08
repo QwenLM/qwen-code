@@ -60,6 +60,7 @@ import {
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
@@ -69,6 +70,7 @@ import type {
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -982,6 +984,7 @@ export class DingtalkChannel extends ChannelBase {
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private permissionCardController?: PermissionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
@@ -1120,10 +1123,28 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (this.statusCardController || this.questionCardController) {
+      if (this.interactiveCardConfig.permissionCard.enabled) {
+        this.permissionCardController = new PermissionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (
+        this.statusCardController ||
+        this.questionCardController ||
+        this.permissionCardController
+      ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
+          permissionCards: this.permissionCardController,
           ...(config.blockStreaming !== 'on'
             ? {
                 sendFallback: (
@@ -1245,12 +1266,18 @@ export class DingtalkChannel extends ChannelBase {
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
-    return (
-      this.questionCardController?.claim(callback) ?? {
-        kind: 'ignored',
-        actorId: callback.actorId,
-      }
-    );
+    const questionResult = this.questionCardController?.claim(callback);
+    if (questionResult && questionResult.kind !== 'ignored') {
+      return questionResult;
+    }
+    const permissionResult = this.permissionCardController?.claim(callback);
+    if (permissionResult && permissionResult.kind !== 'ignored') {
+      return permissionResult;
+    }
+    return {
+      kind: 'ignored',
+      actorId: callback.actorId,
+    };
   }
 
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
@@ -3559,6 +3586,19 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentInput(context);
+  }
+
+  protected override async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.permissionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentPermission(context);
   }
 
   /**

@@ -19,10 +19,22 @@ describe('interactive card config', () => {
     const timeout = questionCard?.properties?.find(
       (field) => field.key === 'timeoutMs',
     );
+    const permissionCard = interactiveCards?.properties?.find(
+      (field) => field.key === 'permissionCard',
+    );
+    const permissionTimeout = permissionCard?.properties?.find(
+      (field) => field.key === 'timeoutMs',
+    );
 
     expect(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM).toBe(0);
     expect(
       timeout?.kind === 'number' ? timeout.exclusiveMinimum : undefined,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
+    expect(permissionCard?.kind).toBe('object');
+    expect(
+      permissionTimeout?.kind === 'number'
+        ? permissionTimeout.exclusiveMinimum
+        : undefined,
     ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
     const descriptorAdmittedSamples = [
       {},
@@ -32,6 +44,13 @@ describe('interactive card config', () => {
       { questionCard: {} },
       {
         questionCard: {
+          enabled: false,
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM + 1,
+        },
+      },
+      { permissionCard: {} },
+      {
+        permissionCard: {
           enabled: false,
           timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM + 1,
         },
@@ -47,11 +66,13 @@ describe('interactive card config', () => {
       enabled: false,
       statusCard: { enabled: true },
       questionCard: { enabled: true, timeoutMs: 270_000 },
+      permissionCard: { enabled: true, timeoutMs: 270_000 },
     });
     expect(parseDingtalkInteractiveCardConfig({})).toEqual({
       enabled: true,
       statusCard: { enabled: true },
       questionCard: { enabled: true, timeoutMs: 270_000 },
+      permissionCard: { enabled: true, timeoutMs: 270_000 },
     });
   });
 
@@ -61,11 +82,13 @@ describe('interactive card config', () => {
         enabled: true,
         statusCard: { enabled: false },
         questionCard: { enabled: true, timeoutMs: 1_000 },
+        permissionCard: { enabled: false },
       }),
     ).toEqual({
       enabled: true,
       statusCard: { enabled: false },
       questionCard: { enabled: true, timeoutMs: 1_000 },
+      permissionCard: { enabled: false, timeoutMs: 270_000 },
     });
   });
 
@@ -85,6 +108,33 @@ describe('interactive card config', () => {
     expect(() =>
       parseDingtalkInteractiveCardConfig({ statusCard: { enabled: 'yes' } }),
     ).toThrow('statusCard.enabled');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({
+        permissionCard: {
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+        },
+      }),
+    ).toThrow('permissionCard.timeoutMs');
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({ permissionCard: 'on' }),
+    ).toThrow('permissionCard must be an object');
+  });
+
+  it('defaults the permission card timeout and clamps oversized values', () => {
+    const config = parseDingtalkInteractiveCardConfig({
+      permissionCard: {},
+    });
+    expect(config.permissionCard).toEqual({
+      enabled: true,
+      timeoutMs: 270_000,
+    });
+    expect(
+      parseDingtalkInteractiveCardConfig({
+        permissionCard: {
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS + 1,
+        },
+      }).permissionCard.timeoutMs,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS);
   });
 
   it('clamps question timeouts at the setTimeout maximum delay', () => {

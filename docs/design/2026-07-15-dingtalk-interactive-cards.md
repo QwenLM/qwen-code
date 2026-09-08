@@ -27,12 +27,13 @@ The architecture has four ownership layers:
 
 There are two card types, not one generic card lifecycle:
 
-| Card                  | Business object                         | DingTalk protocol                                        | Local lifecycle                                                              |
-| --------------------- | --------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Streaming status card | One visible output segment              | `createAndDeliver`, `/card/streaming`, `/card/instances` | `running`, `completed`, `failed`, `stopped`, `cancelled`                     |
-| Form callback card    | One Channel-owned user-question request | `createAndDeliver`, card callback, `/card/instances`     | `pending`, `submitted`, `cancelled`, `expired`, `resolved_outside_presenter` |
+| Card                  | Business object                                    | DingTalk protocol                                        | Local lifecycle                                                                       |
+| --------------------- | -------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Streaming status card | One visible output segment                         | `createAndDeliver`, `/card/streaming`, `/card/instances` | `running`, `completed`, `failed`, `stopped`, `cancelled`                              |
+| Form callback card    | One Channel-owned user-question request            | `createAndDeliver`, card callback, `/card/instances`     | `pending`, `submitted`, `cancelled`, `expired`, `resolved_outside_presenter`          |
+| Permission card       | One Channel-owned ordinary tool permission request | `createAndDeliver`, card callback, `/card/instances`     | `pending`, `approved`, `denied`, `cancelled`, `expired`, `resolved_outside_presenter` |
 
-They share authentication and callback ingress, but they keep independent registries and state machines.
+They share authentication and callback ingress, but they keep independent registries and state machines. The permission card (added for [#10388](https://github.com/QwenLM/qwen-code/issues/10388)) reuses the question form template with a single required decision field and follows the same delivery-race discipline as the question card; the section "Ordinary permission card — DingTalk-only change" below fixes its contract.
 
 ## Existing capabilities reused — no change
 
@@ -329,6 +330,20 @@ An instance update is a UI projection, not the permission transaction. If the re
 
 Unlike the OpenClaw reference implementation, Qwen Code does not inject a synthetic inbound message. It responds directly to the original permission request. A second request in the same live run uses the text fallback and leaves the first native card answerable.
 
+## Ordinary permission card — DingTalk-only change (added for #10388)
+
+Ordinary tool permission requests — everything that is not a semantic `ask_user_question` interaction — gain their own presentation seam and card lifecycle. `ChannelBase` exposes a second optional structured hook, `presentPermissionRequest(context)`, invoked only when the question presenter is not eligible: the request must belong to the current attended, non-loop Channel-owned prompt, and requests identified as user-question interactions (including malformed canonical ones) never reach it. The context carries only adapter-neutral data — request, session, and run identity, the prompt owner, the resolved target, a sanitized tool name, title, and parameter summary, the decisions actually advertised by the permission request (`allow_once`, `allow_always` only when the request offers a persistent grant, and `deny`), a settlement subscription, and a one-shot `respond(decision)` closure mapped onto the original option IDs. The adapter never invents an option ID.
+
+The DingTalk `PermissionCardController` reuses the question form template with one required single-choice `permission_decision` field whose options are exactly the advertised decision labels; there is no free-form input. It follows the same `reserved → pending → claimed → terminal` delivery-race discipline as the question card, with the same owner check, forbidden-actor handling, callback acknowledgment, and terminal projection rules. Differences from the question card are deliberate:
+
+- Every terminal path first settles the original request at most once through the shared pending-record responder, then projects the card as `approved`, `denied`, `cancelled`, `expired`, or `resolved_outside_presenter` (projected as a non-interactive `expired` card with a "Resolved outside this card." description).
+- The card cancel action and the card-local timeout both deny the permission through the one-shot responder and terminalize the card as `cancelled` and `expired` respectively, matching the existing permission timeout semantics.
+- A card delivery failure removes the local record and returns `unsupported` without cancelling the request: the existing `/approve`, `/approve-always`, and `/deny` text message is a complete fallback and is sent by `ChannelBase`. Unlike question cards, no fallback text is sent by the controller itself.
+- Multiple permission requests in one run each get their own card; there is no scope supersession, because sequential tool approvals are the normal case.
+- While a permission card is live, text commands from the owning sender still work: `ChannelBase` routes them through the same one-shot pending-record response promise, so a card action and a text command race settles the permission exactly once and first-responder-wins. `/approve` and `/approve-always` remain blocked only for question-card presentations, where they cannot carry the required answers.
+
+Run termination and session death cancel every pending permission card of the run through the same `cancelRun` projection used for question cards.
+
 ## Configuration and built-in templates — DingTalk-only change
 
 The capability configuration is local to DingTalk. It is parsed by the DingTalk adapter and does not add a cross-channel card concept to `ChannelConfig`:
@@ -343,12 +358,16 @@ The capability configuration is local to DingTalk. It is parsed by the DingTalk 
     "questionCard": {
       "enabled": true,
       "timeoutMs": 270000
+    },
+    "permissionCard": {
+      "enabled": true,
+      "timeoutMs": 270000
     }
   }
 }
 ```
 
-The effective question lifetime is the smaller of the configured timeout and the host permission lifetime.
+The effective question lifetime is the smaller of the configured timeout and the host permission lifetime. The permission card mirrors the question-card configuration and defaults.
 
 Template IDs are built-in DingTalk Channel assets, not user configuration. The reference plugin uses these IDs with the installing bot's own DingTalk credentials; they are not treated as resources owned by the reference repository's AppKey:
 

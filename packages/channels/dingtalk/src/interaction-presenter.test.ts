@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChannelOutputSegmentContext,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
@@ -11,6 +12,7 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { StatusCardController } from './status-card-controller.js';
 
@@ -100,6 +102,35 @@ function questionContext(
   };
 }
 
+function permissionContext(
+  requestId = 'perm-1',
+): ChannelPermissionRequestContext {
+  const listeners = new Set<(reason: UserInputSettlementReason) => void>();
+  return {
+    requestId,
+    sessionId: 'session-1',
+    runId: 'run-1',
+    owner: { kind: 'channel_user', id: 'owner-1' },
+    target: {
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      senderId: 'owner-1',
+      isGroup: true,
+    },
+    toolName: 'run_shell_command',
+    title: 'Run a command',
+    decisions: [
+      { kind: 'allow_once', label: 'Allow' },
+      { kind: 'deny', label: 'Reject' },
+    ],
+    onSettled(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    respond: vi.fn().mockResolvedValue(true),
+  };
+}
+
 function createHarness() {
   const projectionOrder: string[] = [];
   const client = {
@@ -137,9 +168,16 @@ function createHarness() {
     reserveRunProjection: (runId) =>
       presenterRef.current?.reserveProjection(runId),
   });
+  const permissionCards = new PermissionCardController({
+    client,
+    timeoutMs: 300_000,
+    reserveRunProjection: (runId) =>
+      presenterRef.current?.reserveProjection(runId),
+  });
   const presenter = new DingtalkInteractionPresenter({
     statusCards,
     questionCards,
+    permissionCards,
     sendFallback,
   });
   presenterRef.current = presenter;
@@ -149,6 +187,7 @@ function createHarness() {
     presenter,
     projectionOrder,
     questionCards,
+    permissionCards,
     statusCards,
     cancelRun,
     sendFallback,
@@ -1535,5 +1574,72 @@ describe('DingtalkInteractionPresenter', () => {
     await secondPresentation;
 
     expect(questionCreatesBeforeTerminalUpdate).toBe(2);
+  });
+
+  it('presents a permission card through the matching run', async () => {
+    const { client, presenter } = createHarness();
+
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'presented' });
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: QUESTION_CARD_TEMPLATE_ID,
+        target,
+      }),
+    );
+  });
+
+  it('rejects permission presentation for foreign owners and unknown runs', async () => {
+    const { presenter } = createHarness();
+    const foreign = permissionContext();
+    foreign.owner = { kind: 'channel_user', id: 'someone-else' };
+    const unknownRun = permissionContext();
+    unknownRun.runId = 'run-missing';
+
+    await expect(presenter.presentPermission(foreign)).resolves.toEqual({
+      kind: 'unsupported',
+    });
+    await expect(presenter.presentPermission(unknownRun)).resolves.toEqual({
+      kind: 'unsupported',
+    });
+  });
+
+  it('is unsupported without a permission card controller', async () => {
+    const client = {
+      createAndDeliver: vi.fn().mockResolvedValue(undefined),
+      openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
+      updateInstance: vi.fn().mockResolvedValue(undefined),
+    } as unknown as DingtalkInteractiveCardClient;
+    const presenter = new DingtalkInteractionPresenter({
+      questionCards: new QuestionCardController({
+        client,
+        timeoutMs: 300_000,
+        sendFallback: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+    presenter.registerRun('run-1', 'owner-1', target);
+
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'unsupported' });
+  });
+
+  it('cancels pending permission cards when the run terminalizes', async () => {
+    const { client, presenter } = createHarness();
+    await presenter.presentPermission(permissionContext());
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            card_status: 'cancelled',
+          }),
+        }),
+      ),
+    );
   });
 });
