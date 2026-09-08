@@ -905,6 +905,41 @@ describe('useComposerCore history and drafts', () => {
 });
 
 describe('useComposerCore paste', () => {
+  it('pastes editable text when PPT clipboard also includes an image', async () => {
+    const { onSubmit } = await mount();
+    const text = '第一季度收入增长 20%\n请改写这段文字。';
+    const image = new File(['png'], 'ppt-text.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [image],
+        items: [
+          { kind: 'file', type: 'image/png', getAsFile: () => image },
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+    await waitForImageIngestion();
+
+    expect.soft(latest!.getText()).toBe(text);
+    expect.soft(latest!.pastedImages).toEqual([]);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      text,
+      undefined,
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
+  });
+
   it('lets long plain text paste directly into the editor', async () => {
     await mount();
     const event = new Event('paste', { bubbles: true, cancelable: true });
@@ -1330,6 +1365,39 @@ describe('useComposerCore tags', () => {
     );
   });
 
+  it('uses file format icons while preserving explicit icons and directories', async () => {
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'html', kind: 'file', value: 'docs/page.html' },
+          {
+            id: 'custom',
+            kind: 'file',
+            value: 'other.html',
+            icon: '/custom.svg',
+          },
+          {
+            id: 'folder',
+            kind: 'file',
+            value: 'docs',
+            metadata: { fileKind: 'directory' },
+          },
+        ],
+        tagPlacement: 'inline',
+      },
+    });
+
+    expect(
+      document.body.querySelectorAll('[data-file-type-icon="html"]'),
+    ).toHaveLength(1);
+    expect(
+      document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(2);
+    expect(latest!.viewRef.current!.state.doc.toString()).toContain(
+      'docs/page.html',
+    );
+  });
+
   it('resubmits restored input annotations with the draft', async () => {
     const { onSubmit } = await mount();
     const inputAnnotations = [
@@ -1534,23 +1602,26 @@ describe('useComposerCore tags', () => {
     warn.mockRestore();
   });
 
-  it('uses a custom inline tooltip without a native title', async () => {
-    await mount({
-      composerInput: {
-        tags: [{ id: 'orders', label: 'Table', value: 'orders' }],
-        tagPlacement: 'inline',
-      },
-      renderComposerTagTooltip: () => 'Details',
-    });
+  it.each([undefined, 'file'] as const)(
+    'uses a custom inline tooltip without a native title for kind %s',
+    async (kind) => {
+      await mount({
+        composerInput: {
+          tags: [{ id: 'orders', kind, label: 'Table', value: 'orders' }],
+          tagPlacement: 'inline',
+        },
+        renderComposerTagTooltip: () => 'Details',
+      });
 
-    const tooltip = document.body.querySelector('[role="tooltip"]');
-    expect(tooltip?.textContent).toBe('Details');
-    expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
-    expect(tooltip?.id).toBeTruthy();
-    expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
-      tooltip?.id,
-    );
-  });
+      const tooltip = document.body.querySelector('[role="tooltip"]');
+      expect(tooltip?.textContent).toBe('Details');
+      expect(tooltip?.parentElement?.getAttribute('title')).toBeNull();
+      expect(tooltip?.id).toBeTruthy();
+      expect(tooltip?.parentElement?.getAttribute('aria-describedby')).toBe(
+        tooltip?.id,
+      );
+    },
+  );
 
   it('falls back to a native title when attaching an inline tooltip fails', async () => {
     const error = new Error('append failed');
@@ -1637,7 +1708,10 @@ describe('useComposerCore tags', () => {
 
     expect(
       document.body.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      document.body.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('reports inline composer tags as attachments', async () => {
