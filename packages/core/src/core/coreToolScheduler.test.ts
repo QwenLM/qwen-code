@@ -13377,6 +13377,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       'User intentionally cancelled this tool call.',
     );
     expect(responseText).not.toContain('had already completed');
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('tells the model a post-completion cancellation discarded finished work', async () => {
@@ -13400,6 +13403,68 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );
+  });
+
+  it('tells the model a queued sibling cancellation was user-directed', async () => {
+    const abortController = new AbortController();
+    const siblingExecute = vi.fn().mockResolvedValue({
+      llmContent: 'unexpected',
+      returnDisplay: 'unexpected',
+    });
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      tools: [
+        new MockTool({
+          name: 'mockTool',
+          execute: vi.fn().mockImplementation(() => {
+            abortController.abort();
+            return Promise.reject(
+              Object.assign(new Error('Tool call aborted'), {
+                name: 'AbortError',
+              }),
+            );
+          }),
+        }),
+        new MockTool({ name: 'mockTool2', execute: siblingExecute }),
+      ],
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'running-call',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-telemetry',
+        },
+        {
+          callId: 'queued-sibling',
+          name: 'mockTool2',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-telemetry',
+        },
+      ],
+      abortController.signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as CompletedToolCall[];
+    const queuedSibling = completedCalls.find(
+      (call) => call.request.callId === 'queued-sibling',
+    );
+    expect(queuedSibling?.status).toBe('cancelled');
+    expect(queuedSibling?.response.executionStatus).toBe('not_started');
+    expect(siblingExecute).not.toHaveBeenCalled();
+    const responseText = JSON.stringify(queuedSibling?.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call before it ran.',
+    );
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
+    expect(responseText).not.toContain('had already completed');
   });
 
   // A post-execution cancellation drops the model-visible output, but the

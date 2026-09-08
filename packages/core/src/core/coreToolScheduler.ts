@@ -385,6 +385,10 @@ const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 
+const TOOL_CANCELLATION_STOP_DIRECTIVE =
+  'Stop and await further instructions; do not retry or work around it.';
+const TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE = `User intentionally cancelled this tool call before it ran. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+
 // The cancellation notice handed to the model depends on whether the tool's
 // work actually finished. Claiming a tool "already completed" when it was
 // interrupted mid-flight makes the model skip work that never happened; the
@@ -393,10 +397,8 @@ const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 //
 // Both messages include an explicit stop directive so the model does not
 // misattribute the cancellation as a transient fault and retry (#10170).
-const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
-  'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
-const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
-  'The tool had already completed; its output was discarded. User intentionally cancelled. Stop and await further instructions; do not retry or work around it.';
+const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE = `User intentionally cancelled this tool call. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE = `The tool had already completed; its output was discarded. User intentionally cancelled. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -2511,7 +2513,7 @@ export class CoreToolScheduler {
             request: reqInfo,
             response: createCancelledResponse(
               reqInfo,
-              'Tool call cancelled before execution.',
+              TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
               'not_started',
             ),
             ...(resolvedTool ? { tool: resolvedTool } : {}),
@@ -4858,7 +4860,7 @@ export class CoreToolScheduler {
       if (signal.aborted) {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
-          'Tool call cancelled before execution.',
+          TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
           'not_started',
         );
         observeSyntheticProducer(cancelledResponse);
@@ -4898,7 +4900,7 @@ export class CoreToolScheduler {
       ) {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
-          'Tool call cancelled before execution.',
+          TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
           'not_started',
         );
         observeSyntheticProducer(cancelledResponse);
