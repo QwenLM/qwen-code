@@ -580,6 +580,42 @@ describe('scheduled-tasks routes', () => {
     );
   });
 
+  it('edits a task when the dialog re-sends its deleted group', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'original prompt',
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    await organization.deleteGroup(group.id);
+
+    const updated = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        prompt: 'updated prompt',
+        sessionMode: 'per_run',
+        groupId: group.id,
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      prompt: 'updated prompt',
+      groupId: group.id,
+    });
+
+    const rejected = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ groupId: 'another-missing-group' });
+
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.code).toBe('group_not_found');
+  });
+
   it('rejects a missing group before creating the task session', async () => {
     const res = await create({
       cron: '0 * * * *',
@@ -1799,10 +1835,25 @@ describe('scheduled-tasks routes', () => {
   it('deletes a task, then 404s on repeat', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
+    let deletionGeneration: number | undefined;
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(0);
 
     const del = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(del.status).toBe(200);
     expect(del.body).toEqual({ deleted: true, id });
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(1);
     // The task's dedicated session is torn down with it (no resident leak).
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
 

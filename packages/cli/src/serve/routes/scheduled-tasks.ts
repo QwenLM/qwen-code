@@ -1313,6 +1313,7 @@ function registerScheduledTaskCrudRoutes(
       let clearDelivery = false;
       let clearModelServiceId = false;
       let clearGroupId = false;
+      let missingGroupId: string | undefined;
 
       const removedPatchField = findRemovedTaskField(body);
       if (removedPatchField) {
@@ -1431,11 +1432,7 @@ function registerScheduledTaskCrudRoutes(
             createSessionOrganizationService(workspaceCwd).listGroups(),
           );
           if (!groups.groups.some((group) => group.id === value)) {
-            res.status(400).json({
-              error: `Group not found: ${value}`,
-              code: 'group_not_found',
-            });
-            return;
+            missingGroupId = value;
           }
           patch.groupId = value;
         }
@@ -1474,6 +1471,7 @@ function registerScheduledTaskCrudRoutes(
       let blockedSessionModeDelivery = false;
       let blockedSessionModeUnavailable = false;
       let blockedSessionModeUnbound = false;
+      let blockedGroupNotFound = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -1485,6 +1483,13 @@ function registerScheduledTaskCrudRoutes(
               if (idx === -1) return tasks; // not found → no write
               found = true;
               const current = tasks[idx]!;
+              if (
+                missingGroupId !== undefined &&
+                current.groupId !== missingGroupId
+              ) {
+                blockedGroupNotFound = true;
+                return tasks;
+              }
               // Both per-run admission checks apply to an actual CONVERSION.
               // Re-sending the mode the task already has changes nothing, so it
               // must not be refused (see the note on `patch.sessionMode` above).
@@ -1621,6 +1626,13 @@ function registerScheduledTaskCrudRoutes(
           if (sendGenerationClosedError(res, error)) return;
           throw error;
         }
+      }
+      if (missingGroupId !== undefined && (blockedGroupNotFound || !found)) {
+        res.status(400).json({
+          error: `Group not found: ${missingGroupId}`,
+          code: 'group_not_found',
+        });
+        return;
       }
       if (blockedLegacy) {
         res.status(409).json({
