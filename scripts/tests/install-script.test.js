@@ -2446,28 +2446,27 @@ describe('standalone release packaging', () => {
 
   it('syncs standalone and hosted installation assets during release', () => {
     const releaseWorkflow = readScript('.github/workflows/release.yml');
+    const releaseStepScript = readScript('.github/scripts/run-release-step.sh');
     const ossWorkflow = readScript('.github/workflows/sync-release-to-oss.yml');
 
-    // release.yml builds standalone archives, verifies them, and creates GitHub Release
-    expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    // The step script builds standalone archives, verifies them, and creates
+    // the GitHub Release; release.yml keeps only the env wiring.
+    expect(releaseStepScript).toContain(
+      'npm run package:standalone:release --',
+    );
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
-    expect(releaseWorkflow).toContain(
+    expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
     expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
-    expect(releaseWorkflow).toContain('--include-opentui-preview');
+    expect(releaseStepScript).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
-    const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "- name: 'Create GitHub Release and Tag'",
-    );
-    expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
-    const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
-    expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
-    expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
+    expect(releaseStepScript).toContain('dist/standalone/qwen-code-*');
+    expect(releaseStepScript).toContain('dist/standalone/SHA256SUMS');
     // OSS upload logic must not remain in release.yml
     expect(releaseWorkflow).not.toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(releaseWorkflow).not.toContain(

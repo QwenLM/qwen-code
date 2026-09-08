@@ -1540,6 +1540,7 @@ export function WebShellSidebar({
     workspace.client,
     {
       enabled: workspaceSessionLiveStateEnabled,
+      pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
       workspaceCwds: liveStateWorkspaceCwds,
       groupWorkspaceCwds: liveStateGroupWorkspaceCwds,
     },
@@ -5070,6 +5071,12 @@ export function WebShellSidebar({
             <StandaloneRecents
               archiveState="archived"
               currentSessionId={connection.sessionId}
+              currentSessionReady={
+                connection.status === 'connected' &&
+                !connection.error &&
+                !connection.loadingTranscript &&
+                !connection.catchingUp
+              }
               refreshKey={standaloneRefreshKey}
               renderSession={(session, standalone) =>
                 renderSessionRow(session, {
@@ -5124,7 +5131,11 @@ export function WebShellSidebar({
     archivedExpanded,
     archivedWorkspaceGroups,
     allArchivedSessions,
+    connection.catchingUp,
+    connection.error,
+    connection.loadingTranscript,
     connection.sessionId,
+    connection.status,
     effectiveArchivedError,
     effectiveArchivedLoading,
     handleStandaloneArchivedStatus,
@@ -5808,6 +5819,12 @@ export function WebShellSidebar({
                       <StandaloneRecents
                         archiveState="active"
                         currentSessionId={connection.sessionId}
+                        currentSessionReady={
+                          connection.status === 'connected' &&
+                          !connection.error &&
+                          !connection.loadingTranscript &&
+                          !connection.catchingUp
+                        }
                         refreshKey={standaloneRefreshKey}
                         searchQuery={searchQuery}
                         renderSession={(session, standalone) =>
