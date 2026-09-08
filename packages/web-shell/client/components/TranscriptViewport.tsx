@@ -59,6 +59,7 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const pendingEdgeFrame = useRef(0);
   useLayoutEffect(() => {
     if (historical || loading) onCanScrollToBottomChange?.(true);
   }, [historical, loading, onCanScrollToBottomChange]);
@@ -114,6 +115,10 @@ export const TranscriptViewport = forwardRef<
       offset: row.getBoundingClientRect().top - top,
     };
   }, [historical, pin, rows, scroller, toolSources]);
+  useLayoutEffect(
+    () => () => cancelAnimationFrame(pendingEdgeFrame.current),
+    [viewKey, loading, capture],
+  );
   useImperativeHandle(
     ref,
     () => ({
@@ -206,17 +211,27 @@ export const TranscriptViewport = forwardRef<
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
-    anchor.current = capture();
+    const saved = capture();
+    if (!saved) {
+      // A large scroll can reach an edge before its virtual rows are mounted.
+      pendingEdgeFrame.current = requestAnimationFrame(() =>
+        loadAtEdge(direction),
+      );
+      return;
+    }
+    anchor.current = saved;
     entryDirection.current = direction;
     void viewport.load(direction);
   };
   const handleScrollIntent = () => {
+    cancelAnimationFrame(pendingEdgeFrame.current);
     scrollIntent.current += 1;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
     restoring.current = false;
   };
   const loadAtEdge = (direction?: 'older' | 'newer') => {
+    cancelAnimationFrame(pendingEdgeFrame.current);
     const scroll = scroller();
     if (
       !historical ||
@@ -293,7 +308,7 @@ export const TranscriptViewport = forwardRef<
         onScrollCapture={(event) => {
           if (event.target !== scroller() || restoring.current) return;
           const current = capture();
-          if (loading) anchor.current = current;
+          if (loading && current) anchor.current = current;
           loadAtEdge();
         }}
       >
