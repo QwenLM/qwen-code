@@ -223,7 +223,9 @@ function interpolate(
 }
 
 // Language setting helpers
-function resolveLanguage(lang: SupportedLanguage | 'auto'): SupportedLanguage {
+export function resolveLanguage(
+  lang: SupportedLanguage | 'auto',
+): SupportedLanguage {
   if (lang === 'auto') {
     return detectSystemLanguage();
   }
