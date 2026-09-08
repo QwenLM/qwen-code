@@ -1861,12 +1861,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // continuity (#10136 R18-3): the bound sheds an interaction file's
     // hunks on the premise a prior round published them, which holds only
     // while the merge base holds still between rounds. Stamped exactly
-    // when a diff was published — a round that published nothing vouches
-    // nothing. Best-effort and write-temp-then-rename like the file's own
-    // writer (`persistRecoveredLedger`): a torn write must never restart
-    // the round id space the file carries, and a failed stamp simply
-    // keeps the next round's bound off.
-    if (diffPath !== null && mergeBaseSha !== null) {
+    // when a diff was published AND the round is not a retryable refusal
+    // (#10136 R18-3 round 19): `capture-failed`/`base-untrusted` publish
+    // a fallback full range that SKILL.md's same-round retry discards
+    // before any agent launches, so publication there is not a proxy for
+    // "a round reviewed it" — a stamp off one would let the retry's own
+    // continuity gate pass on hunks no round ever published. The
+    // non-retryable refusals (`nothing-to-narrow`, `partition-failed`,
+    // the deterministic anchor refusals) publish a full range the
+    // round's agents DO consume, so they stamp. Best-effort and
+    // write-temp-then-rename like the file's own writer
+    // (`persistRecoveredLedger`): a torn write must never restart the
+    // round id space the file carries, and a failed stamp simply keeps
+    // the next round's bound off.
+    const retryableRefusal =
+      anchor !== null &&
+      anchor.incremental.effective === false &&
+      (anchor.incremental.reason === 'capture-failed' ||
+        anchor.incremental.reason === 'base-untrusted');
+    if (diffPath !== null && mergeBaseSha !== null && !retryableRefusal) {
       const sideFile = join(
         dirname(out),
         `qwen-review-pr-${prNumber}-prev-ledger.json`,

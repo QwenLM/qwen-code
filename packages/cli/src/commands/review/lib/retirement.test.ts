@@ -414,6 +414,66 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a re-rendered list (reordered or re-wrapped, round 1 uncertified) is still stale (#10136 R17-1 round 19)', () => {
+    // The convergence pair's lists are model-edited markdown: between the
+    // pair's builds the orchestrator clears tags AND re-renders — reorders
+    // entries, re-wraps prose. Whole-text equality normalises neither,
+    // and an UNCERTIFIED round 1 filed nothing for the entry arm to look
+    // for. The comparison must hold at entry granularity: same `file:line`
+    // tokens, set-compared, or the chunk narrows out over a finding the
+    // dry receipt never saw and the loop certifies a clean convergence.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — a stale cache — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_REORDERED =
+      '- **File:** src/other.ts:7 — a stale cache\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_REWRAPPED =
+      '- **File:** src/pay.ts:42 — the double\n' +
+      '  charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — a stale\n' +
+      '  cache\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    for (const [name, l2] of [
+      ['reordered', L2_REORDERED],
+      ['re-wrapped', L2_REWRAPPED],
+    ] as const) {
+      const f2 = writeFindingsFile(plan, `reverse-audit--round-2--${name}`, l2);
+      // Round 1 left a record and NO transcript — the record's own
+      // `unknown` (the orchestrator still merges its finding).
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      );
+      transcript(
+        record(
+          2,
+          14,
+          'chunk 14 round 2 territory walk\n' +
+            `read_file(file_path="${f2 ?? ''}")`,
+          'd2',
+        ),
+        DRY,
+      );
+
+      const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+        deltaChunkIds: new Set([99]),
+      });
+      expect(r3.due).toEqual([14]);
+      expect(r3.narrowed).toEqual([]);
+      expect(r3.converged).toBe(false);
+    }
+  });
+
   it('a dry receipt whose list never carried the yield is stale even with new entries elsewhere (#10136 R17-1)', () => {
     // The sibling arm: round 2's list DID change between the rounds — a
     // different chunk's finding merged — so neither the digest nor the

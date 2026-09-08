@@ -1773,6 +1773,101 @@ describe('fetch-pr report assembly', () => {
     expect(written['posted']).toBe(1);
   });
 
+  it('a retryable refusal does NOT stamp the base its discarded fallback was captured over (#10136 R18-3 round 19)', async () => {
+    // `capture-failed` publishes a fallback full range that the skill's
+    // same-round retry discards before any agent launches — publication
+    // there is not "a round reviewed it". If the stamp landed anyway,
+    // the retry's own continuity gate would pass on hunks no round ever
+    // published. Drive exactly that: the full range captures fine while
+    // the delta read fails, so the plan carries `diffPath !== null`
+    // beside `incremental.reason === 'capture-failed'`, and the side
+    // file's stamp must stay the OLD base.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
+      if (args.includes(`${ANCHOR}..f00df00df00d`)) {
+        throw new Error('git diff timed out');
+      }
+      if (args.includes(`${BASE}..f00df00df00d`)) {
+        return Buffer.from(FULL_DIFF);
+      }
+      return Buffer.from('');
+    });
+    const PREV_BASE = 'c'.repeat(40);
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+          mergeBaseSha: PREV_BASE,
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.effective).toBe(false);
+    expect(report.incremental.reason).toBe('capture-failed');
+    expect(report.diffPath).not.toBeNull();
+    // No stamp write reached the side file: the previous round's base
+    // survives for the retry's continuity gate. (In this mocked-fs
+    // harness the stamp's temp write is the observable half — the
+    // guarded code path never reaches it at all.)
+    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
+      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
+    );
+    expect(stamp).toBeUndefined();
+  });
+
+  it('a nothing-to-narrow demotion still stamps — its full range IS reviewed (#10136 R18-3 round 19)', async () => {
+    // The guard keys on the RETRYABLE refusals only: `nothing-to-narrow`
+    // publishes a full range the round's agents DO consume (and SKILL.md
+    // forbids retrying it), so suppressing the stamp there would keep
+    // the bound permanently off on the long-lived PRs it exists for.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    // The delta carries a file the full range does not: the join fails
+    // closed, the anchor is refused `nothing-to-narrow`, and the full
+    // range publishes instead.
+    servesBothRanges(
+      FULL_DIFF,
+      `${FULL_DIFF}${[
+        'diff --git a/ghost.ts b/ghost.ts',
+        '--- a/ghost.ts',
+        '+++ b/ghost.ts',
+        '@@ -1,1 +1,2 @@',
+        ' keep',
+        '+added',
+        '',
+      ].join('\n')}`,
+    );
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({ round: 7, findings: [], posted: 1 });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.effective).toBe(false);
+    expect(report.incremental.reason).toBe('nothing-to-narrow');
+    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
+      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
+    );
+    expect(stamp).toBeDefined();
+    expect(JSON.parse(String(stamp?.[1]))['mergeBaseSha']).toBe(BASE);
+  });
+
   // The capture-time recovery of the operator's RECORDED floor (#10136
   // R1-5): the same record compose and submit read, bound to the same
   // identity axes. Each test plants the CLI's own args record beside a side

@@ -488,19 +488,26 @@ function substantiveClause(clause: string): boolean {
 const UNVERIFIED_FINDING_TAG_RE = /—\s*\[unverified\]/gi;
 
 /**
- * Two lists compared for the SAME entries, ignoring verification-tag state:
- * the convergence pair's rounds legitimately build against the same entries
- * with only the tags cleared in between, and the digest over the bytes
- * cannot see it (#10136 R17-1). Tags out and whitespace runs collapsed —
- * a stripped tag leaves its separator spaces behind, and a re-wrap must
- * not read as a different list.
+ * The `file:line` tokens of a list's entries, as a SET — the granularity
+ * the staleness ruling compares at (#10136 R17-1 round 19). `FILE_LINE_RE`
+ * captures the rest of the line, which a re-wrap of the orchestrator's
+ * model-edited markdown rewrites; the first whitespace-delimited token is
+ * the `file:line` the entry names, which re-wraps and re-orders cannot
+ * change — so the comparison is insensitive to both by construction, and
+ * tag state is stripped per token. Null for a NON-EMPTY list no entry
+ * extracts from: that list cannot be compared, and the fail direction is
+ * stale, never a fresh reading of a list nobody could parse.
  */
-function stripUnverifiedTags(list: string): string {
-  return list
-    .replace(UNVERIFIED_FINDING_TAG_RE, ' ')
-    .split('\n')
-    .map((l) => l.replace(/\s+/g, ' ').trim())
-    .join('\n');
+function entryTokensOf(list: string): ReadonlySet<string> | null {
+  const out = new Set<string>();
+  for (const m of list.matchAll(FILE_LINE_RE)) {
+    const token = (m[1] ?? '')
+      .replace(UNVERIFIED_FINDING_TAG_RE, ' ')
+      .trim()
+      .split(/\s+/)[0];
+    if (token !== undefined && token !== '') out.add(token);
+  }
+  return out.size === 0 && list.trim() !== '' ? null : out;
 }
 
 function findingsListFor(
@@ -943,7 +950,6 @@ export function scheduleReverseAuditRound(
         outcomes: AuditOutcome[];
         failures: CertificationFailure[];
         digests: Set<string>;
-        lists: Set<string>;
         fileLists: Set<string>;
         filedFiles: Set<string>;
       }
@@ -959,7 +965,6 @@ export function scheduleReverseAuditRound(
       outcomes: [],
       failures: [],
       digests: new Set<string>(),
-      lists: new Set<string>(),
       fileLists: new Set<string>(),
       filedFiles: new Set<string>(),
     };
@@ -969,7 +974,6 @@ export function scheduleReverseAuditRound(
       if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
     }
     entry.digests.add(rec.digest);
-    entry.lists.add(rec.findings);
     if (rec.findingsFromFile) entry.fileLists.add(rec.findings);
     byRound.set(rec.round, entry);
   });
@@ -986,7 +990,6 @@ export function scheduleReverseAuditRound(
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
         digests: [...entry.digests],
-        lists: [...entry.lists],
         fileLists: [...entry.fileLists],
         filedFiles: [...entry.filedFiles],
       }))
@@ -1025,13 +1028,25 @@ export function scheduleReverseAuditRound(
           if (a.outcome === 'dry') return false;
           // Same digest: built against the same list bytes.
           if (a.digests.some((d) => latest.digests.includes(d))) return true;
-          // Same entries once the verification tags are stripped — the
-          // pair shape the digest cannot see.
+          // Same entries, compared as a SET of `file:line` tokens — the
+          // pair's two lists legitimately differ by tag state alone
+          // (SKILL.md:771), and the orchestrator's list is model-edited
+          // markdown whose re-wraps and re-orders must not read as a
+          // different list either (#10136 R17-1 round 19: whole-text
+          // equality normalised neither). Only a list read back from its
+          // findings file is evidence — a prompt fallback is not a list
+          // — and a non-empty one no entry extracts from reads as stale
+          // (fail closed), never fresh.
           if (
-            a.lists.some((l) =>
-              latest.lists.some(
-                (ll) => stripUnverifiedTags(l) === stripUnverifiedTags(ll),
-              ),
+            a.fileLists.length > 0 &&
+            latest.fileLists.length > 0 &&
+            a.fileLists.some((l) =>
+              latest.fileLists.some((ll) => {
+                const ea = entryTokensOf(l);
+                const eb = entryTokensOf(ll);
+                if (ea === null || eb === null) return true;
+                return ea.size === eb.size && [...ea].every((x) => eb.has(x));
+              }),
             )
           )
             return true;

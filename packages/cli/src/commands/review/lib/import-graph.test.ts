@@ -665,6 +665,15 @@ describe('seamLines', () => {
     // so a file that types everything through the alias no longer marks
     // nothing past the typedef line.
     expect(seamLines('src/imp.js', typed, changed)).toEqual([1, 3, 4]);
+    // A QUALIFIED alias (`ns.Bar`) binds every identifier of the name —
+    // dropping it left the alias's uses unmarked beside a specifier the
+    // cross-check had seen: a confident under-read (#10136 R18-1 round 19).
+    const qualified = [
+      "/** @typedef {import('./changed.js').Bar} ns.Bar */", // 1
+      '/** @type {ns.Bar} */', // 2
+      'const w = make();', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.js', qualified, changed)).toEqual([1, 2]);
     const imported = [
       "/** @import { Foo } from './changed.js' */", // 1
       '', // 2
@@ -928,6 +937,46 @@ describe('seamLines', () => {
         changed,
       ),
     ).toBeNull();
+    // A factory bound under a RENAMED local is the same factory — the
+    // import's/destructuring's/property's ORIGINAL name is
+    // `createRequire` whatever the local is (#10136 R18-1 round 19).
+    // None of these may answer a confident `[]`.
+    expect(
+      seamLines(
+        'src/imp.mjs',
+        [
+          "import { createRequire as cjsRequire } from 'node:module';", // 1
+          'const req = cjsRequire(import.meta.url);', // 2
+          "const moved = req('./changed.js');", // 3
+          'moved.run();', // 4
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([3, 4]);
+    expect(
+      seamLines(
+        'src/imp.js',
+        [
+          "const { createRequire: mkRequire } = require('node:module');", // 1
+          'const req = mkRequire(import.meta.url);', // 2
+          "const moved = req('./changed.js');", // 3
+          'moved.run();', // 4
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([3, 4]);
+    expect(
+      seamLines(
+        'src/imp.js',
+        [
+          'const mkRequire = module.createRequire;', // 1
+          'const req = mkRequire(import.meta.url);', // 2
+          "const moved = req('./changed.js');", // 3
+          'moved.run();', // 4
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([3, 4]);
   });
 
   it('a property-named binding reads back through its bracket spelling (#10136 R18-1)', () => {

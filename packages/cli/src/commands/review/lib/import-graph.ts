@@ -828,19 +828,66 @@ function seamLinesWith(
   // createRequire(import.meta.url)` makes `req` a require factory's
   // product, and a call through it is a require call the plain identifier
   // read cannot see — it returned a confident `[]` where the aliased
-  // control correctly marked. Collected file-wide BEFORE the walk (a
+  // control correctly marked. The factory itself is matched by the LOCAL
+  // names its original name was bound to, not just the literal spelling
+  // (#10136 R18-1 round 19): `import { createRequire as cr }`,
+  // `const { createRequire: cr } = …`, and `const cr = x.createRequire`
+  // all rename it, and a rename the read cannot follow is another
+  // confident miss. Both sets are collected file-wide BEFORE the walk (a
   // hoisted use precedes its declaration in source order), by name — the
   // same fuzz the binding read budgets.
+  const factoryNames = new Set<string>(['createRequire']);
+  const collectFactories = (node: TSNode): void => {
+    if (ts.isImportDeclaration(node)) {
+      const named = node.importClause?.namedBindings;
+      if (named !== undefined && ts.isNamedImports(named)) {
+        for (const el of named.elements) {
+          // `import { createRequire as cr }` — `propertyName` is the
+          // ORIGINAL name, `name` the local one.
+          if ((el.propertyName ?? el.name).text === 'createRequire') {
+            factoryNames.add(el.name.text);
+          }
+        }
+      }
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isObjectBindingPattern(node.name)
+    ) {
+      // `const { createRequire: cr } = …` (and the shorthand form).
+      for (const el of node.name.elements) {
+        const prop = el.propertyName ?? el.name;
+        if (
+          ts.isIdentifier(prop) &&
+          prop.text === 'createRequire' &&
+          ts.isIdentifier(el.name)
+        ) {
+          factoryNames.add(el.name.text);
+        }
+      }
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isIdentifier(node.name) &&
+      ts.isPropertyAccessExpression(node.initializer) &&
+      node.initializer.name.text === 'createRequire'
+    ) {
+      // `const cr = module.createRequire` — the property read binds the
+      // local to the same factory.
+      factoryNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collectFactories);
+  };
+  collectFactories(sf);
+  const isFactoryCallee = (callee: TSNode): boolean =>
+    (ts.isIdentifier(callee) && factoryNames.has(callee.text)) ||
+    (ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === 'createRequire');
   const requireAliases = new Set<string>();
   const collectAliases = (node: TSNode): void => {
     if (refused) return;
     if (ts.isCallExpression(node)) {
       const callee = unwrapCallee(node.expression);
-      if (
-        (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
-        (ts.isPropertyAccessExpression(callee) &&
-          callee.name.text === 'createRequire')
-      ) {
+      if (isFactoryCallee(callee)) {
         const received = receiverBindings(node, false);
         if (received === null) {
           // The alias itself escapes the receiver walk: calls through it
@@ -912,8 +959,18 @@ function seamLinesWith(
       scan(node);
       if (aliased) {
         const name = (node as import('typescript').JSDocTypedefTag).fullName;
-        if (name !== undefined && ts.isIdentifier(name)) {
-          bindings.add(name.text);
+        if (name !== undefined) {
+          // A QUALIFIED alias (`ns.Bar`) binds every identifier of the
+          // name, not nothing (#10136 R18-1 round 19): dropping it left
+          // the alias's uses unmarked beside a specifier the cross-check
+          // HAD seen — a confident under-read where the sibling
+          // unreadable-`@import` branch refuses. Over-collecting a
+          // namespace segment is the direction the name read budgets.
+          const bindAll = (n: TSNode): void => {
+            if (ts.isIdentifier(n)) bindings.add(n.text);
+            ts.forEachChild(n, bindAll);
+          };
+          bindAll(name);
         }
       }
     } else if (ts.isExportDeclaration(node)) {
