@@ -309,66 +309,13 @@ For the complete route and wire protocol reference, see [`../qwen-serve-protocol
   2. `server.close()`: in-flight requests drain, `SHUTDOWN_FORCE_CLOSE_MS` (5s) triggers `closeAllConnections()`, then a second 2s deadline applies.
 - **Second SIGINT / SIGTERM while already exiting** -> `bridge.killAllSync()` synchronously SIGKILLs all ACP children and calls `process.exit(1)` to avoid orphan processes.
 
-`RunHandle.close()` returned by `runQwenServe` is the programmatic equivalent for embedders and tests.
+`RunHandle.close()` returned by `runQwenServe` is the programmatic equivalent used by repository-internal hosts and tests.
 
-## 12. Embedded invocation (bypass CLI)
+## 12. Embedding boundary
 
-```ts
-import { runQwenServe } from '@qwen-code/qwen-code/serve';
+`runQwenServe`, `createServeApp`, and their lifecycle helpers are internal implementation APIs; the published `@qwen-code/qwen-code` package does not export a `./serve` subpath. External integrations should start `qwen serve --no-web` and use the documented HTTP/SSE protocol or `@qwen-code/sdk`. Repository code and tests may import the source modules directly, but those imports are not a supported integration contract.
 
-const handle = await runQwenServe({
-  port: 0, // ephemeral
-  hostname: '127.0.0.1',
-  mode: 'http-bridge',
-  maxSessions: 20,
-  workspace: '/abs/path/to/repo',
-});
-console.log(`Daemon at ${handle.url}`);
-// ... call handle.bridge directly or access handle.server
-await handle.close(); // programmatic shutdown
-```
-
-Or get the Express app directly and bind the listener lifecycle yourself. This form is required when the embed uses Live/Conversations:
-
-```ts
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import {
-  createServeApp,
-  getServeAppLifecycle,
-} from '@qwen-code/qwen-code/serve';
-
-let actualPort = 0;
-const app = createServeApp(
-  {
-    port: 0,
-    hostname: '127.0.0.1',
-    mode: 'http-bridge',
-    maxSessions: 20,
-  },
-  () => actualPort,
-  {
-    /* deps: bridge, fsFactory, ... */
-  },
-);
-
-const lifecycle = getServeAppLifecycle(app);
-const server = createServer(app);
-lifecycle.bindServer(server);
-await new Promise<void>((resolve, reject) => {
-  server.once('error', reject);
-  server.listen(0, '127.0.0.1', () => resolve());
-});
-actualPort = (server.address() as AddressInfo).port;
-console.log('listening on', server.address());
-
-// Stop admission, drain app work, close the listener, and release ownership.
-await lifecycle.close();
-```
-
-Calling raw `server.close()` also starts the same event-driven cleanup, but it is only best effort unless the process remains alive; always await `lifecycle.close()` to receive shutdown errors. If no server is bound, Live/Conversations requests fail closed while ordinary-only app behavior is unchanged.
-
-Note: when calling `createServeApp` directly, the default `fsFactory.trusted = false`. Agent-side ACP `writeTextFile` is rejected as `untrusted_workspace`, and a stderr warning is printed once. Either inject `deps.fsFactory` with explicit trust, inject `deps.bridge`, or accept the trust-gated default behavior.
+For repository-internal callers of `createServeApp`, the default `fsFactory.trusted = false`. Agent-side ACP `writeTextFile` is rejected as `untrusted_workspace`, and a stderr warning is printed once. Either inject `deps.fsFactory` with explicit trust, inject `deps.bridge`, or accept the trust-gated default behavior.
 
 ## 13. Debugging recipes
 
