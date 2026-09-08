@@ -63,6 +63,7 @@ import {
   type ThreadRun,
   deliverNotifications,
 } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
@@ -387,12 +388,50 @@ export function registerWorkspaceAgentRoutes(
     return undefined;
   };
 
-  for (const runtime of deps.workspaceRegistry.list()) {
-    if (!runtime.trusted) continue;
-    void readWorkspaceAgents(runtime.workspaceCwd)
-      .then((agents) => (agents.length > 0 ? dispatch(runtime) : undefined))
-      .catch(() => {});
-  }
+  let recovering = false;
+  let recoveryStopped = false;
+  const recover = async (): Promise<void> => {
+    if (recovering || recoveryStopped) return;
+    recovering = true;
+    try {
+      for (const runtime of deps.workspaceRegistry.list()) {
+        if (recoveryStopped) return;
+        if (!runtime.trusted || runtime.generationGuard?.closed) continue;
+        try {
+          const { threads } = await listThreads(runtime.workspaceCwd);
+          if (
+            !threads.some(
+              (thread) =>
+                thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
+                thread.outbox.some((event) => event.status === 'pending'),
+            )
+          )
+            continue;
+          if (recoveryStopped) return;
+          const error = await startBookedRuns(runtime);
+          if (error)
+            writeStderrLine(
+              `qwen serve: workspace agent recovery failed: ${error}`,
+            );
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: workspace agent recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    } finally {
+      recovering = false;
+    }
+  };
+  // Runtimes may become ready after routes are registered, or after replacement.
+  const recoveryTimer = setInterval(() => void recover(), 5_000);
+  recoveryTimer.unref?.();
+  void recover();
+  app.locals['stopWorkspaceAgentRecovery'] = () => {
+    recoveryStopped = true;
+    clearInterval(recoveryTimer);
+    for (const { owner } of owners.values()) owner.stop();
+  };
 
   app.get(`${prefix}/agents`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);

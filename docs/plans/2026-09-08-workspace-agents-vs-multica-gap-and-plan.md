@@ -4,6 +4,38 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Daemon restart — recovered after fixing runtime discovery
+
+Task `th_00437664-ff68-4582-a053-949dc6ac53e1` first completed too quickly for
+manual interruption; that first run is not crash-recovery evidence. On a second
+human-requested run, a bounded observer waited for a durable checkpoint and
+verified no unrelated live work before sending SIGKILL to the local daemon.
+At interruption, run `rn_a04df8a1-8bcc-4a53-91c7-2940ce584c07` was running,
+attempt 1, session `b48bad11-6e7c-5110-92a1-e560bf56eec6`; message
+`ms_67e84e03-15c6-4382-a9d9-78569db56c6b` contained recovery checkpoint new-1.
+
+The first daemon restart left this run stranded. The route registration only
+performed a one-shot registry scan and discarded startup errors. It now scans
+active, trusted workspace runtimes every five seconds for durable live work or
+pending outbox events, reusing the existing owner and serialized dispatch. The
+scan is stopped during server cleanup. The exact cause of the initial missed
+one-shot scan was not logged, so readiness timing is not claimed as proven.
+
+After that patch, starting the daemon recovered the same run as attempt 2,
+without a human post, and reused the same session. Its review contained
+RESTART-RECOVER-7263 and identified new-1 as the surviving checkpoint; it did not
+repeat the checkpoint loop. Chrome Mark done succeeded. This verifies running
+run recovery, not every accepted-input/transcript/outbox crash window.
+
+Recovery also overwrote the prior usage baseline before settling that attempt:
+2,462,933 before the kill became 2,495,350 on resume, with no attempt-1 usage
+entry. The dispatcher now records the positive prior-attempt delta before
+rebinding. A direct source check verified 100 → 125 produces a 25-token entry
+for attempt 1 and baseline 125 for attempt 2. The real task's old accounting
+was not rewritten; its displayed 1,030.1k tokens omit that observed 32,417 delta.
+The accounting patch has source-check evidence, not a second live crash run.
+No build, lint, typecheck, test suite, or additional PR was used.
+
 #### Human unblock — same-session continuation
 
 Chrome task `th_2987a14f-0765-4a32-81e2-c0c12b28dd9a` asked demo-leader to

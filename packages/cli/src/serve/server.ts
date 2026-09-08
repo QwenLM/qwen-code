@@ -3500,10 +3500,12 @@ export function createServeApp(
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
+        stopWorkspaceAgentRecovery?: () => void;
       };
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(locals.stopWorkspaceAgentRecovery);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

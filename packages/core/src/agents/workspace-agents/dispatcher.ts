@@ -774,6 +774,18 @@ export async function dispatchOnce(
       // Session ports prepare first: persist the baseline and run binding
       // before activation lets the model call any thread tools.
       const usageBaselineTokens = await port.totalTokens?.(agent);
+      if (
+        run.attempts > 0 &&
+        run.usageBaselineTokens !== undefined &&
+        usageBaselineTokens !== undefined &&
+        usageBaselineTokens > run.usageBaselineTokens
+      ) {
+        await upsertRunUsage(projectRoot, thread.id, run.id, {
+          attempt: run.attempts,
+          round: SESSION_USAGE_ROUND,
+          tokens: usageBaselineTokens - run.usageBaselineTokens,
+        });
+      }
       await bindRunSession(projectRoot, {
         threadId: thread.id,
         runId: run.id,

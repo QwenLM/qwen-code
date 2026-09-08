@@ -28,6 +28,7 @@ Current run ids, timestamps and limitations are recorded in
 | Child delegation and parent report | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run. |
 | Live human input | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open. |
 | Cancellation | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open. |
+| Running task after daemon restart | SIGKILL after a durable checkpoint exposed a startup-discovery defect; after its fix, the same run/session recovered as attempt 2 and reached human acceptance. Other crash windows remain open. |
 | Human resolves a blocker | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision. |
 | Read-only boundary and ambient ownership | Guard wiring and direct source checks exist; full model-driven negative matrix has not been demonstrated. |
 | Storage and reliability gates in steps 3/7/8 | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix. |

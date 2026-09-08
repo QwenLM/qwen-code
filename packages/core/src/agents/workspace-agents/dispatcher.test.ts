@@ -436,6 +436,20 @@ describe('dispatchOnce', () => {
     expect(stopped.usageByRound[0]?.tokens).toBe(25);
   });
 
+  it('charges an interrupted attempt before replacing its usage baseline', async () => {
+    const thread = await seedQueued({
+      runs: [run({ attempts: 1, usageBaselineTokens: 100 })],
+    });
+    await dispatchOnce(PROJECT_ROOT, {
+      ...port(),
+      totalTokens: async () => 125,
+    });
+    const resumed = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
+    expect(resumed.attempts).toBe(2);
+    expect(resumed.usageBaselineTokens).toBe(125);
+    expect(resumed.usageByRound).toEqual([{ attempt: 1, round: 1, tokens: 25 }]);
+  });
+
   it('chooses the runtime entry point from the body state', async () => {
     await seedQueued();
     for (const [state, action] of [

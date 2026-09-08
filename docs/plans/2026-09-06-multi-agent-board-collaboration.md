@@ -888,6 +888,13 @@ has just completed. `failed` and `cancelled` are true terminal states: their
 unaccepted trigger ids remain audit evidence and are never turned into a new run
 by a later dispatcher sweep.
 
+On daemon startup or later runtime readiness, discovery revisits active trusted
+workspaces with durable live runs or pending outbox events every five seconds;
+a one-shot snapshot during route registration is insufficient. Existing owner
+dispatch remains serialized, and server cleanup stops discovery and owners.
+When a session resumes an interrupted run, account for the previous attempt's
+positive cumulative usage delta before replacing its baseline for the new attempt.
+
 Cancellation admission reads and transitions the run under the workspace lock.
 The dispatcher therefore cannot claim a queued run between a route's stale read
 and its attempted cancellation, and the route reports the state read back after
