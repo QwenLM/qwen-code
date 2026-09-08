@@ -165,6 +165,54 @@ describe('planThreadActions — matching threads to findings', () => {
     expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 1001 }]);
   });
 
+  it('plans one ruling per thread, never over a thread this pass replies into, and nothing at all for an unknown account (#9940 review, round 30)', () => {
+    // `postReviewReply` is non-idempotent: a second entry under one id
+    // posts the note twice. Submit dedups its rulings and refuses a ruling
+    // on a carried id, so neither is reachable through it — but this is an
+    // exported pure function and a second caller would hit both.
+    const twice = planThreadActions(
+      [thread({ rootBody: '**[Critical]** R1-2: the guard' })],
+      'qwen-bot',
+      [],
+      [
+        { id: 'R1-2', by: 'the rewrite' },
+        { id: 'R01-2', by: 'again' },
+      ],
+    );
+    expect(twice.resolves).toHaveLength(1);
+    expect(twice.resolves[0]).toMatchObject({ id: 'R1-2', commentId: 1001 });
+    // The second ruling acted on the same thread — it resolved, so it is
+    // not reported as a ruling that resolved nothing.
+    expect(twice.unmatchedFixed).toEqual([]);
+    // A thread taking a still-standing carry this pass is not a thread
+    // this pass closes.
+    const both = planThreadActions(
+      [thread({ rootBody: '**[Critical]** R1-2: the guard' })],
+      'qwen-bot',
+      [{ index: 0, id: 'R1-2' }],
+      [{ id: 'R1-2', by: 'the rewrite' }],
+    );
+    expect(both.replies).toHaveLength(1);
+    expect(both.resolves).toEqual([]);
+    // …and the ruling that went nowhere is disclosed, not swallowed.
+    expect(both.unmatchedFixed).toEqual(['R1-2']);
+    // An account the token could not name matches nothing — the guard
+    // every other own-account read carries.
+    for (const login of ['', '   ']) {
+      const nobody = planThreadActions(
+        [thread({ rootAuthor: '', rootBody: '**[Critical]** R1-2: g' })],
+        login,
+        [{ index: 0, id: 'R1-2' }],
+        [{ id: 'R1-2' }],
+      );
+      expect(nobody).toEqual({
+        replies: [],
+        resolves: [],
+        unmatchedFixed: ['R1-2'],
+      });
+    }
+  });
+
   it('joins a carried or fixed id to its thread by the canonical spelling — `R01-2` names R1-2 (#9940 review, round 27)', () => {
     const carry = planThreadActions(
       [thread({ rootBody: '**[Critical]** R1-2: the guard' })],
@@ -1883,6 +1931,16 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
       ...over,
     };
   }
+
+  it('names itself when the read comes back empty — a silenced call is not a JSON error (#9940 review, round 30)', () => {
+    // `JSON.parse('')` dies as a bare `SyntaxError: Unexpected end of JSON
+    // input`, which tells the operator nothing about which read aborted
+    // their post.
+    ghMock.mockReturnValue('');
+    expect(() => fetchReviewThreads('o/r', 1)).toThrow(/thread query/);
+    ghMock.mockReturnValue('   \n  ');
+    expect(() => fetchReviewThreads('o/r', 1)).toThrow(/Nothing was posted/);
+  });
 
   it('throws when the response carries no thread list — never plans on empty', () => {
     ghMock.mockReturnValue(JSON.stringify({ data: {} }));

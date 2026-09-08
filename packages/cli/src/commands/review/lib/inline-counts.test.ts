@@ -336,6 +336,24 @@ describe('carriedClaimLine — the shared readback strip', () => {
       'R1-2: not code',
     );
     expect(carriedClaimLine('**[Critical]** R1-2: x\rsecond')).toBe('R1-2: x');
+    // `[regression](url)` is a LINK, not an axis tag: read as one, its
+    // text left both the claim and the ledger title, which then opened
+    // with a bare URL in parens (#9940 review, round 30).
+    const link = readClaimHead(
+      'R1-2: [regression](https://ci.test/run/9) shows the bug',
+    );
+    expect(link.id).toBe('R1-2');
+    expect(link.claim).toBe(
+      '[regression](https://ci.test/run/9) shows the bug',
+    );
+    expect(link.axes).toEqual([]);
+    expect(readClaimHead('R1-2: [probe](https://x.test) ran').source).toBe(
+      undefined,
+    );
+    // A real tag, with no `(` after it, still reads.
+    expect(readClaimHead('R1-2: [regression] the guard').axes).toEqual([
+      'regression',
+    ]);
     expect(readClaimHead('R02-3: the guard').id).toBe('R2-3');
     expect(readClaimHead('[probe] R007-010: the guard').id).toBe('R7-10');
     expect(readClaimHead('R0-1: the guard').id).toBe('R0-1');

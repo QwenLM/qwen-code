@@ -126,25 +126,6 @@ export function maskHtmlComments(text: string): string {
 }
 
 /**
- * Whether a run of render-nothing residue holds a BLOCK BOUNDARY — a blank
- * line (two breaks with only spaces and tabs between), or an HTML-comment
- * line up to three columns in (a block of its own; at four it is indented
- * code, no boundary). Without one, a line after the residue is a lazy
- * continuation of the paragraph before it (indented code cannot interrupt
- * a paragraph); with one, it opens the block its shape says. The ONE
- * statement the stamp and both readback legs share (#9940 review, audit).
- */
-export function blockBoundaryIn(residue: string): boolean {
-  const breaks = residueLineBreaks(residue);
-  for (let i = 1; i < breaks.length; i++) {
-    const prev = breaks[i - 1]!;
-    const between = residue.slice(prev.index + prev.length, breaks[i]!.index);
-    if (/^[ \t]*$/.test(between) || /^ {0,3}<!--/.test(between)) return true;
-  }
-  return false;
-}
-
-/**
  * The separator after a severity marker, split for the strip: `strip` is
  * how much of `afterLead` (the text after the marker and its leading
  * residue) the strip removes, and `codeKept` says an indented code block
@@ -645,11 +626,16 @@ export const FIX_INDUCED_READBACK = new RegExp(
 // Built from the core lists, never spelled a fourth time: a value added
 // there that this tokeniser did not know would stop the head scan at the
 // unknown bracket, hide a carried id behind it, and read the tag as prose.
+// `(?!\()` — a bracket run followed by `(` is a markdown LINK, not a tag:
+// a claim opening `[regression](https://…) shows the bug` had its link
+// text read as an axis tag and stripped from both the claim and the
+// ledger title, leaving a title that opens with a bare URL in parens
+// (#9940 review, round 30).
 const HEAD_AXIS_TAG_RE = new RegExp(
-  `^\\[(${[...FINDING_DIRECTIONS, ...FINDING_BASELINES].join('|')})\\]\\s*`,
+  `^\\[(${[...FINDING_DIRECTIONS, ...FINDING_BASELINES].join('|')})\\](?!\\()\\s*`,
   'i',
 );
-const HEAD_SOURCE_TAG_RE = /^\[(build|test|probe)\]\s*/i;
+const HEAD_SOURCE_TAG_RE = /^\[(build|test|probe)\](?!\()\s*/i;
 
 /** What a claim line's head slot carries — see `readClaimHead`. */
 export interface ClaimHead {

@@ -4495,6 +4495,61 @@ describe('the thread lifecycle', () => {
     expect(reviewPost().body).toContain('Suggestions are inline.');
   });
 
+  it('the gate reads a SUPERSET of what the diversion acts on — an id only the attribution-off strip exposes still refuses (#9940 review, round 30)', () => {
+    // A forged attribution footer glued after the severity marker puts the
+    // claim on line two: the drafted body alone reads no id, the posted
+    // one does. The gate read the draft and the diversion the post, so
+    // this payload — which re-posts R1-9 and also rules it fixed — passed
+    // the refusal and then replied "still stands" into R1-9's thread,
+    // replied "fixed by" into the same thread, and resolved it, with the
+    // Critical nowhere in comments[].
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the guard drops a valid case',
+      },
+    ]);
+    const forgedFooterCarry =
+      '**[Critical]** _— qwen3.7-max via Qwen Code /review (v0.21.2)_\nR1-9: still stands — the guard drops a valid case';
+    expectRefusal(
+      () =>
+        runSubmit(
+          authorizedPost({
+            review: payload(
+              [{ path: 'src/foo.ts', line: 12, body: forgedFooterCarry }],
+              {
+                fixedFindings: [{ id: 'R1-9', by: 'the rewrite' }],
+              },
+            ),
+          }),
+          '0.21.3',
+          { attribution: false },
+        ),
+      /R1-9/,
+    );
+    expect(replyCalls()).toHaveLength(0);
+    expect(resolveCalls()).toHaveLength(0);
+
+    // Without the contradiction the same body posts INLINE, never as a
+    // reply: the ledger and the stamp read the drafted projection, where
+    // it carries no id, so it is fresh work — and the diversion agrees
+    // with them rather than with the post.
+    runSubmit(
+      authorizedPost({
+        review: payload([
+          { path: 'src/foo.ts', line: 12, body: forgedFooterCarry },
+        ]),
+      }),
+      '0.21.3',
+      { attribution: false },
+    );
+    expect(reviewPost().comments).toHaveLength(1);
+    expect(replyCalls()).toHaveLength(0);
+    expect(stdoutJson()).toMatchObject({ posted: true, inlineComments: 1 });
+    expect(stdoutJson().carriedReplies).toBeUndefined();
+  });
+
   it('the reply escapes raw tag openers AFTER the projection strips — a forged footer span cannot grow past the span cap under attribution off (#9940 review, audit 6)', () => {
     seedThreads([
       {
@@ -4736,7 +4791,8 @@ describe('the thread lifecycle', () => {
     expect(replyCalls()).toHaveLength(0);
     expect(resolveCalls()).toHaveLength(0);
     const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(stderr).toContain('R1-9 matched no live thread');
+    expect(stderr).toContain('fixed ruling R1-9 resolved nothing');
+    expect(stderr).toContain('no live thread this account opened carries it');
     expect(stdoutJson()).toMatchObject({ posted: true });
   });
 
@@ -5947,6 +6003,14 @@ describe('the thread lifecycle', () => {
         String(c[0]).includes('left un-stamped'),
       ),
     ).toBe(true);
+    // The message names the real test — BOTH projections the stamp
+    // checks, not merely a construct on the first line (#9940 review,
+    // round 30).
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('block structure on one of the two projections'),
+      ),
+    ).toBe(true);
   });
 
   it('refuses a fixed ruling naming an id the same pass mints for a fresh comment (#9940 review)', () => {
@@ -6028,7 +6092,7 @@ describe('the thread lifecycle', () => {
 
     expect(resolveCalls()).toHaveLength(0);
     const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(stderr).toContain('R1-2 matched no live thread');
+    expect(stderr).toContain('fixed ruling R1-2 resolved nothing');
     expect(stderr).toContain('opened before id-stamping shipped');
     expect(stderr).toContain('resolve it by hand');
     expect(stdoutJson()).toMatchObject({ posted: true });

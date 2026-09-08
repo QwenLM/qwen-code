@@ -746,6 +746,109 @@ describe('composeReview — the C/S table', () => {
     expect(r.body).toContain('- R2-1 stale guard — already reported');
   });
 
+  it('no model-text channel can open a raw HTML element over the rest of the body (#9940 review, round 30 reverse audit)', () => {
+    // A list item bounds a `<details>` at its `</li>`, but NOT a RAWTEXT
+    // element — `<textarea>`, `<style>`, `<script>` run to a close tag
+    // that never comes and take the footer with them. The disclosure
+    // paragraphs are not even list items.
+    for (const tag of ['details', 'textarea', 'style', 'script']) {
+      for (const field of [
+        'cannotTellCriticals',
+        'suggestionsDroppedAsDuplicates',
+        'unreviewedDimensions',
+        'uncoverableChunks',
+      ]) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker nobody should lose'],
+            [field]: [`the fold's <${tag}> element is left open`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).not.toContain(`<${tag}>`);
+        expect(r.body).toContain(`&lt;${tag}`);
+        expect(r.body).toContain('a real blocker nobody should lose');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // A backticked tag still reads as code in every one of them.
+    for (const field of [
+      'cannotTellCriticals',
+      'suggestionsDroppedAsDuplicates',
+      'unreviewedDimensions',
+    ]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          [field]: ['`<details>` stays'],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(r.body).toContain('`<details>` stays');
+    }
+  });
+
+  it('a downgrade reason too big for the budget does not evict the shorter ones after it (#9940 review, round 30 reverse audit)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Four fit (1606 of 2000); the fifth would overrun, the short
+          // one after it still fits.
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, (_, i) =>
+              String.fromCharCode(97 + i).repeat(400),
+            ),
+            'self-PR',
+          ],
+        },
+      }),
+    );
+    expect(r.body).toContain('self-PR');
+  });
+
+  it('a model-written blocker cannot open a raw HTML element over the rest of the body (#9940 review, round 30)', () => {
+    // One ordinary sentence of review prose naming a tag without
+    // backticks: the entry is a top-level paragraph, so the unclosed
+    // element swallowed every later paragraph — the second blocker and
+    // the footer among them. Per entry is the right unit: a code span
+    // cannot cross the blank line between two entries.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            "the fold's <details> element is left open when the cut lands inside it",
+            'second blocker nobody would see',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain("fold's <details>");
+      expect(r.body).toContain('second blocker nobody would see');
+      // A backticked tag in blocker prose still reads as code.
+      const span = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: ['`<details>` stays'],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(span.body).toContain('`<details>` stays');
+    }
+  });
+
   it('attribution on: a comment-wrapped forged footer strips like an unwrapped one — only the canonical footer posts', () => {
     // Ingest's trailing strip ran while the wrapper still hid the footer;
     // the exit re-runs it on the neutralized text, so the forged model
@@ -2366,6 +2469,58 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.downgradedFrom).toBe('Approve');
     expect(r.body).toContain('⚠️ Downgraded from Approve to Comment: self-PR.');
     expect(verdictLine(r)).toContain('a presubmit check failed');
+  });
+
+  it("the downgrade sentence escapes over the JOIN — an odd backtick run in one reason cannot free the next reason's tag opener (#9940 review, round 30)", () => {
+    // The reasons render as ONE paragraph, so backtick runs pair across
+    // the `; `. Escaped per reason, `<details>` sat inside a code span of
+    // its own fragment and was left live; joined, the run re-paired the
+    // other way and the opener went out unescaped — one `<details>` in a
+    // top-level paragraph folds every later paragraph (the blockers, the
+    // disclosures, the footer) into a collapsed triangle.
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['CI failing: `build', 'head drift in `<details>`'],
+        },
+      }),
+    );
+    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
+    expect(r.body).toContain('&lt;details');
+    expect(r.body).not.toContain('<details');
+    // A reason whose span pairs within itself keeps its `<` — the escape
+    // reads the spans the render reads, not one span rule per fragment.
+    const paired = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['head drift in `<details>`', 'self-PR'],
+        },
+      }),
+    );
+    expect(paired.body).toContain('`<details>`');
+    // The 2000-point total is charged against the string that POSTS: the
+    // escape's `&lt;` expansion happens over the join, so pricing the
+    // fragments let the posted run overrun the budget by ~41%.
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Openers OUTSIDE any code span: each `<` grows to `&lt;` when
+          // the join is escaped, which pricing the fragments never saw.
+          downgradeReasons: Array.from({ length: 8 }, () => '<a>'.repeat(120)),
+        },
+      }),
+    );
+    const run = /Downgraded from Request changes to Comment: ([^\n]*)\./.exec(
+      many.body,
+    );
+    expect(run).not.toBeNull();
+    expect([...run![1]!].length).toBeLessThanOrEqual(2000);
   });
 
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {

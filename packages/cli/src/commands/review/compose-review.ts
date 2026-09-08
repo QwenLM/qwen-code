@@ -2078,14 +2078,20 @@ function formatCannotTell(
   // post lists the unresolved entries without it.
   const marker = attribution ? `${CRITICAL_PREFIX} ` : '';
   for (const { reason, heads } of groups) {
+    // Escaped per rendered LINE (see the duplicate list): `</li>` closes a
+    // `<details>` but not a RAWTEXT element, so one `<textarea>` in an
+    // entry folded the rest of the body away (#9940 review, round 30
+    // reverse audit).
     if (heads.length === 1) {
       lines.push(
-        `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        escapeTagOpeners(
+          `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        ),
       );
     } else {
       lines.push(
-        `- ${marker}${heads.length} entries — ${reason}:`,
-        ...heads.map((head) => `  - ${head}`),
+        escapeTagOpeners(`- ${marker}${heads.length} entries — ${reason}:`),
+        ...heads.map((head) => escapeTagOpeners(`  - ${head}`)),
       );
     }
   }
@@ -5194,21 +5200,31 @@ function composeReviewBody(
     // the footer and the ledger marker (#9940 review, audit 6).
     const reason = quotedProse(raw.replace(/\s+/g, ' ').trim(), attribution);
     const points = [...reason];
-    // Capped BEFORE the escape: the cap bounds the model's text, and the
-    // escape's `&lt;` lengthens it (#9940 review, audit 7).
-    return escapeTagOpeners(
-      points.length <= DOWNGRADE_REASON_MAX_CHARS
-        ? reason
-        : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`,
-    );
+    // The per-reason cap bounds the MODEL's text, before any escape
+    // lengthens it (#9940 review, audit 7).
+    return points.length <= DOWNGRADE_REASON_MAX_CHARS
+      ? reason
+      : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`;
   });
+  // The total budget is charged against the string that actually POSTS —
+  // the joined run, escaped once over the join (backtick runs pair across
+  // the `; `, so escaping fragment by fragment both misses openers and
+  // mis-prices them). Charging the fragments instead let the join's own
+  // `&lt;` expansion run 41% past the budget the accounting believed it
+  // had spent (#9940 review, round 30 reverse audit).
   const downgradeReasons: string[] = [];
-  let reasonBudget = DOWNGRADE_REASONS_TOTAL_MAX_CHARS;
   for (const reason of cappedReasons) {
-    const cost = [...reason].length;
-    if (cost > reasonBudget) break;
+    const next = [...downgradeReasons, reason];
+    if (
+      [...escapeTagOpeners(next.join('; '))].length >
+      DOWNGRADE_REASONS_TOTAL_MAX_CHARS
+    ) {
+      // Skipped, not `break`: one oversized reason used to drop every
+      // shorter one after it while the disclosure blamed the budget for
+      // all of them (#9940 review, round 30 reverse audit).
+      continue;
+    }
     downgradeReasons.push(reason);
-    reasonBudget -= cost;
   }
   const reasonsLeftOut = cappedReasons.length - downgradeReasons.length;
   const modelId: unknown = input.modelId;
@@ -6416,7 +6432,24 @@ function composeReviewBody(
   // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => {
-      const quoted = quotedProse(l, attribution);
+      // …and stops at raw HTML openers too: an entry is a top-level
+      // PARAGRAPH, so one unbalanced `<details>` in blocker prose — an
+      // ordinary sentence naming a tag without backticks — left the
+      // element open over every later paragraph and folded the remaining
+      // blockers, the disclosures and the footer into a collapsed
+      // triangle. Per entry is the right unit: a code span cannot cross
+      // the blank line between two entries, so the spans this computes
+      // are the spans that render (#9940 review, round 30).
+      //
+      // Every other channel that carries model prose is escaped the same
+      // way, at its own render unit: `formatCannotTell`'s list lines, the
+      // duplicate-drop list, and the `Not reviewed:` disclosure
+      // paragraphs. A list item bounds a `<details>` at its `</li>` but
+      // NOT a RAWTEXT element (`<textarea>`, `<style>`, `<script>`),
+      // whose content model runs to a matching close tag that never
+      // comes — measured swallowing the footer from all three channels
+      // (#9940 review, round 30 reverse audit).
+      const quoted = escapeTagOpeners(quotedProse(l, attribution));
       return attribution ? withMarker(quoted) : quoted;
     })
     .map((l) => ({ keep: 2, en: l, zh: l }));
@@ -6437,7 +6470,14 @@ function composeReviewBody(
   // overflow item names what the cap cut.
   const duplicatesShown = suggestionsDroppedAsDuplicates
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
-    .map((entry) => asListLine(boundDeferredLine(entry), pr));
+    .map((entry) =>
+      // After the wrap, not before: `escapeTagOpeners` reads code spans,
+      // so a line `boundDeferredLine` already wrapped keeps its `<`
+      // literal while an unwrapped one goes inert. A RAWTEXT opener here
+      // is not bounded by its `</li>` — it swallows the footer (#9940
+      // review, round 30 reverse audit).
+      escapeTagOpeners(asListLine(boundDeferredLine(entry), pr)),
+    );
   const duplicatesMore =
     suggestionsDroppedAsDuplicates.length - duplicatesShown.length;
   const duplicatesBlock: Bi[] =
@@ -6799,8 +6839,18 @@ function composeReviewBody(
   // which the verdict's own cap already carries, so trimming them costs
   // detail rather than the claim. (`notReviewedParts` itself stays untagged
   // — the length checks below ask about presence, not about rank.)
+  // Each part is its own PARAGRAPH of model-named subjects and reasons, so
+  // an unbalanced raw opener in one — `<details>`, or a RAWTEXT element
+  // like `<textarea>`/`<style>`/`<script>` whose content model swallows
+  // markup wholesale — left the element open over the blockers, the
+  // disclosures and the footer, exactly as it did for `bodyCriticals`
+  // before the escape moved there. Escaped per part, which is the render
+  // unit: a code span cannot cross the blank line between two paragraphs
+  // (#9940 review, round 30 reverse audit).
   const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
     ...p,
+    en: escapeTagOpeners(p.en),
+    zh: escapeTagOpeners(p.zh),
     trim: 2,
   }));
 
@@ -7119,7 +7169,22 @@ function composeReviewBody(
           `and were left out — read them in the presubmit report.`,
       );
     }
-    const reasons = downgradeReasons.join('; ');
+    // Escaped over the JOIN, once: the reasons render as ONE paragraph and
+    // backtick runs pair across the `; `, so a reason that leaves an odd
+    // run re-pairs the next reason's opening backtick — a `<` a
+    // fragment-local escape reads as span-interior is then live in the
+    // posted body, and one `<details>` there folds every later paragraph
+    // (the blockers, the disclosures, the footer) away (#9940 review,
+    // round 30).
+    //
+    // The escape's unit is this join; the RENDER's unit is the paragraph
+    // it sits in. They agree only while the opener's other clauses carry
+    // no backtick — they are static, backtick-free strings today, and
+    // `unlicensedDeferralBlock` (the one opener-adjacent clause that has
+    // any) is pushed as its own paragraph, which a code span cannot
+    // cross. A clause added here WITH a backtick reopens the same hole
+    // one level up: escape the assembled paragraph instead.
+    const reasons = escapeTagOpeners(downgradeReasons.join('; '));
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
       keep: 1,

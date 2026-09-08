@@ -564,6 +564,33 @@ function structuralProblems(payload: ReviewPayload): string[] {
 }
 
 /**
+ * The carried ledger id of a DRAFTED comment as the CONTRADICTION GATE
+ * reads it: the union of both projections — as authored, and as the
+ * attribution-off post strips it (`stripForUnattributedPost` removes the
+ * severity marker and a forged footer, which can EXPOSE an id the drafted
+ * body hides behind a hard break).
+ *
+ * A SUPERSET of what the rest of the pipeline acts on, deliberately, and
+ * that direction is the invariant: the ledger builder and `stampCarriedId`
+ * both read the drafted projection, so a strip-only id is fresh work to
+ * them — minted a new id, stamped, posted inline — while the POSTED body
+ * still visibly leads with the old one. A pass that also ruled that old id
+ * fixed would resolve its thread beside a comment publicly re-asserting
+ * it, which is exactly the self-contradiction `refuse` exists to stop. The
+ * gate therefore refuses on either projection; nothing downstream may see
+ * an id this read cannot (#9940 review, round 30).
+ */
+function carriedInEitherProjection(
+  body: string | undefined,
+): { id: string; fixInduced: boolean } | null {
+  const drafted = body ?? '';
+  return (
+    carriedFindingOf(drafted) ??
+    carriedFindingOf(stripReviewFooter(stripForUnattributedPost(drafted)))
+  );
+}
+
+/**
  * The per-comment shape checks the consistency gate refuses. One statement,
  * two readers: `inconsistencies` reports them as the loud refusal, and the
  * Aone anchor gate consults them to decide a comment is too malformed to
@@ -756,7 +783,7 @@ function inconsistencies(
     // no removal) the posting set IS the authored set.
     const drafted = authored?.comments ?? comments;
     drafted.forEach((c, i) => {
-      const carried = carriedFindingOf(c.body);
+      const carried = carriedInEitherProjection(c.body);
       if (carried !== null && fixedIds.has(carried.id)) {
         problems.push(
           contradiction(
@@ -1624,14 +1651,17 @@ function submit(
     };
     if (stampSkippedFence > 0) {
       writeStderrLine(
-        `Thread lifecycle: ${stampSkippedFence} draft(s) open a code ` +
-          `fence, HTML block, blockquote, heading, list item or thematic ` +
-          `break on their first line (or an indented code block / ` +
-          `non-\`1.\` ordered list right under the marker) and were left ` +
-          `un-stamped — a stamp there would break the structure the ` +
-          `gate validated. Their ` +
-          `thread roots carry no ledger id, so no later carry or ` +
-          `fixed ruling can reach them; resolve such threads by hand.`,
+        `Thread lifecycle: ${stampSkippedFence} draft(s) were left ` +
+          `un-stamped — inserting the id would have changed the drafted ` +
+          `body's block structure on one of the two projections the ` +
+          `stamp checks (as drafted, and as the attribution-off post ` +
+          `strips it): the first line opens a construct the id cannot ` +
+          `join (a code fence, HTML block, blockquote, heading, list ` +
+          `item, thematic break, an indented code block or a non-\`1.\` ` +
+          `ordered list right under the marker), or the stripped post ` +
+          `re-shapes around the inserted paragraph. Their thread roots ` +
+          `carry no ledger id, so no later carry or fixed ruling can ` +
+          `reach them; resolve such threads by hand.`,
       );
     }
   }
@@ -1707,8 +1737,21 @@ function submit(
       );
     }
   } else {
-    const carried = finalComments
-      .map((c, index) => ({ index, finding: carriedFindingOf(c.body) }))
+    // The DRAFTED bodies, at the same indices `finalComments` maps —
+    // the projection the ledger builder and `stampCarriedId` read, so
+    // this agrees with the id a comment is actually posted under. Reading
+    // the POST here instead let the diversion act on ids the gate could
+    // not see (a payload then replied "still stands" AND "fixed by" into
+    // one thread and resolved it); the gate now reads a superset of this
+    // set, which is the safe direction (`carriedInEitherProjection`).
+    // A strip-only id is fresh work to the ledger — minted, stamped, and
+    // excluded below — so diverting it here would answer a thread under
+    // an id the post no longer claims (#9940 review, round 30).
+    const carried = (payload.comments ?? [])
+      .map((c, index) => ({
+        index,
+        finding: carriedFindingOf(c.body ?? ''),
+      }))
       // A stamped-fresh id was minted THIS round; no existing thread can
       // carry it, so it is no carry candidate — left in, it would pay the
       // thread read on every round with new findings for a match that
@@ -1809,6 +1852,13 @@ function submit(
           // The ruling note carries its own invisible marker — the autofix
           // census filters the review bot's inline replies by it, and it is
           // not the posted comment-marker shape presubmit reads ids by.
+          // Escaping `by` alone is enough HERE, unlike the downgrade
+          // reasons' join: everything put in front of it (`R<id> fixed
+          // by `) and after it (the marker, the footer) carries no
+          // backtick, so no run can re-pair across the concatenation and
+          // free a `<` this read as span-interior (#9940 review, round
+          // 30 — measured, not assumed: an escape over the assembled
+          // line killed no mutant).
           const line = `${fixedRulingLine(r.id, by)} ${FIXED_RULING_MARKER}`;
           return {
             threadId: r.threadId,
@@ -1835,9 +1885,10 @@ function submit(
       }
       for (const id of plan.unmatchedFixed) {
         writeStderrLine(
-          `Thread lifecycle: fixed ruling ${id} matched no live thread ` +
-            `this account opened — already resolved, or never posted. ` +
-            `Nothing to resolve. ${preStampCaveat}`,
+          `Thread lifecycle: fixed ruling ${id} resolved nothing — no ` +
+            `live thread this account opened carries it (already ` +
+            `resolved, or never posted), or the one that does is taking ` +
+            `this round's still-standing re-post. ${preStampCaveat}`,
         );
       }
     }

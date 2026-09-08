@@ -139,7 +139,20 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
       `pr=${pr}`,
     ];
     if (after !== undefined) args.push('-f', `after=${after}`);
-    const response = JSON.parse(gh(...args).replace(ANSI_SGR_RE, '')) as {
+    const raw = gh(...args)
+      .replace(ANSI_SGR_RE, '')
+      .trim();
+    // An empty read is the transport failing quietly (a 204, a silenced
+    // call): `JSON.parse('')` dies as a bare `SyntaxError: Unexpected end
+    // of JSON input`, which tells the operator nothing about which read
+    // aborted their post (#9940 review, round 30).
+    if (raw === '') {
+      throw new Error(
+        `Review threads: the thread query returned nothing (page ${page + 1}). ` +
+          `Nothing was posted — retry, or check \`gh auth status\`.`,
+      );
+    }
+    const response = JSON.parse(raw) as {
       data?: {
         repository?: {
           pullRequest?: {
@@ -585,7 +598,11 @@ export interface ThreadActionPlan {
     threadId: string;
     commentId: number;
   }>;
-  /** Fixed ids that matched no live own thread (already resolved, or gone). */
+  /**
+   * Fixed ids this plan does not act on: no live own thread carries them
+   * (already resolved, or gone), or every thread that does is taking a
+   * still-standing carry reply from this same pass.
+   */
   unmatchedFixed: string[];
 }
 
@@ -620,6 +637,23 @@ export function planThreadActions(
   fixed: FixedFinding[],
 ): ThreadActionPlan {
   const me = login.trim().toLowerCase();
+  // An unknown account matches nothing. Empty is what `currentUser()`
+  // returns when the token cannot name itself, and `''` compared against
+  // a root author of `''` matched every such thread — the guard every
+  // other member of the own-account family already carries (presubmit's
+  // reply leg, `ownSignalReplies`, `isSelfReview`) (#9940 review, round
+  // 30).
+  // …but a ruling that could not be acted on is still disclosed: submit
+  // prints one operator line per `unmatchedFixed` entry, and silence here
+  // read as "there was nothing to resolve" (#9940 review, round 30
+  // reverse audit).
+  if (me === '') {
+    return {
+      replies: [],
+      resolves: [],
+      unmatchedFixed: fixed.map((f) => f.id),
+    };
+  }
   const byId = new Map<
     string,
     Array<{ thread: ReviewThread; marked: boolean }>
@@ -667,13 +701,29 @@ export function planThreadActions(
       });
     }
   }
+  // One ruling per thread, whatever the caller passed. `postReviewReply`
+  // is non-idempotent, so a second entry under the same id — two `fixed`
+  // rulings spelling one id, or one thread already answered — posts the
+  // note twice. Submit's ingestion dedups by id and its contradiction
+  // gate refuses a ruling on a carried id, so neither is reachable
+  // through it today; this function is exported and unit-tested as pure,
+  // and a second caller would hit both (#9940 review, round 30).
+  const ruled = new Set<string>();
   for (const f of fixed) {
     const targets = byId.get(canonicalLedgerId(f.id)) ?? [];
-    if (targets.length === 0) {
-      plan.unmatchedFixed.push(f.id);
-      continue;
-    }
+    let acted = false;
     for (const { thread } of targets) {
+      if (ruled.has(thread.threadId)) {
+        acted = true;
+        continue;
+      }
+      // A thread this pass is replying a still-standing carry into is not
+      // a thread this pass may close.
+      if (plan.replies.some((r) => r.commentId === thread.rootCommentId)) {
+        continue;
+      }
+      ruled.add(thread.threadId);
+      acted = true;
       plan.resolves.push({
         id: f.id,
         ...(f.by === undefined ? {} : { by: f.by }),
@@ -681,6 +731,10 @@ export function planThreadActions(
         commentId: thread.rootCommentId,
       });
     }
+    // No thread at all, or every one of them excluded: either way the
+    // ruling went nowhere, and the operator is told rather than left to
+    // infer it from a silent pass.
+    if (!acted) plan.unmatchedFixed.push(f.id);
   }
   return plan;
 }
