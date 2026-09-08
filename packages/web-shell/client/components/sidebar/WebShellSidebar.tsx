@@ -4177,8 +4177,13 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
-        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      const scheduledTaskMarker = isScheduledTaskSession(session) ? (
+        <span
+          className={styles.sessionSourceIcon}
+          data-web-shell-scheduled-task-session
+        >
+          <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+        </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
@@ -4270,15 +4275,7 @@ export function WebShellSidebar({
                   : undefined
               }
             >
-              {scheduledTaskIcon && (
-                <span
-                  className={styles.sessionSourceIcon}
-                  data-web-shell-scheduled-task-session
-                  title={t('sidebar.scheduledTasks')}
-                >
-                  {scheduledTaskIcon}
-                </span>
-              )}
+              {scheduledTaskMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -4528,15 +4525,7 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
-                {scheduledTaskIcon && (
-                  <span
-                    className={styles.sessionSourceIcon}
-                    data-web-shell-scheduled-task-session
-                    title={t('sidebar.scheduledTasks')}
-                  >
-                    {scheduledTaskIcon}
-                  </span>
-                )}
+                {scheduledTaskMarker}
                 {attention && (
                   <span
                     className={cx(
