@@ -21,7 +21,10 @@ vi.mock('./telemetry-context.js', () => ({
     telemetryMocks.getDaemonTelemetryInboundTraceId,
 }));
 
-import { installAccessLogMiddleware } from './access-log.js';
+import {
+  ACCESS_LOG_REJECT_LOCAL,
+  installAccessLogMiddleware,
+} from './access-log.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -67,13 +70,16 @@ function harness() {
       method?: string;
       status?: number;
       rawHeaders?: string[];
+      locals?: Record<string, unknown>;
     } = {},
   ) => {
     if (!middleware) throw new Error('Access middleware was not installed');
     const response = new EventEmitter() as EventEmitter & {
       statusCode: number;
+      locals: Record<string, unknown>;
     };
     response.statusCode = input.status ?? 200;
+    response.locals = input.locals ?? {};
     const next = vi.fn();
     middleware(
       {
@@ -292,5 +298,39 @@ describe('installAccessLogMiddleware', () => {
     pending.response.emit('finish');
     expect(h.logger.info).not.toHaveBeenCalled();
     expect(h.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('charges pre-auth gate rejects to their own budget, never the operator one', () => {
+    const h = harness();
+    // 65 marked rejects: beyond the shared burst (60), so without the split
+    // the operator's own line would already be coalesced. Marked rejects
+    // draw from their own smaller budget instead — 30 logged, rest counted.
+    for (let i = 0; i < 65; i += 1) {
+      const { response } = h.begin({
+        method: 'POST',
+        path: '/session',
+        status: 403,
+        locals: { [ACCESS_LOG_REJECT_LOCAL]: true },
+      });
+      response.emit('finish');
+    }
+    expect(
+      vi
+        .mocked(h.logger.warn)
+        .mock.calls.filter(([message]) => message === 'request completed'),
+    ).toHaveLength(30);
+    // The operator's own line is untouched by the flood.
+    const { response } = h.begin({ path: '/capabilities', status: 200 });
+    response.emit('finish');
+    expect(h.logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+    );
+    // And the flood still coalesces loudly once its own budget drains.
+    expect(
+      vi
+        .mocked(h.logger.warn)
+        .mock.calls.some(([message]) => message === 'access logs suppressed'),
+    ).toBe(true);
   });
 });

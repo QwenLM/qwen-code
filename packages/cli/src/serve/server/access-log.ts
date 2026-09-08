@@ -13,11 +13,22 @@ import { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 const SESSION_ID_RE = /\/session\/([^/]+)/;
 const ACCESS_LOG_BURST = 60;
 const ACCESS_LOG_REFILL_PER_SECOND = 2;
+// Gate rejects rejected before authentication (Host allowlist, the CORS
+// wall, the remote same-origin credential check) draw from a separate,
+// smaller budget. They share this middleware only because the walls moved
+// above it; without the split a credential-less host sustaining >2 req/s of
+// rejected traffic drains the burst in ~30 s and holds the OPERATOR's own
+// authenticated lines suppressed behind the aggregate warning.
+const ACCESS_LOG_REJECT_BURST = 30;
+const ACCESS_LOG_REJECT_REFILL_PER_SECOND = 1;
 const ROUTE_MAX_BYTES = 2 * 1024;
 const SESSION_ID_MAX_BYTES = 256;
 const CLIENT_ID_MAX_BYTES = 256;
 
 export const ACCESS_LOG_CONTROLLER_LOCAL = 'accessLogController';
+
+/** res.locals key the pre-auth gates set on their reject path. */
+export const ACCESS_LOG_REJECT_LOCAL = 'accessLogPreAuthReject';
 
 export interface AccessLogController {
   sealAndFlushSuppressed(): void;
@@ -88,6 +99,8 @@ export function installAccessLogMiddleware(
   let sealed = false;
   let tokens = ACCESS_LOG_BURST;
   let refillBaseline = monotonicNow();
+  let rejectTokens = ACCESS_LOG_REJECT_BURST;
+  let rejectRefillBaseline = refillBaseline;
   let suppressed = emptySuppressedCounts();
 
   const refill = (): void => {
@@ -97,6 +110,17 @@ export function installAccessLogMiddleware(
       tokens + ((now - refillBaseline) / 1_000) * ACCESS_LOG_REFILL_PER_SECOND,
     );
     refillBaseline = now;
+  };
+
+  const refillReject = (): void => {
+    const now = Math.max(monotonicNow(), rejectRefillBaseline);
+    rejectTokens = Math.min(
+      ACCESS_LOG_REJECT_BURST,
+      rejectTokens +
+        ((now - rejectRefillBaseline) / 1_000) *
+          ACCESS_LOG_REJECT_REFILL_PER_SECOND,
+    );
+    rejectRefillBaseline = now;
   };
 
   const flushSuppressed = (): boolean => {
@@ -144,11 +168,24 @@ export function installAccessLogMiddleware(
           tokens -= 1;
           flushSuppressed();
         }
-        if (tokens < 1) {
+        const isPreAuthReject = Boolean(
+          (res.locals as Record<string, unknown> | undefined)?.[
+            ACCESS_LOG_REJECT_LOCAL
+          ],
+        );
+        let admitted: boolean;
+        if (isPreAuthReject) {
+          refillReject();
+          admitted = rejectTokens >= 1;
+          if (admitted) rejectTokens -= 1;
+        } else {
+          admitted = tokens >= 1;
+          if (admitted) tokens -= 1;
+        }
+        if (!admitted) {
           countSuppressed(suppressed, status);
           return;
         }
-        tokens -= 1;
 
         const route = truncateUtf8(`${method} ${reqPath}`, ROUTE_MAX_BYTES);
         const sessionMatch = reqPath.match(SESSION_ID_RE);

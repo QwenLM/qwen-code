@@ -10,6 +10,7 @@ import { bearerAuth } from '../auth.js';
 import { isPreAuthWebShellRequest } from '../web-shell-preauth.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import { ACCESS_LOG_REJECT_LOCAL } from './access-log.js';
 
 export function installRemoteSelfOriginMiddleware(
   app: Application,
@@ -51,7 +52,12 @@ export function installRemoteSelfOriginMiddleware(
       next();
       return;
     }
+    // Charge a same-origin credential reject to the pre-auth budget, not
+    // the operator one: the marker is set provisionally and cleared when
+    // the bearer actually verifies.
+    res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
     const allow = () => {
+      delete res.locals[ACCESS_LOG_REJECT_LOCAL];
       delete req.headers.origin;
       next();
     };
