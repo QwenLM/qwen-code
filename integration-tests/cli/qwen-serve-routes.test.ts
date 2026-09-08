@@ -423,6 +423,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
       'extension_batch_activation_v2',
+      'extension_activation_explicit_refresh',
       'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',
@@ -474,6 +475,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
+      'session_worktree_reset_v1',
       'voice_transcribe',
       'web_terminal',
     ]);

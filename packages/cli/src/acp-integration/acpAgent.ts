@@ -281,7 +281,7 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
-  getModelConfiguration,
+  getConfiguredModelReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -842,6 +842,10 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
+    Storage.getUserWorkflowsDir(),
+    // Workflow run artifacts: resume journals, run snapshots, and persisted
+    // inline scripts named by workflow results and notifications.
+    config.storage.getWorkflowRunsDir(),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
@@ -7340,7 +7344,9 @@ class QwenAgent implements Agent {
                     model.id,
                     model.registryBaseUrl ?? model.baseUrl,
                   )?.generationConfig.thinkingMandatory === true,
+                  model.capabilities?.reasoning,
                 ),
+                model.capabilities?.reasoning,
               );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
@@ -10517,6 +10523,7 @@ class QwenAgent implements Agent {
         const status = params['status'];
         const kind = params['kind'];
         const toolUseId = params['toolUseId'];
+        const label = params['label'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -10580,6 +10587,17 @@ class QwenAgent implements Agent {
             'Invalid background notification toolUseId',
           );
         }
+        if (
+          label !== undefined &&
+          (typeof label !== 'string' ||
+            label.trim().length === 0 ||
+            label.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification label',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
@@ -10588,6 +10606,7 @@ class QwenAgent implements Agent {
           status,
           kind,
           ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+          ...(typeof label === 'string' ? { label } : {}),
         });
         return { sessionId, accepted: result.accepted };
       }
@@ -11893,7 +11912,8 @@ class QwenAgent implements Agent {
               : task.status === 'completed' ||
                 task.status === 'failed' ||
                 task.status === 'cancelled';
-          if (!canStart || !task.script) {
+          const savedScriptPath = task.scriptPath;
+          if (!canStart || (!task.script && !savedScriptPath)) {
             return { changed: false, status: task.status };
           }
           const attempt = await tryWithWorkflowTaskMutation(
@@ -11908,13 +11928,33 @@ class QwenAgent implements Agent {
                   `The workflow tool is unavailable; cannot ${action} this run.`,
                 );
               }
+              let readableScriptPath: string | undefined;
+              if (savedScriptPath) {
+                try {
+                  await resolveSavedWorkflowScript(
+                    { scriptPath: savedScriptPath },
+                    config,
+                  );
+                  readableScriptPath = savedScriptPath;
+                } catch {
+                  readableScriptPath = undefined;
+                }
+              }
+              if (!readableScriptPath && !task.script) {
+                return { changed: false, status: task.status };
+              }
               const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-                script: task.script,
+                ...(readableScriptPath
+                  ? { scriptPath: readableScriptPath }
+                  : { script: task.script }),
                 args: task.args,
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool
-                .buildSessionOwnedBackground(startParams, task.workflowName)
+                .buildSessionOwnedBackground(
+                  startParams,
+                  readableScriptPath ? task.workflowName : undefined,
+                )
                 .execute(new AbortController().signal)) as WorkflowToolResult;
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
@@ -14031,16 +14071,17 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
+    const modelReasoning = getConfiguredModelReasoning(config, modelId);
     if (
       !isReasoningSelectionSupported(
         modelId,
         selection,
         generation?.thinkingMandatory === true,
+        modelReasoning,
       )
     ) {
       return;
     }
-    const modelReasoning = this.getModelReasoningConfiguration(config);
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
       clearReasoningRequestOverrides(generation);
     }
@@ -14598,12 +14639,19 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    const modelReasoning = this.getModelReasoningConfiguration(
+      config,
+      currentModelId,
+    );
+
     if (
       activeRuntimeSnapshot ||
       currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
+        false,
+        modelReasoning,
       )
     ) {
       return [modeConfigOption, modelConfigOption];
@@ -14613,10 +14661,6 @@ class QwenAgent implements Agent {
     if (!generation) {
       return [modeConfigOption, modelConfigOption];
     }
-    const modelReasoning = this.getModelReasoningConfiguration(
-      config,
-      currentModelId,
-    );
     const currentModelEffort = config.getReasoningEffort?.();
     const reasoningOverride = config.getReasoningEffortOverride?.();
     const reasoningOverrideValue = reasoningOverride
@@ -14660,7 +14704,7 @@ class QwenAgent implements Agent {
         ? mandatoryUsesDefaultEffort
           ? modelReasoning.defaultEffort
           : normalizedOverrideEffort
-            ? (modelReasoning.efforts.find(
+            ? (modelReasoning.efforts?.find(
                 (effort) => effort === normalizedOverrideEffort,
               ) ?? modelReasoning.defaultEffort)
             : currentModelEffort
@@ -14670,11 +14714,15 @@ class QwenAgent implements Agent {
       (!reasoningOverride || !overrideDisablesReasoning);
     const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
-      ? buildModelReasoningConfigOption(rawCurrentModelId, {
-          enabled: reasoningEnabled,
-          effort: effectiveModelEffort,
-          thinkingMandatory: generation.thinkingMandatory === true,
-        })
+      ? buildModelReasoningConfigOption(
+          rawCurrentModelId,
+          {
+            enabled: reasoningEnabled,
+            effort: effectiveModelEffort,
+            thinkingMandatory: generation.thinkingMandatory === true,
+          },
+          modelReasoning,
+        )
       : undefined) ?? {
       id: 'reasoning_effort',
       name: 'Reasoning effort',
@@ -14730,8 +14778,7 @@ class QwenAgent implements Agent {
     if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
       return undefined;
     }
-    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
-    return reasoning?.thinking ? reasoning : undefined;
+    return getConfiguredModelReasoning(config);
   }
 
   private buildSelectableModelOptions(config: Config) {

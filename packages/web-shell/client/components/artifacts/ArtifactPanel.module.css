@@ -78,10 +78,43 @@
 }
 
 .tabTitle {
+  position: relative;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tabTitle[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.tabTitleInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.tabItem:hover .tabTitleInner,
+.tabItem:focus-within .tabTitleInner {
+  animation: artifactTabTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes artifactTabTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabItem:hover .tabTitleInner,
+  .tabItem:focus-within .tabTitleInner {
+    animation: none;
+  }
 }
 
 .tabIcon {
@@ -98,6 +131,10 @@
   width: 16px;
   height: 16px;
   display: block;
+}
+
+.tabArtifactIcon {
+  filter: grayscale(1);
 }
 
 .tabItem:hover .tabIcon,

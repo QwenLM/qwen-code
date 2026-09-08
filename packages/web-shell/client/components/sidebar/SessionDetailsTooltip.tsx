@@ -27,6 +27,7 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  workspaceLabel?: string;
   worktreeOnly?: boolean;
   children: ReactElement;
 }
@@ -36,6 +37,7 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  workspaceLabel,
   worktreeOnly = false,
   children,
 }: SessionDetailsTooltipProps) {
@@ -56,7 +58,7 @@ export function SessionDetailsTooltip({
       )
     : null;
   const folderPath = session.workspaceCwd;
-  const folderName = workspaceBasename(folderPath);
+  const folderName = workspaceLabel ?? workspaceBasename(folderPath);
   const branch = session.worktree?.branch ?? session.branch?.name;
   const prs = [...(session.prs ?? [])]
     .reverse()
@@ -73,9 +75,13 @@ export function SessionDetailsTooltip({
     );
   const status = session.hasActivePrompt
     ? t('sidebar.running')
-    : completedUnread
-      ? t('sidebar.completedUnread')
-      : t('sidebar.clients', { count: session.clientCount ?? 0 });
+    : session.activeWorkState === 'active'
+      ? t('sidebar.activeWork')
+      : session.activeWorkState === 'unknown'
+        ? t('sidebar.activityUnknown')
+        : completedUnread
+          ? t('sidebar.completedUnread')
+          : t('sidebar.clients', { count: session.clientCount ?? 0 });
 
   useEffect(() => {
     return () => {
@@ -160,7 +166,7 @@ export function SessionDetailsTooltip({
             </div>
             <div className={styles.sessionDetailsRow}>
               <FolderClosedIcon aria-hidden="true" />
-              <span title={folderPath}>{folderName}</span>
+              <span title={workspaceLabel ?? folderPath}>{folderName}</span>
             </div>
           </>
         )}

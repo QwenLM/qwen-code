@@ -10,7 +10,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { atomicWriteFileSync, Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/storage';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/atomicFileWrite';
 
 interface TipHistoryEntry {
   totalShown: number;

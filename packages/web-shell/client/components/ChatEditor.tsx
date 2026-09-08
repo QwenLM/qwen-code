@@ -91,6 +91,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import { FileTypeIcon } from './FileTypeIcon';
+import { FileAttachmentContent } from './FileAttachmentContent';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -265,6 +266,7 @@ interface ChatEditorProps {
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -400,7 +402,11 @@ function TopComposerTag({
     </span>
   );
   const tagElement = (
-    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+    <span
+      ref={anchorRef}
+      className={`${styles.tag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}`}
+      data-web-shell-composer-tag
+    >
       {hasTooltip ? (
         <TooltipPrimitive.Trigger asChild>
           {tagContent}
@@ -1535,6 +1541,7 @@ export const ChatEditor = memo(
       atWorkspaceCwd,
       composerScopeKey,
       workspaceFeaturesEnabled = true,
+      attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -1568,6 +1575,7 @@ export const ChatEditor = memo(
       atProviders: contextAtProviders,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     } = useWebShellCustomization();
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
@@ -1635,7 +1643,7 @@ export const ChatEditor = memo(
     );
     useLayoutEffect(() => {
       setPendingDropFiles(null);
-    }, [disabled, uploadTargetKey]);
+    }, [disabled, uploadTargetKey, attachmentsEnabled, fileDropAction]);
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1690,7 +1698,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: workspaceFeaturesEnabled && fileUploadEnabled !== false,
+      fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
       skills,
@@ -1713,7 +1721,7 @@ export const ChatEditor = memo(
       atWorkspaceCwd,
       composerScopeKey,
       disableLegacyHistoryFallback: composerScopeKey === 'standalone',
-      attachmentsEnabled: workspaceFeaturesEnabled,
+      attachmentsEnabled,
       workspaceFeaturesEnabled,
       composerTagIcons,
       parseUserMessageContent,
@@ -1784,10 +1792,12 @@ export const ChatEditor = memo(
     };
     const [uploadDragActive, setUploadDragActive] = useState(false);
     const uploadDragDepthRef = useRef(0);
+    const uploadDropEnabled =
+      uploadEnabled && (!attachmentsEnabled || fileDropAction !== 'attach');
     const handleUploadDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
@@ -1796,19 +1806,19 @@ export const ChatEditor = memo(
         uploadDragDepthRef.current += 1;
         setUploadDragActive(true);
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
           return;
         event.preventDefault();
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragLeave = useCallback(() => {
       if (uploadDragDepthRef.current === 0) return;
@@ -1852,27 +1862,38 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
-        if (fileUploadEnabled === false) {
-          // Host force-disables file drag-in entirely: cancel the drop so
-          // the browser cannot navigate to the file, but ingest nothing on
-          // any lane (the image lane is gated off too).
-          event.preventDefault();
-          return;
-        }
         if (!uploadEnabled || files.length === 0) {
-          core.imageTransferHandlers.onDropCapture(event);
+          if (attachmentsEnabled) {
+            core.imageTransferHandlers.onDropCapture(event);
+          } else {
+            event.preventDefault();
+          }
           return;
         }
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        setPendingDropFiles(files);
+        if (!attachmentsEnabled || fileDropAction === 'upload') {
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+          focusComposer();
+        } else if (fileDropAction === 'attach') {
+          ingestFiles(files);
+          focusComposer();
+        } else {
+          setPendingDropFiles(files);
+        }
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
-        fileUploadEnabled,
+        attachmentsEnabled,
+        fileDropAction,
+        focusComposer,
+        fileUploadDirectory,
+        ingestFiles,
+        insertUploadReference,
+        uploadFiles,
         pendingDropFiles,
         uploadEnabled,
       ],
@@ -2009,8 +2030,8 @@ export const ChatEditor = memo(
       };
     }, [clearUploadDragState, uploadDragActive]);
     useEffect(() => {
-      if (disabled) clearUploadDragState();
-    }, [clearUploadDragState, disabled]);
+      if (disabled || !uploadDropEnabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled, uploadDropEnabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -2395,13 +2416,22 @@ export const ChatEditor = memo(
       }
       return (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.tagIcon}
               style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -2447,6 +2477,7 @@ export const ChatEditor = memo(
     const workspaceSelectVisible = Boolean(
       workspaces &&
         onSelectWorkspace &&
+        showToolbarAction('workspace') &&
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
@@ -2702,19 +2733,32 @@ export const ChatEditor = memo(
                       })
                     }
                   >
-                    {busy ? (
-                      <LoaderCircleIcon
-                        className={styles.uploadRowSpinner}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <UploadIcon aria-hidden="true" />
-                    )}
-                    <span className={styles.uploadRowName}>
+                    <FileTypeIcon
+                      name={upload.file.name}
+                      mimeType={upload.file.type}
+                      size={20}
+                      className={styles.uploadRowIcon}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className={styles.uploadRowName}
+                      title={upload.file.name}
+                    >
                       {upload.file.name}
                     </span>
                     <span className={styles.uploadRowStatus}>
-                      {uploadStatusText(upload)}
+                      {busy && (
+                        <LoaderCircleIcon
+                          className={styles.uploadRowSpinner}
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span
+                        className={styles.uploadRowStatusText}
+                        title={uploadStatusText(upload)}
+                      >
+                        {uploadStatusText(upload)}
+                      </span>
                     </span>
                   </button>
                   <button
@@ -2964,16 +3008,10 @@ export const ChatEditor = memo(
                             })
                           }
                         >
-                          <FileTypeIcon
+                          <FileAttachmentContent
                             name={file.name}
                             mimeType={file.media_type}
-                            size={14}
-                            className={styles.fileChipIcon}
-                            aria-hidden="true"
                           />
-                          <span className={styles.fileChipName}>
-                            {file.name}
-                          </span>
                         </button>
                         <button
                           type="button"
@@ -3109,6 +3147,7 @@ export const ChatEditor = memo(
                       disabled={disabled}
                       availabilityKey={JSON.stringify([
                         fileUploadEnabled === false,
+                        attachmentsEnabled,
                         uploadEnabled,
                         Boolean(
                           core.workspaceActionsRef.current?.globWorkspace ??
@@ -3123,9 +3162,7 @@ export const ChatEditor = memo(
                         ),
                         Boolean(skills?.length),
                       ])}
-                      addFileAvailable={
-                        workspaceFeaturesEnabled && fileUploadEnabled !== false
-                      }
+                      addFileAvailable={attachmentsEnabled}
                       uploadAvailable={uploadEnabled}
                       onAddFiles={handleAddMenuFiles}
                       onFilePickerCancel={focusComposer}

@@ -63,6 +63,13 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Whether a host-level allow decision may be confirmed without forwarding
+   * an interaction payload. Tools that collect data through their approval
+   * surface should return false so the host-provided payload is preserved.
+   */
+  canAutoApproveOnAllow?(): boolean;
+
+  /**
    * Constructs the confirmation dialog details for this invocation.
    * Only called when the final permission decision is `'ask'` and the user
    * needs to be prompted interactively.
@@ -113,6 +120,10 @@ export abstract class BaseToolInvocation<
 
   requiresUserInteraction(): boolean {
     return false;
+  }
+
+  canAutoApproveOnAllow(): boolean {
+    return true;
   }
 
   /**
@@ -817,6 +828,13 @@ export interface TaskListResultDisplay {
 export interface FileDiff {
   fileDiff: string;
   fileName: string;
+  /**
+   * Full (project-relative or absolute) path to the edited file, as passed
+   * to the tool. UI consumers must prefer this over `fileName` when
+   * resolving a clickable/openable location — `fileName` is a basename and
+   * cannot be used to locate files outside the workspace root.
+   */
+  filePath?: string;
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;

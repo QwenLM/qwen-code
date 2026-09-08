@@ -29,7 +29,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { CompressionProps } from '../types.js';
+import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
@@ -73,6 +73,15 @@ export type OpenTuiStreamEvent =
       visionBridgeNotice?: string;
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
+  /** The call left awaiting_approval (approved, declined, or bounced):
+   * releases the transcript card's pending marker and records how it left
+   * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
+   * 'approved' (running means someone approved it). */
+  | {
+      type: 'confirm-resolved';
+      id: string;
+      outcome: 'approved' | 'rejected';
+    }
   /** Structured compression item (/compress command): rendered as the ink
    * CompressionMessage row (spinner/diamond + token counts) instead of the
    * flattened text projection. */
@@ -122,6 +131,27 @@ export type OpenTuiStreamEvent =
       iterations?: number;
       durationMs?: number;
       lastReason?: string;
+    }
+  /** Away-summary recap (ink away_recap → AwayRecapMessage): `※` gutter +
+   * bold "recap:" label, all secondary-colored. */
+  | { type: 'away-recap'; text: string }
+  /** User `!`-shell command row (ink user_shell → UserShellMessage):
+   * `$ ` prefix + the command text. */
+  | { type: 'user-shell'; text: string }
+  /** Advisor review card (ink advisor → AdvisorMessage): header with the
+   * resolved model + the review body as markdown. */
+  | { type: 'advisor'; text: string; model: string }
+  /** Arena agent card (ink arena_agent_complete → ArenaAgentCard):
+   * structured agent result carried so the row can color the status. */
+  | { type: 'arena-agent'; agent: ArenaAgentCardData }
+  /** Arena session summary card (ink arena_session_complete →
+   * ArenaSessionCard): structured cross-agent comparison. */
+  | {
+      type: 'arena-session';
+      sessionStatus: string;
+      task: string;
+      totalDurationMs: number;
+      agents: ArenaAgentCardData[];
     }
   /**
    * Turn segmentation marker (core `finished` / one-shot notices): closes
@@ -752,6 +782,8 @@ export type GoalSnapshotLike = {
     status?: string;
     turnCount?: number;
     activeTimeMs?: number;
+    tokensUsed?: number;
+    tokenBudget?: number;
     lastReason?: string;
   } | null;
   activity?: string;

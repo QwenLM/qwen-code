@@ -181,9 +181,12 @@ export function App() {
 审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
 投影：
 
+> 只渲染 transcript 的宿主请从 `@qwen-code/web-shell/transcript` 子路径导入。包根会连带
+> `App`、daemon providers 和编辑器/终端相关代码，不要依赖 tree shaking 把它们摇掉。
+
 ```tsx
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { WebShellTranscript } from '@qwen-code/web-shell';
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 
 const records = jsonl
   .split(/\r?\n/)
@@ -201,6 +204,25 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
 历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
+## 拖入文件的默认行为
+
+通过 `fileDropAction` 指定拖入文件时的默认去向，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders fileDropAction="upload" fileUploadDirectory="uploads" />
+<WebShellWithProviders fileDropAction="attach" />
+```
+
+- `upload`：直接上传到工作区，并插入 `@文件` 引用。
+- `attach`：直接添加为当前消息的附件。
+- 不传：仅当上传和附件都可用时显示选择弹窗。
+
+只有一种方式可用时直接使用它，即使配置的默认去向是另一种；两种都不可用时
+不接收拖入文件。`fileUploadEnabled={false}` 只关闭工作区上传，不再关闭附件
+拖入或添加附件入口。上传仍受 daemon 能力、工作区信任及目标路径检查约束。
+修改默认去向或可用方式时，会关闭已经打开的选择弹窗；需要重新拖入文件。
 
 ## 消息操作
 
@@ -291,6 +313,13 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+`Live` 会话分组默认不向嵌入宿主展示；此前版本会默认展示，依赖该分组的宿主升级时
+需要显式开启：
+
+```tsx
+<WebShellWithProviders sidebar={{ showLive: true }} />
+```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

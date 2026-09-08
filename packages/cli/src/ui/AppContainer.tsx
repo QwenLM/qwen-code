@@ -47,6 +47,7 @@ import {
   parseHeldExpiry,
   describeHoldCause,
   describePeerInboxFailure,
+  flattenPeerLabel,
   getErrorMessage,
   getAllMemoryFilenames,
   ShellExecutionService,
@@ -2706,9 +2707,13 @@ export const AppContainer = (props: AppContainerProps) => {
           type: MessageType.INFO,
           text:
             `Held a message from ${
-              newest.selfSent
-                ? 'a process this session started'
-                : 'another session'
+              newest.controller
+                ? `a trusted controller (${flattenPeerLabel(
+                    newest.controller.label,
+                  )})`
+                : newest.selfSent
+                  ? 'a process this session started'
+                  : 'another session'
             } (${describeHoldCause(newest.cause, newest.policyScope)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
