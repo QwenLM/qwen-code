@@ -644,8 +644,8 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
       workspaceCwd: workspaceDir,
     });
 
-    // Find the daemon's direct `--acp` child PID.
-    const childPids = execSync(`pgrep -P ${daemon.pid} -f "qwen.*--acp"`, {
+    // Find the daemon's direct `--acp` child PID without relying on the checkout path.
+    const childPids = execSync(`pgrep -P ${daemon.pid} -f -- "--acp"`, {
       encoding: 'utf8',
     })
       .trim()
