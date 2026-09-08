@@ -145,6 +145,14 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
 
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised, and it is the
+    // only visual test that hovers a message row -- so its screenshots were the
+    // only place a hover-timestamp change could show up, and every web-shell
+    // preview was dominated by four full-height red error images regardless of
+    // what the PR touched. The reveal/hide behaviour is pinned by the opacity
+    // assertions below on every viewport and on touch; the captures added a
+    // misleading preview, not coverage.
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const scenario = createTerminalTurnErrorScenario(
@@ -168,14 +176,12 @@ for (const theme of THEMES) {
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
 
       await page.setViewportSize({ width: 720, height: 800 });
       await page.mouse.move(0, 0);
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
 
       const touchContext = await browser.newContext({
         ...devices['Pixel 7'],
