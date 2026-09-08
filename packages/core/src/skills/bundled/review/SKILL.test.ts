@@ -1146,7 +1146,7 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'the no-`fixed`-beside-landed-hunks refusal (`the ledger records no `fixed` outcome, but --hunks carries edits`)',
     );
-    expect(step).toContain('Both take the same two-way ruling.');
+    expect(step).toContain('Both take the same two-way ruling');
     // The claim-versus-edit case is an annotation, never a refusal — a fix
     // can land entirely in files the findings do not name — and the
     // annotation is relayed, not acted on.
@@ -1174,6 +1174,12 @@ describe('bundled review skill', () => {
     // The not-a-patch refusal is neither a carve-out nor an agent
     // failure: it is disclosed as `not run` with the command's reason.
     expect(step).toContain('--hunks names no path at all');
+    // The out-of-band cause of the no-`fixed`-beside-hunks refusal has an
+    // exit that is not "record a fixed outcome you did not make".
+    expect(step).toContain(
+      'Fix audit: not run — hunks carry edits no outcome owns',
+    );
+    expect(step).toContain('Do not invent a `fixed` outcome');
     expect(step).toContain('Fix audit: not run — <what the command said>');
     expect(step).toContain(
       'never into `findings-in.json`, the census, or the verdict',

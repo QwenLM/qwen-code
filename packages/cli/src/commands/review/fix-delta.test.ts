@@ -57,6 +57,12 @@ vi.mock('node:child_process', async (importOriginal) => {
 const readdirHook = vi.hoisted(() => ({
   unknownDirents: false,
 }));
+// …and the inode witness: FAT/exFAT and some SMB mounts answer `ino === 0`
+// for every entry, which no CI host can mount, so the stat stream is
+// wrapped behind the same kind of switch.
+const statHook = vi.hoisted(() => ({
+  zeroInodes: false,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const readdirSync = ((...args: Parameters<typeof actual.readdirSync>) => {
@@ -82,7 +88,19 @@ vi.mock('node:fs', async (importOriginal) => {
       isBlockDevice: () => false,
     }));
   }) as typeof actual.readdirSync;
-  return { ...actual, default: { ...actual, readdirSync }, readdirSync };
+  const statSync = ((...args: Parameters<typeof actual.statSync>) => {
+    const st = actual.statSync(...args);
+    if (!statHook.zeroInodes || st === undefined) return st;
+    return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {
+      ino: 0,
+    });
+  }) as typeof actual.statSync;
+  return {
+    ...actual,
+    default: { ...actual, readdirSync, statSync },
+    readdirSync,
+    statSync,
+  };
 });
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
@@ -108,6 +126,8 @@ import type { Mock } from 'vitest';
 import yargs from 'yargs';
 import {
   IGNORED_WALK_BUDGET,
+  IGNORED_WALK_RUN_CAP,
+  setWalkBudgetsForTest,
   assertCompleteCapture,
   excludePathspec,
   fixDeltaCommand,
@@ -262,6 +282,11 @@ describe('fix-delta', () => {
     gitIsolation.dispose();
     tmpdirOverride.value = undefined;
     readdirHook.unknownDirents = false;
+    statHook.zeroInodes = false;
+    setWalkBudgetsForTest({
+      perWalk: IGNORED_WALK_BUDGET,
+      perRun: IGNORED_WALK_RUN_CAP,
+    });
   });
 
   it('diffs exactly the edits made between the snapshot and now — on top of the reviewed change', () => {
@@ -1903,7 +1928,16 @@ describe('fix-delta', () => {
     const inner = join(big, 'inner');
     mkdirSync(inner);
     gitAt(inner, 'init', '-q', '-b', 'main');
-    for (let i = 0; i <= IGNORED_WALK_BUDGET; i++) {
+    // The budget is charged per DIRECTORY OPENED, so the fixture is
+    // directories — and the ceiling is lowered for the test rather than
+    // building a package store: production reads the same field.
+    setWalkBudgetsForTest({ perWalk: 4 });
+    for (let i = 0; i <= 6; i++) {
+      mkdirSync(join(big, `d${i}`, 'deeper'), { recursive: true });
+    }
+    // …and the plain files a directory holds are not the search: a
+    // thousand of them beside the same directories still resolve.
+    for (let i = 0; i < 1000; i++) {
       writeFileSync(join(big, `e${i}`), '');
     }
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
@@ -1911,8 +1945,8 @@ describe('fix-delta', () => {
       readFileSync(snapshotFile(), 'utf8'),
     ) as FixSnapshot;
     expect(snap.dirtySubmodules).not.toContain('big');
-    // The PER-WALK budget is what exhausts here — one directory past
-    // `IGNORED_WALK_BUDGET`, well inside the per-run cap — and the
+    // The PER-WALK budget is what exhausts here — more directories than
+    // the ceiling this test pins, well inside the per-run cap — and the
     // exhaustion is disclosed, never absorbed by the larger cap.
     expect(snap.unresolved).toContain('big');
     writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
@@ -1927,6 +1961,51 @@ describe('fix-delta', () => {
     expect(
       lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
     ).toBe(false);
+
+    // …and the files a directory holds are not the search: the same tiny
+    // ceiling over a tree of THREE directories holding a thousand files
+    // each resolves, so nothing is charged for what the walk drops.
+    (writeStderrLine as unknown as Mock).mockClear();
+    const flat = join(repo, 'ig');
+    mkdirSync(flat, { recursive: true });
+    for (const name of ['a', 'b', 'c']) {
+      mkdirSync(join(flat, name), { recursive: true });
+      for (let i = 0; i < 1000; i++) {
+        writeFileSync(join(flat, name, `f${i}`), '');
+      }
+    }
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nbig/\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig too');
+    setWalkBudgetsForTest({ perWalk: 5 });
+    runSnapshot();
+    const flatSnap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(flatSnap.unresolved).not.toContain('ig');
+
+    // The per-RUN cap is the other ceiling: with the per-walk budget wide
+    // open, a run that opens more directories than the cap allows still
+    // discloses — the two are charged independently.
+    (writeStderrLine as unknown as Mock).mockClear();
+    setWalkBudgetsForTest({ perWalk: IGNORED_WALK_BUDGET, perRun: 3 });
+    runSnapshot();
+    const capped = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(capped.unresolved.length).toBeGreaterThan(0);
+    setWalkBudgetsForTest({ perRun: IGNORED_WALK_RUN_CAP });
+
+    // The control: the same tree under the shipped ceiling resolves, so
+    // the disclosure above is the budget's and not the walk's.
+    setWalkBudgetsForTest({ perWalk: IGNORED_WALK_BUDGET });
+    (writeStderrLine as unknown as Mock).mockClear();
+    runSnapshot();
+    const wide = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(wide.unresolved).not.toContain('big');
+    expect(Object.keys(wide.digests)).toContain('big/inner');
   }, 30_000);
 
   it('hedges the all-clear to what the capture can see, beside gitignored edits', () => {
@@ -3951,6 +4030,390 @@ describe('fix-delta', () => {
       lines.some((l) => l.includes('cannot see') && l.includes('nested/lib')),
     ).toBe(true);
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('runs no hook the repository ships, at either moment', () => {
+    // Hooks are steering the tree carries. `core.fsmonitor` runs from the
+    // capture's `check-ignore` (the one spawn that measured this tree
+    // unpinned), and a `post-index-change` hook inherits the capture's
+    // throwaway `GIT_INDEX_FILE` — one `cp` of a prebuilt index resets the
+    // very index being recorded and both trees come back equal over a
+    // landed edit. A hook that only PRINTS is the other half: its line
+    // lands in `add`'s stderr and the capture refuses as incomplete.
+    const marker = join(out, 'hook-ran');
+    const hookBody = `#!/bin/sh\nprintf ran >> ${marker}\nprintf 'HOOK SAID X' >&2\n`;
+    mkdirSync(join(repo, '.git', 'hooks'), { recursive: true });
+    for (const name of ['post-index-change', 'fsmonitor-watchman']) {
+      const path = join(repo, '.git', 'hooks', name);
+      writeFileSync(path, hookBody);
+      chmodSync(path, 0o755);
+    }
+    git('config', 'core.fsmonitor', '.git/hooks/fsmonitor-watchman');
+    // The side file lives INSIDE the repository, so `check-ignore` runs:
+    // outside it the capture never spawns it at all.
+    const snap = join(repo, '.qwen', 'tmp', 'fd-snapshot.json');
+    const hunks = join(repo, '.qwen', 'tmp', 'fd-hunks.diff');
+    mkdirSync(dirname(snap), { recursive: true });
+
+    runFixDelta({ snapshot: true, since: undefined, out: snap });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    expect(() => runSince(snap, hunks)).not.toThrow();
+
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(hunks, 'utf8')).toContain('export const x = 2;');
+    expect(stderr().at(-1)).toContain('1 file(s) changed since the snapshot');
+  });
+
+  it('probes a repository hidden in a nested repository’s own ignored path', () => {
+    // Depth alone was the difference: the walk stopped at the first `.git`
+    // it met and handed that repository to the probe without descending,
+    // so a repository under an ignored path OF a nested repository was
+    // neither walked, nor dirt, nor a digest move — and the run printed
+    // the bare all-clear over an edit inside it.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const repoA = join(repo, 'ig', 'repoA');
+    mkdirSync(repoA, { recursive: true });
+    gitAt(repoA, 'init', '-q', '-b', 'main');
+    gitAt(repoA, 'config', 'user.email', 't@t.t');
+    gitAt(repoA, 'config', 'user.name', 't');
+    writeFileSync(join(repoA, '.gitignore'), 'build/\n');
+    writeFileSync(join(repoA, 'f.txt'), 'v1\n');
+    gitAt(repoA, 'add', '-A');
+    gitAt(repoA, 'commit', '-qm', 'init');
+    const deep = join(repoA, 'build', 'deep');
+    mkdirSync(deep, { recursive: true });
+    gitAt(deep, 'init', '-q', '-b', 'main');
+    gitAt(deep, 'config', 'user.email', 't@t.t');
+    gitAt(deep, 'config', 'user.name', 't');
+    writeFileSync(join(deep, 'x.ts'), 'v1\n');
+    gitAt(deep, 'add', '-A');
+    gitAt(deep, 'commit', '-qm', 'init');
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(Object.keys(snap.digests)).toContain('ig/repoA/build/deep');
+    writeFileSync(join(deep, 'x.ts'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('ig/repoA/build/deep'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('discovers every repository on a filesystem that reports no inodes', () => {
+    // FAT/exFAT and some SMB mounts answer `ino === 0` for every entry.
+    // Keyed on a raw `dev:ino`, the first directory walked claimed the
+    // identity of all of them: every later directory read as already
+    // visited, every path compared equal to the audited root, and both
+    // `dirtySubmodules` and `digests` came back EMPTY behind the bare
+    // all-clear. No identity means walk and probe, never "seen".
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    for (const name of ['one', 'two']) {
+      const inner = join(repo, 'ig', name);
+      mkdirSync(inner, { recursive: true });
+      gitAt(inner, 'init', '-q', '-b', 'main');
+      gitAt(inner, 'config', 'user.email', 't@t.t');
+      gitAt(inner, 'config', 'user.name', 't');
+      writeFileSync(join(inner, 'f.txt'), 'v1\n');
+      gitAt(inner, 'add', '-A');
+      gitAt(inner, 'commit', '-qm', 'init');
+      writeFileSync(join(inner, 'dirty.txt'), 'uncommitted\n');
+    }
+
+    statHook.zeroInodes = true;
+    runSnapshot();
+    statHook.zeroInodes = false;
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.dirtySubmodules).toEqual(
+      expect.arrayContaining(['ig/one', 'ig/two']),
+    );
+    expect(Object.keys(snap.digests)).toEqual(
+      expect.arrayContaining(['ig/one', 'ig/two']),
+    );
+  });
+
+  it('never baselines a repository the walk reaches outside the root', () => {
+    // A directory link out of the tree led the walk to enumerate, spawn
+    // against and BASELINE content the capture never records: an unrelated
+    // commit in that repository read as this tree's transition, and the
+    // enumeration spent the run's budget on it. Out of root is disclosed,
+    // never walked.
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-outside-')),
+    );
+    try {
+      gitAt(outside, 'init', '-q', '-b', 'main');
+      gitAt(outside, 'config', 'user.email', 't@t.t');
+      gitAt(outside, 'config', 'user.name', 't');
+      writeFileSync(join(outside, 'o.txt'), 'v1\n');
+      gitAt(outside, 'add', '-A');
+      gitAt(outside, 'commit', '-qm', 'init');
+      writeFileSync(join(outside, 'dirt.txt'), 'unrelated\n');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      mkdirSync(join(repo, 'ig'));
+      symlinkSync(outside, join(repo, 'ig', 'ext'));
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(Object.keys(snap.digests)).not.toContain('ig/ext');
+      expect(snap.dirtySubmodules).not.toContain('ig/ext');
+      expect(snap.unresolved).not.toContain('ig/ext');
+      // Scope, not an unanswerable state: the link is named, its target's
+      // dirt is not this tree's, and the run says so.
+      expect(snap.outOfRoot).toContain('ig/ext');
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+      runSince();
+
+      const lines = stderr();
+      expect(
+        lines.some(
+          (l) => l.includes('ig/ext') && l.includes('outside this repository'),
+        ),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes('otherrepo'))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a subtree an enclosing checkout already answers for', () => {
+    // ONE planted `sub/.git` reading `gitdir: <repo>/.git` narrows every
+    // reading to `sub`: git answers `--show-toplevel` = `sub`, the honest
+    // walk stops at the plant, and both git-dir readings resolve through
+    // it and agree — so the capture recorded a subtree, the hunks named
+    // paths that do not exist at the repository root, and every edit
+    // outside `sub` landed in no hunk. A stale gitfile a moved submodule
+    // or a copied worktree left behind is the same shape.
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub', 'b.txt'), 'v1\n');
+    git('add', '-A');
+    git('commit', '-qm', 'sub');
+    writeFileSync(join(repo, 'sub', '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    const cwdHere = process.cwd();
+    try {
+      process.chdir(join(repo, 'sub'));
+      expect(() => runSnapshot()).toThrow(/CONTAINS it/);
+    } finally {
+      process.chdir(cwdHere);
+    }
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
+  it('captures a family-named path the user staged without committing', () => {
+    // `-u` updates entries the throwaway index HOLDS, and that index is
+    // HEAD's tree: a family-named path staged but not committed is tracked
+    // by the same meaning the re-inclusion's contract uses, yet it was in
+    // neither tree — so a fix's edit to it produced an empty delta and the
+    // bare all-clear, the very harm the re-inclusion exists to prevent.
+    // The repository IGNORES `.qwen/` — this one does, and so do many —
+    // which is what makes `-f` load-bearing on the re-inclusion.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    const staged = join(repo, '.qwen', 'tmp', 'qwen-review-notes.md');
+    writeFileSync(staged, 'staged content v1\n');
+    git('add', '-f', '--', '.qwen/tmp/qwen-review-notes.md');
+
+    runSnapshot();
+    writeFileSync(staged, 'staged content v2 EDITED-BY-THE-FIX\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('qwen-review-notes.md');
+    expect(hunks).toContain('EDITED-BY-THE-FIX');
+    expect(stderr().at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('keeps a file the fix replaced with a directory in the hunks', () => {
+    // A tracked FILE replaced by a DIRECTORY of the same name records
+    // `D <name>` beside the new entries, and "still on disk" alone called
+    // that a capture artefact: the literal exclude then dropped the whole
+    // SUBTREE from the hunks, and when the replacement was the only change
+    // the run printed the all-clear over it. A ghost is a path an ignore
+    // rule now hides — git is the authority on its own rules.
+    writeFileSync(join(repo, 'config.json'), '{"v":1}\n');
+    git('add', '-A');
+    git('commit', '-qm', 'config');
+
+    runSnapshot();
+    rmSync(join(repo, 'config.json'));
+    mkdirSync(join(repo, 'config.json'));
+    writeFileSync(join(repo, 'config.json', 'prod.json'), '{"env":"prod"}\n');
+    writeFileSync(join(repo, 'config.json', 'dev.json'), '{"env":"dev"}\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('config.json/prod.json');
+    expect(hunks).toContain('config.json/dev.json');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('still on') && l.includes('disk')),
+    ).toBe(false);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'walks an in-tree link whose own name is not valid UTF-8',
+    () => {
+      // The root bound is decided on BYTES: a link whose name carries an
+      // invalid byte decoded to U+FFFD, `realpathSync` threw for the
+      // decoded string, and the walk called an in-tree link an escape —
+      // so the repository behind it was never discovered, on every run,
+      // on any filesystem that allows such a name (Linux; APFS refuses
+      // them, which is why the sibling cases below fail locally too).
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      const inner = join(repo, 'ig', 'inner');
+      mkdirSync(inner, { recursive: true });
+      gitAt(inner, 'init', '-q', '-b', 'main');
+      gitAt(inner, 'config', 'user.email', 't@t.t');
+      gitAt(inner, 'config', 'user.name', 't');
+      writeFileSync(join(inner, 'f.txt'), 'v1\n');
+      gitAt(inner, 'add', '-A');
+      gitAt(inner, 'commit', '-qm', 'init');
+      // A second route to the same directory, under a name spawn args
+      // cannot carry — planted through the shell's stdin, the one
+      // byte-exact channel.
+      const linkAbs = Buffer.concat([
+        Buffer.from(join(repo, 'ig', 'l')),
+        Buffer.from([0xff]),
+      ]);
+      execFileSync('/bin/sh', [], {
+        input: Buffer.concat([
+          Buffer.from("set -e\nln -s -- '"),
+          Buffer.from(join(repo, 'ig')),
+          Buffer.from("' '"),
+          linkAbs,
+          Buffer.from("'\n"),
+        ]),
+      });
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      // In-tree, so it is neither scope nor unresolvable, and the
+      // repository behind it is recorded exactly once.
+      expect(snap.outOfRoot).toEqual([]);
+      expect(snap.unresolved).toEqual([]);
+      expect(Object.keys(snap.digests)).toEqual(['ig/inner']);
+    },
+  );
+
+  it('states an out-of-root link as scope, without spending the all-clear', () => {
+    // `npm link`, a `file:../sibling` dependency and a hoisted package
+    // store put a directory link out of the tree in an ordinary run.
+    // Content out there is outside this command's model the way a
+    // gitignored file's bytes are, so it states the scope; gating the
+    // all-clear on it made the qualification fire on every run, which is
+    // the disclosure nobody reads. A link that APPEARED since the
+    // snapshot is the fix's doing and does gate.
+    const outside = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-linked-')),
+    );
+    try {
+      writeFileSync(join(outside, 'o.txt'), 'v1\n');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      mkdirSync(join(repo, 'ig'));
+      symlinkSync(outside, join(repo, 'ig', 'linked'));
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(snap.outOfRoot).toContain('ig/linked');
+      expect(snap.unresolved).not.toContain('ig/linked');
+      runSince();
+      let lines = stderr();
+      expect(
+        lines.some(
+          (l) =>
+            l.includes('ig/linked') && l.includes('outside this repository'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(true);
+
+      // …and one that was not there at the snapshot gates it.
+      (writeStderrLine as unknown as Mock).mockClear();
+      runSnapshot();
+      symlinkSync(outside, join(repo, 'ig', 'fresh-link'));
+      runSince();
+      lines = stderr();
+      expect(
+        lines.some(
+          (l) =>
+            l.includes('ig/fresh-link') &&
+            l.includes('not there at the snapshot'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('never reports a deletion the capture invented from a new ignore rule', () => {
+    // The two captures run under whatever ignore rules exist at each
+    // moment. A `.gitignore` line the fix writes — the most ordinary thing
+    // a fix does — hides a pre-existing untracked file from the SECOND
+    // capture, and the tree comparison read the absence as a deletion: the
+    // hunks asserted an edit the fix never made and the count overstated
+    // its footprint.
+    mkdirSync(join(repo, 'coverage'), { recursive: true });
+    writeFileSync(join(repo, 'coverage', 'lcov.info'), 'report\n');
+
+    runSnapshot();
+    writeFileSync(join(repo, '.gitignore'), 'coverage/\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('coverage/lcov.info');
+    expect(hunks).toContain('a.ts');
+    expect(existsSync(join(repo, 'coverage', 'lcov.info'))).toBe(true);
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('coverage/lcov.info') &&
+          l.includes('still on') &&
+          l.includes('disk'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
   });
 
   it('runs from a cwd whose own empty .git directory git climbs past', () => {
