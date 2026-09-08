@@ -100,7 +100,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       failCalls: '',
       elapsedSeconds: 1200,
     });
-    expect(npmCalls).toBe(1);
+    expect(npmCalls).toBe(2);
     expect(output).not.toContain('::warning::');
     expect(output).not.toContain('::error::');
     expect(exitCode).toBe(0);
@@ -113,7 +113,17 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       failCalls: '1',
       elapsedSeconds: 1200,
     });
-    expect(npmCalls).toBe(2);
+    expect(npmCalls).toBe(3);
+    expect(output).toContain('::warning::');
+    expect(exitCode).toBe(0);
+  });
+
+  it('retries when the isolated serve routes suite dies once', () => {
+    const { exitCode, npmCalls, output } = runStepScript({
+      failCalls: '2',
+      elapsedSeconds: 1200,
+    });
+    expect(npmCalls).toBe(4);
     expect(output).toContain('::warning::');
     expect(exitCode).toBe(0);
   });
@@ -129,6 +139,15 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
     expect(exitCode).not.toBe(0);
   });
 
+  it('keeps the step red when the serve routes suite fails both attempts', () => {
+    const { exitCode, npmCalls } = runStepScript({
+      failCalls: '2 4',
+      elapsedSeconds: 1200,
+    });
+    expect(npmCalls).toBe(4);
+    expect(exitCode).not.toBe(0);
+  });
+
   it('retries at exactly the 2100s budget-gate threshold', () => {
     // The gate admits a retry at elapsed <= 2100. Threshold mutations in
     // either direction must not ship silently between the 1200/3000 probes.
@@ -136,7 +155,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       failCalls: '1',
       elapsedSeconds: 2100,
     });
-    expect(npmCalls).toBe(2);
+    expect(npmCalls).toBe(3);
     expect(output).toContain('::warning::');
     expect(exitCode).toBe(0);
   });

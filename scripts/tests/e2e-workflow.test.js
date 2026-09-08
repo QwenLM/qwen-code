@@ -34,7 +34,7 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
-  it('runs three Vitest forks on one Linux runner per sandbox', () => {
+  it('isolates the serve routes suite from the three parallel forks', () => {
     const linuxJob = yml.jobs['e2e-test-linux'];
     const runStep = linuxJob.steps.find(
       (step) => step.name === 'Run E2E tests',
@@ -47,6 +47,14 @@ describe('e2e workflow', () => {
     expect(runStep.run).toMatch(
       /^\s*QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- .*--poolOptions\.forks\.maxForks=3/m,
     );
+    expect(
+      runStep.run.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
+    ).toHaveLength(2);
+    expect(
+      runStep.run.match(
+        /cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.singleFork/g,
+      ),
+    ).toHaveLength(2);
   });
 
   describe('sandbox image preparation', () => {
@@ -208,7 +216,7 @@ describe('e2e workflow', () => {
       // shard and exclude coverage lives only in this argument list. The
       // excludes are shared verbatim with the docker leg above.
       expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}'",
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}'",
       );
     });
 
@@ -266,25 +274,25 @@ describe('e2e workflow', () => {
     });
 
     it('does not retry the docker leg', () => {
-      // Two ~30min docker attempts would outrun the job's timeout-minutes.
-      expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
-        1,
-      );
-      // Structure, not just count: wrapping the docker command in a
-      // function and calling it twice keeps the literal count at one. The
+      // The bulk run and isolated serve-routes run each execute once.
+      const commands = [
+        ...runStep.run.matchAll(/QWEN_SANDBOX=docker vitest run/g),
+      ];
+      expect(commands).toHaveLength(2);
+      // Structure, not just count: wrapping either command in a function and
+      // calling it later keeps the literal count unchanged. The
       // docker leg defines its own helper functions, so match by brace
       // depth rather than any earlier definition: every `${...}` brace in
       // the script is balanced, leaving the command at depth zero unless
       // something wraps it.
-      const commandIndex = runStep.run.indexOf(
-        'QWEN_SANDBOX=docker vitest run',
-      );
-      let depth = 0;
-      for (const ch of runStep.run.slice(0, commandIndex)) {
-        if (ch === '{') depth += 1;
-        if (ch === '}') depth -= 1;
+      for (const command of commands) {
+        let depth = 0;
+        for (const ch of runStep.run.slice(0, command.index)) {
+          if (ch === '{') depth += 1;
+          if (ch === '}') depth -= 1;
+        }
+        expect(depth).toBe(0);
       }
-      expect(depth).toBe(0);
     });
   });
 

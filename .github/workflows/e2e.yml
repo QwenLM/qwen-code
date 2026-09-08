@@ -358,11 +358,15 @@ jobs:
           # The docker leg runs vitest directly instead of through
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
+          # Keep the long-lived serve daemon out of the three-fork batch so
+          # sibling E2E processes cannot starve its local HTTP requests.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}' 9>&-
+            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}' 9>&-
+            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork 9>&-
           else
             run_shard() {
-              QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}'
+              QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}' &&
+              QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork
             }
             # One bounded retry: pool runners' sandbox:none shards die under
             # shared-host pressure with every test green and no vitest FAIL
