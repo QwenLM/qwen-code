@@ -612,6 +612,14 @@ describe('resolveBootstrapRoute', () => {
     expect(
       resolveBootstrapRoute(['mcp', 'remove', 'victim', '-v', 'help']),
     ).toBe('version');
+    // A `--bg` token in a subcommand-led argv is not a background launch:
+    // the `--bg` gate lives inside `if (route === 'default')` and never
+    // sees an `mcp` route, so the version intercept is the only thing that
+    // stops the subcommand from EXECUTING with the version request
+    // shadowed (`mcp remove victim --bg -v` ran the remove handler).
+    expect(
+      resolveBootstrapRoute(['mcp', 'remove', 'victim', '--bg', '-v']),
+    ).toBe('version');
     expect(
       resolveBootstrapRoute([
         'mcp',
@@ -1451,6 +1459,26 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('does not honor -h');
+    });
+
+    it('declines a --help typed as an attached --bg prompt word instead of hijacking the launch', async () => {
+      // The shell splits `qwen --bg=audit add a --help section to the
+      // README`, so `--help` is its own argv word among the trailing
+      // positionals that `readBackgroundPrompt` joins behind the attached
+      // prompt. Keying the help scan on the flag's token FORM scanned the
+      // whole argv and matched that prompt word, falling through to
+      // top-level help: exit 0, prompt dropped, no session, no diagnostic
+      // — while the bare spelling of the identical prompt declined by name
+      // with exit 1. The scan must stop at the first prompt word after the
+      // attached flag, so the prompt-word `--help` declines like the bare
+      // form's.
+      await runCliEntry(['--bg=audit', 'add', '--help', 'section']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor --help');
+      expect(stderr.join('')).toContain('after --');
     });
 
     it('declines a version token typed as a --bg prompt word instead of printing the version', async () => {

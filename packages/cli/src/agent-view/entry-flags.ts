@@ -29,13 +29,18 @@ export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
 export const BACKGROUND_FLAG = '--bg';
 
 // `bg` is declared `type: 'boolean'` in the help surface, so the attached
-// spelling has boolean semantics: `--bg=false` / `--bg=0` is how a wrapper
-// (`qwen --bg=$ENABLED "$TASK"`) turns the launch OFF, and `--bg=true` /
-// `--bg=1` means the same as the bare flag. Only these exact literals are
-// special — every other attached value is prompt data, which is the only
-// way to express a prompt that starts with a dash (`--bg=-repro`).
-const BACKGROUND_FLAG_OFF_VALUES = new Set(['false', '0']);
-const BACKGROUND_FLAG_ON_VALUES = new Set(['true', '1']);
+// spelling has boolean semantics: `--bg=false` / `--bg=0` / `--bg=off` /
+// `--bg=no` is how a wrapper (`qwen --bg=$ENABLED "$TASK"`) turns the
+// launch OFF, and `--bg=true` / `--bg=1` / `--bg=on` / `--bg=yes` means
+// the same as the bare flag. The match is case-insensitive because the
+// wrapper spellings that reach a real argv are the capitalized ones a
+// `type: 'boolean'` coercion folds away (`--bg=False`, `--bg=True`), and
+// the short forms `off`/`no`/`on`/`yes` are what Make/CI/PowerShell
+// writers emit. Only these literals are special — every other attached
+// value is prompt data, which is the only way to express a prompt that
+// starts with a dash (`--bg=-repro`).
+const BACKGROUND_FLAG_OFF_VALUES = new Set(['false', '0', 'off', 'no', 'n']);
+const BACKGROUND_FLAG_ON_VALUES = new Set(['true', '1', 'on', 'yes', 'y']);
 
 /** The value of an attached `--bg=<value>` token, or undefined. */
 function backgroundFlagAttachedValue(token: string): string | undefined {
@@ -56,7 +61,7 @@ export function isBackgroundFlagToken(token: string): boolean {
   if (attached === undefined) {
     return token === BACKGROUND_FLAG;
   }
-  return !BACKGROUND_FLAG_OFF_VALUES.has(attached);
+  return !BACKGROUND_FLAG_OFF_VALUES.has(attached.toLowerCase());
 }
 
 /**
@@ -67,7 +72,10 @@ export function isBackgroundFlagToken(token: string): boolean {
  */
 export function backgroundFlagPromptWord(token: string): string | undefined {
   const attached = backgroundFlagAttachedValue(token);
-  if (attached === undefined || BACKGROUND_FLAG_ON_VALUES.has(attached)) {
+  if (
+    attached === undefined ||
+    BACKGROUND_FLAG_ON_VALUES.has(attached.toLowerCase())
+  ) {
     return undefined;
   }
   return attached;

@@ -187,6 +187,23 @@ describe('readBackgroundPrompt', () => {
     expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=falsey`])).toEqual({
       prompt: 'falsey',
     });
+    // The match is case-insensitive and widened to the off/on short forms
+    // a real wrapper emits (`--bg=False`, `--bg=off`): the `type:
+    // 'boolean'` declaration folds every non-`true` attached value to
+    // false, so a wrapper spelling that reaches argv as `False`/`off`/`no`
+    // must read as OFF — reading it as prompt data dispatched an agent on
+    // `False audit the release` and certified it with exit 0. The
+    // lowercase stays on the set lookup only: the returned prompt word is
+    // verbatim, so `--bg=-Repro` still round-trips.
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=False`, 'audit the release']),
+    ).toBeUndefined();
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=off`, 'audit the release']),
+    ).toBeUndefined();
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=True`, 'audit the release']),
+    ).toEqual({ prompt: 'audit the release' });
   });
 
   it('declines any other flag and names it, because --bg forwards nothing', () => {
@@ -421,6 +438,30 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).not.toContain(
       'Could not start a background session',
     );
+  });
+
+  it('reports a session the supervisor terminally failed as a failure, not in flight', async () => {
+    // The supervisor patches a post-record failure to `sessionState:
+    // 'failed'` WITHOUT touching ownership, projectCwd or createdAt
+    // (markFailedSession), so the recorded-since predicate matched it and
+    // certified a definitively failed launch "may still be starting" —
+    // exit 2, the do-not-retry code — while `qwen sessions ps` listed it
+    // `failed`. Terminal states must read as NOT recorded, so the truthful
+    // exit 1 stands.
+    const internalError = new Error(
+      'Agent View worker did not report ready before timeout.',
+    ) as Error & { code: string };
+    internalError.code = 'internal_error';
+    supervisorDispatch.mockRejectedValue(internalError);
+    listAgentViewSessionStates.mockResolvedValue([
+      recordedSession({ sessionState: 'failed' }),
+    ]);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Could not start a background session');
+    expect(stderr.join('')).not.toContain('may still be starting');
   });
 
   it('keeps a dispatch rejection the store does not date to this launch a failure', async () => {

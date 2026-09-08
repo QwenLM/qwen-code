@@ -459,7 +459,20 @@ export function resolveBootstrapRoute(
   const versionToken = versionTokenIndex(argv);
   if (versionToken !== -1) {
     const backgroundFlag = backgroundFlagIndex(argv);
-    if (backgroundFlag === -1 || versionToken < backgroundFlag) {
+    // The exception is scoped to flag-LED background launches: a version
+    // token after a `--bg` that leads the argv is one of that launch's
+    // prompt words (`qwen --bg -v audit`), but a version token after a
+    // `--bg` in a subcommand-led argv (`qwen mcp add victim node --bg -v`)
+    // is not — the `--bg` gate lives inside `if (route === 'default')`
+    // and never sees an `mcp` route, so intercepting is the only thing
+    // that stops the subcommand from EXECUTING with the version request
+    // shadowed (the demote-then-execute direction this intercept exists
+    // to prevent).
+    const firstPositional = firstPositionalArgIndex(argv);
+    const flagLedBackgroundLaunch =
+      backgroundFlag !== -1 &&
+      (firstPositional === -1 || firstPositional > backgroundFlag);
+    if (!flagLedBackgroundLaunch || versionToken < backgroundFlag) {
       return 'version';
     }
   }
@@ -774,27 +787,39 @@ export async function runCliEntry(
       // path's known-safe grammar (see argvSafeForFastPath), and the
       // parser renders help even for the unregistered spelling.
       //
-      // The whole argv is scanned only when the flag token carries its
-      // prompt INSIDE itself (`--bg=<prompt>`): such a token consumes no
-      // positional words, so base rendered help for every ordering of the
-      // pair (`--help --bg=x`, `--bg=x --help`) and the tokens after it are
-      // still flags. After a BARE `--bg` — and after `--bg=true`, which
-      // means the bare flag — every following token is a prompt word, so
-      // scanning them let `qwen --bg add a --help section to the README` (a
-      // spelling this gate's own reader supports, since the shell splits the
-      // prompt into words) fall through to top-level help: exit 0, prompt
-      // dropped, no session, no diagnostic, while every other unsupported
-      // flag in the same position is declined by name with exit 1. A
-      // `--help` inside one quoted token never triggered this; the trigger
-      // is a help token as its own argv word.
-      const promptInsideFlagToken =
-        backgroundFlagPromptWord(argv[backgroundFlag] ?? '') !== undefined;
+      // The scan always covers the flag and everything before it, so base
+      // behavior for the pair survives: `--help --bg=x` and `--bg=x --help`
+      // both stay on the help path. Beyond the flag, the bound depends on
+      // whether the flag carries a prompt word. An attached `--bg=<prompt>`
+      // consumes no positional words of its own, so the flag tokens that
+      // immediately follow it are still flags and are scanned too; the scan
+      // stops at the first PROMPT word, because `readBackgroundPrompt`
+      // joins every trailing positional behind the attached prompt — a
+      // `--help`/`-h` sitting among them is prompt data and must decline by
+      // name, not hijack the launch into top-level help. After a BARE
+      // `--bg` — and after `--bg=true`, which means the bare flag — every
+      // following token is a prompt word, so the scan stops AT the flag: a
+      // help token there (`qwen --bg add a --help section`, a spelling this
+      // gate's own reader supports since the shell splits the prompt into
+      // words) is the trigger this bound exists for, matching the exit-0
+      // help fall-through the whole-argv scan let through. A `--help`
+      // inside one quoted token never triggered this; the trigger is a
+      // help token as its own argv word.
+      const carriedWord = backgroundFlagPromptWord(
+        argv[backgroundFlag] ?? '',
+      );
+      let helpScanEnd = backgroundFlag;
+      if (carriedWord !== undefined) {
+        helpScanEnd = argv.length;
+        for (let i = backgroundFlag + 1; i < argv.length; i++) {
+          if (!argv[i]!.startsWith('-')) {
+            helpScanEnd = i;
+            break;
+          }
+        }
+      }
       const helpRequested =
-        flagIndex(
-          promptInsideFlagToken ? argv : argv.slice(0, backgroundFlag),
-          '--help',
-          '-h',
-        ) !== -1;
+        flagIndex(argv.slice(0, helpScanEnd), '--help', '-h') !== -1;
       if (!parserOwnsLaunch && !helpRequested) {
         const { readBackgroundPrompt, runBackgroundDispatch } = await import(
           './agent-view/background-entry.js'

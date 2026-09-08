@@ -127,6 +127,13 @@ export function readBackgroundPrompt(
   return { prompt: words.join(' ').trim() };
 }
 
+// The session states a supervisor writes that mean the launch is already
+// over. A row the supervisor terminally patched to one of these still
+// keeps its `managed` ownership, its `projectCwd` and its `createdAt`, so
+// the recorded-since predicate below would otherwise match it and certify
+// a definitively failed launch as "may still be starting".
+const TERMINAL_SESSION_STATES = new Set(['failed', 'stopped', 'completed']);
+
 /**
  * True when the store holds a managed session for `cwd` recorded at or
  * after `since` — the positive "the supervisor already wrote the record"
@@ -141,6 +148,13 @@ export function readBackgroundPrompt(
  * to do so. Exit 1 "Could not start" beside a persisted `starting`
  * session and a live detached host is a contradiction a wrapper resolves
  * by retrying, which starts a SECOND agent on the same prompt.
+ *
+ * Terminal states are excluded: the supervisor itself patches a row it
+ * terminally failed to `failed`/`exited` (and `stopped`/`completed` are
+ * equally done) without touching `ownership`, `projectCwd` or `createdAt`,
+ * so a definitively failed launch would otherwise satisfy the predicate
+ * and be certified "may still be starting" — exit 2, the do-not-retry
+ * code — while `qwen sessions ps` lists it `failed`.
  */
 async function sessionRecordedSince(
   since: number,
@@ -154,6 +168,7 @@ async function sessionRecordedSince(
     return (await listAgentViewSessionStates()).some(
       (state) =>
         state.ownership === 'managed' &&
+        !TERMINAL_SESSION_STATES.has(state.sessionState) &&
         state.projectCwd === resolvedCwd &&
         Date.parse(state.createdAt) >= since,
     );
