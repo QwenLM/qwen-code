@@ -232,8 +232,12 @@ export function useOpenTuiLiveTurn(
           apply(ev);
         }
         // ink parity (use-llm-stream submitPromptOnCompleteRef): fired once
-        // after the turn completes successfully, never on error/abort.
-        if (seq === turnSeqRef.current) {
+        // after the turn completes successfully, never on error/abort. The
+        // abort paths inside the generator end it with a normal return, so
+        // the seq guard alone cannot tell them apart — gate on the signal
+        // (R6-6). A decline of every confirmation without Esc is a genuinely
+        // completed turn and keeps firing.
+        if (seq === turnSeqRef.current && !abort.signal.aborted) {
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {

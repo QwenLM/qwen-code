@@ -241,17 +241,23 @@ function createFakeConfig(
     recordMidTurnUserMessage: (...args: unknown[]) => void;
   },
 ) {
+  // One stable client object: tests spy on its addHistory through
+  // getGeminiClient() (R5-4/R6-5).
+  const client = {
+    sendMessageStream,
+    isInitialized,
+    // R5-4/R6-5: an abort at the sampling boundary still writes the
+    // completed batch's function responses to history before returning.
+    addHistory: vi.fn(async () => {}),
+    // A chat the startup flight has already completed: `setTools()` ran, so
+    // its declarations are in the generation config the send reads.
+    getChat: () => ({
+      getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
+    }),
+  };
   return {
     initialize: vi.fn(async () => {}),
-    getGeminiClient: () => ({
-      sendMessageStream,
-      isInitialized,
-      // A chat the startup flight has already completed: `setTools()` ran, so
-      // its declarations are in the generation config the send reads.
-      getChat: () => ({
-        getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
-      }),
-    }),
+    getGeminiClient: () => client,
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
@@ -1003,8 +1009,9 @@ describe('livePromptEvents', () => {
     // All-or-nothing: the resolved hop dies with the turn, so every text comes
     // back instead of a half-built message reaching the model.
     expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts', 'then @b.ts']);
-    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
-    expect(secondPrompt).toEqual([toolResponse]);
+    // R6-5: the dead signal never sends the continuation — the completed
+    // batch's responses reach history instead (the R5-4 shape, pinned below).
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
     // And nothing the restored hop produced reaches the transcript: the echo
     // belongs to ink's accept step (U-12), which an aborted hop never gets to.
     expect(events.filter((e) => e.type === 'user')).toEqual([]);
@@ -1057,6 +1064,20 @@ describe('livePromptEvents', () => {
     );
 
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    // R6-5: the abort inside the hop is the same dead-signal window as an
+    // abort after the hop — the completed batch's responses still reach
+    // history, and no continuation send rides the aborted signal.
+    const addHistory = vi.mocked(config.getGeminiClient().addHistory);
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 't1')).toBe(
+      true,
+    );
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
   });
 
   it('restores the steer when the abort lands after the hop resolves (U-32)', async () => {
@@ -1119,6 +1140,45 @@ describe('livePromptEvents', () => {
     expect(content.parts.some((p) => p.functionResponse?.id === 't1')).toBe(
       true,
     );
+  });
+
+  it('restores the steer and records nothing when the continuation send throws (R6-7)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      throw new Error('429 rate limited');
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const restoreSteering = vi.fn();
+
+    await expect(
+      drain(
+        livePromptEvents(config, 'start', undefined, {
+          drainSteering: () => ['also check the tests'],
+          restoreSteering,
+        }),
+      ),
+    ).rejects.toThrow('429 rate limited');
+
+    // The steer reached the send but the send died before delivering it: no
+    // mid-turn recording for content the model never saw, and the drained
+    // text goes back raw so the retried turn re-expands it.
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(restoreSteering).toHaveBeenCalledWith(['also check the tests']);
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {

@@ -716,6 +716,28 @@ export async function* livePromptEvents(
   if (hasUnsupportedImageFormat(nextPrompt)) {
     yield imageFormatWarningEvent();
   }
+  // R6-7: U-32 recordings are stashed at the sampling boundary and written
+  // only once the continuation send is delivered (ink records from
+  // onDelivered) — a send that throws must not persist a mid-turn user
+  // message the model never saw, and the drained texts go back to the queue
+  // raw so the retried turn re-expands them.
+  let stashedSteeredTexts: readonly string[] | undefined;
+  let stashedRecordings: SteeredMessageRecording[] = [];
+  const flushSteeredStash = (): void => {
+    if (!stashedSteeredTexts) return;
+    const recorder = config.getChatRecordingService?.();
+    for (const recording of stashedRecordings) {
+      recorder?.recordMidTurnUserMessage(recording.parts, recording.message);
+    }
+    stashedRecordings = [];
+    stashedSteeredTexts = undefined;
+  };
+  const restoreSteeredStash = (): void => {
+    if (!stashedSteeredTexts) return;
+    options?.restoreSteering?.(stashedSteeredTexts);
+    stashedRecordings = [];
+    stashedSteeredTexts = undefined;
+  };
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
@@ -739,24 +761,40 @@ export async function* livePromptEvents(
       promptId,
       sendOptions,
     );
-    for await (const ev of stream) {
-      if (dbg) {
-        try {
-          appendFileSync(
-            '/tmp/opentui-events.log',
-            `${(ev as { type?: string }).type}\n`,
-          );
-        } catch {
-          /* ignore */
+    try {
+      for await (const ev of stream) {
+        // First event from this send: the request is out, so a stashed
+        // mid-turn steer is delivered (R6-7).
+        flushSteeredStash();
+        if (dbg) {
+          try {
+            appendFileSync(
+              '/tmp/opentui-events.log',
+              `${(ev as { type?: string }).type}\n`,
+            );
+          } catch {
+            /* ignore */
+          }
         }
+        if ((ev as { type?: string }).type === 'tool_call_request') {
+          pending.push(
+            (ev as { value: { callId: string; name: string; args?: unknown } })
+              .value,
+          );
+        }
+        for (const neutral of map(ev)) yield neutral;
       }
-      if ((ev as { type?: string }).type === 'tool_call_request') {
-        pending.push(
-          (ev as { value: { callId: string; name: string; args?: unknown } })
-            .value,
-        );
-      }
-      for (const neutral of map(ev)) yield neutral;
+    } catch (error) {
+      // The send died before delivering a stashed steer: no recording for
+      // content the model never saw, and the raw texts go back to the queue.
+      restoreSteeredStash();
+      throw error;
+    }
+    // A zero-event stream still delivered the request unless it ended on a
+    // dead signal before the request went out.
+    if (stashedSteeredTexts) {
+      if (abort.aborted) restoreSteeredStash();
+      else flushSteeredStash();
     }
     if (pending.length === 0 || abort.aborted) return;
 
@@ -965,33 +1003,33 @@ export async function* livePromptEvents(
           abort,
           turnModel,
         );
-        if (steered.restore.length > 0) {
-          options?.restoreSteering?.(steered.restore);
-        } else if (abort.aborted) {
-          // ink use-llm-stream :3386-3392 re-checks the signal after accept():
-          // an abort that lands once the hop has resolved must send the texts
-          // back to the queue — the continuation below never runs on the dead
-          // signal, so recording here would commit a mid-turn user message the
-          // model never saw (and /resume would replay it as the user's words).
-          options?.restoreSteering?.(texts);
-          // The batch completed normally, so its responses must still reach
-          // history (all-cancelled sibling above): without the write the next
-          // send's orphan repair tells the model a successful tool failed and
-          // invites a retry (R5-4).
+        // Abort check hoisted above the restore branch (R6-5):
+        // resolveSteeredPromptParts returns restore() only on an aborted
+        // signal, so this covers both windows — an abort inside the @-read
+        // hop and one after a clean hop. Both write the completed batch's
+        // responses to history (R5-4) and return: the loop must never send a
+        // continuation on the dead signal (a functionCall without its
+        // response), nor commit a mid-turn user message the model never saw
+        // (ink use-llm-stream :3386-3392 re-checks the signal after accept()).
+        if (abort.aborted) {
+          options?.restoreSteering?.(
+            steered.restore.length > 0 ? steered.restore : texts,
+          );
           if (responseParts.length > 0) {
             await client.addHistory({ role: 'user', parts: responseParts });
           }
           return;
         }
-        // U-32 (ink accept() :3352-3358): record each surviving message so a
-        // steer survives /resume as a mid-turn user message.
-        const recorder = config.getChatRecordingService?.();
-        for (const recording of steered.recordings) {
-          recorder?.recordMidTurnUserMessage(
-            recording.parts,
-            recording.message,
-          );
+        if (steered.restore.length > 0) {
+          options?.restoreSteering?.(steered.restore);
         }
+        // U-32 (ink accept() :3352-3358): record each surviving message so a
+        // steer survives /resume as a mid-turn user message. The write is
+        // gated on delivery of the continuation send (R6-7, ink records from
+        // onDelivered): the stash flushes once that send yields or completes
+        // cleanly, and restores the texts when it dies first.
+        stashedRecordings = steered.recordings;
+        stashedSteeredTexts = texts;
         // Carries the per-message USER echoes too (U-12), in ink accept() order.
         for (const ev of steered.events) yield ev;
         responseParts.push(...steered.parts);
