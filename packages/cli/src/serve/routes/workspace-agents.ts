@@ -31,6 +31,7 @@ import {
   createThread,
   THREAD_PRIORITY_ORDER,
   DEFAULT_THREAD_PRIORITY,
+  LOCAL_AGENT_RUNTIME_ID,
   type ThreadPriority,
   decideDispatch,
   finishRunInTransaction,
@@ -469,7 +470,6 @@ export function registerWorkspaceAgentRoutes(
               candidate.sourceType === AGENT_SESSION_SOURCE_TYPE &&
               candidate.sourceId === agent.id,
           );
-          const session = agentSessions[0];
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -489,7 +489,7 @@ export function registerWorkspaceAgentRoutes(
             ),
           );
           const status =
-            agent.retiredAt !== undefined
+            agent.retiredAt !== undefined || agent.enabled === false
               ? 'offline'
               : active || agentSessions.some((entry) => entry.hasActivePrompt)
                 ? 'working'
@@ -497,9 +497,7 @@ export function registerWorkspaceAgentRoutes(
                   ? 'blocked'
                   : failed || agentSessions.some((entry) => entry.hasTurnError)
                     ? 'error'
-                    : session
-                      ? 'idle'
-                      : 'offline';
+                    : 'idle';
           return {
             id: agent.id,
             name: agent.name,
@@ -512,9 +510,10 @@ export function registerWorkspaceAgentRoutes(
             enabled: agent.enabled !== false,
             status,
             runtime: {
+              id: agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID,
               kind: 'local',
               label: 'Local daemon',
-              ...(session ? { sessionId: session.sessionId } : {}),
+              status: 'online',
             },
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
@@ -1074,6 +1073,7 @@ export function registerWorkspaceAgentRoutes(
           created = config.apply({
             id: generateAgentId(),
             name,
+            runtimeId: LOCAL_AGENT_RUNTIME_ID,
             createdAt: Date.now(),
           });
           return [...agents, created];

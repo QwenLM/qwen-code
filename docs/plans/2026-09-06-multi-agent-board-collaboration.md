@@ -386,9 +386,10 @@ chose one migration rather than serial schema bumps for fields already designed
 for steps 5-8. Fields whose producers do not exist yet remain optional and do
 not claim that delivery, provenance, recovery, or transcript slicing is
 implemented. `hostSessionId` is a workspace singleton. `runtimeId` is the
-generic execution binding, reserved and not yet produced: a local agent is
-reached through its own session, whose id is derived from the agent id, so
-nothing needs a stored handle today.
+generic execution binding. New local Agents store `runtimeId: "local"`; v1
+records written before that producer existed read an absent field as the same
+local binding. A task session id is derived from `(agent id, thread id)` and is
+stored on each run, so there is no ambiguous Agent-wide conversation handle.
 
 `authorKind` is `human | agent | system`. Until the ambient producer lands in
 step 5, migrated and rule-layer posts may omit `sourceRunId` and `triggerKind`.
@@ -1206,18 +1207,18 @@ remain genuinely open:
 
 ### Resolved during step 3
 
-Runtime shape is settled: runtime is a first-class concept. V1 carries
-`runtimeId` beside `backgroundAgentId`; step 4 exposes the smallest launcher
-contract with the local background agent as its first implementation. Remote,
-cloud, and foreign-runtime adapters remain out of scope for v1. This settles
-the former runtime-shape schema dependency without deciding
-whether #9402 becomes the seed of a later adapter.
+Runtime shape is settled: an Agent carries a runtime binding rather than being
+the runtime. V1 produces and enforces the single local binding and exposes it in
+the roster; the ACP bridge is its implementation. A runtime registry with
+remote/cloud/foreign adapters, health heartbeats and placement remains outside
+the demo. This settles the former schema dependency without pretending the
+registry already exists or deciding whether #9402 seeds a later adapter.
 
 ## 10. Out of scope
 
 Cross-machine and non-Qwen agents (#10078's session-boundary decision and
-#10247 §5's stalled wiring choice) — local per-agent process isolation is now
-§1, not out of scope; durable history after a thread
+#10247 §5's stalled wiring choice); local per-agent OS-process isolation (task
+session isolation is §1); durable history after a thread
 is deleted; remote and cloud runtimes; multi-user permissions; and agents that
 write code, which decision 1 defers until isolation is settled.
 
@@ -1228,7 +1229,7 @@ write code, which decision 1 defers until isolation is settled.
 
 **源码纠错**：Multica 的延续会话是 `(agent, issue)` 维度，WebSocket 唤醒同时保留 HTTP polling fallback；active run 收不到新评论，但完成时会 reconcile，并不是丢弃。Qwen 的运行中送信也不能调用 `resumeBackgroundAgent`，而要走 registry 的直接输入队列；workspace agents 需用带 delivery id 的 `queueExternalInput`，分别记录「队列接受」和 `EXTERNAL_MESSAGE` 的「实际消费」，并处理 finishing 窗口返回 `false`。真实 daemon 已证明队列接受与实际消费的直接路径，且模型把中途追加要求纳入同一个 run 的最终结论；finishing 竞态返回 `false` 后的持久重订仍未端到端证明，因此完整投递可靠性不能先假定。
 
-**执行模型**：本方案仍选择「每工作空间每 agent 一个跨线程长期后台执行体」，这是主动区别于 Multica 的产品选择。好处是同事式长期记忆；代价是串行吞吐、跨线程串台和持久化 prompt 注入。每次 turn 都必须在真正的 background-turn 调用点重新绑定 `(agent, run, thread)`，工具只信 ambient binding，prompt 每次都带完整线程帧、最近消息、确认水位后的增量和明确 gap。
+**执行模型**：Agent 身份在工作空间内长期存在，但会话按 `(agent, thread)` 隔离；同一 Agent 续跑同一任务会恢复该任务的 ACP session，换任务就使用另一条 session。这与 Multica 的 `(agent, issue)` 延续范围一致，也允许同一 Agent 并行处理多个任务而不串上下文。当前这些顶层 session 仍由同一个 ACP daemon 承载，因此是会话隔离，不是 OS 进程隔离。
 
 **规则修正**：turn gate 改为每线程，token gate 保持根树维度；子线程继承父线程当前 turn 计数；running coalesce 也计 turn；未知 @ 不再误唤醒 assignee；无目标、agent unavailable、capacity wait、launch failure、done/cancel、assignment trigger 都有明确语义；跨线程 queued run 按锁内分配的 `(queueSequence, runId)` 全局 FIFO，`queuedAt` 只用于显示。全局锁只处理并发，跨文件父报告和通知由可重放 outbox 保证，token 则从各 run 的逐轮 usage 推导；`blocked/in_review` 按所有 agent 的 run 聚合，不再由最后一个 agent 覆盖。
 

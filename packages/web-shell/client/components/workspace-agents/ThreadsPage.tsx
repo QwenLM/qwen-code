@@ -46,7 +46,6 @@ export interface ThreadsPageProps {
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
-  onOpenAgentSession?: (sessionId: string) => void;
   agentDefinitions?: readonly string[];
   onOpenAgentBuilder?: () => void;
   onOpenDefinitions?: () => void;
@@ -72,9 +71,10 @@ export interface WorkspaceAgentSummaryView {
   enabled: boolean;
   status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
   runtime: {
+    id: string;
     kind: 'local';
     label: string;
-    sessionId?: string;
+    status: 'online' | 'offline';
   };
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
@@ -181,7 +181,6 @@ export function ThreadsPage({
   onDeleteAgent,
   onSetAgentEnabled,
   onUpdateAgent,
-  onOpenAgentSession,
   agentDefinitions = [],
   onOpenAgentBuilder,
   onOpenDefinitions,
@@ -516,17 +515,6 @@ export function ThreadsPage({
                 </span>
                 {agent.retiredAt ? null : (
                   <>
-                    {agent.runtime.sessionId && onOpenAgentSession ? (
-                      <button
-                        type="button"
-                        className={styles.agentAction}
-                        onClick={() =>
-                          onOpenAgentSession(agent.runtime.sessionId!)
-                        }
-                      >
-                        Open session
-                      </button>
-                    ) : null}
                     {onUpdateAgent ? (
                       <button
                         type="button"

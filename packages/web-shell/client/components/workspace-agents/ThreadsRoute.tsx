@@ -381,7 +381,6 @@ export function ThreadsRoute({
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
-        {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
         {...(agentDefinitions ? { agentDefinitions } : {})}
         onOpenAgentBuilder={() => setCreatingAgent(true)}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}

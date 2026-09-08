@@ -26,6 +26,9 @@ definition first. Existing definitions remain a secondary linking/template path
 for compatibility, not a prerequisite for a new persistent Agent.
 The existing Agents navigation now opens the runnable Agent roster and shared
 tasks first; reusable definition files are a secondary Definitions view.
+New Agents bind explicitly to the local Runtime. An Agent with no task session
+is idle while that Runtime is online; a task/run, not the Agent row, owns the
+link to its ordinary conversation transcript.
 
 ## Current correction — task orchestration before process isolation
 

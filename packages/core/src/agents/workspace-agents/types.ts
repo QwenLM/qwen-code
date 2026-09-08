@@ -17,6 +17,7 @@
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const LOCAL_AGENT_RUNTIME_ID = 'local';
 
 /**
  * Where this workspace's notifications go.
@@ -111,8 +112,8 @@ export interface WorkspaceAgent {
    */
   maxConcurrentRuns?: number;
   /**
-   * Runtime carrying this identity. V1 also keeps the local
-   * `backgroundAgentId`; later runtime adapters bind through this generic id.
+   * Runtime carrying this identity. Existing v1 records without the field use
+   * {@link LOCAL_AGENT_RUNTIME_ID}.
    */
   runtimeId?: string;
 }
