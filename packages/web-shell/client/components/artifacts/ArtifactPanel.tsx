@@ -24,6 +24,7 @@ import {
   ExpandIcon,
   GaugeIcon,
   ImageIcon,
+  LayersIcon,
   MessageCirclePlusIcon,
   PanelRightIcon,
   PlusIcon,
@@ -104,6 +105,7 @@ import { SideTaskPanel } from './SideTaskPanel';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import { TerminalPanel } from '../terminal/TerminalPanel';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ContextUsagePanel } from './ContextUsagePanel';
 import {
   useArtifactWorkspaceTarget,
   type ArtifactWorkspaceActions,
@@ -284,6 +286,14 @@ export type ArtifactPanelTab =
       kind: 'token_usage';
       title: string;
       sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
+    }
+  | {
+      id: string;
+      kind: 'context_usage';
+      title: string;
+      sessionId: string;
       sessionActions?: DaemonSessionActions;
       closeWithPane?: boolean;
     }
@@ -617,6 +627,11 @@ export function ArtifactPanel({
                       />
                     ) : getArtifactPanelTabKind(tab) === 'image' ? (
                       <ImageIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'context_usage' ? (
+                      <LayersIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -1137,6 +1152,12 @@ export function ArtifactPanel({
               {activeTab.loadError ?? t('common.loading')}
             </div>
           )
+        ) : activeTab.kind === 'context_usage' ? (
+          <ContextUsagePanel
+            key={activeTab.id}
+            sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
         ) : activeTab.kind === 'token_usage' ? (
           <TokenUsagePanel
             key={activeTab.id}
