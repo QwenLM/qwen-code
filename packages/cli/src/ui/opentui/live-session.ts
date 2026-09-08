@@ -445,11 +445,22 @@ interface SteeredPromptResolution {
    */
   events: OpenTuiStreamEvent[];
   /**
+   * Per surviving message: its own parts and display text, for the chat
+   * recorder (U-32) — ink's accept() records each message this way so a
+   * steer survives /resume. Empty when the hop is restored.
+   */
+  recordings: SteeredMessageRecording[];
+  /**
    * Texts to put back at the front of the queue. All of them or none: ink
    * discards the resolved parts when an abort lands, so nothing can go out
    * twice.
    */
   restore: string[];
+}
+
+interface SteeredMessageRecording {
+  message: string;
+  parts: Part[];
 }
 
 /**
@@ -458,9 +469,10 @@ interface SteeredPromptResolution {
  * prompt-side vision bridge — before it rides to the model as steering.
  *
  * Not ported, on purpose: ink's slash interception at this boundary (its goal
- * command has no OpenTUI counterpart) and its two-phase recording, which
- * defers the read cards until the messages are committed. Here the cards go out
- * as they are produced, and an abort drops the whole hop instead.
+ * command has no OpenTUI counterpart, and with it the goal-permit recording
+ * argument) and its two-phase card deferral — ink defers the read cards until
+ * the messages are committed; here the cards go out as they are produced, and
+ * an abort drops the whole hop instead.
  */
 async function resolveSteeredPromptParts(
   config: Config,
@@ -471,10 +483,12 @@ async function resolveSteeredPromptParts(
   const restore = (): SteeredPromptResolution => ({
     parts: [],
     events: [],
+    recordings: [],
     restore: [...texts],
   });
   const events: OpenTuiStreamEvent[] = [];
   const segments: Part[][] = [];
+  const recordings: SteeredMessageRecording[] = [];
 
   for (const message of texts) {
     if (signal.aborted) return restore();
@@ -528,6 +542,7 @@ async function resolveSteeredPromptParts(
       events.push(imageFormatWarningEvent());
     }
     if (messageParts.length > 0) segments.push(messageParts);
+    recordings.push({ message, parts: messageParts });
     // U-12 (ink accept() :3359-3367): `sentToModel: false` — the steer rides
     // the tool boundary, not a standalone user turn. Not coupled to this
     // message's own parts: accept() echoes every message it recorded. The one
@@ -541,7 +556,43 @@ async function resolveSteeredPromptParts(
     if (parts.length > 0) parts.push({ text: '\n\n' });
     parts.push(...segment);
   }
-  return { parts, events, restore: [] };
+  return { parts, events, recordings, restore: [] };
+}
+
+/**
+ * Single shared `config.initialize()` flight for the OpenTUI app. Core joins
+ * callers onto an in-flight initialize and only rejects once initialization
+ * has settled ("Config was already initialized"), so plain awaits are safe
+ * against a race but can neither own one boot flight nor preserve a failure:
+ * the guard gives the entry one flight that command loading and every turn
+ * await, and — because a settled failure is never retried by core and the
+ * rejected promise stays cached — every later submit surfaces the real cause
+ * instead of re-entering, swallowing the re-entry error and degrading into
+ * "Chat not initialized".
+ */
+const initializationPromises = new WeakMap<Config, Promise<void>>();
+
+export function ensureConfigInitialized(config: Config): Promise<void> {
+  const pending = initializationPromises.get(config);
+  if (pending) return pending;
+  const started = config.initialize().catch((err) => {
+    // A caller that initialized elsewhere already won: its settled success
+    // reports as core's re-entry error while the chat is ready to send. A
+    // settled failure does not — the real error must surface, and core has
+    // no retry either way, so the rejected promise stays cached for awaiters.
+    if (
+      config.getGeminiClient()?.isInitialized?.() ||
+      (err instanceof Error && err.message === 'Config was already initialized')
+    ) {
+      return;
+    }
+    throw err;
+  });
+  // Fire-and-forget callers (the entry) must not trip unhandled-rejection
+  // handling; awaiters still receive the rejection.
+  started.catch(() => {});
+  initializationPromises.set(config, started);
+  return started;
 }
 
 // How long a turn waits for a startup initialization that is already in
@@ -565,11 +616,7 @@ export async function* livePromptEvents(
   signal?: AbortSignal,
   options?: LivePromptOptions,
 ): AsyncGenerator<OpenTuiStreamEvent> {
-  try {
-    await config.initialize();
-  } catch {
-    /* already initialized by command loading / startup */
-  }
+  await ensureConfigInitialized(config);
   const client = config.getGeminiClient();
   // `Config.initialize()` flips its own guard before the work runs, so the
   // boot-time command-registry load owning that flight makes the call above
@@ -669,6 +716,28 @@ export async function* livePromptEvents(
   if (hasUnsupportedImageFormat(nextPrompt)) {
     yield imageFormatWarningEvent();
   }
+  // R6-7: U-32 recordings are stashed at the sampling boundary and written
+  // only once the continuation send is delivered (ink records from
+  // onDelivered) — a send that throws must not persist a mid-turn user
+  // message the model never saw, and the drained texts go back to the queue
+  // raw so the retried turn re-expands them.
+  let stashedSteeredTexts: readonly string[] | undefined;
+  let stashedRecordings: SteeredMessageRecording[] = [];
+  const flushSteeredStash = (): void => {
+    if (!stashedSteeredTexts) return;
+    const recorder = config.getChatRecordingService?.();
+    for (const recording of stashedRecordings) {
+      recorder?.recordMidTurnUserMessage(recording.parts, recording.message);
+    }
+    stashedRecordings = [];
+    stashedSteeredTexts = undefined;
+  };
+  const restoreSteeredStash = (): void => {
+    if (!stashedSteeredTexts) return;
+    options?.restoreSteering?.(stashedSteeredTexts);
+    stashedRecordings = [];
+    stashedSteeredTexts = undefined;
+  };
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
@@ -692,24 +761,40 @@ export async function* livePromptEvents(
       promptId,
       sendOptions,
     );
-    for await (const ev of stream) {
-      if (dbg) {
-        try {
-          appendFileSync(
-            '/tmp/opentui-events.log',
-            `${(ev as { type?: string }).type}\n`,
-          );
-        } catch {
-          /* ignore */
+    try {
+      for await (const ev of stream) {
+        // First event from this send: the request is out, so a stashed
+        // mid-turn steer is delivered (R6-7).
+        flushSteeredStash();
+        if (dbg) {
+          try {
+            appendFileSync(
+              '/tmp/opentui-events.log',
+              `${(ev as { type?: string }).type}\n`,
+            );
+          } catch {
+            /* ignore */
+          }
         }
+        if ((ev as { type?: string }).type === 'tool_call_request') {
+          pending.push(
+            (ev as { value: { callId: string; name: string; args?: unknown } })
+              .value,
+          );
+        }
+        for (const neutral of map(ev)) yield neutral;
       }
-      if ((ev as { type?: string }).type === 'tool_call_request') {
-        pending.push(
-          (ev as { value: { callId: string; name: string; args?: unknown } })
-            .value,
-        );
-      }
-      for (const neutral of map(ev)) yield neutral;
+    } catch (error) {
+      // The send died before delivering a stashed steer: no recording for
+      // content the model never saw, and the raw texts go back to the queue.
+      restoreSteeredStash();
+      throw error;
+    }
+    // A zero-event stream still delivered the request unless it ended on a
+    // dead signal before the request went out.
+    if (stashedSteeredTexts) {
+      if (abort.aborted) restoreSteeredStash();
+      else flushSteeredStash();
     }
     if (pending.length === 0 || abort.aborted) return;
 
@@ -803,24 +888,48 @@ export async function* livePromptEvents(
             description: invocation.getDescription(),
           });
         }
-        if (!options?.onWaitingCall) return;
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
-        // same callId) must be able to surface its dialog again.
+        // same callId) must be able to surface its dialog again. Each
+        // entrance also marks the transcript card pending (event-adapter
+        // 'confirm' parity): the awaiting marker shows while the card keeps
+        // its description under the viewport- and payload-aware pending
+        // budget — an MCP dialog carries no args, so the card is the only
+        // surface that has them (R5-9).
         const awaiting = new Set(
           calls
             .filter((c) => c.status === 'awaiting_approval')
             .map((c) => c.request.callId),
         );
         for (const id of waitingSeen) {
-          if (!awaiting.has(id)) waitingSeen.delete(id);
+          if (!awaiting.has(id)) {
+            waitingSeen.delete(id);
+            // Release the transcript card's pending marker — without this it
+            // would keep claiming "awaiting approval" while the call runs.
+            // The card must also record HOW it left: the scheduler cancels
+            // the call on No/Esc, so a blanket 'approved' would mislabel a
+            // declined tool as user-approved in the transcript.
+            const departed = calls.find((c) => c.request.callId === id);
+            live.push({
+              type: 'confirm-resolved',
+              id,
+              outcome:
+                departed?.status === 'cancelled' ? 'rejected' : 'approved',
+            });
+          }
         }
         for (const c of calls) {
           if (c.status !== 'awaiting_approval') continue;
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
-          options.onWaitingCall({
+          live.push({
+            type: 'confirm',
+            id: callId,
+            tool: c.request.name,
+            title: c.confirmationDetails.title,
+          });
+          options?.onWaitingCall?.({
             callId,
             name: c.request.name,
             confirmationDetails: c.confirmationDetails,
@@ -872,6 +981,17 @@ export async function* livePromptEvents(
       };
       if (resp?.responseParts) responseParts.push(...resp.responseParts);
     }
+    // ink use-llm-stream parity (:5328): when every tool in the batch was
+    // cancelled, the cancelled responses go to history only — no follow-up
+    // model request. Checked before the steering drain so surviving steered
+    // texts stay parked for the post-turn queue drain instead of riding a
+    // request that will never be sent.
+    if (completed.every((call) => call.status === 'cancelled')) {
+      if (responseParts.length > 0) {
+        await client.addHistory({ role: 'user', parts: responseParts });
+      }
+      return;
+    }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
@@ -883,9 +1003,33 @@ export async function* livePromptEvents(
           abort,
           turnModel,
         );
+        // Abort check hoisted above the restore branch (R6-5):
+        // resolveSteeredPromptParts returns restore() only on an aborted
+        // signal, so this covers both windows — an abort inside the @-read
+        // hop and one after a clean hop. Both write the completed batch's
+        // responses to history (R5-4) and return: the loop must never send a
+        // continuation on the dead signal (a functionCall without its
+        // response), nor commit a mid-turn user message the model never saw
+        // (ink use-llm-stream :3386-3392 re-checks the signal after accept()).
+        if (abort.aborted) {
+          options?.restoreSteering?.(
+            steered.restore.length > 0 ? steered.restore : texts,
+          );
+          if (responseParts.length > 0) {
+            await client.addHistory({ role: 'user', parts: responseParts });
+          }
+          return;
+        }
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
         }
+        // U-32 (ink accept() :3352-3358): record each surviving message so a
+        // steer survives /resume as a mid-turn user message. The write is
+        // gated on delivery of the continuation send (R6-7, ink records from
+        // onDelivered): the stash flushes once that send yields or completes
+        // cleanly, and restores the texts when it dies first.
+        stashedRecordings = steered.recordings;
+        stashedSteeredTexts = texts;
         // Carries the per-message USER echoes too (U-12), in ink accept() order.
         for (const ev of steered.events) yield ev;
         responseParts.push(...steered.parts);

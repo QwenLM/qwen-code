@@ -662,6 +662,38 @@ Configures logging and metrics collection for Qwen Code. For more information, s
 | `telemetry.sensitiveSpanAttributeMaxLength` | number  | Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Must be between `1` and `104857600` (100 MiB). Set lower if your collector or backend rejects large attributes.                                                                          | `1048576` |
 | `telemetry.outfile`                         | string  | Path to write telemetry to a file. When set, overrides OTLP export.                                                                                                                                                                                                                      |           |
 
+#### outboundCorrelation
+
+⚠️ **Security-relevant.** Controls what client-side correlation data Qwen Code writes into outbound LLM API requests — a separate consent decision from `telemetry.*`, which governs data flowing into your OWN observability backend. All values default to off.
+
+| Setting                                        | Type    | Description                                                                                                                                                     | Default |
+| ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `outboundCorrelation.propagateTraceContext`    | boolean | Inject W3C `traceparent` on outbound `fetch` requests and as a `TRACEPARENT` env var in shell child processes. Requires `telemetry.enabled: true`.              | `false` |
+| `outboundCorrelation.allowDynamicHeaderValues` | boolean | Allow `customHeaders` values to contain runtime placeholders such as `${session_id}`, expanded per request. When off, such a value is dropped rather than sent. | `false` |
+
+```json
+{
+  "outboundCorrelation": {
+    "allowDynamicHeaderValues": true
+  }
+}
+```
+
+`allowDynamicHeaderValues` is only the consent switch. _Which_ hosts receive the
+value and _what_ the header is called are decided where the header lives —
+`modelProviders[].generationConfig.customHeaders`, see
+[Dynamic values in `customHeaders`](model-providers.md#dynamic-values-in-customheaders).
+That scoping is why there is no host allowlist here: you already chose the
+endpoint when you wrote the provider's `baseUrl`, and providers that should not
+send the header simply do not carry it.
+
+If a provider entry has a placeholder while this is off, the header is dropped
+and a warning naming both is printed at startup — so a gateway rejecting your
+requests should never be a silent mystery.
+
+**Privacy note:** an expanded value is a stable per-conversation identifier.
+Only put one on a provider you already send your prompt content to.
+
 ### Example `settings.json`
 
 Here is an example of a `settings.json` file with the nested structure, new as of v0.3.0:

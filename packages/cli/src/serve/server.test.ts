@@ -4468,6 +4468,72 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([
+      [undefined, 5_000],
+      ['', 5_000],
+      ['   ', 5_000],
+      ['invalid', 5_000],
+      ['10000ms', 5_000],
+      ['NaN', 5_000],
+      ['Infinity', 5_000],
+      ['0', 5_000],
+      ['-1', 5_000],
+      ['999', 5_000],
+      ['1000.5', 5_000],
+      ['2147483648', 5_000],
+      ['1000', 1_000],
+      ['10000', 10_000],
+      [' 30000 ', 30_000],
+      ['2147483647', 2_147_483_647],
+    ])(
+      'resolves live-state polling environment %s to %i ms',
+      async (value, expected) => {
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: value },
+        });
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body.sessionLiveStatePollIntervalMs).toBe(expected);
+      },
+    );
+
+    it('keeps the process-wide live-state interval from the startup environment', async () => {
+      const daemonEnv = { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '10000' };
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const secondary: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+          effectiveEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '30000' },
+        },
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primary.bridge,
+        workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+        daemonEnv,
+      });
+      daemonEnv.QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS = '20000';
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.body.sessionLiveStatePollIntervalMs).toBe(10_000);
+    });
+
     it('advertises workflow availability per workspace before a session exists', async () => {
       const primaryBridge = fakeBridge();
       const primary = makeWorkspaceRuntimeForTest({
