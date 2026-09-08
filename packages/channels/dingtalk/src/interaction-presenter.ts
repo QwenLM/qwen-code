@@ -10,6 +10,8 @@ import type {
 import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
+import type { DingtalkPresentationPhase } from './presentation-phase.js';
+import { isChinesePresentationLanguage } from './presentation-phase.js';
 import {
   CONTENT_LIMIT,
   TRUNCATION_MARKER,
@@ -43,6 +45,12 @@ export interface DingtalkInteractionPresenterOptions {
   compactResults?: boolean;
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
+  /**
+   * Effective Qwen display language. When set to a non-Chinese language the
+   * terminal card copy renders in English; unset keeps the historical
+   * Simplified Chinese copy.
+   */
+  language?: string;
   sendFallback?(
     chatId: string,
     text: string,
@@ -129,6 +137,14 @@ export class DingtalkInteractionPresenter {
   markBackgroundRun(runId: string): void {
     const run = this.runs.get(runId);
     if (run && !run.terminal) run.background = true;
+  }
+
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    void this.enqueue(run, () =>
+      this.options.statusCards?.updateRunPhase(runId, phase),
+    );
   }
 
   appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {
@@ -324,6 +340,28 @@ export class DingtalkInteractionPresenter {
     return questionCards.present(context, this.cardTarget(context.target));
   }
 
+  private terminalCopy(): {
+    failed: string;
+    stopped: string;
+    cancelled: string;
+  } {
+    if (
+      this.options.language !== undefined &&
+      !isChinesePresentationLanguage(this.options.language)
+    ) {
+      return {
+        failed: 'Processing failed, please try again later.',
+        stopped: 'Task stopped',
+        cancelled: 'Task cancelled',
+      };
+    }
+    return {
+      failed: '本次处理失败，请稍后重试。',
+      stopped: '任务已停止',
+      cancelled: '任务已取消',
+    };
+  }
+
   terminalizeRun(
     runId: string,
     terminal: 'completed' | 'failed' | 'cancelled',
@@ -345,6 +383,7 @@ export class DingtalkInteractionPresenter {
       this.segments.delete(activeSegmentId);
       this.addTerminalSegment(activeSegmentId);
     }
+    const copy = this.terminalCopy();
     const finalization = this.enqueue(run, async () => {
       if (terminal === 'failed') {
         const statusContext = this.ensureStatusContext(run);
@@ -356,9 +395,7 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(
             run,
-            [run.completedOutput, '本次处理失败，请稍后重试。']
-              .filter(Boolean)
-              .join('\n\n'),
+            [run.completedOutput, copy.failed].filter(Boolean).join('\n\n'),
           ),
         );
         await this.redeliverCardDeliveredContent(run);
@@ -372,7 +409,7 @@ export class DingtalkInteractionPresenter {
               run,
               [
                 run.completedOutput,
-                detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+                detail === 'cancel_command' ? copy.stopped : copy.cancelled,
               ]
                 .filter(Boolean)
                 .join('\n\n'),

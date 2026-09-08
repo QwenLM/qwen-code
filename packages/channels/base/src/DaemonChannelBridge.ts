@@ -348,6 +348,10 @@ export class DaemonChannelBridge
     string,
     AvailableCommand[]
   >();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
   private readonly turnBarriers = new Map<string, () => void>();
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly channelLoopDisabledSessions = new Set<string>();
@@ -1120,10 +1124,10 @@ export class DaemonChannelBridge
       case 'tool_call':
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
-        const kind = getString(update['kind']);
+        const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
-          !kind &&
+          !explicitKind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
           (meta?.['shellProgress'] !== undefined ||
@@ -1139,9 +1143,20 @@ export class DaemonChannelBridge
           // reaches the normal flow below instead of being silently swallowed.
           break;
         }
+        // Terminal frames from the daemon's transcript replay carry no kind by
+        // construction; restore the kind remembered from the initial frame
+        // (same contract as AcpBridge) before judging the frame malformed.
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId ?? '');
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;
+        }
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
         }
         const event: ToolCallEvent = {
           sessionId,
@@ -1157,6 +1172,12 @@ export class DaemonChannelBridge
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
         break;
       }
       case 'plan': {
@@ -1331,6 +1352,7 @@ export class DaemonChannelBridge
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
     if (this.latestAvailableCommandsSessionId === sessionId) {
       this.latestAvailableCommandsSessionId = Array.from(
         this.availableCommandsBySession.keys(),

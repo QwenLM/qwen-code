@@ -1177,6 +1177,139 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('restores the initial kind on a kindless terminal tool update', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'execute',
+            title: 'Run shell',
+            status: 'in_progress',
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-1',
+            status: 'completed',
+          },
+        },
+      });
+      events.push({
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const errors: Error[] = [];
+    const toolCalls: Array<{ kind: string; status: string }> = [];
+    bridge.on('error', (err) => errors.push(err));
+    bridge.on('toolCall', (event) => toolCalls.push(event));
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
+    expect(errors).toHaveLength(0);
+    expect(toolCalls.map(({ kind, status }) => [kind, status])).toEqual([
+      ['execute', 'in_progress'],
+      ['execute', 'completed'],
+    ]);
+    // The terminal frame also retires the remembered kind.
+    expect(
+      (
+        bridge as unknown as {
+          toolCallKindsBySession: Map<string, Map<string, string>>;
+        }
+      ).toolCallKindsBySession.has('session-1'),
+    ).toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('drops remembered tool kinds when the session drops', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'execute',
+            title: 'Run shell',
+            status: 'in_progress',
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const kinds = () =>
+      (
+        bridge as unknown as {
+          toolCallKindsBySession: Map<string, Map<string, string>>;
+        }
+      ).toolCallKindsBySession;
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
+    expect(kinds().get('session-1')?.get('call-1')).toBe('execute');
+
+    events.close();
+    bridge.stop();
+    expect(kinds().has('session-1')).toBe(false);
+  });
+
   it('excludes nested subagent text from the daemon response', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

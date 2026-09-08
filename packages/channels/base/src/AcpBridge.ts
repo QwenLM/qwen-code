@@ -94,6 +94,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly knownSessionIds = new Set<string>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private readonly notificationExecutions = new Map<string, string>();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -159,6 +163,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.knownSessionIds.clear();
       this.notificationExecutions.clear();
       this.sessionBindingTokens.clear();
+      this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -399,6 +404,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.notificationExecutions.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
     const conn = this.connection;
@@ -429,6 +435,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.knownSessionIds.clear();
     this.notificationExecutions.clear();
     this.sessionBindingTokens.clear();
+    this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -522,19 +529,55 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         }
         break;
       }
-      case 'tool_call': {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const toolCallId = (update['toolCallId'] as string) || '';
+        if (!toolCallId) break;
+        const explicitKind =
+          typeof update['kind'] === 'string' ? update['kind'] : '';
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (
+          type === 'tool_call_update' &&
+          !explicitKind &&
+          update['status'] === 'in_progress' &&
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
+        ) {
+          // Matches the DaemonChannelBridge guard: kindless in_progress frames
+          // carrying only shell or subagent progress are heartbeats, not phase
+          // changes, and must not restore the slot kind onto the reaction/card.
+          break;
+        }
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId);
+        if (!kind) break;
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
+        }
         const event: ToolCallEvent = {
           sessionId,
-          toolCallId: update['toolCallId'] as string,
-          kind: (update['kind'] as string) || '',
+          toolCallId,
+          kind,
           title: (update['title'] as string) || '',
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
-        if (event.status === 'pending' || event.status === 'in_progress') {
+        if (
+          type === 'tool_call' &&
+          (event.status === 'pending' || event.status === 'in_progress')
+        ) {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
         break;
       }
       case 'plan': {

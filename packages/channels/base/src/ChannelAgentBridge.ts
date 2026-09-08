@@ -186,6 +186,13 @@ export function readBackgroundTaskEvent(
 interface ChannelAgentBridgeEventMap {
   backgroundTask: [BackgroundTaskEvent];
   sessionDied: [SessionDiedEvent];
+  /**
+   * Standalone ACP bridge process exit. Daemon bridges never emit this; they
+   * report per-session death through sessionDied instead. Listeners must
+   * clear only turn-scoped transient state: crash recovery restores the
+   * sessions on a fresh bridge, so routing state must stay.
+   */
+  disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
   backgroundResponse: [
     sessionId: string,
