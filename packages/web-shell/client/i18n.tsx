@@ -2714,6 +2714,10 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'contextUsage.refresh': 'Refresh',
+  'contextUsage.retry': 'Retry',
+  'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -3395,6 +3399,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -6124,6 +6131,10 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'contextUsage.refresh': '刷新',
+  'contextUsage.retry': '重试',
+  'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',
@@ -6765,6 +6776,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
