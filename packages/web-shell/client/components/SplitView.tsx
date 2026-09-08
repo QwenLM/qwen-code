@@ -62,7 +62,10 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
-  /** Report panes surfacing approvals, including hidden panes. Must be stable. */
+  /**
+   * Report panes surfacing approvals, including hidden panes. Keep stable while
+   * consumer inputs are unchanged; a new callback receives the current list.
+   */
   onPendingPanesChange?: (sessionIds: string[]) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
