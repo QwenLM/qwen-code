@@ -123,10 +123,11 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
-  | 'tokenUsage';
+  | 'tokenUsage'
+  | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Token usage is opt-in. */
+  /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
@@ -169,6 +170,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens context usage for the current session, when available. */
+  onOpenContextUsage?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
@@ -243,6 +246,15 @@ export interface WebShellSessionArtifactsChange {
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -539,6 +551,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;

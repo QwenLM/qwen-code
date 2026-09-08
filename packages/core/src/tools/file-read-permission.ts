@@ -45,6 +45,13 @@ export function getFileReadDefaultPermission(
     // back must not stall on a confirmation prompt. The dir holds only
     // session plan files, never credentials or settings.
     config.getPlansDir(),
+    // User-scope saved workflows are also named in resume instructions.
+    Storage.getUserWorkflowsDir(),
+    // Workflow run artifacts: the resume journal the model is told to read before
+    // diagnosing a result, the terminal snapshots, and the persisted copy of
+    // a script the model wrote itself. Nothing else is written there, and
+    // run-artifact paths are named in workflow results and notifications.
+    config.storage.getWorkflowRunsDir(),
   ].map(realpathNearestExisting);
 
   if (

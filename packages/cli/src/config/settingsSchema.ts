@@ -2730,6 +2730,28 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      todoWrite: {
+        type: 'object',
+        label: 'Todo Write',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings for the built-in todo_write tool. Opt-in: the tool is disabled by default.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Todo Write',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable the built-in todo_write tool and its system-prompt guidance.',
+            showInDialog: true,
+          },
+        },
+      },
       shell: {
         type: 'object',
         label: 'Shell',
@@ -3369,7 +3391,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'What happens to messages other sessions send this one. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means review-class parity: a message auto-delivers only when both sessions review every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review.',
+          'What happens to inbound cross-session messages. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means user-minted controllers and this session\'s own child processes auto-deliver, while other sessions use review-class parity: both must review every action, or both must declare a mode that can apply actions without per-action review. Other messages are held for you to review.',
         showInDialog: false,
         options: [
           { value: 'accept', label: 'Accept' },
@@ -3887,7 +3909,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
+          'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Requires tools.todoWrite.enabled. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
       },
       sessionWriterLease: {

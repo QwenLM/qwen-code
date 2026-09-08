@@ -181,9 +181,12 @@ export function App() {
 审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
 投影：
 
+> 只渲染 transcript 的宿主请从 `@qwen-code/web-shell/transcript` 子路径导入。包根会连带
+> `App`、daemon providers 和编辑器/终端相关代码，不要依赖 tree shaking 把它们摇掉。
+
 ```tsx
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { WebShellTranscript } from '@qwen-code/web-shell';
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 
 const records = jsonl
   .split(/\r?\n/)
@@ -291,6 +294,13 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+`Live` 会话分组默认不向嵌入宿主展示；此前版本会默认展示，依赖该分组的宿主升级时
+需要显式开启：
+
+```tsx
+<WebShellWithProviders sidebar={{ showLive: true }} />
+```
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 
