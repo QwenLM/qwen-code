@@ -68,7 +68,7 @@ function isForceUnsupportedError(err: unknown): boolean {
 // The daemon's `message` is the carrier of what went wrong — git's own
 // notice, or the core's explanation of a refusal — while the SDK's error
 // message only names the route and code. Prefer the former when present.
-function pullErrorMessage(err: unknown): string {
+function gitErrorMessage(err: unknown): string {
   const message = daemonErrorBody(err)?.['message'];
   if (typeof message === 'string' && message.trim() !== '') return message;
   return err instanceof Error ? err.message : String(err);
@@ -503,7 +503,8 @@ export function BranchPickerPopover({
         onBranchChanged?.();
         onOpenChange(false);
       } catch (err) {
-        showStatus(err instanceof Error ? err.message : String(err), 'error');
+        showStatus(gitErrorMessage(err), 'error');
+        await refreshAfterAction();
       } finally {
         setBusyAction(null);
       }
@@ -516,6 +517,7 @@ export function BranchPickerPopover({
       onOpenChange,
       showStatus,
       clearPullPanel,
+      refreshAfterAction,
       t,
     ],
   );
@@ -543,7 +545,8 @@ export function BranchPickerPopover({
       onBranchChanged?.();
       onOpenChange(false);
     } catch (err) {
-      showStatus(err instanceof Error ? err.message : String(err), 'error');
+      showStatus(gitErrorMessage(err), 'error');
+      await refreshAfterAction();
     } finally {
       setBusyAction(null);
     }
@@ -556,6 +559,7 @@ export function BranchPickerPopover({
     onOpenChange,
     showStatus,
     clearPullPanel,
+    refreshAfterAction,
     t,
   ]);
 
@@ -638,11 +642,11 @@ export function BranchPickerPopover({
         } else if (isForceUnsupportedError(err)) {
           setPullBlocked(true);
           setConfirmDiscard(false);
-          setPullBlockedDetail(pullErrorMessage(err));
+          setPullBlockedDetail(gitErrorMessage(err));
           showStatus(t('branchPicker.pullBlocked'), 'error');
         } else {
           clearPullPanel();
-          showStatus(pullErrorMessage(err), 'error');
+          showStatus(gitErrorMessage(err), 'error');
         }
         // A failed pull has usually still fetched (the force-reset shape
         // self-heals here; a deleted upstream ref defeats the fetch itself

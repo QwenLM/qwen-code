@@ -65,12 +65,28 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
+export type GitBranchRollbackCode =
+  | 'branch_creation_rolled_back'
+  | 'branch_preserved_after_hook'
+  | 'branch_restore_failed'
+  | 'branch_delete_failed';
+
 export class GitBranchRollbackError extends Error {
-  constructor(message: string, cause: unknown) {
+  readonly code: GitBranchRollbackCode;
+
+  constructor(code: GitBranchRollbackCode, message: string, cause: unknown) {
     super(message, { cause });
     this.name = 'GitBranchRollbackError';
+    this.code = code;
   }
 }
+
+const NO_REPOSITORY_COMMANDS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+] as const;
 
 // Repository-shifting variables that a daemon process may inherit from its
 // launch environment.  Clearing them prevents a trusted workspace request
@@ -460,64 +476,84 @@ export async function gitCreateBranch(
         env,
       ).catch(() => '')
     ).trim();
-    if (nowOn === name) {
-      let rollbackError: unknown;
-      let branchDeleted = false;
+    if (nowOn === name && originalRef !== name) {
+      const restoreTarget = originalRef || originalCommit;
+      if (!restoreTarget) {
+        throw new GitBranchRollbackError(
+          'branch_restore_failed',
+          `could not restore the previous checkout after creating "${name}"; workspace is still on "${nowOn}"`,
+          err,
+        );
+      }
+
       try {
-        // Recovery must not run repository hooks again. A side-effecting
-        // post-checkout hook could otherwise mutate the original branch.
         const rollbackArgs = originalRef
-          ? ['-c', 'core.hooksPath=', 'checkout', originalRef, '--']
-          : originalCommit
-            ? [
-                '-c',
-                'core.hooksPath=',
-                'checkout',
-                '--detach',
-                originalCommit,
-                '--',
-              ]
-            : undefined;
-        if (rollbackArgs) {
-          await runGit(cwd, rollbackArgs, env);
-        }
-
-        const branchTip = expectedTip
-          ? (
-              await runGit(
-                cwd,
-                ['rev-parse', '--verify', `refs/heads/${name}`],
-                env,
-              ).catch(() => '')
-            ).trim()
-          : '';
-        // A hook may have advanced the branch, or the starting tip may not
-        // be verifiable (for example, an unborn HEAD). Preserve it rather
-        // than risking deletion of user-created history.
-        if (rollbackArgs && expectedTip && branchTip === expectedTip) {
-          await runGit(cwd, ['branch', '-D', name], env);
-          branchDeleted = true;
-        }
+          ? [...NO_REPOSITORY_COMMANDS, 'checkout', originalRef, '--']
+          : [
+              ...NO_REPOSITORY_COMMANDS,
+              'checkout',
+              '--detach',
+              originalCommit,
+              '--',
+            ];
+        await runGit(cwd, rollbackArgs, env);
       } catch (rollbackErr) {
-        rollbackError = rollbackErr;
+        throw new GitBranchRollbackError(
+          'branch_restore_failed',
+          `failed to restore "${restoreTarget}" after creating "${name}"; workspace is still on "${nowOn}":\n${gitDetail(rollbackErr)}`,
+          err,
+        );
       }
 
-      if (rollbackError) {
-        const rollbackMessage =
-          rollbackError instanceof Error
-            ? rollbackError.message
-            : String(rollbackError);
+      if (!expectedTip) {
         throw new GitBranchRollbackError(
-          `failed to roll back branch "${name}"; the new branch may still exist: ${rollbackMessage}`,
+          'branch_preserved_after_hook',
+          `restored "${restoreTarget}"; branch "${name}" was not deleted because its starting tip could not be verified`,
           err,
         );
       }
-      if (!branchDeleted) {
+
+      try {
+        // Compare-and-delete is atomic, so a concurrent ref update can never
+        // be removed after a separate tip check.
+        await runGit(
+          cwd,
+          [
+            ...NO_REPOSITORY_COMMANDS,
+            'update-ref',
+            '-d',
+            `refs/heads/${name}`,
+            expectedTip,
+          ],
+          env,
+        );
+      } catch (deleteErr) {
+        const branchTip = (
+          await runGit(
+            cwd,
+            ['rev-parse', '--verify', `refs/heads/${name}`],
+            env,
+          ).catch(() => '')
+        ).trim();
+        if (branchTip && branchTip !== expectedTip) {
+          throw new GitBranchRollbackError(
+            'branch_preserved_after_hook',
+            `restored "${restoreTarget}"; branch "${name}" was not deleted because its ref changed`,
+            err,
+          );
+        }
         throw new GitBranchRollbackError(
-          `branch "${name}" was not deleted because its ref changed or could not be verified`,
+          'branch_delete_failed',
+          `restored "${restoreTarget}" but could not delete branch "${name}":\n${gitDetail(deleteErr)}`,
           err,
         );
       }
+
+      throw new GitBranchRollbackError(
+        'branch_creation_rolled_back',
+        `restored "${restoreTarget}" and deleted branch "${name}" after branch creation failed`,
+        err,
+      );
     }
     throw err;
   }

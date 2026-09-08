@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   fetchGitBranches,
+  GitBranchRollbackError,
   gitCheckout,
   gitCommit,
   gitCreateBranch,
@@ -24,6 +25,8 @@ import {
 import { getDefaultBranch } from './github-prs.js';
 
 const tmpRoots: string[] = [];
+const NO_REPOSITORY_COMMANDS_FOR_TEST =
+  '-c core.hooksPath=/dev/null/no-hooks -c core.fsmonitor=';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -165,6 +168,21 @@ async function expectPullFailure(
   expect(caught).toBeInstanceOf(GitPullFailure);
   expect((caught as GitPullFailure).code).toBe(code);
   return caught as GitPullFailure;
+}
+
+async function expectBranchRollbackFailure(
+  promise: Promise<unknown>,
+  code: GitBranchRollbackError['code'],
+): Promise<GitBranchRollbackError> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(GitBranchRollbackError);
+  expect((caught as GitBranchRollbackError).code).toBe(code);
+  return caught as GitBranchRollbackError;
 }
 
 afterEach(() => {
@@ -579,6 +597,25 @@ describe('gitCreateBranch', () => {
 });
 
 describe('gitCreateBranch rollback (R12)', () => {
+  it('does not roll back a branch that already exists and is checked out', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const beforeHead = headSha(dir);
+    let caught: unknown;
+
+    try {
+      await gitCreateBranch(dir, before);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(GitBranchRollbackError);
+    expect((caught as Error).message).toMatch(/already exists/);
+    expect(currentBranch(dir)).toBe(before);
+    expect(headSha(dir)).toBe(beforeHead);
+  });
+
   it('rolls back a branch created before a failing post-checkout hook', async () => {
     const dir = makeRepo();
     const before = currentBranch(dir);
@@ -596,6 +633,30 @@ describe('gitCreateBranch rollback (R12)', () => {
 
     // HEAD is restored and the half-created branch is removed.
     expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+  });
+
+  it('rolls back a branch created from a non-HEAD start point', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const startPoint = headSha(dir);
+    git(dir, 'commit', '--allow-empty', '-q', '-m', 'second');
+    const beforeHead = headSha(dir);
+    git(dir, 'branch', 'start-point', startPoint);
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      { mode: 0o755 },
+    );
+
+    await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic', 'start-point'),
+      'branch_creation_rolled_back',
+    );
+
+    expect(currentBranch(dir)).toBe(before);
+    expect(headSha(dir)).toBe(beforeHead);
     const branches = git(dir, 'branch', '--format=%(refname:short)');
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
   });
@@ -620,9 +681,11 @@ describe('gitCreateBranch rollback (R12)', () => {
       { mode: 0o755 },
     );
 
-    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow(
-      /branch "topic" was not deleted/,
+    const failure = await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic'),
+      'branch_preserved_after_hook',
     );
+    expect(failure.message).toMatch(/branch "topic" was not deleted/);
 
     expect(currentBranch(dir)).toBe(before);
     expect(headSha(dir)).toBe(beforeHead);
@@ -631,6 +694,155 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(git(dir, 'log', '-1', '--format=%s', 'topic').trim()).toBe(
       'hook commit',
     );
+  });
+
+  it('preserves a concurrent ref update during deletion', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const expectedTip = headSha(dir);
+    const tree = git(dir, 'rev-parse', 'HEAD^{tree}').trim();
+    const concurrentTip = git(
+      dir,
+      'commit-tree',
+      tree,
+      '-p',
+      expectedTip,
+      '-m',
+      'concurrent update',
+    ).trim();
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const env = gitShim(hermeticEnv(), [
+      {
+        match: `"${NO_REPOSITORY_COMMANDS_FOR_TEST} update-ref -d refs/heads/topic ${expectedTip}"`,
+        before: `"$REAL" update-ref refs/heads/topic ${concurrentTip}`,
+      },
+    ]);
+
+    await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic', undefined, env),
+      'branch_preserved_after_hook',
+    );
+
+    expect(currentBranch(dir)).toBe(before);
+    expect(git(dir, 'rev-parse', 'refs/heads/topic').trim()).toBe(
+      concurrentTip,
+    );
+  });
+
+  it('distinguishes a failed delete after restoring the original branch', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const expectedTip = headSha(dir);
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const env = gitShim(hermeticEnv(), [
+      {
+        match: `"${NO_REPOSITORY_COMMANDS_FOR_TEST} update-ref -d refs/heads/topic ${expectedTip}"`,
+        script: 'echo "fatal: delete refused" >&2; exit 1',
+      },
+    ]);
+
+    const failure = await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic', undefined, env),
+      'branch_delete_failed',
+    );
+
+    expect(failure.message).toContain(
+      `restored "${before}" but could not delete branch "topic"`,
+    );
+    expect(failure.message).toContain('fatal: delete refused');
+    expect(currentBranch(dir)).toBe(before);
+    expect(git(dir, 'rev-parse', 'refs/heads/topic').trim()).toBe(expectedTip);
+  });
+
+  it('surfaces a recovery checkout failure with the resulting HEAD', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      [
+        '#!/bin/sh',
+        `git update-ref -d refs/heads/${before}`,
+        'printf "original hook failure\\n" >&2',
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const failure = await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic'),
+      'branch_restore_failed',
+    );
+
+    expect(failure.message).toContain('workspace is still on "topic"');
+    expect(failure.message).toContain('fatal:');
+    expect(failure.message).not.toContain('Command failed:');
+    expect(currentBranch(dir)).toBe('topic');
+  });
+
+  it('does not run fsmonitor during recovery', async () => {
+    const dir = makeRepo();
+    const marker = path.join(dir, 'fsmonitor-ran');
+    const monitor = path.join(dir, 'fsmonitor');
+    fs.writeFileSync(
+      monitor,
+      `#!/bin/sh\necho ran >> "${marker}"\necho token\n`,
+      { mode: 0o755 },
+    );
+    git(dir, 'config', 'core.fsmonitor', monitor);
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\nrm -f "${marker}"\nexit 1\n`,
+      { mode: 0o755 },
+    );
+
+    await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic'),
+      'branch_creation_rolled_back',
+    );
+
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('does not run reference-transaction hooks during recovery', async () => {
+    const dir = makeRepo();
+    const marker = path.join(dir, 'reference-transaction-ran');
+    const enabled = path.join(dir, 'enable-reference-transaction');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'reference-transaction'),
+      [
+        '#!/bin/sh',
+        `if test -f "${enabled}"; then`,
+        `  echo ran >> "${marker}"`,
+        '  exit 1',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\ntouch "${enabled}"\nexit 1\n`,
+      { mode: 0o755 },
+    );
+
+    await expectBranchRollbackFailure(
+      gitCreateBranch(dir, 'topic'),
+      'branch_creation_rolled_back',
+    );
+
+    expect(fs.existsSync(marker)).toBe(false);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
   });
 });
 

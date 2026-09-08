@@ -331,9 +331,47 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('classifies creating the current branch as branch_already_exists', async () => {
+    const dir = makeRepo();
+    const branch = git(dir, 'symbolic-ref', '--short', 'HEAD').trim();
+    const beforeHead = git(dir, 'rev-parse', 'HEAD').trim();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/branch')
+      .send({ name: branch });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('branch_already_exists');
+    expect(git(dir, 'symbolic-ref', '--short', 'HEAD').trim()).toBe(branch);
+    expect(git(dir, 'rev-parse', 'HEAD').trim()).toBe(beforeHead);
+  });
+
+  it('does not classify a rolled-back hook failure from the branch name', async () => {
+    const dir = makeRepo();
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    git(dir, 'config', 'core.hooksPath', hookDir);
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\nprintf "hook failed\\n" >&2\nexit 1\n',
+      { mode: 0o755 },
+    );
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/branch')
+      .send({ name: 'dirty-cleanup' });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toBe('branch_creation_rolled_back');
+    expect(response.body.message).toContain('hook failed');
+    expect(response.body.error).not.toBe('dirty_working_tree');
+  });
+
   it('keeps rollback details visible without misclassifying the branch name', async () => {
     const dir = makeRepo();
     const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    git(dir, 'config', 'core.hooksPath', hookDir);
     const hookOutput = 'hook output '.repeat(80);
     fs.writeFileSync(
       path.join(hookDir, 'post-checkout'),
@@ -353,12 +391,43 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       .post('/workspace/git/branch')
       .send({ name: 'dirty-cleanup' });
 
-    expect(response.status).toBe(500);
-    expect(response.body.error).toContain(
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('branch_preserved_after_hook');
+    expect(response.body.message).toContain(
       'branch "dirty-cleanup" was not deleted because its ref changed',
     );
-    expect(response.body.error.length).toBeLessThanOrEqual(512);
+    expect(response.body.message).toContain('hook output');
+    expect(response.body.message.length).toBeLessThanOrEqual(512);
     expect(response.body.error).not.toBe('dirty_working_tree');
+  });
+
+  it('reports a failed restore without leaking repository paths', async () => {
+    const dir = makeRepo();
+    const branch = git(dir, 'symbolic-ref', '--short', 'HEAD').trim();
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    git(dir, 'config', 'core.hooksPath', hookDir);
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      [
+        '#!/bin/sh',
+        `git update-ref -d refs/heads/${branch}`,
+        `printf '%s\\n' '${dir}' >&2`,
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/branch')
+      .send({ name: 'topic' });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toBe('branch_restore_failed');
+    expect(response.body.message).toContain('workspace is still on "topic"');
+    expect(response.body.message).toContain('fatal:');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
   it('updates a dirty tree and restores the local changes with stash', async () => {

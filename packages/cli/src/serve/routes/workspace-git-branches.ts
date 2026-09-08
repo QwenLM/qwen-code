@@ -70,40 +70,32 @@ function sendGitError(
   // when the workspace path itself contains a keyword (e.g. "dirty").
   const output = gitOutput(err);
   const detail = output ?? (err instanceof Error ? err.message : String(err));
-  // Rollback errors keep the original git failure in `cause`, but their
-  // message is a recovery outcome rather than a git diagnostic. Leave those
-  // failures unclassified so branch names and recovery text cannot trigger a
-  // misleading category such as dirty_working_tree.
-  const classificationDetail =
-    err instanceof GitBranchRollbackError ? '' : (output ?? detail);
-
   const message = redactGitMessage(detail, cwd);
-  const classificationMessage = redactGitMessage(classificationDetail, cwd);
 
   if (
-    /not a git repository/i.test(classificationMessage) ||
-    /invalid reference/i.test(classificationMessage)
+    /not a git repository/i.test(message) ||
+    /invalid reference/i.test(message)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(classificationMessage)) {
+  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
-  if (/already exists/i.test(classificationMessage)) {
+  if (/already exists/i.test(message)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
-  if (/nothing to commit/i.test(classificationMessage)) {
+  if (/nothing to commit/i.test(message)) {
     res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
-  if (/detached HEAD/i.test(classificationMessage)) {
+  if (/detached HEAD/i.test(message)) {
     res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream|no tracking information/i.test(classificationMessage)) {
+  if (/no upstream|no tracking information/i.test(message)) {
     res.status(400).json({ error: 'no_upstream', message });
     return;
   }
@@ -211,6 +203,19 @@ async function handleCreateBranch(
     const result = await gitCreateBranch(cwd, name, startPoint, env);
     res.status(200).json(result);
   } catch (err) {
+    if (err instanceof GitBranchRollbackError) {
+      const causeDetail =
+        gitOutput(err.cause) ??
+        (err.cause instanceof Error ? err.cause.message : '');
+      const detail = causeDetail
+        ? `${err.message}\n${causeDetail}`
+        : err.message;
+      res.status(err.code === 'branch_preserved_after_hook' ? 409 : 500).json({
+        error: err.code,
+        message: redactGitMessage(detail, cwd),
+      });
+      return;
+    }
     sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }

@@ -182,6 +182,8 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  workspaceGitCreateBranch.mockReset();
+  workspaceGitCreateBranch.mockResolvedValue(undefined);
   workspaceGitPull.mockReset();
   workspaceGitCheckout.mockReset();
   workspaceGitCheckout.mockResolvedValue(undefined);
@@ -505,6 +507,44 @@ describe('BranchPickerPopover actions', () => {
     expect(footerText()).not.toContain('Stash Changes and Update');
   });
 
+  it('refreshes branches after a preserved-branch creation failure', async () => {
+    workspaceGitCreateBranch.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'branch_preserved_after_hook',
+          message: 'branch "topic" was preserved',
+        },
+        'POST /workspace/git/branch: branch "topic" was preserved',
+      ),
+    );
+    mountWithBranches();
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+
+    clickButton('New Branch');
+    await flush();
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Branch name"]',
+    );
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    await act(async () => {
+      nativeSetter?.call(input, 'topic');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(workspaceGitCreateBranch).toHaveBeenCalledTimes(1);
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(footerText()).toContain('branch "topic" was preserved');
+  });
+
   it('clears the panel when a competing checkout runs, showing its outcome', async () => {
     workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
     workspaceGitCheckout.mockRejectedValueOnce(
@@ -523,11 +563,15 @@ describe('BranchPickerPopover actions', () => {
     clickButton('Update Project');
     await flush();
     expect(footerText()).toContain('Stash Changes and Update');
+    const fetchesBeforeCheckout = workspaceGitBranches.mock.calls.length;
 
     clickButton('dev');
     await flush();
 
     expect(workspaceGitCheckout).toHaveBeenCalledWith('dev', undefined);
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(
+      fetchesBeforeCheckout + 1,
+    );
     expect(footerText()).not.toContain('Stash Changes and Update');
     expect(footerText()).toContain('checkout refused: local changes');
   });
