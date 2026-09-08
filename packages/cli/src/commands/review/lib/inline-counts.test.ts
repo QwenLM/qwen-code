@@ -150,6 +150,39 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('**[Critical]**\u200B')).toBe('');
     expect(stripSeverityPrefix('**[Critical]**<!-- x -->')).toBe('');
     expect(stripSeverityPrefix('**[Critical]** <!-- x --> \u200B')).toBe('');
+    // A kept code block whose only content is a machine marker is still
+    // marker-only: posting it left a comment whose whole body is a bare
+    // `**[Suggestion]**` rendered as code, with submit's
+    // renders-as-nothing refusal disarmed (#9940 review, round 30).
+    expect(stripSeverityPrefix('**[Suggestion]**\n\n\t**[Suggestion]**')).toBe(
+      '',
+    );
+    expect(stripSeverityPrefix('**[Critical]**\n\n    **[Critical]**')).toBe(
+      '',
+    );
+    // The separator grammar the marker trails is machine text too — the
+    // readback accepts either colon, and a looping model that writes one
+    // produced exactly this (#9940 review, round 30 reverse audit).
+    expect(stripSeverityPrefix('**[Suggestion]**\n\n\t**[Suggestion]**:')).toBe(
+      '',
+    );
+    expect(stripSeverityPrefix('**[Critical]**\n\n    **[Critical]**：')).toBe(
+      '',
+    );
+    // Every marker in the kept block projects out, not just the first,
+    // and a format character is not content.
+    expect(
+      stripSeverityPrefix(
+        '**[Critical]**\n\n    **[Critical]** **[Suggestion]**\u200b',
+      ),
+    ).toBe('');
+    // …while a kept block holding real content still posts.
+    expect(stripSeverityPrefix('**[Critical]**\n\n    const x = 1;')).toBe(
+      '    const x = 1;',
+    );
+    expect(stripSeverityPrefix('**[Critical]**\n\n    <!-- c -->')).toBe(
+      '    <!-- c -->',
+    );
   });
 });
 

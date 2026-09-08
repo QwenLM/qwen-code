@@ -6777,6 +6777,49 @@ describe('composeReview — fixedFindings', () => {
       escapeTagOpeners(text);
       expect(performance.now() - t0).toBeLessThan(2000);
     }
+    // A code span cannot cross a blank line — CommonMark parses inlines
+    // per block — so the two runs below never pair and the opener between
+    // them is live text the escape owes an `&lt;` (#9940 review, round
+    // 30). Reachable through the `Not reviewed:` disclosures, whose
+    // entries are verbatim model prose no collapse folds to one line.
+    expect(escapeTagOpeners('`<details>\n\nfoo` bar')).toBe(
+      '`&lt;details>\n\nfoo` bar',
+    );
+    // …and a span that stays inside its block still shields its `<`.
+    expect(escapeTagOpeners('`<details>\nfoo` bar')).toBe(
+      '`<details>\nfoo` bar',
+    );
+    // A lone CR ends a line too.
+    expect(escapeTagOpeners('`<details>\r\rfoo` bar')).toBe(
+      '`&lt;details>\r\rfoo` bar',
+    );
+    // A line of spaces and tabs is blank; one carrying anything else —
+    // a form feed, an NBSP — is a paragraph line, and the span survives.
+    expect(escapeTagOpeners('`<a>\n \t \nfoo` b')).toBe(
+      '`&lt;a>\n \t \nfoo` b',
+    );
+    expect(escapeTagOpeners('`<a>\n\f\nfoo` b')).toBe('`<a>\n\f\nfoo` b');
+    // A FENCED block is a block, not a span: a blank line inside it does
+    // not end it, its `<` is already inert, and escaping there rendered a
+    // literal `&lt;` to the reader for no safety gain (#9940 review,
+    // round 30 reverse audit).
+    const fenced =
+      'it is:\n\n```html\n<div class="w">\n\n  <span>x</span>\n</div>\n```.';
+    expect(escapeTagOpeners(fenced)).toBe(fenced);
+    // …tilde fences and an unclosed fence too, while text outside is
+    // still escaped.
+    expect(escapeTagOpeners('a\n\n~~~\n<div>\n\n<p>\n~~~\nb <div>')).toBe(
+      'a\n\n~~~\n<div>\n\n<p>\n~~~\nb &lt;div>',
+    );
+    expect(escapeTagOpeners('a <div>\n\n```\n<span>\n\n<b>')).toBe(
+      'a &lt;div>\n\n```\n<span>\n\n<b>',
+    );
+    // A fence's INTERIOR backticks are not span delimiters either: paired
+    // with a run outside, they opened a span over live text and suppressed
+    // its escape.
+    expect(escapeTagOpeners('~~~\n`\n~~~\n<b> and ` y')).toBe(
+      '~~~\n`\n~~~\n&lt;b> and ` y',
+    );
   });
 
   it('opensUnclosedComment — the linear form agrees with the closed-comment-removal reference on generated grammar (#9940 review, audit 4)', () => {

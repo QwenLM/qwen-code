@@ -54,6 +54,29 @@ const POSTED_MARKER_RE = /<!-- qwen-review (?:critical|suggestion) -->$/;
  */
 export const FIXED_RULING_MARKER = '<!-- qwen-review-fixed-ruling -->';
 
+/**
+ * The ruling note's posted SHAPE, anchored at the body's first line: the
+ * one `submit` assembles as `${fixedRulingLine(id, by)} ${FIXED_RULING_MARKER}`
+ * (the by-less `R<id> fixed` form included), before `normalizeInlineComments`
+ * appends the attribution footer under attribution on — so the FIRST LINE is
+ * what both polarities share.
+ *
+ * Readers must match THIS, never the marker as a substring: the marker
+ * string is public, a review of the file that defines it quotes it
+ * verbatim, and a substring test demoted such a Critical out of the
+ * blocker re-check (#9940 review, round 30). The autofix census applies
+ * the same anchored shape from its own workflow-level env.
+ *
+ * Anchored at BOTH ends of that line. `^` alone is only worth anything
+ * while the severity marker leads the body: under `review.attribution:
+ * false` the post strips it, and a Critical whose claim line opens by
+ * quoting a ruling then matched and demoted itself. A real note ends at
+ * the marker; a quotation carries on past it (#9940 review, round 30
+ * reverse audit).
+ */
+export const FIXED_RULING_SHAPE_RE =
+  /^R\d+-\d+ fixed(?: by .*?)? <!-- qwen-review-fixed-ruling -->[ \t]*(?:\r?\n|$)/;
+
 /** Whether the body ends with the posted marker shape. */
 export function carriesCommentMarker(body: string): boolean {
   return POSTED_MARKER_RE.test(body.trimEnd());

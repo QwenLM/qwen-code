@@ -39,7 +39,7 @@ import {
 import { isPositivePrNumber } from './lib/roster.js';
 import {
   commentMarkerSeverity,
-  FIXED_RULING_MARKER,
+  FIXED_RULING_SHAPE_RE,
 } from './lib/review-footer.js';
 
 /**
@@ -760,7 +760,7 @@ export function classifyInlineThreads(
   // as the text to rule on while the real re-post sank into a snippet
   // (#9940 review, round 30 reverse audit).
   const isRuling = (c: RawComment): boolean =>
-    (c.body ?? '').includes(FIXED_RULING_MARKER);
+    FIXED_RULING_SHAPE_RE.test(c.body ?? '');
   const blockerLeads = new Map<number, RawComment>();
   const promoted = new Set<number>();
   for (const root of roots) {

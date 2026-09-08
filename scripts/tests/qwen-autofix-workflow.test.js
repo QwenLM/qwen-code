@@ -9851,6 +9851,9 @@ exit 1
     expect(shape).toBeTruthy();
     expect(shape).toMatch(/^\^R\[0-9\]\+-\[0-9\]\+ fixed/);
     expect(shape).toContain('[^\\n]');
+    // Anchored at BOTH ends of the note's line: a real ruling ends at the
+    // marker, a quotation carries on past it.
+    expect(shape).toMatch(/\(\\n\|\$\)$/);
     expect(shape).not.toContain('\\\\');
     expect(reviewScanStep).not.toContain("FIXED_RULING_FILTER='");
     const program = reviewScanStep.match(
@@ -9928,6 +9931,18 @@ exit 1
         },
       ]),
     ).toBe('3');
+    // Attribution off strips the severity marker, so a Critical's own
+    // claim line can OPEN with a quoted ruling — the start anchor alone
+    // dropped it from the census (#9940 review, round 30).
+    expect(
+      run([
+        {
+          ...after,
+          ...bot,
+          body: `R1-2 fixed by the guard ${marker} is the shape this filter matches, and it is anchored at both ends`,
+        },
+      ]),
+    ).toBe('1');
     // Every other reply and root keeps counting: a carried re-post, a
     // bot reply in prose, a human reply, a human quoting the shape.
     expect(

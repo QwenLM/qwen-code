@@ -3661,14 +3661,73 @@ export function escapeTagOpeners(text: string): string {
   // walked with one cursor while the text is scanned — a per-run search
   // from the start and a per-`<` span scan were quadratic (#9940 review,
   // audit 7).
-  const runs: Array<{ start: number; end: number }> = [];
+  // …and BLOCK-SCOPED: CommonMark parses inlines per block and a blank
+  // line ends one, so a run can never pair with a closer past it. Pairing
+  // over the whole string invented a span across the blank line and left
+  // the tag opener inside that phantom span live — reachable through the
+  // `Not reviewed:` disclosures, the one escaped channel whose entries
+  // are verbatim model prose that no collapse folds to a single line
+  // (#9940 review, round 30). Boundaries are collected in the same single
+  // pass the runs are, and pairing stays per-length with one cursor each.
+  // A FENCED code block is a block, not a span: its `<` is already inert,
+  // its backticks are not span delimiters, and a blank line inside it does
+  // NOT end it. Masked in one line-wise pass before the run scan —
+  // escaping inside a fence corrupted the display (a code block does not
+  // decode entities, so the reader saw a literal `&lt;`) for no safety
+  // gain (#9940 review, round 30 reverse audit).
+  const fenced: Array<[number, number]> = [];
+  {
+    let open: { char: string; len: number; start: number } | null = null;
+    let pos = 0;
+    for (const line of text.split(/(?<=\n)/)) {
+      const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (open === null) {
+        // A backtick fence's info string may not contain a backtick.
+        if (m && !(m[1]![0] === '`' && line.slice(m[0].length).includes('`'))) {
+          open = { char: m[1]![0]!, len: m[1]!.length, start: pos };
+        }
+      } else if (
+        m &&
+        m[1]![0] === open.char &&
+        m[1]!.length >= open.len &&
+        line.slice(m[0].length).trim() === ''
+      ) {
+        fenced.push([open.start, pos + line.length]);
+        open = null;
+      }
+      pos += line.length;
+    }
+    if (open !== null) fenced.push([open.start, text.length]);
+  }
+  // One cursor per ascending scan — `fenced` is sorted by construction, and
+  // both callers below walk their positions forward, so a shared `some()`
+  // would have been quadratic in fences × runs.
+  const fenceCursor = (): ((i: number) => boolean) => {
+    let at = 0;
+    return (i: number): boolean => {
+      while (at < fenced.length && fenced[at]![1] <= i) at++;
+      return at < fenced.length && i >= fenced[at]![0];
+    };
+  };
+  const boundaryInFence = fenceCursor();
+  const runInFence = fenceCursor();
+  const runs: Array<{ start: number; end: number; block: number }> = [];
   const byLength = new Map<number, number[]>();
+  // A lone `\r` is a line ending too — every reader here normalizes them.
+  const boundaries = [...text.matchAll(/(?:\r\n|[\r\n])[ \t]*(?:\r\n|[\r\n])/g)]
+    .map((m) => m.index)
+    .filter((at) => !boundaryInFence(at));
+  let blockAt = 0;
   for (const m of text.matchAll(/`+/g)) {
+    while (blockAt < boundaries.length && boundaries[blockAt]! < m.index) {
+      blockAt++;
+    }
+    if (runInFence(m.index)) continue;
     const len = m[0].length;
     const list = byLength.get(len) ?? [];
     list.push(runs.length);
     byLength.set(len, list);
-    runs.push({ start: m.index, end: m.index + len });
+    runs.push({ start: m.index, end: m.index + len, block: blockAt });
   }
   const cursor = new Map<number, number>();
   const spans: Array<[number, number]> = [];
@@ -3680,13 +3739,22 @@ export function escapeTagOpeners(text: string): string {
     cursor.set(len, at);
     if (at >= list.length) continue;
     const j = list[at]!;
+    // A closer in a later block is no closer at all — and no later run of
+    // this length can be in an EARLIER block, so the cursor still only
+    // moves forward.
+    if (runs[j]!.block !== runs[i]!.block) continue;
     spans.push([runs[i]!.start, runs[j]!.end]);
     i = j;
   }
+  // Fences join the spans as protected ranges: a run inside one never
+  // paired, so the two lists cannot overlap and merge in order.
+  const protectedRanges = [...spans, ...fenced].sort((a, b) => a[0] - b[0]);
   let span = 0;
   const inSpan = (i: number): boolean => {
-    while (span < spans.length && spans[span]![1] <= i) span++;
-    return span < spans.length && i >= spans[span]![0];
+    while (span < protectedRanges.length && protectedRanges[span]![1] <= i) {
+      span++;
+    }
+    return span < protectedRanges.length && i >= protectedRanges[span]![0];
   };
   const autolink =
     /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/;

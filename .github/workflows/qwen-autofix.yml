@@ -96,12 +96,17 @@ env:
   # nothing to address (#9940 review, round 28). Matched by its posted SHAPE,
   # anchored at the start, so a real Critical that QUOTES the marker (a
   # review of the file defining it) leads with its severity marker and keeps
-  # counting. Defined ONCE and handed to every jq site as `--arg frf`: an
+  # counting — and so does one whose first line QUOTES a whole ruling and
+  # then carries on, which the start anchor alone let through under
+  # attribution off, where no severity marker leads the post (#9940
+  # review, round 30). A real note ends at the marker; the end anchor is
+  # what says so. `lib/review-footer.ts` exports the same shape as
+  # FIXED_RULING_SHAPE_RE for the TypeScript readers. Defined ONCE and handed to every jq site as `--arg frf`: an
   # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
   # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
   # shell value, to "neither backslash nor n" and let a `by` clause with an
   # `n` in it count (#9940 review, round 29).
-  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\n]*)? <!-- qwen-review-fixed-ruling -->'
+  FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\n]*)? <!-- qwen-review-fixed-ruling -->[ \t]*\r?(\n|$)'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   MODEL_ID_MAX_CHARS,
@@ -23,9 +25,41 @@ import {
   stripReviewFooter,
   stripReviewFooterLine,
   swallowsAppendedMarker,
+  FIXED_RULING_SHAPE_RE,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
 import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
+
+const RULING_CORPUS = [
+  // What `submit` posts: `${fixedRulingLine(id, by)} ${MARKER}`, with the
+  // attribution footer appended under attribution on.
+  ['R1-2 fixed by the guard rewrite <!-- qwen-review-fixed-ruling -->', true],
+  ['R1-2 fixed <!-- qwen-review-fixed-ruling -->', true],
+  [
+    'R01-2 fixed by x <!-- qwen-review-fixed-ruling -->\n\n_— m via Qwen Code /review (v0.21.3)_',
+    true,
+  ],
+  [
+    'R123-456 fixed by the retry; the old path still fails <!-- qwen-review-fixed-ruling -->\r\n\r\n_— m via Qwen Code /review (v1)_',
+    true,
+  ],
+  // A Critical that QUOTES the note — the shape must end at the marker,
+  // or such a finding demotes itself out of the blocker re-check.
+  [
+    'R1-2 fixed by the guard <!-- qwen-review-fixed-ruling --> is the shape this filter matches, and it is anchored',
+    false,
+  ],
+  [
+    '**[Critical]** R3-1: the filter `<!-- qwen-review-fixed-ruling -->` is substring-anywhere',
+    false,
+  ],
+  [
+    'a note that merely mentions <!-- qwen-review-fixed-ruling --> mid-body',
+    false,
+  ],
+  ['R1-2 fixed by x', false],
+  ['  R1-2 fixed by x <!-- qwen-review-fixed-ruling -->', false],
+] as const;
 
 describe('the review footer and the regex that strips it', () => {
   it('the regex strips the exact output of the builder, versioned or not', () => {
@@ -1312,5 +1346,37 @@ describe('the review footer and the regex that strips it', () => {
         poolMultiplier: 20,
       });
     });
+  });
+});
+
+describe('FIXED_RULING_SHAPE_RE — the ruling note by its posted shape', () => {
+  it('matches every note submit posts and nothing that quotes one (#9940 review, round 30)', () => {
+    for (const [body, expected] of RULING_CORPUS) {
+      expect([body, FIXED_RULING_SHAPE_RE.test(body)]).toEqual([
+        body,
+        expected,
+      ]);
+    }
+  });
+
+  it('agrees with the autofix census filter, which is a second spelling of the same shape', () => {
+    // The workflow cannot import this module, so the shape lives twice —
+    // in different regex dialects. Pinned by BEHAVIOUR over the corpus,
+    // which is what has to agree; a textual pin would fail on `\d` vs
+    // `[0-9]` and say nothing about what either matches.
+    // vitest runs with cwd = packages/cli; the workflow is repo-rooted.
+    const yaml = readFileSync(
+      join(
+        import.meta.dirname,
+        '../../../../../../.github/workflows/qwen-autofix.yml',
+      ),
+      'utf8',
+    );
+    const shape = /^ {2}FIXED_RULING_FILTER: '([^\n]*)'$/m.exec(yaml)?.[1];
+    expect(shape).toBeTruthy();
+    const census = new RegExp(shape!);
+    for (const [body, expected] of RULING_CORPUS) {
+      expect([body, census.test(body)]).toEqual([body, expected]);
+    }
   });
 });

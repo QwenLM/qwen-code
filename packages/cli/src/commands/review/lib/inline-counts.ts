@@ -532,6 +532,19 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 }
 
 /**
+ * Both severity markers, wherever they sit — the projection the
+ * marker-only test applies to a remainder before asking whether anything
+ * is left (see `stripSeverityPrefix`).
+ */
+const MARKERS_RE = new RegExp(
+  `${CRITICAL_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${SUGGESTION_PREFIX.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  )}`,
+  'g',
+);
+
+/**
  * The body with its leading severity markers removed — the shape an
  * attribution-off (`review.attribution: false`) run POSTS, applied by
  * `submit` after the verdict was counted from the marked payload.
@@ -579,9 +592,35 @@ export function stripSeverityPrefix(body: string): string {
   // A body that was nothing but markers and residue strips to the empty
   // string. Tested ONCE, at the fixpoint: testing the remainder after every
   // marker scanned the whole body per marker, and a run of twenty thousand
-  // stacked markers took nine seconds (#9940 review, audit). A kept code
-  // block is visible by construction — a comment on a code line is text.
+  // stacked markers took nine seconds (#9940 review, audit).
+  //
+  // A kept code block is visible by construction — a comment on a code
+  // line is text — but "visible" is not "content": a body of a marker, a
+  // blank line and an INDENTED marker kept the second one and posted a
+  // comment whose only content is a bare machine marker rendered as code,
+  // with `submit`'s renders-as-nothing refusal disarmed because the
+  // remainder was non-empty. Projecting the markers out of the remainder
+  // separates the two: a kept block holding real text (a quoted
+  // `    <!-- qwen-review -->` line, `    const x = 1;`) still posts
+  // (#9940 review, round 30).
   if (stripped && !kept && current.replace(ALL_INVISIBLE_RE, '') === '') {
+    return '';
+  }
+  // The kept block is tested against a NARROWER projection — markers, the
+  // separator grammar they trail (`MARKER_SEPARATOR_RE` accepts either
+  // colon) and whitespace, never comments: a quoted `    <!-- c -->` line
+  // is the code the audit-6 case exists to KEEP HERE, while
+  // `\t**[Suggestion]**` and `\t**[Suggestion]**:` are the machine marker
+  // this mode removes wearing an indent (#9940 review, round 30). What
+  // this strip keeps and what `submit` agrees to post are two questions:
+  // its renders-as-nothing gate is comment-blind and refuses a body whose
+  // kept block is only a comment anyway. This function owes the readback
+  // the truthful projection, not the gate's verdict.
+  if (
+    stripped &&
+    kept &&
+    current.replace(MARKERS_RE, '').replace(/[:：\s\p{Cf}]/gu, '') === ''
+  ) {
     return '';
   }
   return current;

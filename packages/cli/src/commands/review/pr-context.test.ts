@@ -1423,6 +1423,41 @@ describe('classifyInlineThreads', () => {
     );
     expect(ruled.repliedBlockerRoots).toEqual([]);
     expect(ruled.blockerLeads.size).toBe(0);
+    // …matched by the note's posted SHAPE, anchored: the marker string is
+    // public, and a review of the file that defines it quotes it verbatim
+    // — read as a substring, that Critical demoted itself out of the
+    // mandatory section (#9940 review, round 30).
+    const quotingMarker = classifyInlineThreads(
+      [
+        {
+          id: 711,
+          user: { login: 'qwen-bot' },
+          body: `**[Critical]** R3-1: the filter \`${FIXED_RULING_MARKER}\` is substring-anywhere`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotingMarker.openBlockerRoots.map((c) => c.id)).toEqual([711]);
+    // A reply that quotes a whole ruling line and carries on is a claim,
+    // not a note: the shape ends at the marker.
+    const quotesWholeLine = classifyInlineThreads(
+      [
+        {
+          id: 731,
+          user: { login: 'qwen-bot' },
+          body: '**[Suggestion]** R1-2: consider a guard here',
+        },
+        {
+          id: 732,
+          user: { login: 'qwen-bot' },
+          in_reply_to_id: 731,
+          body: `**[Critical]** R1-2: \`R1-2 fixed by x ${FIXED_RULING_MARKER}\` is what the census matches, and it must not demote this finding`,
+        },
+      ],
+      'qwen-bot',
+    );
+    expect(quotesWholeLine.repliedBlockerRoots.map((c) => c.id)).toEqual([731]);
+    expect(quotesWholeLine.blockerLeads.get(731)!.id).toBe(732);
     // The root is never its own lead — it is already rendered as the
     // root, and a lead is the thing quoted BESIDE it.
     const rootOnly = classifyInlineThreads(

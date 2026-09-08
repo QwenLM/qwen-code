@@ -1953,6 +1953,36 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
+  it('an indented marker under a marker is marker-only too — the kept code block is not substance (#9940 review, round 30)', () => {
+    // The indent makes the second marker a kept code block, so the strip
+    // returned it as substance and the gate passed a comment whose whole
+    // posted body is a bare machine marker rendered as code.
+    const indentedMarkerOnly = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]**\n\n\t**[Suggestion]**',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expectRefusal(
+      () =>
+        runSubmit(
+          base({ review: writeReview(indentedMarkerOnly) }),
+          'unknown',
+          {
+            defaultComment: false,
+            attribution: false,
+          },
+        ),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
   it('merges gate discards into an existing suggestionsDiscarded count', () => {
     const withPrior = {
       commit_id: 'abc123',
