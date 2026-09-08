@@ -18,6 +18,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
+  ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -1732,6 +1733,71 @@ export async function runNonInteractive(
         return 1;
       };
 
+      const emitRetryProgress = (
+        event: ServerLlmStreamEvent,
+        discardedToolCallCount: number,
+        preserveText: boolean,
+      ): void => {
+        if (event.type === LlmEventType.ModelFallback) {
+          process.stderr.write(
+            `Falling back from ${event.fromModel} to ${event.toModel} (${discardedToolCallCount} buffered tool call(s) discarded).\n`,
+          );
+          return;
+        }
+        if (event.type !== LlmEventType.Retry) return;
+        if (!event.retryInfo) {
+          process.stderr.write(
+            `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
+              preserveText ? '; preserving delivered text' : ''
+            }).\n`,
+          );
+          return;
+        }
+        const { attempt, maxRetries, delayMs, message } = event.retryInfo;
+        const delaySeconds = Math.ceil(delayMs / 1000);
+        process.stderr.write(
+          `Retrying in ${delaySeconds}s (attempt ${attempt}/${maxRetries})${
+            message ? `: ${message}` : ''
+          }\n`,
+        );
+      };
+
+      const discardAbandonedAttempt = (
+        event: ServerLlmStreamEvent,
+        pendingRequests: ToolCallRequestInfo[],
+        onDiscardText?: () => void,
+      ): void => {
+        if (
+          event.type !== LlmEventType.Retry &&
+          event.type !== LlmEventType.ModelFallback
+        ) {
+          return;
+        }
+        const discardedToolCalls = pendingRequests.splice(0);
+        const preserveText =
+          event.type === LlmEventType.Retry && event.isContinuation === true;
+        adapter.restartAttempt(preserveText, discardedToolCalls);
+        if (!preserveText) {
+          onDiscardText?.();
+        }
+        const retryInfo =
+          event.type === LlmEventType.Retry ? event.retryInfo : undefined;
+        adapter.emitSystemMessage('retry', {
+          reason:
+            event.type === LlmEventType.Retry ? 'retry' : 'model_fallback',
+          ...(retryInfo
+            ? {
+                attempt: retryInfo.attempt,
+                maxRetries: retryInfo.maxRetries,
+                delayMs: retryInfo.delayMs,
+              }
+            : {}),
+          discardedToolCalls: discardedToolCalls.length,
+          preserveText,
+        });
+        emitRetryProgress(event, discardedToolCalls.length, preserveText);
+      };
+
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
        * `drainBatch`. Both call sites used to reproduce ~120 lines of
@@ -2405,6 +2471,7 @@ export async function runNonInteractive(
         );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -2468,13 +2535,14 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
+          discardAbandonedAttempt(event, toolCallRequests, () => {
+            plainTextPreview = plainTextPreview.slice(0, attemptPreviewLength);
+          });
+          // Process fallback metadata only after the abandoned attempt has
+          // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
-          }
-          if (event.type === LlmEventType.ModelFallback) {
-            toolCallRequests.length = 0;
           }
           if (
             event.type === LlmEventType.Content &&
@@ -2796,6 +2864,7 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);

@@ -96,7 +96,7 @@ vi.mock('./live-turn.js', () => ({
   }),
 }));
 vi.mock('../handleAutoUpdate.js', () => ({
-  setUpdateHandler: () => ({ cleanup: () => {} }),
+  setUpdateHandler: () => ({ cleanup: () => {}, flush: () => {} }),
 }));
 vi.mock('../hooks/useLogger.js', () => ({ useLogger: () => null }));
 vi.mock('../../startup/startup-prefetch.js', () => ({
@@ -125,6 +125,7 @@ vi.mock('./exit-lifecycle.js', () => ({
 vi.mock('./early-input.js', () => ({
   drainCapturedInputAsText: () => '',
   injectCapturedInput: () => () => {},
+  armCapturedInputInjection: () => () => {},
 }));
 vi.mock('./resume-session.js', () => ({
   resumeEventsFromConfig: () => null,
@@ -136,15 +137,17 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { InitializationResult } from '../../core/initializer.js';
 
-function buildConfig(): Config {
+function buildConfig(authType: 'qwen-oauth' | 'none' = 'qwen-oauth'): Config {
   return {
     getSessionId: () => 'test-session-id',
     getTargetDir: () => '/tmp/project',
     getApprovalMode: () => 'default',
+    getAuthType: () => (authType === 'none' ? undefined : authType),
     getChatRecordingService: () => null,
     isTelemetryInitializationDeferred: () => false,
     getHookSystem: () => null,
     getTranscriptPath: () => '/tmp/project/transcript.jsonl',
+    initialize: vi.fn(async () => {}),
     trackSessionRegistration: vi.fn(),
     unregisterSessionRegistry: vi.fn(),
   } as unknown as Config;
@@ -161,8 +164,20 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.stderrLines = [];
     mocks.state.renderer.destroy.mockClear();
     mocks.state.root.unmount.mockClear();
+    mocks.state.root.render.mockClear();
     mocks.state.runtime.shutdown.mockClear();
   });
+
+  // root.render is mocked, so the tree is never executed; the boot-computed
+  // initialDialog is read straight off the captured SessionStatsProvider
+  // element (children = the OpenTuiEntryApp element).
+  function renderedInitialDialog(): unknown {
+    const calls = mocks.state.root.render.mock.calls;
+    const provider = calls[calls.length - 1]?.[0] as
+      | { props?: { children?: { props?: Record<string, unknown> } } }
+      | undefined;
+    return provider?.props?.children?.props?.['initialDialog'];
+  }
 
   it('returns false when the renderer cannot be created', async () => {
     vi.mocked(createCliRenderer).mockRejectedValueOnce(
@@ -213,5 +228,49 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(mocks.state.stderrLines).toHaveLength(0);
     expect(mocks.state.cleanups.length).toBeGreaterThanOrEqual(3);
     expect(config.trackSessionRegistration).toHaveBeenCalled();
+  });
+
+  it('threads the boot auth auto-open into the shell (U-6)', async () => {
+    // Unauthenticated: ink useAuth opens the dialog with no error message.
+    expect(
+      await startOpenTuiUI(
+        buildConfig('none'),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(mocks.state.stderrLines).toEqual([]);
+    expect(renderedInitialDialog()).toEqual({ dialog: 'auth' });
+
+    // Startup auth failure: ink useInitializationAuthError opens once with
+    // the message; here it is one-shot by construction (computed at boot).
+    expect(
+      await startOpenTuiUI(buildConfig(), settings, [], '/tmp/project', {
+        authError: 'Failed to login. Message: bad key',
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        memoryFileCount: 0,
+      } as InitializationResult),
+    ).toBe(true);
+    expect(mocks.state.stderrLines).toEqual([]);
+    expect(renderedInitialDialog()).toEqual({
+      dialog: 'auth',
+      initialError: 'Failed to login. Message: bad key',
+    });
+
+    // Authenticated and error-free: no auto-open.
+    expect(
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    expect(mocks.state.stderrLines).toEqual([]);
+    expect(renderedInitialDialog()).toBeNull();
   });
 });
