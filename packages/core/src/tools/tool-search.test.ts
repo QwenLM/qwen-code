@@ -812,8 +812,9 @@ describe('ToolSearchTool', () => {
   it('keyword search hides exclusion-set tools from subagent candidates', async () => {
     // R5-1 keyword side: collectCandidates must drop exclusion-set members
     // in subagent-like contexts while the leader still finds them. Mutation
-    // check: removing the filter from collectCandidates turns the subagent
-    // assertion red.
+    // check: returnSchemas applies the same exclusion predicate, so only
+    // removing BOTH filters turns the subagent assertion red — the defence
+    // is layered, and this assertion pins the pair.
     registry.registerTool(
       new MockTool({
         name: ToolNames.TEAM_DELETE,

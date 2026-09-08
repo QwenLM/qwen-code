@@ -273,7 +273,15 @@ export class ToolCallTool extends BaseDeclarativeTool<
   override toAutoClassifierInput(
     params: ToolCallParams,
   ): Record<string, unknown> {
-    const targetName = canonicalToolName(params.name);
+    // History parts are unvalidated: a malformed bridged entry may carry a
+    // non-string name. Dereferencing it would throw, and the caller's catch
+    // falls back to the raw envelope — leaking unredacted arguments into the
+    // classifier prompt. Coerce first and fail closed on the name alone.
+    const rawName = typeof params.name === 'string' ? params.name : '';
+    const targetName = canonicalToolName(rawName);
+    if (rawName === '') {
+      return { name: targetName };
+    }
     let target = this.registry?.getTool(targetName);
 
     // Keep classifier projection aligned with deferred-call resolution: the

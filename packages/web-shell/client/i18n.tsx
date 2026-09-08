@@ -6946,7 +6946,7 @@ const ZH: Messages = {
     '搜索文件时启用模糊搜索。',
   'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
   'settings.description.tools.toolSearch.enabled':
-    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用；桥接的查看与调用保持工具声明列表稳定，以减少提示词大小并提高缓存命中率。若恢复会话的历史中直接调用过的延迟工具在会话中途完成注册，声明列表仍可能随之刷新。',
+    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用；桥接的查看与调用保持工具声明列表稳定，以减少提示词大小并提高缓存命中率。会话仍可能在中途刷新声明列表：恢复会话时，或当工具集刷新（MCP 发现、进入计划模式、子代理完成）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时。',
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',

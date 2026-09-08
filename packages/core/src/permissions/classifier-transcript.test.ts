@@ -588,6 +588,33 @@ describe('buildClassifierContents', () => {
     expect(priorText).not.toContain('must-not-leak');
   });
 
+  it('does not leak the raw envelope of a bridged history entry with no string name', () => {
+    const tools: Record<string, AnyDeclarativeTool> = {};
+    const registry = makeRegistry(tools);
+    tools[ToolNames.TOOL_CALL] = new ToolCallTool(registry);
+    const result = buildClassifierContents(
+      [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  arguments: { secret: 'must-not-leak' },
+                },
+              },
+            },
+          ],
+        },
+      ],
+      registry,
+      { toolName: 'read_file', toolParams: { path: '/tmp/a.ts' } },
+    );
+    const priorText = (result[0].parts?.[0] as { text: string }).text;
+    expect(priorText).not.toContain('must-not-leak');
+  });
+
   it('falls back to raw args when tool declines to project (returns undefined)', () => {
     const tool = new StubTool('read_file' /* no projection */);
     const registry = makeRegistry({ read_file: tool });

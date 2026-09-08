@@ -129,7 +129,7 @@ const toolSearchDescription = `Reviews function declarations for deferred tools 
 
 Deferred tools appear by name in the deferred-tools startup reminder. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
 
-The returned <functions> block is informational. After reviewing a hidden deferred tool's schema, invoke it through tool_call with its exact name and schema-shaped arguments. Do not call a hidden deferred tool directly: its declaration remains hidden so the model-facing tool list and prompt-cache prefix stay stable. If select: returns a tool that is already declared, call that tool directly; tool_call accepts hidden deferred tools only.
+The returned <functions> block is informational. After reviewing a hidden deferred tool's schema, invoke it through tool_call with its exact name and schema-shaped arguments. Do not call a hidden deferred tool directly: its declaration remains hidden so the model-facing tool list and prompt-cache prefix stay stable (a tool-set refresh may still re-declare it when the live history contains a direct call to it). If select: returns a tool that is already declared, call that tool directly; tool_call accepts hidden deferred tools only.
 
 Query forms:
 - "select:ToolA,ToolB" — fetch these exact tools by name

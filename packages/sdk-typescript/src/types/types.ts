@@ -417,12 +417,17 @@ export interface QueryOptions {
    * denies both; a `tool_search` or `tool_call` deny rule, or a
    * `tools.disabled` entry removes one) the
    * demoted tools that remain hidden are not offered to the model and cannot
-   * be reached through the bridge for that session, and a warning is logged;
+   * be reached through the bridge for that session, and a warning is
+   * written to the CLI process's stderr (the SDK discards it unless
+   * `debug: true` is set; a `stderr` handler alone also needs
+   * `logLevel: 'debug'`);
    * they stay registered, so a direct call by their own name is still
    * evaluated and approved normally — except tools also listed in
    * `tools.visible`, which
-   * are declared upfront, and resumed sessions, which re-declare demoted
-   * tools referenced by direct calls in the transcript.
+   * are declared upfront, and sessions whose live history contains a
+   * direct call to a still-hidden demoted tool, which any tool-set
+   * refresh (resume, MCP discovery, plan-mode entry, subagent
+   * completion) re-declares.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -477,12 +482,17 @@ export interface QueryOptions {
    *   both; a `tool_search` or `tool_call` deny rule, or a
    *   `tools.disabled` entry removes one) the
    *   demoted tools that remain hidden are not offered to the model and cannot
-   *   be reached through the bridge for that session, and a warning is logged;
+   *   be reached through the bridge for that session, and a warning is
+   *   written to the CLI process's stderr (the SDK discards it unless
+   *   `debug: true` is set; a `stderr` handler alone also needs
+   *   `logLevel: 'debug'`);
    *   they stay registered, so a direct call by their own name is still
    *   evaluated and approved normally — except tools also listed in
    *   `tools.visible`,
-   *   which are declared upfront, and resumed sessions, which re-declare
-   *   demoted tools referenced by direct calls in the transcript (#9827)
+   *   which are declared upfront, and sessions whose live history
+   *   contains a direct call to a still-hidden demoted tool, which any
+   *   tool-set refresh (resume, MCP discovery, plan-mode entry,
+   *   subagent completion) re-declares (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
