@@ -1538,6 +1538,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
+      // Let StrictMode discard its first effect before starting a session load.
+      if (!runnerSession) {
+        await Promise.resolve();
+        if (disposed) return;
+      }
       const client =
         workspaceClientRef.current ??
         new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });

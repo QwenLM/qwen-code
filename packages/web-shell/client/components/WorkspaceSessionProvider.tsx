@@ -243,7 +243,9 @@ function WorkspaceSessionProviderWorkspace({
   ]);
 
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveWorkspaceCwd ||
+      effectiveWorkspaceId ||
+      (effectiveSessionId && !workspace.capabilities)) &&
     workspace.status === 'error'
   ) {
     return (
@@ -260,7 +262,7 @@ function WorkspaceSessionProviderWorkspace({
     );
   }
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
     return (
