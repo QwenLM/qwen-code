@@ -39,6 +39,7 @@ export { runWithAgentRunContext, getAgentRunContext } from '${repo}/${src}/run-c
 export { ThreadPostTool, ThreadReviewTool, ThreadReadTool, ThreadCreateTool, ThreadBlockTool, ThreadWaitTool } from '${repo}/packages/core/src/tools/thread-tools.js';
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
+export * as view from '${repo}/packages/web-shell/client/components/workspace-agents/agents-view-logic.js';
 `,
 );
 execFileSync(
@@ -1140,6 +1141,121 @@ ok(
     recs.some((r) => r.kind === 'runtime_divergence'),
   `${untouched.status} ${JSON.stringify(recs.map((r) => r.kind))}`,
 );
+
+console.log('\n17. what the panel tells a person');
+const V = M.view;
+const summary = (over = {}) => ({
+  id: 't',
+  title: 'T',
+  status: 'open',
+  reason: 'r',
+  updatedAt: 1,
+  liveRunCount: 0,
+  ...over,
+});
+
+ok(
+  'work needing a person is grouped first, not buried by recency',
+  V.groupThreads([
+    summary({ id: 'a', status: 'open', updatedAt: 99 }),
+    summary({ id: 'b', status: 'blocked', updatedAt: 1 }),
+  ])[0].key === 'needs_you',
+);
+ok(
+  'blocked and in_review share that group, because they are one question',
+  V.groupThreads([
+    summary({ id: 'a', status: 'blocked' }),
+    summary({ id: 'b', status: 'in_review' }),
+  ]).find((g) => g.key === 'needs_you').threads.length === 2,
+);
+ok(
+  'finished work starts collapsed',
+  V.groupThreads([summary({ status: 'done' })])[0].collapsedByDefault === true,
+);
+ok(
+  'an empty group is not shown at all',
+  V.groupThreads([summary({ status: 'open' })]).every(
+    (g) => g.threads.length > 0,
+  ),
+);
+
+ok(
+  'a retired agent is explained as retired, not as disabled',
+  V.explainSkip('agent_retired', 'alice').what.includes('retired'),
+  JSON.stringify(V.explainSkip('agent_retired', 'alice')),
+);
+ok(
+  'and is not told to enable it, which is refused',
+  !V.explainSkip('agent_retired', 'alice').fix.toLowerCase().includes('enable'),
+  V.explainSkip('agent_retired', 'alice').fix,
+);
+ok(
+  'a disabled agent still is told to enable it',
+  V.explainSkip('agent_disabled', 'alice').fix.toLowerCase().includes('enable'),
+);
+ok(
+  'an unknown name is a spelling problem, not an availability one',
+  V.explainSkip('agent_unknown', 'alice')
+    .fix.toLowerCase()
+    .includes('spelling'),
+);
+
+const runView = (over = {}) => ({
+  id: 'r',
+  agentId: 'a',
+  agentName: 'alice',
+  status: 'completed',
+  closeAcknowledged: false,
+  trigger: 'assigned by you',
+  ...over,
+});
+ok(
+  'a blocked close reads as a question asked',
+  V.describeRun(runView({ closeKind: 'blocked' })) === 'asked a question',
+);
+ok(
+  'a failure names the stage it failed at',
+  V.describeRun(runView({ status: 'failed', failureStage: 'launch' })) ===
+    'failed at launch',
+);
+const rows = V.buildRunRows([
+  runView({ id: 'old', status: 'completed', endedAt: 1 }),
+  runView({ id: 'live', status: 'running', startedAt: 5 }),
+  runView({ id: 'new', status: 'completed', endedAt: 9 }),
+]);
+ok(
+  'live runs are listed apart from finished ones',
+  rows.live.map((r) => r.run.id).join() === 'live',
+  rows.live.map((r) => r.run.id).join(),
+);
+ok(
+  'and finished ones are newest first',
+  rows.past.map((r) => r.run.id).join() === 'new,old',
+  rows.past.map((r) => r.run.id).join(),
+);
+ok(
+  'an unacknowledged blocked close is flagged outstanding',
+  V.buildRunRows([runView({ closeKind: 'blocked' })]).past[0].outstanding ===
+    true,
+);
+ok(
+  'an acknowledged one is not',
+  V.buildRunRows([runView({ closeKind: 'blocked', closeAcknowledged: true })])
+    .past[0].outstanding === false,
+);
+
+const bud = V.formatBudget({
+  turnsUsed: 3,
+  turnLimit: 12,
+  tokensUsed: 2500,
+  tokenLimit: 1000000,
+});
+ok(
+  'the budget line is readable, not a raw count',
+  bud.tokens === '2.5k of 1000.0k tokens',
+  bud.tokens,
+);
+ok('and says the spend is tree-wide', bud.scope.includes('thread tree'));
 
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
