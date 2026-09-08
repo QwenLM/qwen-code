@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   GitWorktreeService,
+  gitEnv,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
@@ -50,21 +51,49 @@ function canonicalPath(candidate: string): string {
 const execFileAsync = promisify(execFile);
 
 /**
+ * Ignored top-level directories whose contents are regenerable build or
+ * dependency output. They are exempt from the ignored-content check so a
+ * checkout where the agent ran `npm install` or a build stays cleanable;
+ * every other ignored entry (agent artifacts like `.qwen/pr-drafts/`)
+ * still counts as work.
+ */
+const DISPOSABLE_IGNORED_ROOTS = new Set(['node_modules', 'dist', 'coverage']);
+
+/**
  * Full `git status --porcelain` — untracked files included — so an
  * agent-written file that was never committed counts as work and
- * preserves the checkout. The daemon's own marker file is the one
- * exemption (it is git-excluded in production but may not be in
- * hand-built fixtures). Fails closed to "has work" on any read error.
+ * preserves the checkout. The untracked mode is pinned and the
+ * environment scrubbed (`gitEnv`) so an ambient
+ * `status.showUntrackedFiles=no` or an inherited `GIT_DIR` cannot make a
+ * dirty checkout read clean, and `--ignored=matching` keeps content
+ * under git-ignored paths visible (minus disposable build output). The
+ * daemon's own marker file is the one exemption (it is git-excluded in
+ * production but may not be in hand-built fixtures). Fails closed to
+ * "has work" on any read error.
  */
 async function checkoutHasWork(worktreePath: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
-      cwd: worktreePath,
-    });
+    const { stdout } = await execFileAsync(
+      'git',
+      [
+        'status',
+        '--porcelain',
+        '--untracked-files=normal',
+        '--ignored=matching',
+      ],
+      { cwd: worktreePath, env: gitEnv() },
+    );
     return stdout
       .split('\n')
       .filter((line) => line.trim().length > 0)
-      .some((line) => line.slice(3) !== WORKTREE_SESSION_FILE);
+      .some((line) => {
+        const entry = line.slice(3);
+        if (entry === WORKTREE_SESSION_FILE) return false;
+        if (line.startsWith('!!')) {
+          return !DISPOSABLE_IGNORED_ROOTS.has(entry.split('/')[0]!);
+        }
+        return true;
+      });
   } catch {
     return true;
   }
@@ -95,10 +124,21 @@ export function logWorktreeCleanupPreserve(
  * (it took the checkout from a predecessor), so it stays cleanable;
  * the predecessor's tombstone sidecar is discounted by the sharing
  * scan instead.
+ *
+ * The sidecar is an untrusted input class (crash-truncated or
+ * hand-edited), so the two fields that later derive the containment
+ * allow-list and select the removal target are validated here, before
+ * either one is trusted: both must be absolute, and when the runtime's
+ * own workspace cwd is supplied they must belong to that workspace —
+ * `workspaceCwd` must realpath to it exactly and `originalCwd` must be
+ * the workspace or its repo top-level, the same pair the sibling
+ * routes accept. Any doubt preserves the checkout with a named log
+ * line; the session record deletion itself is never blocked.
  */
 export async function preclassifyWorktreeCleanup(
   service: SessionService,
   sessionId: string,
+  runtimeWorkspaceCwd?: string,
 ): Promise<WorktreeCleanupPlan | undefined> {
   // The delete path covers active and archived records alike, and the
   // sidecar moves with the record — check the active location first.
@@ -125,6 +165,45 @@ export async function preclassifyWorktreeCleanup(
   const session = sidecar.session;
   if (session.workspaceCwd === undefined) return undefined;
   if (session.supersededBy !== undefined) return undefined;
+  if (
+    !path.isAbsolute(session.workspaceCwd) ||
+    !path.isAbsolute(session.originalCwd)
+  ) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'sidecar base is not an absolute path',
+    );
+    return undefined;
+  }
+  if (runtimeWorkspaceCwd !== undefined) {
+    if (
+      canonicalPath(session.workspaceCwd) !== canonicalPath(runtimeWorkspaceCwd)
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'sidecar belongs to another workspace',
+      );
+      return undefined;
+    }
+    const workspaceRoots = [canonicalPath(runtimeWorkspaceCwd)];
+    try {
+      const repoTop = await new GitWorktreeService(
+        runtimeWorkspaceCwd,
+      ).getRepoTopLevel();
+      if (repoTop && canonicalPath(repoTop) !== workspaceRoots[0]) {
+        workspaceRoots.push(canonicalPath(repoTop));
+      }
+    } catch {
+      // Not a git repo — the workspace root alone bounds originalCwd.
+    }
+    if (!workspaceRoots.includes(canonicalPath(session.originalCwd))) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'sidecar original cwd is outside the accepted roots',
+      );
+      return undefined;
+    }
+  }
   return {
     sessionId,
     sidecar: session,
@@ -146,6 +225,10 @@ async function worktreeAllowedRoots(
 ): Promise<string[]> {
   const roots = new Set<string>();
   for (const base of [workspaceCwd, originalCwd]) {
+    // A relative or empty base would resolve against the daemon's own
+    // cwd — never let it derive a root. preclassify already rejects
+    // such sidecars; this is the defense in depth underneath it.
+    if (!path.isAbsolute(base)) continue;
     roots.add(path.join(base, '.qwen', 'worktrees'));
     try {
       const repoTop = await new GitWorktreeService(base).getRepoTopLevel();
@@ -187,7 +270,9 @@ export async function verifyWorktreeCleanupOwnership(
     current.workspaceCwd === undefined ||
     current.supersededBy !== undefined ||
     current.slug !== sidecar.slug ||
-    current.worktreePath !== sidecar.worktreePath
+    current.worktreePath !== sidecar.worktreePath ||
+    current.originalCwd !== sidecar.originalCwd ||
+    current.workspaceCwd !== sidecar.workspaceCwd
   ) {
     // A `supersededBy` link appearing here means the session was
     // superseded between the advisory read and the lock — its checkout
@@ -250,7 +335,44 @@ export async function verifyWorktreeCleanupOwnership(
       return { ok: false, reason: `checkout shared with ${entry}` };
     }
   }
+  // Every guard above verified plan.lockKey, but the removal call
+  // re-derives its own target from originalCwd + slug. Assert the two
+  // denote the same directory before the destructive phase may run —
+  // both sides canonicalized, because the sidecar stores the realpath'd
+  // path while the service joins against a merely resolved root.
+  const removalTarget = canonicalPath(
+    new GitWorktreeService(current.originalCwd).getUserWorktreePath(
+      current.slug,
+    ),
+  );
+  if (removalTarget !== plan.lockKey) {
+    return {
+      ok: false,
+      reason: 'slug does not resolve to the verified checkout',
+    };
+  }
+  // Verification passed against the locked re-read — the destructive
+  // phase must consume those values, not the advisory snapshot.
+  plan.sidecar = current;
   return { ok: true };
+}
+
+/**
+ * Whether the checkout still holds any entries. `removeWorktree` can
+ * delete the contents and fail only the final `rmdir` (its fallback
+ * `fs.rm(recursive, force)` removes children first, and git itself
+ * unlinks files before a failing `rmdir`), so a `success: false`
+ * result does not mean the checkout survived intact — the log line
+ * must re-observe the filesystem instead of certifying preservation.
+ * Unreadable or missing counts as not populated: when we cannot see
+ * the contents we do not claim they survived.
+ */
+async function checkoutStillPopulated(worktreePath: string): Promise<boolean> {
+  try {
+    return (await fsp.readdir(worktreePath)).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -276,15 +398,26 @@ export async function executeWorktreeCleanup(
     return;
   }
   // originalCwd is the root the creating worktree service used; the
-  // sidecar contract reserves it for exactly this resolution.
+  // sidecar contract reserves it for exactly this resolution, and the
+  // locked verification asserted this derived target is the verified
+  // checkout.
   const result = await new GitWorktreeService(
     sidecar.originalCwd,
   ).removeUserWorktree(sidecar.slug, { deleteBranch: true });
   if (!result.success) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      `checkout removal failed: ${result.error ?? 'unknown error'}`,
-    );
+    const errorText = result.error ?? 'unknown error';
+    if (await checkoutStillPopulated(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        `checkout removal failed: ${errorText}`,
+      );
+    } else {
+      logWarning(
+        `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+          sessionId,
+        )} reason=${safeLogValue(errorText)}`,
+      );
+    }
     return;
   }
   if (result.branchPreserved) {

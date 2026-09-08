@@ -2451,6 +2451,327 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(result.removed).toEqual([sessionId]);
     expect(fs.existsSync(worktreePath)).toBe(true);
   });
+
+  it('keeps both checkouts when the sidecar slug names a different worktree', async () => {
+    // The removal call re-derives its target from originalCwd + slug;
+    // the equality guard must refuse when that derived target is not
+    // the checkout every guard verified.
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b0';
+    const otherPath = gitAddWorktree(workspaceDir, 'task-other-b0');
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { slug: 'task-other-b0' },
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(fs.existsSync(otherPath)).toBe(true);
+    expect(warnings()).toContain(
+      'slug does not resolve to the verified checkout',
+    );
+  });
+
+  it('keeps the checkout when the sidecar slug escapes the worktree root', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b1';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { slug: '../..' },
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      'slug does not resolve to the verified checkout',
+    );
+  });
+
+  it('keeps a checkout whose only work sits under a git-ignored path', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b2';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    fs.writeFileSync(path.join(worktreePath, '.gitignore'), '.qwen/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: worktreePath });
+    execFileSync('git', ['commit', '-m', 'ignore agent artifacts'], {
+      cwd: worktreePath,
+      stdio: 'ignore',
+    });
+    const draft = path.join(worktreePath, '.qwen', 'pr-drafts', 'draft.md');
+    fs.mkdirSync(path.dirname(draft), { recursive: true });
+    fs.writeFileSync(draft, '# draft\n');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(fs.existsSync(draft)).toBe(true);
+    expect(warnings()).toContain('uncommitted work');
+  });
+
+  it('keeps a checkout with untracked work when the repo hides untracked files', async () => {
+    // `status.showUntrackedFiles=no` set on the main repo is shared by
+    // every linked worktree; the gate pins its own mode so ambient
+    // config cannot make a dirty checkout read clean.
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b3';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+      cwd: workspaceDir,
+    });
+    const draft = path.join(worktreePath, 'draft.ts');
+    fs.writeFileSync(draft, 'export {}\n');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(fs.existsSync(draft)).toBe(true);
+    expect(warnings()).toContain('uncommitted work');
+  });
+
+  it('cleans a checkout whose only ignored content is disposable build output', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b4';
+    // The ignore rules live on main so the worktree branch carries no
+    // unmerged commits of its own.
+    fs.writeFileSync(
+      path.join(workspaceDir, '.gitignore'),
+      'node_modules/\ndist/\ncoverage/\n',
+    );
+    execFileSync('git', ['add', '.gitignore'], { cwd: workspaceDir });
+    execFileSync('git', ['commit', '-m', 'ignore build output'], {
+      cwd: workspaceDir,
+      stdio: 'ignore',
+    });
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
+    fs.mkdirSync(path.join(worktreePath, 'node_modules', 'pkg'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(worktreePath, 'node_modules', 'pkg', 'index.js'),
+      'module.exports = {}\n',
+    );
+    fs.mkdirSync(path.join(worktreePath, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, 'dist', 'bundle.js'), '//\n');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it('refuses to fold the record when close reports the session is already closing', async () => {
+    // A bridge-internal auto-close (last-detach, idle reaper) holds the
+    // session without the coordinator; the child may still hold the
+    // checkout as its cwd, so the delete must error instead of folding
+    // the record and arming the destructive cleanup.
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b5';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: {
+        closeSession: vi
+          .fn()
+          .mockRejectedValue(
+            new SessionNotFoundError(
+              sessionId,
+              'The session is already closing',
+              'session_closing',
+            ),
+          ),
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.stringContaining('already closing') },
+    ]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(worktreePath)).toBe(true);
+  });
+
+  it('still folds the record on a genuine not-found close', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b6';
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: {
+        closeSession: vi
+          .fn()
+          .mockRejectedValue(new SessionNotFoundError(sessionId)),
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it('preserves the checkout when the workspace generation closes mid-delete', async () => {
+    // The destructive step is the only mutation that ran without
+    // consulting the workspace-runtime generation guard; it must
+    // re-assert before running.
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b7';
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
+    let generationClosed = false;
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments: vi.fn(async () => {
+          generationClosed = true;
+        }),
+      },
+      coordinator: new SessionArchiveCoordinator(),
+      assertCanMutate: () => {
+        if (generationClosed) {
+          throw new Error('workspace_generation_closed');
+        }
+      },
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(true);
+    expect(warnings()).toContain(
+      'cleanup execution failed: workspace_generation_closed',
+    );
+  });
+
+  it('does not certify preservation when the checkout may be partially deleted', async () => {
+    // Make the final rmdir fail after the contents are gone (the parent
+    // goes read-only): the failure log must not claim the checkout was
+    // preserved.
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b8';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const parent = path.dirname(worktreePath);
+    fs.chmodSync(parent, 0o500);
+    try {
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(warnings()).toContain('may be partially deleted');
+      expect(warnings()).not.toContain('preserved checkout');
+    } finally {
+      fs.chmodSync(parent, 0o700);
+    }
+  });
+
+  it('keeps the checkout and warns when a sidecar base is not absolute', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b9';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { workspaceCwd: '', originalCwd: '' },
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('sidecar base is not an absolute path');
+  });
+
+  it('keeps the checkout when the sidecar belongs to another workspace', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400ba';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { workspaceCwd: runtimeDir },
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+      runtimeWorkspaceCwd: workspaceDir,
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('sidecar belongs to another workspace');
+  });
+
+  it('keeps the checkout when the sidecar original cwd is foreign', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bb';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { originalCwd: runtimeDir },
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+      runtimeWorkspaceCwd: workspaceDir,
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      'sidecar original cwd is outside the accepted roots',
+    );
+  });
+
+  it('cleans an owned checkout when the runtime workspace is threaded', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bc';
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+      runtimeWorkspaceCwd: workspaceDir,
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
 });
 
 function initGitRepo(dir: string): void {

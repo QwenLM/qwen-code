@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import {
   SessionIdCaseConflictError,
   SessionService,
@@ -501,6 +502,7 @@ export async function deleteDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   assertCanMutate?: () => void;
+  runtimeWorkspaceCwd?: string;
   onError?: (entry: {
     phase: DaemonDeleteErrorPhase;
     sessionId: string;
@@ -514,6 +516,7 @@ export async function deleteDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     assertCanMutate,
+    runtimeWorkspaceCwd,
     onError,
   } = params;
   const uniqueSessionIds = [
@@ -536,7 +539,30 @@ export async function deleteDaemonSessions(params: {
     sessionId: string,
     mutateSession: () => Promise<DeleteOneResult>,
   ): Promise<DeleteOneResult> => {
-    const cleanupPlan = await preclassifyWorktreeCleanup(service, sessionId);
+    // Fast path for sessions with no worktree sidecar at either
+    // location: nothing to classify, so go straight to the coordinator
+    // without awaiting. Keeping the coordinator call on the task's
+    // synchronous prefix preserves the pre-cleanup batch scheduling —
+    // an awaited pre-read here reshuffles which sibling reaches
+    // `runExclusiveMany` first and made the gate-race test
+    // non-deterministic (#11024).
+    const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+    const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    if (
+      !fs.existsSync(activeSidecarPath) &&
+      (archivedSidecarPath === activeSidecarPath ||
+        !fs.existsSync(archivedSidecarPath))
+    ) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const cleanupPlan = await preclassifyWorktreeCleanup(
+      service,
+      sessionId,
+      runtimeWorkspaceCwd,
+    );
     if (!cleanupPlan) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);
     }
@@ -552,6 +578,7 @@ export async function deleteDaemonSessions(params: {
       );
       if (ownership.ok && result.kind === 'removed') {
         try {
+          assertCanMutate?.();
           await executeWorktreeCleanup(cleanupPlan);
         } catch (error) {
           logWorktreeCleanupPreserve(
@@ -610,7 +637,15 @@ export async function deleteDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
-            if (isSessionNotFoundError(error)) {
+            // A 'session_closing' refusal means a bridge-internal
+            // auto-close (last-detach, idle reaper) is in flight — the
+            // child may still hold the checkout as its cwd, so the
+            // record must NOT fold into a removal that would arm the
+            // destructive cleanup. Only a genuine not-found folds.
+            if (
+              isSessionNotFoundError(error) &&
+              (error as SessionNotFoundError).code !== 'session_closing'
+            ) {
               return await removePersistedSession();
             }
             onError?.({
