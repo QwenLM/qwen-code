@@ -48,6 +48,7 @@ describe('Mem0 Extension package', () => {
       'dist/main.js',
       'dist/auto-recall.js',
       'dist/write-main.js',
+      'dist/delete-main.js',
       'schemas',
       'examples',
       'qwen-extension.json',
