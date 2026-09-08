@@ -507,6 +507,8 @@ describe('updateConnectionFromDaemonEvent', () => {
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 3,
       activeTimeMs: 4_000,
+      tokensUsed: 1_234,
+      tokenBudget: 30_000_000,
       createdAt: 10,
       updatedAt: 20,
     };
@@ -999,6 +1001,48 @@ describe('updateConnectionFromDaemonEvent', () => {
     );
 
     expect(next.goalState?.goal?.limitKind).toBeUndefined();
+  });
+
+  it('leaves out the spend keys when the daemon omits them', () => {
+    // Older daemons send neither field. Spreading them in unconditionally
+    // would leave `tokensUsed: undefined` on the record, which reads the same
+    // to the renderer but not to the structural comparisons this state goes
+    // through.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('tokensUsed');
+    expect(Object.keys(goal!)).not.toContain('tokenBudget');
   });
 
   it('ignores malformed Goal snapshots', () => {
