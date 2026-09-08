@@ -814,6 +814,9 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Per-session active-work observation. `idle` is emitted only from a
+   * fresh snapshot that covers every negotiated hold category. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
@@ -1571,6 +1574,49 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     worktree: { slug: string; path: string; branch: string },
   ): void;
+
+  /**
+   * Clear the in-memory worktree association of a live session. Used by the
+   * worktree-reset transfer after the marker moved to the replacement
+   * session, so the superseded session's runtime view matches the disk
+   * state. No-op when the session is not live or carries no worktree.
+   */
+  clearSessionWorktree?(sessionId: string): void;
+
+  /**
+   * Arm the worktree-reset admission barrier for a session id: while armed,
+   * `sendPrompt` and the other writers that reach the session's checkout or
+   * cwd (`rewindSession`, `launchSessionForkAgent`, `branchSession`,
+   * `changeSessionCwd`, `executeShellCommand`, `controlSessionWorkflowTask`,
+   * `controlSessionGoal`) throw `SessionResetPendingError` synchronously at
+   * admission. Returns whether a live entry currently exists for the id — a
+   * dormant session counts as quiescent but is still fenced against
+   * re-admission. Optional so lightweight fakes may omit it.
+   */
+  setSessionResetPending?(sessionId: string): boolean;
+
+  /**
+   * Disarm the worktree-reset admission barrier. Idempotent; the reset route
+   * calls it on every transfer outcome up to the marker flip. Past the flip
+   * only a completed severance clears it, so a post-commit failure leaves the
+   * barrier armed for the retry that finishes the transfer.
+   */
+  clearSessionResetPending?(sessionId: string): void;
+
+  /**
+   * Detach every client registered on a live session. The last detach runs
+   * the normal idle-close path (transcript and persisted record survive).
+   * No-op for unknown ids. Used by the worktree-reset transfer to sever the
+   * superseded session's residual attaches after the ownership flip.
+   *
+   * Resolves whether the session entry is gone from the registry once the
+   * detach drain finishes. `false` means the child refused the conditional
+   * idle close because it holds work (a background shell inside the worktree,
+   * for example), so the superseded session is still live, re-attachable and
+   * — once the barrier is cleared — promptable. Callers must not read a
+   * resolved call as "severed" without checking this.
+   */
+  severSessionClients?(sessionId: string): Promise<boolean>;
 
   /** Admit a restore question deferred by the daemon's integrity gate. */
   fireDeferredRestoreAskUserQuestionPrompt?(

@@ -118,7 +118,7 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: must match the release version in this change ~~~
-$Script:CuaDriverRsBakedVersion = "0.20.3"
+$Script:CuaDriverRsBakedVersion = "0.20.4"
 # ~~~ END_BAKED_VERSION ~~~
 $CursorThemeRequiredFrom = [version]"0.12.7"
 $LegacyUiaRequiredFrom = [version]"0.2.8"

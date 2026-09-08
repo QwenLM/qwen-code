@@ -322,7 +322,11 @@
   cursor: pointer;
 }
 
-.messageTagClickable:hover,
+.messageTagClickable:where(.fileTag):hover {
+  border-color: color-mix(in srgb, var(--border), var(--foreground) 20%);
+}
+
+.messageTagClickable:not(.fileTag):hover,
 .messageTagClickable:focus-visible {
   border-color: var(--chat-editor-accent-color, var(--foreground));
   outline: none;
@@ -436,14 +440,14 @@
 .chatFileChip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: var(--background);
-  font-size: 14px;
-  line-height: 20px;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 272px;
   max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--background);
 }
 
 .chatFileChipPreviewable {
@@ -455,11 +459,17 @@
   outline-offset: 2px;
 }
 
-.chatFileIcon {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
+.fileTag {
+  vertical-align: middle;
+  background: var(--background);
+  min-height: 28px;
+  padding-right: 8px;
+  border-radius: 8px;
+  font-family: var(--font-sans, system-ui, sans-serif);
 }
 
-.chatFileName {
-  overflow-wrap: anywhere;
+.fileTagIcon {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: var(--muted-foreground);
 }
