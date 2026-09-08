@@ -160,3 +160,58 @@
     overflow-x: auto;
   }
 }
+
+.panel.compact {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.compact .metaLine {
+  flex-direction: column;
+  gap: 2px;
+  white-space: normal;
+  max-width: none;
+}
+
+.compact .progress {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  height: 6px;
+  overflow: hidden;
+  white-space: normal;
+  border-radius: 3px;
+}
+
+.compact .progress > span {
+  display: block;
+  height: 100%;
+}
+
+.compact .row,
+.compact .detailRow,
+.compact .subDetailRow {
+  grid-template-columns: 2ch minmax(0, 1fr);
+  padding-left: 0;
+}
+
+.compact .subDetailRow {
+  padding-left: 2ch;
+}
+
+.compact .row > :last-child,
+.compact .detailRow > :last-child,
+.compact .subDetailRow > :last-child {
+  grid-column: 2;
+  justify-self: start;
+  text-align: left;
+  white-space: normal;
+}
+
+.compact .detailName {
+  white-space: normal;
+}

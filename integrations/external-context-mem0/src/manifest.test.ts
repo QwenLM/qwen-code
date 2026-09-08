@@ -29,6 +29,7 @@ describe('Mem0 Extension package', () => {
     expect(packageJson.scripts?.['build']).toContain('--bundle');
     expect(packageJson.files).toContain('dist/main.js');
     expect(packageJson.files).toContain('dist/auto-recall.js');
+    expect(packageJson.files).toContain('dist/write-main.js');
     expect(packageJson.dependencies).toBeUndefined();
     expect(packageJson.private).not.toBe(true);
     expect(packageJson.name).toBe('@qwen-code/external-context-mem0');
@@ -46,6 +47,8 @@ describe('Mem0 Extension package', () => {
     expect(packageJson.files).toEqual([
       'dist/main.js',
       'dist/auto-recall.js',
+      'dist/write-main.js',
+      'dist/delete-main.js',
       'schemas',
       'examples',
       'qwen-extension.json',
