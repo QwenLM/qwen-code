@@ -635,13 +635,15 @@ export function ExtensionsManagerPage({
           );
           const capability = coordinator.capabilities?.extensions;
           if (capability?.state === 'error') {
-            loadNoticeRef.current = true;
-            setMessageOwner(null);
-            setMessageTone('error');
-            setMessage(
-              capability.error?.message ??
-                'Extension runtime preparation failed.',
-            );
+            if (messageOwnerRef.current === null) {
+              loadNoticeRef.current = true;
+              setMessageOwner(null);
+              setMessageTone('error');
+              setMessage(
+                capability.error?.message ??
+                  'Extension runtime preparation failed.',
+              );
+            }
           } else {
             if (loadNoticeRef.current && messageOwnerRef.current === null) {
               loadNoticeRef.current = false;
@@ -1547,7 +1549,8 @@ export function ExtensionsManagerPage({
             </DropdownMenu>
           </div>
 
-          {messageOwner === selectedExtension.name && message ? (
+          {(messageOwner === null || messageOwner === selectedExtension.name) &&
+          message ? (
             <ManagementNotice
               tone={messageTone}
               noticeKey={message}

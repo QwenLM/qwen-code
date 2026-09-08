@@ -15,6 +15,26 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+if (!globalThis.PointerEvent) {
+  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {};
+}
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
+}
+
+function click(element: Element): void {
+  element.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
 
 const { actions, workspaceState } = vi.hoisted(() => ({
   actions: {
@@ -38,6 +58,7 @@ const { actions, workspaceState } = vi.hoisted(() => ({
           client: {
             extensionCatalog: ReturnType<typeof vi.fn>;
             workspaceByCwd: ReturnType<typeof vi.fn>;
+            updateUserExtension?: ReturnType<typeof vi.fn>;
           };
         },
   },
@@ -262,5 +283,133 @@ describe('ExtensionsManagerPage split-runtime trust gating', () => {
     await flush();
 
     expect(mocks.ensureRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders an unowned runtime Extension error in the detail view', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          isActive: true,
+        },
+      ],
+    });
+
+    await mountPage();
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain('runtime prep exploded'),
+    );
+
+    // A load-driven runtime error owns no extension; it must stay visible
+    // after navigating into the detail view, not render only in the list.
+    const row = container!.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+    expect(container!.textContent).toContain('runtime prep exploded');
+  });
+
+  it('keeps an owned notice visible when a reload reports a runtime Extension error', async () => {
+    const mocks = makeSplitWorkspaceMocks(true);
+    mocks.ensureRuntime.mockResolvedValue({
+      runtimeEpoch: 1,
+      capabilities: {
+        extensions: {
+          state: 'error',
+          runtimeEpoch: 1,
+          desiredGeneration: 0,
+          appliedGeneration: 0,
+          error: { message: 'runtime prep exploded' },
+        },
+      },
+    });
+    mocks.extensionCatalog.mockResolvedValue({
+      v: 1,
+      generation: 0,
+      extensions: [
+        {
+          id: 'ext-demo',
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceOverrideCount: 0,
+          updateState: 'update available',
+          isActive: true,
+        },
+      ],
+    });
+    const updateUserExtension = vi.fn(async () => ({}));
+    workspaceState.current!.client.updateUserExtension = updateUserExtension;
+
+    await mountPage();
+
+    // The initial unowned runtime error reaches the list view.
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain('runtime prep exploded'),
+    );
+
+    // Open the extension detail view.
+    const row = container!.querySelector('[role="button"][aria-label="demo"]');
+    expect(row).not.toBeNull();
+    await act(async () => {
+      click(row!);
+      await Promise.resolve();
+    });
+
+    // Start the update action so the notice becomes owned by the selected
+    // extension while the reload reports the same capability error.
+    const trigger = container!.querySelector(
+      'button[aria-label="Extension actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const updateItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Update Extension');
+    expect(updateItem).toBeDefined();
+    const catalogReads = mocks.extensionCatalog.mock.calls.length;
+    await act(async () => {
+      click(updateItem!);
+      await Promise.resolve();
+    });
+
+    // The reload that follows the mutation re-reads the catalog; once it
+    // settles, the runtime error must not have replaced the owned result —
+    // the detail view renders only notices it owns.
+    await vi.waitFor(() =>
+      expect(mocks.extensionCatalog.mock.calls.length).toBeGreaterThan(
+        catalogReads,
+      ),
+    );
+    await flush();
+    expect(updateUserExtension).toHaveBeenCalledOnce();
+    expect(container!.textContent).toContain(
+      'Extension action queued for "demo".',
+    );
+    expect(container!.textContent).not.toContain('runtime prep exploded');
   });
 });

@@ -27,6 +27,10 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
 const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
 const EXTENSIONS_RECONCILE_TIMEOUT_MS = 30_000;
+// A latched Extension failure is retried at most once per cooldown window;
+// without a bound, a store stuck at its initial generation has no recovery
+// path (the desired generation never moves to clear the latch).
+const EXTENSIONS_ERROR_RETRY_COOLDOWN_MS = 2 * 60_000;
 const MCP_PREPARE_TIMEOUT_MS = 2 * 60_000;
 const MCP_POLL_INTERVAL_MS = 250;
 
@@ -138,7 +142,9 @@ export class WorkspaceRuntimeCoordinator {
 
   private extensionsQueuedWork = 0;
 
-  private extensionsRefreshFailedRevision: number | undefined;
+  private extensionsRefreshFailedRevision:
+    | { revision: number; runtimeEpoch: number; failedAt: number }
+    | undefined;
 
   private extensionsRefreshRetryRevision: number | undefined;
 
@@ -383,6 +389,18 @@ export class WorkspaceRuntimeCoordinator {
       return { state: 'reconciled', refreshed: 0, failed: 0 };
     }
     const revision = this.extensionsRevision;
+    // The 30s poller selects an errored capability every cycle; bound its
+    // re-drives of a latched failure by the same cooldown as the ensure path
+    // so a permanently failing generation does not invalidate Skills/MCP on
+    // every poll.
+    if (
+      current?.state === 'error' &&
+      current.revision === revision &&
+      this.isExtensionsFailureLatched(revision, snapshot.runtimeEpoch)
+    ) {
+      return { state: 'deferred', refreshed: 0, failed: 0 };
+    }
+    const appliedGenerationBefore = this.appliedExtensionGeneration;
     let result: ServeWorkspaceExtensionsRefreshResult | undefined;
     try {
       result = await this.queueExtensionsWork(() =>
@@ -403,11 +421,7 @@ export class WorkspaceRuntimeCoordinator {
         error instanceof ExtensionRuntimeRefreshError
           ? error.result
           : undefined;
-      this.invalidateDerivedCapabilities(options);
-      this.scheduleSkillsReconciliation();
-      if (!options.skillsOnly) {
-        this.scheduleMcpReconciliation();
-      }
+      this.afterExtensionApply(options);
       return {
         state: 'failed',
         refreshed: refresh?.sessionsRefreshed ?? 0,
@@ -425,10 +439,11 @@ export class WorkspaceRuntimeCoordinator {
       generation === this.desiredExtensionGeneration &&
       this.appliedExtensionGeneration === generation
     ) {
-      this.invalidateDerivedCapabilities(options);
-      this.scheduleSkillsReconciliation();
-      if (!options.skillsOnly) {
-        this.scheduleMcpReconciliation();
+      // prepareExtensionsRevision already ran the shared post-apply when it
+      // advanced the applied generation; an explicit reconcile that only
+      // re-certifies it re-verifies the derived capabilities itself.
+      if (appliedGenerationBefore === this.appliedExtensionGeneration) {
+        this.afterExtensionApply(options);
       }
       return {
         state: 'reconciled',
@@ -578,14 +593,14 @@ export class WorkspaceRuntimeCoordinator {
       ) {
         return undefined;
       }
-      // A revision that already failed is not retried from the ensure path;
-      // only an explicit reconcile (or an observed generation move, both of
-      // which clear the marker) may rerun it. Mirror of the Skills guard.
+      // A revision that already failed is retried from the ensure path only
+      // after the failure cooldown; an observed generation move or a
+      // certifying success clears the marker early. Mirror of the Skills
+      // guard.
       if (
         extensions?.state === 'error' &&
         extensions.revision === revision &&
-        extensions.runtimeEpoch === status.runtimeEpoch &&
-        this.extensionsRefreshFailedRevision === revision
+        this.isExtensionsFailureLatched(revision, status.runtimeEpoch)
       ) {
         return undefined;
       }
@@ -700,6 +715,9 @@ export class WorkspaceRuntimeCoordinator {
       if (revision === this.extensionsRefreshRetryRevision) {
         this.extensionsRefreshRetryRevision = undefined;
       }
+      if (this.extensionsRefreshFailedRevision?.revision === revision) {
+        this.extensionsRefreshFailedRevision = undefined;
+      }
       // A skill refresh cannot certify an earlier failed full refresh: the
       // narrow reconcile skipped refreshTools, MCP discovery, and the command
       // update for generations the runtime never fully applied.
@@ -707,8 +725,13 @@ export class WorkspaceRuntimeCoordinator {
         !options.skillsOnly ||
         this.appliedExtensionGeneration === generation - 1 ||
         this.appliedExtensionGeneration === generation;
+      const advancesGeneration =
+        certifiesGeneration && this.appliedExtensionGeneration !== generation;
       if (certifiesGeneration) {
         this.appliedExtensionGeneration = generation;
+      }
+      if (advancesGeneration) {
+        this.afterExtensionApply(options);
       }
       this.extensionsStatus = certifiesGeneration
         ? {
@@ -1031,6 +1054,31 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
+  // Every path that advances the applied Extension generation — the
+  // mutation/poller reconcile and the ensure-path prepare — invalidates and
+  // reschedules the capabilities derived from it, so a ready Skills/MCP
+  // status never certifies revisions that predate the applied generation.
+  private afterExtensionApply(options: { skillsOnly?: boolean } = {}): void {
+    this.invalidateDerivedCapabilities(options);
+    this.scheduleSkillsReconciliation();
+    if (!options.skillsOnly) {
+      this.scheduleMcpReconciliation();
+    }
+  }
+
+  private isExtensionsFailureLatched(
+    revision: number,
+    runtimeEpoch: number,
+  ): boolean {
+    const latched = this.extensionsRefreshFailedRevision;
+    return (
+      latched !== undefined &&
+      latched.revision === revision &&
+      latched.runtimeEpoch === runtimeEpoch &&
+      Date.now() - latched.failedAt < EXTENSIONS_ERROR_RETRY_COOLDOWN_MS
+    );
+  }
+
   private invalidateDerivedCapabilities(
     options: { skillsOnly?: boolean } = {},
   ): void {
@@ -1099,7 +1147,11 @@ export class WorkspaceRuntimeCoordinator {
     // closes only when that retry fails too. Mirror of the Skills markers.
     if (this.extensionsRefreshRetryRevision === revision) {
       this.extensionsRefreshRetryRevision = undefined;
-      this.extensionsRefreshFailedRevision = revision;
+      this.extensionsRefreshFailedRevision = {
+        revision,
+        runtimeEpoch,
+        failedAt: Date.now(),
+      };
     } else {
       this.extensionsRefreshRetryRevision = revision;
     }

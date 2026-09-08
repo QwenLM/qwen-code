@@ -790,10 +790,14 @@ export function registerWorkspaceExtensionRoutes(
             if (!extensions) return true;
             // The coordinator's desired generation is monotonic by design,
             // so a rolled-back store generation is never adopted; comparing
-            // applied alone would read as permanently pending.
+            // applied alone would read as permanently pending. An errored
+            // capability stays pending so a recovered Extension store heals
+            // without a generation move; the coordinator bounds the retry
+            // cadence for a latched failure.
             return (
               generation >= extensions.desiredGeneration &&
-              extensions.appliedGeneration !== generation
+              (extensions.appliedGeneration !== generation ||
+                extensions.state === 'error')
             );
           });
         if (generation === observedGeneration && pendingRuntimes.length === 0)

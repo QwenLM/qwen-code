@@ -559,6 +559,91 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(reconcileCalls()).toBe(3);
   });
 
+  it('invalidates derived capabilities when the ensure path applies an Extension generation', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities).toMatchObject({
+      extensions: { state: 'ready' },
+      skills: { state: 'ready', revision: 0 },
+      mcp: { state: 'ready', revision: 0 },
+    });
+    const skillsReads =
+      harness.getWorkspaceSkillsRuntimeStatus.mock.calls.length;
+
+    coordinator.observeExtensionGeneration(5);
+    await coordinator.ensure();
+
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 5,
+      appliedGeneration: 5,
+    });
+    // Applying the generation on the ensure path must re-verify the derived
+    // capabilities: a ready status that predates the applied generation must
+    // not be certified for it.
+    expect(harness.reloadWorkspaceMcp).toHaveBeenCalled();
+    expect(
+      harness.getWorkspaceSkillsRuntimeStatus.mock.calls.length,
+    ).toBeGreaterThan(skillsReads);
+    expect(coordinator.status().capabilities).toMatchObject({
+      skills: { state: 'ready', runtimeEpoch: 3 },
+      mcp: { state: 'ready', runtimeEpoch: 3 },
+    });
+  });
+
+  it('recovers a latched Extension failure at the initial generation after the cooldown', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });
+    harness.invokeWorkspaceCommand.mockResolvedValue({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    // The store was never mutated: the desired generation stays 0, so no
+    // observed generation move can clear the failed-revision latch.
+    await coordinator.ensure();
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'error',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+
+    // Within the cooldown the latch stays terminal for the ensure path.
+    await coordinator.ensure();
+    expect(coordinator.status().capabilities?.extensions?.state).toBe('error');
+
+    // The underlying fault heals without any store write; once the cooldown
+    // elapses the ensure path must retry instead of certifying the failure
+    // until the runtime restarts.
+    harness.invokeWorkspaceCommand.mockResolvedValue({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+    });
+    const nowSpy = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.now() + 2 * 60_000 + 1_000);
+    try {
+      await coordinator.ensure();
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(coordinator.status().capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 0,
+      appliedGeneration: 0,
+    });
+  });
+
   it('retries a failed Extension refresh once and reaches ready', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 3 });

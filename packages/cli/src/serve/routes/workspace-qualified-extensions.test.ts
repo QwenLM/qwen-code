@@ -1854,6 +1854,102 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('keeps an errored coordinator capability pending at the initial store generation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const initialSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 0,
+      legacyProjectionHash: 'hash',
+      extensions: {},
+    };
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue(initialSnapshot);
+    vi.mocked(
+      ExtensionManager.prototype.refreshCacheWithSnapshot,
+    ).mockResolvedValue(initialSnapshot);
+    const invokeWorkspaceCommand = vi.fn(async () => ({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 1,
+      configErrors: ['broken extension'],
+    }));
+    Object.assign(h.secondary.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: vi.fn(() => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 3,
+      })),
+      invokeWorkspaceCommand,
+      reloadWorkspaceMcp: vi.fn(async () => undefined),
+      initializeWorkspaceMcp: vi.fn(async () => undefined),
+      preheat: vi.fn(async () => undefined),
+    });
+    Object.assign(h.secondary.workspaceService, {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        initialized: true,
+        runtimeEpoch: 3,
+        skills: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: h.secondary.workspaceCwd,
+        source: 'live',
+        runtimeEpoch: 3,
+        discoveryState: 'completed',
+        servers: [],
+      })),
+    });
+    vi.mocked(
+      h.secondary.workspaceService.getWorkspaceExtensionsStatus,
+    ).mockResolvedValue({
+      v: 1,
+      workspaceCwd: h.secondary.workspaceCwd,
+      initialized: true,
+      runtimeEpoch: 3,
+      extensions: [],
+    });
+    try {
+      const coordinator = getWorkspaceRuntimeCoordinator(h.secondary);
+      // Two failed preparations at store generation 0 close the failed-
+      // revision latch; no observed generation move can clear it.
+      await coordinator.ensure();
+      await coordinator.ensure();
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'error',
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+      });
+
+      // The store heals without a write: the errored capability must stay
+      // pending so a poller tick past the failure cooldown re-drives the
+      // reconcile instead of certifying the failure until restart.
+      invokeWorkspaceCommand.mockResolvedValue({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+        configErrors: [],
+      });
+      await vi.advanceTimersByTimeAsync(150_000);
+
+      expect(coordinator.status().capabilities?.extensions).toMatchObject({
+        state: 'ready',
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('suppresses the broadcast for a no-op coordinator reconciliation', async () => {
     vi.useFakeTimers();
     const h = await makeHarness();
