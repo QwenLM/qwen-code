@@ -17,6 +17,7 @@ import {
 } from './goal-protocol.js';
 import {
   createGoalCheckpointVerifier,
+  GoalCheckpointClaimBudgetError,
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
   GoalCheckpointVerifierInputTooLargeError,
   parseGoalCheckpointVerifierText,
@@ -50,11 +51,54 @@ function input(): GoalCheckpointVerifierInput {
   };
 }
 
+function configForReplies(...replies: string[]) {
+  const generateText = vi.fn();
+  for (const reply of replies) {
+    generateText.mockResolvedValueOnce({ text: reply, usage: undefined });
+  }
+  return finishConfig(generateText);
+}
+
+/**
+ * A claims payload whose combined claim text is `bytes` ASCII bytes, spread
+ * over as few claims as the per-claim length bound allows. Every claim is
+ * individually legal, so only the aggregate budget can reject it.
+ */
+function claimsOfBytes(bytes: number): string {
+  const claims = [];
+  for (
+    let left = bytes;
+    left > 0;
+    left -= GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS
+  ) {
+    claims.push({
+      proofKind: 'external_fact',
+      claim: 'a'.repeat(Math.min(left, GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS)),
+      sourceRefs: ['tool-1'],
+    });
+  }
+  return JSON.stringify({ claims });
+}
+
 function configFor(reply: string) {
   const generateText = vi.fn().mockResolvedValue({
     text: reply,
     usage: undefined,
   });
+  const baseLlmClient = {
+    generateText,
+    generateJson: vi.fn(),
+  } as unknown as BaseLlmClient;
+  const config = {
+    getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
+    getFastModel: vi.fn().mockReturnValue('fast-model'),
+    getModel: vi.fn().mockReturnValue('main-model'),
+    getOutputLanguageFilePath: vi.fn(),
+  } as unknown as Config;
+  return { config, generateText };
+}
+
+function finishConfig(generateText: ReturnType<typeof vi.fn>) {
   const baseLlmClient = {
     generateText,
     generateJson: vi.fn(),
@@ -180,6 +224,105 @@ describe('createGoalCheckpointVerifier', () => {
     expect(generateText).not.toHaveBeenCalled();
   });
 
+  it('retries once with the measured size when the claims overrun the budget', async () => {
+    const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 500;
+    const { config, generateText } = configForReplies(
+      claimsOfBytes(over),
+      claimsOfBytes(120),
+    );
+
+    const result = await createGoalCheckpointVerifier(config)(input());
+
+    expect(result.claims).toHaveLength(1);
+    expect(result.claims[0]?.claim).toHaveLength(120);
+    expect(generateText).toHaveBeenCalledTimes(2);
+
+    // The first attempt is the plain payload; the retry carries it plus a
+    // note naming the overrun, which is what makes the second answer differ
+    // at temperature 0.
+    const first = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    const second = generateText.mock.calls[1]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    expect(first.contents[0]?.parts).toHaveLength(1);
+    expect(second.contents[0]?.parts).toHaveLength(2);
+    expect(second.contents[0]?.parts?.[0]?.text).toBe(
+      first.contents[0]?.parts?.[0]?.text,
+    );
+    const note = second.contents[0]?.parts?.[1]?.text ?? '';
+    expect(note).toContain(String(over));
+    expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_BYTES));
+  });
+
+  it('gives up when the retry overruns the budget again', async () => {
+    const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 1;
+    const { config, generateText } = configForReplies(
+      claimsOfBytes(over),
+      claimsOfBytes(over),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).rejects.toBeInstanceOf(GoalCheckpointClaimBudgetError);
+    // Exactly one corrective attempt: a model that overruns twice is an
+    // unusable result, which the runtime counts like any other.
+    expect(generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry an unusable result the budget did not cause', async () => {
+    const { config, generateText } = configForReplies(
+      'not json at all',
+      claimsOfBytes(120),
+    );
+
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).rejects.toBeInstanceOf(InvalidGoalCheckpointError);
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('reports the overrun rather than a request-too-large when the note does not fit', async () => {
+    const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 7;
+    const { config, generateText } = configForReplies(claimsOfBytes(over));
+    const nearLimit = input();
+    // Sized so the payload fits on its own and the corrective note pushes it
+    // past the request limit. A recoverable overrun must not be converted
+    // into the Goal-stopping checkpoint_request failure.
+    nearLimit.evidence[0]!.content = 'a'.repeat(255_600);
+
+    let thrown: unknown;
+    try {
+      await createGoalCheckpointVerifier(config)(nearLimit);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointClaimBudgetError);
+    expect(thrown).not.toBeInstanceOf(GoalCheckpointVerifierInputTooLargeError);
+    expect((thrown as GoalCheckpointClaimBudgetError).byteLength).toBe(over);
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('states the aggregate budget in the emitted schema, the one bound that reaches the model', async () => {
+    // Strict normalisation drops maxLength/maxItems and non-official
+    // endpoints get no response_format at all, so description is the only
+    // place the budget can travel in the structured request.
+    const { config, generateText } = configForReplies(claimsOfBytes(120));
+
+    await createGoalCheckpointVerifier(config)(input());
+
+    const request = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    const schema = request.config?.responseJsonSchema as {
+      properties: { claims: { description?: string } };
+    };
+    expect(schema.properties.claims.description).toContain(
+      `${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes`,
+    );
+  });
+
   it('defaults to a timeout sized for a full claim list, not a short reply', () => {
     // The previous 30 s default timed out on every checkpoint of an
     // overflowing window and never wrote one; the floor is minutes.
@@ -284,6 +427,34 @@ describe('createGoalCheckpointVerifier', () => {
       }
     },
   );
+
+  it('rejects a claim set over the aggregate budget, naming the measured size', () => {
+    // Individually legal claims can still overrun the aggregate: the schema
+    // has no way to express a total byte budget, and the per-claim bound it
+    // does carry never reaches the provider.
+    const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 1;
+    let thrown: unknown;
+    try {
+      parseGoalCheckpointVerifierText(claimsOfBytes(over));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointClaimBudgetError);
+    expect(thrown).toBeInstanceOf(InvalidGoalCheckpointError);
+    expect((thrown as GoalCheckpointClaimBudgetError).byteLength).toBe(over);
+    expect((thrown as Error).message).toContain(String(over));
+
+    // The budget itself is accepted.
+    const atBudget = parseGoalCheckpointVerifierText(
+      claimsOfBytes(GOAL_CHECKPOINT_CLAIM_MAX_BYTES),
+    ).claims;
+    expect(
+      atBudget.reduce(
+        (total, claim) => total + Buffer.byteLength(claim.claim, 'utf8'),
+        0,
+      ),
+    ).toBe(GOAL_CHECKPOINT_CLAIM_MAX_BYTES);
+  });
 
   it('measures the claim limit after trimming, in code points', () => {
     // A max-length claim with trailing padding must parse the same way

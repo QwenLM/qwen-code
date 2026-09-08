@@ -44,6 +44,13 @@ const GOAL_CHECKPOINT_VERIFIER_SCHEMA = {
   properties: {
     claims: {
       type: 'array',
+      // `description` is the only bound that survives to the model. Strict
+      // normalisation drops `maxLength`/`maxItems` (they are in
+      // OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS), and `response_format` is not
+      // sent at all to endpoints that are not official OpenAI -- so the
+      // aggregate budget has to be stated in prose here and in the system
+      // prompt, and enforced on the way back in.
+      description: `Cumulative checkpoint claims. The combined UTF-8 size of every claim string must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes. A response over that budget is rejected even when each individual claim is within its own length bound.`,
       minItems: 1,
       maxItems: GOAL_CHECKPOINT_CLAIM_LIMIT,
       items: {
@@ -86,6 +93,26 @@ export interface CreateGoalCheckpointVerifierOptions {
   timeoutMs?: number;
 }
 
+/**
+ * A well-formed checkpoint whose claim text overruns the aggregate budget.
+ *
+ * Split out of its parent so one corrective retry can be aimed at exactly
+ * this failure: it is the one unusable-result shape a model can fix when
+ * told the measured size, and the one the emitted schema cannot prevent --
+ * JSON Schema has no aggregate byte bound, and the per-claim and per-item
+ * bounds it does carry are stripped before the request goes out. It stays an
+ * `InvalidGoalCheckpointError`, so a retry that overruns again reaches the
+ * runtime as the unusable result it is.
+ */
+export class GoalCheckpointClaimBudgetError extends InvalidGoalCheckpointError {
+  constructor(readonly byteLength: number) {
+    super(
+      `Goal checkpoint claims total ${byteLength} bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget`,
+    );
+    this.name = 'GoalCheckpointClaimBudgetError';
+  }
+}
+
 export class GoalCheckpointVerifierInputTooLargeError extends Error {
   constructor(readonly byteLength: number) {
     super(
@@ -95,7 +122,10 @@ export class GoalCheckpointVerifierInputTooLargeError extends Error {
   }
 }
 
-function verifierContents(input: GoalCheckpointVerifierInput): Content[] {
+function verifierContents(
+  input: GoalCheckpointVerifierInput,
+  retryNote?: string,
+): Content[] {
   const payload = {
     goal: {
       goalId: input.goal.goalId,
@@ -116,11 +146,15 @@ function verifierContents(input: GoalCheckpointVerifierInput): Content[] {
     })),
   };
   const text = JSON.stringify(payload);
-  const byteLength = Buffer.byteLength(text, 'utf8');
+  const parts = retryNote ? [{ text }, { text: retryNote }] : [{ text }];
+  const byteLength = parts.reduce(
+    (total, part) => total + Buffer.byteLength(part.text, 'utf8'),
+    0,
+  );
   if (byteLength > GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT) {
     throw new GoalCheckpointVerifierInputTooLargeError(byteLength);
   }
-  return [{ role: 'user', parts: [{ text }] }];
+  return [{ role: 'user', parts }];
 }
 
 export function parseGoalCheckpointVerifierText(
@@ -148,7 +182,28 @@ export function parseGoalCheckpointVerifierText(
   const claims = value['claims'].map((claim, index) =>
     parseClaim(claim, index),
   );
+  // The aggregate budget is enforced here as well as in
+  // `materializeGoalEvidenceCheckpoint`, so the verifier can see its own
+  // overrun and correct it before the runtime has to treat the whole check
+  // as a compaction that produced nothing. Claims are already trimmed, so
+  // both sites measure the same bytes.
+  const claimBytes = claims.reduce(
+    (total, claim) => total + Buffer.byteLength(claim.claim, 'utf8'),
+    0,
+  );
+  if (claimBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) {
+    throw new GoalCheckpointClaimBudgetError(claimBytes);
+  }
   return { claims };
+}
+
+/**
+ * What a model is told after it overran the aggregate budget. Naming the
+ * measured size is what makes the retry differ from the first attempt at
+ * `temperature: 0`; without it the same window produces the same answer.
+ */
+function claimBudgetRetryNote(byteLength: number): string {
+  return `Your previous answer was rejected: its claim strings totalled ${byteLength} UTF-8 bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget. Return the same coverage within the budget. Merge claims that share a source and state each fact once, cutting restatement rather than facts. Reply with the JSON object only.`;
 }
 
 export function createGoalCheckpointVerifier(
@@ -158,7 +213,6 @@ export function createGoalCheckpointVerifier(
   const timeoutMs =
     options.timeoutMs ?? GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
   return async (input, attemptSignal) => {
-    const contents = verifierContents(input);
     const timeoutController = new AbortController();
     const timer = setTimeout(() => {
       timeoutController.abort(
@@ -170,35 +224,77 @@ export function createGoalCheckpointVerifier(
       : timeoutController.signal;
 
     try {
-      const result = await runSideQuery(config, {
-        contents,
-        abortSignal,
-        purpose: 'goal-checkpoint-verifier',
-        maxAttempts: 1,
-        skipOutputLanguagePreference: true,
-        // Stream so a slow claims generation outlives the provider request
-        // timeout: non-streaming returns no bytes until the whole JSON is
-        // generated, so the SDK timeout (default 120 s) would abort every
-        // attempt past it and retry from zero, leaving any ceiling above
-        // that unreachable. Streamed, the timeout bounds only connect +
-        // first response and the stream guards apply instead.
-        stream: true,
-        systemInstruction: GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT,
-        config: {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseJsonSchema: GOAL_CHECKPOINT_VERIFIER_SCHEMA,
-          thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
-        },
-        // Parsing stays out of a validate hook: runSideQuery re-wraps hook
-        // failures into plain Errors, erasing the InvalidGoalCheckpointError
-        // class and message the verifier's own tests assert on.
-      });
-      return parseGoalCheckpointVerifierText(result.text);
+      // At most one corrective retry, and only for the aggregate claim
+      // budget. Every other unusable result stays single-shot: a malformed
+      // or unfaithful answer is not something restating the request fixes,
+      // and both attempts share the one ceiling armed above.
+      let overrunBytes: number | undefined;
+      for (;;) {
+        const contents = retryContents(input, overrunBytes);
+        const result = await runSideQuery(config, {
+          contents,
+          abortSignal,
+          purpose: 'goal-checkpoint-verifier',
+          maxAttempts: 1,
+          skipOutputLanguagePreference: true,
+          // Stream so a slow claims generation outlives the provider request
+          // timeout: non-streaming returns no bytes until the whole JSON is
+          // generated, so the SDK timeout (default 120 s) would abort every
+          // attempt past it and retry from zero, leaving any ceiling above
+          // that unreachable. Streamed, the timeout bounds only connect +
+          // first response and the stream guards apply instead.
+          stream: true,
+          systemInstruction: GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT,
+          config: {
+            temperature: 0,
+            responseMimeType: 'application/json',
+            responseJsonSchema: GOAL_CHECKPOINT_VERIFIER_SCHEMA,
+            thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+          },
+          // Parsing stays out of a validate hook: runSideQuery re-wraps hook
+          // failures into plain Errors, erasing the InvalidGoalCheckpointError
+          // class and message the verifier's own tests assert on.
+        });
+        try {
+          return parseGoalCheckpointVerifierText(result.text);
+        } catch (error) {
+          if (
+            overrunBytes !== undefined ||
+            !(error instanceof GoalCheckpointClaimBudgetError)
+          ) {
+            throw error;
+          }
+          overrunBytes = error.byteLength;
+        }
+      }
     } finally {
       clearTimeout(timer);
     }
   };
+}
+
+/**
+ * The request for one attempt: the plain payload first, then the same
+ * payload with the corrective note appended.
+ *
+ * A note that pushes an already-large payload over the request limit must
+ * not convert a recoverable overrun into a Goal-stopping
+ * `checkpoint_request` failure, so that case reports the overrun that
+ * prompted the retry instead.
+ */
+function retryContents(
+  input: GoalCheckpointVerifierInput,
+  overrunBytes: number | undefined,
+): Content[] {
+  if (overrunBytes === undefined) return verifierContents(input);
+  try {
+    return verifierContents(input, claimBudgetRetryNote(overrunBytes));
+  } catch (error) {
+    if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
+      throw new GoalCheckpointClaimBudgetError(overrunBytes);
+    }
+    throw error;
+  }
 }
 
 function parseClaim(
