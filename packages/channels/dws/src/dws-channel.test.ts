@@ -512,10 +512,31 @@ class TestableDwsChannel extends DwsChannel {
 }
 
 class PolicyDwsChannel extends DwsChannel {
+  failNextImDeliverySave = false;
+  nextCursorSaveError?: Error;
+  persistentCursorSaveError?: Error;
+
   protected override startPollLoop(): void {}
 
   protected override get todoPollInterval(): number {
     return 0;
+  }
+
+  protected override saveCursor(): void {
+    if (this.persistentCursorSaveError) throw this.persistentCursorSaveError;
+    if (
+      this.failNextImDeliverySave &&
+      (this.cursor.pendingImDeliveries ?? []).length > 0
+    ) {
+      this.failNextImDeliverySave = false;
+      throw new Error('delivery cursor unavailable');
+    }
+    if (this.nextCursorSaveError) {
+      const error = this.nextCursorSaveError;
+      this.nextCursorSaveError = undefined;
+      throw error;
+    }
+    super.saveCursor();
   }
 
   async poll(): Promise<void> {
@@ -530,6 +551,30 @@ class PolicyDwsChannel extends DwsChannel {
 
   pendingDocumentNotifications(): unknown[] {
     return this.cursor.pendingDocumentNotifications ?? [];
+  }
+
+  pendingImDeliveries(): unknown[] {
+    return this.cursor.pendingImDeliveries ?? [];
+  }
+
+  seedPendingImDeliveries(count: number): void {
+    this.cursor.pendingImDeliveries = Array.from(
+      { length: count },
+      (_unused, index) => ({
+        conversationId: `parked-conversation-${index}`,
+        messageId: `parked-message-${index}`,
+        senderId: 'open-alice',
+        content: `parked reply ${index}`,
+        idempotencyKey: `parked-delivery-${index}`,
+        attempts: 1,
+        nextRetryAt: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+    this.saveCursor();
+  }
+
+  replaceAllowedUsers(users: string[]): void {
+    this.gate.replaceAllowedUsers(users);
   }
 
   queuedMessageCount(): number {
@@ -8470,6 +8515,203 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('round-trips a completed direct response target across restart', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const name = 'persisted-direct-delivery-dws';
+      const firstClient = new FakeDwsClient();
+      firstClient.sendImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
+
+      await firstClient.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'persisted-direct-reply',
+          'review this',
+        ),
+      );
+      first.channel.disconnect();
+
+      vi.advanceTimersByTime(5_000);
+      const restartedClient = new FakeDwsClient();
+      const restarted = await readyPolicyChannel(
+        restartedClient,
+        makeConfig(),
+        name,
+      );
+      await restarted.channel.poll();
+
+      expect(restartedClient.sendImMessage).toHaveBeenCalledWith(
+        { kind: 'direct', openDingTalkId: 'open-alice' },
+        'response',
+        expect.any(String),
+      );
+      expect(restartedClient.replyToImMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps delivering when the pre-send cursor checkpoint fails', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    channel.failNextImDeliverySave = true;
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'checkpoint-failure',
+        'review this',
+      ),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.replyToImMessage).toHaveBeenCalledOnce();
+  });
+
+  it('persists a completed response before its first delivery finishes', async () => {
+    const name = 'durable-before-send-dws';
+    const client = new FakeDwsClient();
+    let releaseDelivery!: () => void;
+    client.replyToImMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDelivery = resolve;
+        }),
+    );
+    await readyPolicyChannel(client, makeConfig(), name);
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'durable-reply', 'review this'),
+    );
+    const reloaded = await readyPolicyChannel(
+      new FakeDwsClient(),
+      makeConfig(),
+      name,
+    );
+
+    expect(reloaded.channel.pendingImDeliveries()).toEqual([
+      expect.objectContaining({ messageId: 'durable-reply' }),
+    ]);
+    releaseDelivery();
+  });
+
+  it('drops a queued response when its sender is revoked', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const { channel } = await readyPolicyChannel(
+        client,
+        makeConfig({
+          senderPolicy: 'allowlist',
+          allowedUsers: ['open-alice'],
+        }),
+      );
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'revoked-reply', 'review this'),
+      );
+
+      channel.replaceAllowedUsers([]);
+      vi.advanceTimersByTime(5_000);
+      await channel.poll();
+
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+      expect(channel.pendingImDeliveries()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops queued responses after a DWS profile switch', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const name = 'profile-scoped-im-delivery-dws';
+      const firstClient = new FakeDwsClient();
+      firstClient.identity.profile = 'corp-one';
+      firstClient.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const first = await readyPolicyChannel(firstClient, makeConfig(), name);
+      await firstClient.emit(
+        0,
+        message(
+          'user_im_message_receive_at',
+          'old-profile-reply',
+          'review this',
+        ),
+      );
+      first.channel.disconnect();
+
+      vi.advanceTimersByTime(5_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.identity.profile = 'corp-two';
+      const second = await readyPolicyChannel(secondClient, makeConfig(), name);
+      await second.channel.poll();
+
+      expect(secondClient.replyToImMessage).not.toHaveBeenCalled();
+      expect(second.channel.pendingImDeliveries()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('evicts the oldest queued response instead of rerunning the agent', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    channel.seedPendingImDeliveries(5_000);
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'capacity-reply', 'review this'),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.replyToImMessage).toHaveBeenCalledOnce();
+    expect(channel.pendingImDeliveries()).toHaveLength(4_999);
+  });
+
+  it('abandons a completed response after its bounded delivery attempts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.replyToImMessage.mockRejectedValue(
+        new DwsCommandError('permanent failure', 'not_sent'),
+      );
+      const { channel, bridge } = await readyPolicyChannel(client);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'terminal-reply', 'review this'),
+      );
+
+      for (let attempt = 1; attempt < 16; attempt += 1) {
+        vi.advanceTimersByTime(300_000);
+        await channel.poll();
+      }
+
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(16);
+      expect(channel.pendingImDeliveries()).toEqual([]);
+      vi.advanceTimersByTime(300_000);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(16);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not block the next turn while a completed IM reply waits for retry', async () => {
     const client = new FakeDwsClient();
     let releaseFirstDelivery!: () => void;
@@ -8479,7 +8721,7 @@ describe('DwsChannel', () => {
     client.replyToImMessage
       .mockImplementationOnce(() => firstDelivery)
       .mockResolvedValue(undefined);
-    const { bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(client);
 
     await client.emit(
       0,
@@ -8494,8 +8736,127 @@ describe('DwsChannel', () => {
     expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
     expect(client.replyToImMessage.mock.calls[0]?.[1]).toBe('first-reply');
     expect(client.replyToImMessage.mock.calls[1]?.[1]).toBe('second-reply');
+    await channel.poll();
+    expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
     releaseFirstDelivery();
     await firstDelivery;
+  });
+
+  it('does not replay a response removed by a concurrent delivery', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      let releaseFresh!: () => void;
+      let releaseReplay!: () => void;
+      client.replyToImMessage
+        .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseFresh = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseReplay = resolve;
+            }),
+        )
+        .mockResolvedValue(undefined);
+      const { channel } = await readyPolicyChannel(client);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'parked-reply', 'first request'),
+      );
+      vi.advanceTimersByTime(5_000);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'fresh-reply', 'second request'),
+      );
+
+      const polling = channel.poll();
+      await vi.waitFor(() =>
+        expect(client.replyToImMessage).toHaveBeenCalledTimes(3),
+      );
+      releaseFresh();
+      await vi.waitFor(() =>
+        expect(channel.pendingImDeliveries()).toHaveLength(1),
+      );
+      releaseReplay();
+      await polling;
+
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('backs off after delivery succeeds but its checkpoint fails', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      let releaseDelivery!: () => void;
+      client.replyToImMessage.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseDelivery = resolve;
+          }),
+      );
+      const { channel } = await readyPolicyChannel(client);
+      await client.emit(
+        0,
+        message(
+          'user_im_message_receive_at',
+          'checkpoint-retry',
+          'review this',
+        ),
+      );
+
+      channel.nextCursorSaveError = new Error('disk unavailable');
+      releaseDelivery();
+      await vi.waitFor(() =>
+        expect(channel.pendingImDeliveries()).toEqual([
+          expect.objectContaining({ attempts: 1 }),
+        ]),
+      );
+      const retryAt = (
+        channel.pendingImDeliveries()[0] as { nextRetryAt: number }
+      ).nextRetryAt;
+      vi.setSystemTime(retryAt - 1);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledOnce();
+      vi.setSystemTime(retryAt);
+      await channel.poll();
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays due responses before a later cursor checkpoint failure', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
+      const client = new FakeDwsClient();
+      client.replyToImMessage
+        .mockRejectedValueOnce(new DwsCommandError('rate limited', 'unknown'))
+        .mockResolvedValue(undefined);
+      const { channel } = await readyPolicyChannel(client);
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'dead-disk-reply', 'review this'),
+      );
+
+      channel.persistentCursorSaveError = new Error('disk unavailable');
+      vi.advanceTimersByTime(5_000);
+      await expect(channel.poll()).rejects.toThrow('disk unavailable');
+
+      expect(client.replyToImMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('caps completed IM delivery backoff at five minutes', async () => {

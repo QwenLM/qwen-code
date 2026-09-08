@@ -64,6 +64,7 @@ const TODO_POLL_INTERVAL_MS = 30_000;
 const TODO_CHAT_PREFIX = 'todo:';
 const IM_DELIVERY_RETRY_BASE_MS = 5_000;
 const IM_DELIVERY_RETRY_MAX_MS = 5 * 60_000;
+const IM_DELIVERY_MAX_ATTEMPTS = 16;
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
@@ -1243,21 +1244,20 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     if (existing) return existing;
     const pending = this.cursor.pendingImDeliveries ?? [];
-    if (pending.length >= MAX_PROCESSED_ITEMS) {
-      throw new Error(`[Channel:${this.name}] DWS IM delivery queue is full.`);
+    while (pending.length >= MAX_PROCESSED_ITEMS) {
+      const dropped = pending.shift();
+      process.stderr.write(
+        `[Channel:${this.name}] DWS IM delivery queue is full; dropping the oldest undelivered reply ${sanitizeLogText(dropped?.idempotencyKey ?? '', 64)}\n`,
+      );
     }
     pending.push(delivery);
     this.cursor.pendingImDeliveries = pending;
-    // The completed response must be durable before its first delivery
-    // attempt. If this checkpoint fails, the inbound turn is still allowed to
-    // fail because there is no safe delivery-only recovery path yet.
     try {
       this.saveCursor();
     } catch (error) {
-      this.cursor.pendingImDeliveries = pending.filter(
-        ({ idempotencyKey }) => idempotencyKey !== delivery.idempotencyKey,
+      process.stderr.write(
+        `[Channel:${this.name}] DWS IM delivery pre-send checkpoint failed; keeping the entry in memory and delivering anyway with the same idempotency key: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
       );
-      throw error;
     }
     return delivery;
   }
@@ -1267,12 +1267,26 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   ): Promise<void> {
     if (
       delivery.nextRetryAt > Date.now() ||
-      this.activeImDeliveries.has(delivery.idempotencyKey)
+      this.activeImDeliveries.has(delivery.idempotencyKey) ||
+      !(this.cursor.pendingImDeliveries ?? []).includes(delivery)
     ) {
       return;
     }
     if (!this.connected) {
       this.deferImDelivery(delivery, new Error('channel disconnected'));
+      return;
+    }
+    if (!this.isImDeliveryAuthorized(delivery)) {
+      this.cursor.pendingImDeliveries = (
+        this.cursor.pendingImDeliveries ?? []
+      ).filter((pending) => pending !== delivery);
+      try {
+        this.saveCursor();
+      } catch (error) {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to checkpoint a revoked DWS IM delivery: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
       return;
     }
     this.activeImDeliveries.add(delivery.idempotencyKey);
@@ -1310,23 +1324,43 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         // be written. Keep the in-memory entry aligned with the last durable
         // cursor and retry delivery without rerunning the agent turn.
         this.cursor.pendingImDeliveries.push(delivery);
-        process.stderr.write(
-          `[Channel:${this.name}] DWS IM delivery succeeded but its checkpoint failed; the delivery will be retried with the same idempotency key: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-        );
+        const delay = this.scheduleImDeliveryRetry(delivery);
+        if (delay === undefined) {
+          process.stderr.write(
+            `[Channel:${this.name}] abandoning a completed DWS IM reply after ${delivery.attempts} successful sends whose checkpoints failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[Channel:${this.name}] DWS IM delivery succeeded but its checkpoint failed; retrying with the same idempotency key in ${delay}ms: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        }
       }
     } finally {
       this.activeImDeliveries.delete(delivery.idempotencyKey);
     }
   }
 
+  private isImDeliveryAuthorized(delivery: PersistedImDelivery): boolean {
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: delivery.senderId,
+      senderName: delivery.senderId,
+      chatId: delivery.conversationId,
+      text: '',
+      isGroup: delivery.directTarget === undefined,
+      isMentioned: true,
+      isReplyToBot: true,
+    };
+    return (
+      this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
+      this.dmGate.check(envelope).allowed &&
+      this.gate.isAllowed(delivery.senderId)
+    );
+  }
+
   private deferImDelivery(delivery: PersistedImDelivery, error: unknown): void {
     if (!(this.cursor.pendingImDeliveries ?? []).includes(delivery)) return;
-    delivery.attempts = Math.min(delivery.attempts + 1, 32);
-    const delay = Math.min(
-      IM_DELIVERY_RETRY_BASE_MS * 2 ** Math.min(delivery.attempts - 1, 16),
-      IM_DELIVERY_RETRY_MAX_MS,
-    );
-    delivery.nextRetryAt = Date.now() + delay;
+    const delay = this.scheduleImDeliveryRetry(delivery);
     try {
       this.saveCursor();
     } catch (saveError) {
@@ -1334,9 +1368,33 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] DWS IM delivery retry checkpoint failed: ${sanitizeLogText(saveError instanceof Error ? saveError.message : String(saveError), 300)}\n`,
       );
     }
+    if (delay === undefined) {
+      process.stderr.write(
+        `[Channel:${this.name}] abandoning a completed DWS IM reply after ${delivery.attempts} failed delivery attempts: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+      );
+      return;
+    }
     process.stderr.write(
       `[Channel:${this.name}] DWS IM delivery failed; retrying delivery only in ${delay}ms without rerunning the originating task: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
     );
+  }
+
+  private scheduleImDeliveryRetry(
+    delivery: PersistedImDelivery,
+  ): number | undefined {
+    delivery.attempts = Math.min(delivery.attempts + 1, 32);
+    if (delivery.attempts >= IM_DELIVERY_MAX_ATTEMPTS) {
+      this.cursor.pendingImDeliveries = (
+        this.cursor.pendingImDeliveries ?? []
+      ).filter((pending) => pending !== delivery);
+      return undefined;
+    }
+    const delay = Math.min(
+      IM_DELIVERY_RETRY_BASE_MS * 2 ** Math.min(delivery.attempts - 1, 16),
+      IM_DELIVERY_RETRY_MAX_MS,
+    );
+    delivery.nextRetryAt = Date.now() + delay;
+    return delay;
   }
 
   private async replayPendingImDeliveries(signal: AbortSignal): Promise<void> {
@@ -1367,6 +1425,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     await this.replayPendingMessages(signal);
     if (signal.aborted || !this.connected) return;
     await this.replayPendingDocumentNotifications(signal);
+    if (signal.aborted || !this.connected) return;
+    await this.replayPendingImDeliveries(signal);
     if (signal.aborted || !this.connected) return;
     try {
       const mentionCheckpoint = this.cursor.mentionCheckpoint ?? {
@@ -1487,8 +1547,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
       this.lastTodoPollAt = Date.now();
     }
-    if (signal.aborted || !this.connected) return;
-    await this.replayPendingImDeliveries(signal);
   }
 
   private async pollTodos(signal: AbortSignal): Promise<void> {
