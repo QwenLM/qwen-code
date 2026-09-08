@@ -233,8 +233,8 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
   const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
     failedBridge.on('disconnected', () => {
       // A dead bridge never settles its in-flight turns; let every channel
-      // clear turn-scoped transient state before any guard below can skip.
-      // Crash recovery restores the sessions, so routing state must stay.
+      // clear turn-scoped transient state. Crash recovery restores the
+      // sessions, so routing state must stay.
       for (const channel of channels.values()) {
         channel.onBridgeDisconnected();
       }
