@@ -594,13 +594,43 @@ percentage estimate.
 | Multica/Harness-style Host layer | The current daemon exposes one truthful local Runtime with provider, stable host-session id, heartbeat and workload counts; an unknown runtime binding stays offline and queued | Partial: no Host registration, remote heartbeat transport, placement or Agent-to-Host picker |
 | Full Multica tracker breadth | Agent instructions/model/concurrency and task priority/acceptance criteria exist | Partial: labels, projects, inbox, squads, due dates and invocation policy are absent |
 
-The next implementation step is intentionally not started by this audit. The
-recommended next gate is one minimal registered-Host vertical slice: a second
-daemon registers a stable Host id and provider set; its heartbeat drives
-online/offline; an Agent can be bound to that Host; only that Host can claim the
-Agent's queued task; daemon restart preserves the binding; and the existing
-Runtime and Agent-creation views expose the real choice. Cloud scheduling,
-autoscaling and one permanent process per Agent are not part of that gate.
+The next implementation step is intentionally not started by this audit.
+
+### Registered-Host feasibility gate
+
+Source review rejects treating remote Hosts as one more `runtimeId`. Qwen
+Code's existing `WorkspaceRuntime` is a live object inside one daemon: it owns
+the local workspace path, filesystem, ACP bridge and session service. The
+workspace-agent ledger is also local to that path, and every current dispatch,
+thread tool and transcript link terminates at that same daemon. A second daemon
+cannot safely execute a run merely by appearing in the Runtime list: it cannot
+read the authoritative ledger, prove ambient run identity, apply `thread_*`
+mutations, or expose its task session through the primary daemon's conversation
+list.
+
+There are three real product shapes:
+
+1. A shared service owns the ledger and runtime registry, as Multica and
+   Harness do.
+2. The primary Qwen daemon becomes that control plane, and remote Host daemons
+   connect outbound as execution workers. Thread mutations and session events
+   must be authenticated and proxied back to the primary.
+3. Keep the current local-only Host and make no remote claim.
+
+For an open-source demo without introducing a separate hosted service, option
+2 is the recommended shape. Its design gate must settle the enrollment
+credential, remote workspace/repository mapping, scoped run protocol,
+transcript ownership, reconnect/replay contract, and whether a remote Host may
+invoke only `thread_*` on the primary or a wider tool surface. Implementing a
+Host card or picker before those decisions would be a false capability.
+
+After that gate, the first implementation slice is: a second daemon registers
+a stable Host id and provider set; its heartbeat drives online/offline; an
+Agent can be bound to it; only it can claim the Agent's queued task; daemon
+restart preserves the binding; the run's thread mutations remain authoritative
+on the primary; and the ordinary conversation view can open the remote task
+session. Cloud scheduling, autoscaling and one permanent process per Agent are
+not part of that slice.
 
 A later source audit found that sessionization alone had not delivered the
 claimed persona: persona fields were assigned after `Config.initialize()` had
