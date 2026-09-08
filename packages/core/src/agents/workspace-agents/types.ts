@@ -5,14 +5,12 @@
  */
 
 /**
- * @fileoverview Types for the agent agent — durable agent identities that
+ * @fileoverview Types for durable workspace agent identities that
  * collaborate on a shared thread.
  *
- * The distinction from Agent Team: a teammate is a live in-process loop that
- * receives messages at a tool-round boundary and dies with its leader. A agent
- * agent is an identity whose work happens in a durable background agent that
- * is continued when addressed, so the conversation survives the process, is
- * visible to every participant, and can be replayed.
+ * The distinction from Agent Team: a teammate dies with its leader. A workspace
+ * agent persists independently and resumes a task-scoped top-level session when
+ * addressed, so its work survives the originating conversation.
  */
 
 /** Author id used for messages a person wrote. Never a valid agent id. */
@@ -112,12 +110,8 @@ export interface WorkspaceAgent {
    */
   retiredAt?: number;
   /**
-   * How many threads this agent may work at once. Absent means 1.
-   *
-   * Multica's `max_concurrent_tasks`. Serial was a consequence of an agent
-   * being a subagent that owned one chat; with a top-level session of its own
-   * it is a policy. Distinct from {@link queueLimit}, which bounds how much may
-   * *wait* — throughput and backlog are different questions.
+   * How many task-scoped sessions this agent may run at once. Absent means 1.
+   * Distinct from {@link queueLimit}, which bounds how much may wait.
    */
   maxConcurrentRuns?: number;
   /**
@@ -245,14 +239,13 @@ export interface RunUsageRound {
 /**
  * One agent turn against one thread.
  *
- * `sessionId` links this run to the background agent transcript. Because one
- * workspace agent works across threads, a run is a slice of that transcript rather
- * than the whole log; the dispatcher will record the slice boundaries.
+ * `sessionId` links this run to the agent's transcript for this thread. Several
+ * runs on the same thread resume that session; work on another thread cannot.
  */
 export interface ThreadRun {
   id: string;
   agentId: string;
-  /** Bound background-agent session. Absent until the dispatcher starts it. */
+  /** Bound task session. Absent until the dispatcher starts it. */
   sessionId?: string;
   status: ThreadRunStatus;
   /**
@@ -272,11 +265,8 @@ export interface ThreadRun {
   finalMessageId?: string;
   usageByRound: RunUsageRound[];
   /**
-   * The agent body's cumulative token total when this run started.
-   *
-   * A body is long-lived and works many threads, so its total is not this
-   * run's. Without the baseline the first settlement would charge one thread
-   * tree for everything the agent has ever spent.
+   * The task session's cumulative token total when this run started. The delta
+   * keeps a later turn from charging earlier turns on the same thread twice.
    */
   usageBaselineTokens?: number;
   failureStage?: string;

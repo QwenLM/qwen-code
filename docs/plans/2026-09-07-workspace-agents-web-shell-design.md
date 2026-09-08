@@ -57,7 +57,7 @@ Agents
 
 The dot carries `WorkspaceAgent.color`. A disabled agent's dot is hollow and its row drops to `--muted-foreground` but is never hidden: disabling keeps identity and history, and a roster that hides it contradicts the model. The working column names the thread, because "which thread is my agent on" is what the owner of a queued thread is actually asking. The backlog reads _waiting_, matching `queueLimit`'s meaning of pending runs only.
 
-Empty: **No agents yet. An agent is a persistent identity built on one of your agent definitions — it keeps what it learned across threads.**
+Empty: **No agents yet. An agent is a persistent identity built on one of your agent definitions; each task keeps its own conversation.**
 
 ### 4.2 Thread list, grouped by what they need
 

@@ -52,7 +52,7 @@ import type {
 } from './types.js';
 import { threadPriorityRank } from './types.js';
 
-/** What the runtime says about an agent's long-lived body. */
+/** What the runtime says about one agent's session on one thread. */
 export type AgentBodyState =
   | { kind: 'absent' }
   | { kind: 'paused' }
@@ -93,13 +93,21 @@ export type AgentStartResult =
   | { status: 'agent_unavailable'; error: string }
   | { status: 'launch_failed'; error: string; failureStage?: string };
 
+export interface AgentSessionTarget {
+  agent: WorkspaceAgent;
+  threadId: string;
+  /** Existing binding, used to continue sessions created before the current id convention. */
+  sessionId?: string;
+}
+
 export interface AgentDispatchPort {
-  inspect(agent: WorkspaceAgent): Promise<AgentBodyState>;
+  inspect(target: AgentSessionTarget): Promise<AgentBodyState>;
   cancel?(input: {
     agent: WorkspaceAgent;
     threadId: string;
     runId: string;
     attempt: number;
+    sessionId?: string;
   }): Promise<boolean>;
   deliver?(input: {
     agent: WorkspaceAgent;
@@ -114,6 +122,7 @@ export interface AgentDispatchPort {
     runId: string;
     attempt: number;
     contextThroughSequence: number;
+    sessionId?: string;
   }): Promise<boolean>;
   start(input: {
     action: AgentStartAction;
@@ -125,9 +134,10 @@ export interface AgentDispatchPort {
     runId: string;
     attempt: number;
     contextThroughSequence: number;
+    sessionId?: string;
   }): Promise<AgentStartResult>;
   /**
-   * Total tokens this agent's body has spent since it started, or undefined
+   * Total tokens this task session has spent since it started, or undefined
    * when the runtime cannot say.
    *
    * A cumulative reading rather than a per-round event: a session reports what
@@ -136,7 +146,7 @@ export interface AgentDispatchPort {
    * monotonically increasing total under one synthetic round rather than
    * pretending to per-round detail the source does not have.
    */
-  totalTokens?(agent: WorkspaceAgent): Promise<number | undefined>;
+  totalTokens?(target: AgentSessionTarget): Promise<number | undefined>;
   /** Definition content hash, when the port can supply one (§9.4). */
   definitionVersion?(agent: WorkspaceAgent): Promise<string | undefined>;
 }
@@ -192,6 +202,17 @@ function bodyCarriesRun(
     state.runId === run.id &&
     state.attempt === run.attempts
   );
+}
+
+function priorSessionId(thread: Thread, run: ThreadRun): string | undefined {
+  if (run.sessionId) return run.sessionId;
+  for (let index = thread.runs.length - 1; index >= 0; index -= 1) {
+    const previous = thread.runs[index];
+    if (previous?.agentId === run.agentId && previous.sessionId) {
+      return previous.sessionId;
+    }
+  }
+  return undefined;
 }
 
 async function acceptRunningDelivery(
@@ -423,7 +444,11 @@ async function reconcileInterruptedRuns(
       const agent = agents.find((candidate) => candidate.id === run.agentId);
       if (!agent) continue;
       const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
-      const state = await port.inspect(agent);
+      const state = await port.inspect({
+        agent,
+        threadId: thread.id,
+        ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+      });
       if (
         state.kind === 'failed' &&
         run.status !== 'cancelling' &&
@@ -462,12 +487,23 @@ async function reconcileInterruptedRuns(
             threadId: thread.id,
             runId: run.id,
             attempt: run.attempts,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
           });
-          if ((await port.inspect(agent)).kind === 'running') {
+          if (
+            (
+              await port.inspect({
+                agent,
+                threadId: thread.id,
+                ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+              })
+            ).kind === 'running'
+          ) {
             records.push({
               ...base,
               kind: 'cancelling',
-              detail: requested ? 'awaiting_runtime_stop' : 'cancel_not_accepted',
+              detail: requested
+                ? 'awaiting_runtime_stop'
+                : 'cancel_not_accepted',
             });
             continue;
           }
@@ -571,7 +607,11 @@ async function deliverRunningInputs(
       const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
       let delivered = false;
       if (run.status === 'running' && port.deliver) {
-        const state = await port.inspect(agent);
+        const state = await port.inspect({
+          agent,
+          threadId: thread.id,
+          ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+        });
         if (bodyCarriesRun(state, thread, run)) {
           const prompt = assembleAgentPrompt({
             workspaceId,
@@ -604,6 +644,7 @@ async function deliverRunningInputs(
               runId: run.id,
               attempt: run.attempts,
               contextThroughSequence: prompt.contextThroughSequence,
+              ...(run.sessionId ? { sessionId: run.sessionId } : {}),
             });
             if (delivered) {
               delivered = await acceptRunningDelivery(projectRoot, {
@@ -661,11 +702,10 @@ const SESSION_USAGE_ROUND = 1;
 /**
  * Charges what this run cost, as the difference from its starting reading.
  *
- * An agent's body is long-lived and works many threads, so its total is not
- * this run's total. The baseline is written when the run starts; the delta is
- * what this thread tree owes. A runtime that cannot report usage charges
- * nothing rather than guessing, which under-counts — the gate then trips late
- * rather than blocking work that was never measured.
+ * A task session can carry several turns on the same thread. The baseline is
+ * written when the run starts; the delta is what this run owes. A runtime that
+ * cannot report usage charges nothing rather than guessing, which under-counts
+ * instead of blocking work that was never measured.
  */
 async function chargeRunUsage(
   projectRoot: string,
@@ -675,7 +715,11 @@ async function chargeRunUsage(
   run: ThreadRun,
 ): Promise<void> {
   if (!port.totalTokens) return;
-  const total = await port.totalTokens(agent);
+  const total = await port.totalTokens({
+    agent,
+    threadId,
+    ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+  });
   if (total === undefined) return;
   const baseline = run.usageBaselineTokens ?? 0;
   const spent = Math.max(0, total - baseline);
@@ -723,8 +767,13 @@ export async function dispatchOnce(
   for (const candidate of selectCandidates(agents, threads)) {
     const { agent, thread, run } = candidate;
     const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
+    const sessionId = priorSessionId(thread, run);
 
-    const state = await port.inspect(agent);
+    const state = await port.inspect({
+      agent,
+      threadId: thread.id,
+      ...(sessionId ? { sessionId } : {}),
+    });
     const action = actionFor(state);
     if (!action) {
       // The store says this agent is free and the runtime says it is not. The
@@ -768,12 +817,17 @@ export async function dispatchOnce(
       runId: run.id,
       attempt: claimed.run.attempts,
       contextThroughSequence: prompt.contextThroughSequence,
+      ...(sessionId ? { sessionId } : {}),
     });
 
     if (result.status === 'started') {
       // Session ports prepare first: persist the baseline and run binding
       // before activation lets the model call any thread tools.
-      const usageBaselineTokens = await port.totalTokens?.(agent);
+      const usageBaselineTokens = await port.totalTokens?.({
+        agent,
+        threadId: thread.id,
+        sessionId: result.sessionId,
+      });
       if (
         run.attempts > 0 &&
         run.usageBaselineTokens !== undefined &&

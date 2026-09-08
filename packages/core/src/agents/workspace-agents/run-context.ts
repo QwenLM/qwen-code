@@ -7,15 +7,15 @@
 /**
  * @fileoverview The ambient binding a agent turn executes under.
  *
- * A workspace agent is one long-lived body that works many threads in sequence, so
- * "which thread is this?" cannot come from the model and cannot come from a
- * process-global register that async work would leak across. It comes from an
+ * An agent may run several task sessions concurrently, so "which thread is
+ * this?" cannot come from the model or a process-global register that async
+ * work would leak across. It comes from an
  * `AsyncLocalStorage` frame established at the per-turn seam — the same place
  * `runWithAgentContext` is established inside `runBackgroundTurn`, which the
  * resident continuation re-enters for every turn.
  *
- * Wrapping the *lifetime* launch once would bind the body to its first thread
- * forever; that is the failure this module exists to make impossible.
+ * Wrapping a session lifetime once would let later turns inherit stale run
+ * authority; this module binds every turn instead.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';

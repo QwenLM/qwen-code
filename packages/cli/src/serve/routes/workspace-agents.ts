@@ -464,11 +464,12 @@ export function registerWorkspaceAgentRoutes(
               ).length,
             0,
           );
-          const session = sessions.find(
+          const agentSessions = sessions.filter(
             (candidate) =>
               candidate.sourceType === AGENT_SESSION_SOURCE_TYPE &&
               candidate.sourceId === agent.id,
           );
+          const session = agentSessions[0];
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -490,11 +491,11 @@ export function registerWorkspaceAgentRoutes(
           const status =
             agent.retiredAt !== undefined
               ? 'offline'
-              : active || session?.hasActivePrompt
+              : active || agentSessions.some((entry) => entry.hasActivePrompt)
                 ? 'working'
                 : blocked
                   ? 'blocked'
-                  : failed || session?.hasTurnError
+                  : failed || agentSessions.some((entry) => entry.hasTurnError)
                     ? 'error'
                     : session
                       ? 'idle'
@@ -1116,6 +1117,18 @@ export function registerWorkspaceAgentRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
+        await Promise.all(
+          runtime.bridge
+            .listWorkspaceSessions(runtime.workspaceCwd)
+            .filter(
+              (session) =>
+                session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+                session.sourceId === agentId,
+            )
+            .map((session) =>
+              runtime.bridge.closeSession(session.sessionId).catch(() => {}),
+            ),
+        );
         // Retiring keeps the roster entry, so "is anyone left" is a question
         // about who can still take work, not about how many rows exist.
         const remainingAgents = (

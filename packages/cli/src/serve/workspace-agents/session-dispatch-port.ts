@@ -5,13 +5,11 @@
  */
 
 /**
- * @fileoverview The dispatcher's port, backed by one ACP session per agent.
+ * @fileoverview The dispatcher's port, backed by one ACP session per agent and thread.
  *
- * This is the whole of the execution-model change. The dispatcher's rules, its
- * twelve admission outcomes and every state it records are unchanged, because
- * the port was always the only thing that knew what a body is. What changes is
- * the answer: a body used to be a background subagent inside one shared host
- * process, and is now a session of its own.
+ * Agent identity is workspace-scoped; conversation state is task-scoped. Runs
+ * by the same agent on the same thread resume one session, while another thread
+ * gets another session and may execute concurrently.
  *
  * Sessions currently share the bridge's ACP process. Separate session identity
  * is not process isolation.
@@ -32,7 +30,7 @@ import type {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   AGENT_SESSION_SOURCE_TYPE,
-  agentSessionId,
+  agentThreadSessionId,
 } from '../../runtime/agent-session-source.js';
 
 /** What the port needs from the bridge, so a test can supply four functions. */
@@ -53,24 +51,27 @@ export interface CreateSessionDispatchPortInput {
 }
 
 /**
- * Finds this agent's session, if the bridge is holding one.
+ * Finds this agent's session for one thread, if the bridge is holding it.
  *
- * Matched on `sourceId` rather than on the session id, because the id is a
- * convention and the source is the record. A session the bridge lost is simply
- * absent, which is the same answer the dispatcher wants for an agent that has
- * never run.
+ * Both source attribution and the task session id must match. Source attribution
+ * identifies the persona; the id prevents another thread for that persona from
+ * being mistaken for this one.
  */
 function sessionFor(
   bridge: AgentSessionBridge,
   workspaceCwd: string,
   agent: WorkspaceAgent,
+  threadId: string,
+  sessionId?: string,
 ) {
+  const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
   return bridge
     .listWorkspaceSessions(workspaceCwd)
     .find(
       (session) =>
         session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
-        session.sourceId === agent.id,
+        session.sourceId === agent.id &&
+        session.sessionId === expected,
     );
 }
 
@@ -122,10 +123,17 @@ export function createSessionDispatchPort(
   };
 
   return {
-    async inspect(agent): Promise<AgentBodyState> {
-      const execution = executions.get(agent.id);
+    async inspect({ agent, threadId, sessionId }): Promise<AgentBodyState> {
+      const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
+      const execution = executions.get(expected);
       if (execution) return execution;
-      const session = sessionFor(bridge, workspaceCwd, agent);
+      const session = sessionFor(
+        bridge,
+        workspaceCwd,
+        agent,
+        threadId,
+        sessionId,
+      );
       if (!session) return { kind: 'absent' };
       // A session with a prompt in flight is working. One that is idle is
       // ready for the next turn — which is what `completed` means to the
@@ -145,23 +153,30 @@ export function createSessionDispatchPort(
       rootThreadId,
       attempt,
       contextThroughSequence,
+      sessionId: priorSessionId,
     }): Promise<AgentStartResult> {
       try {
         let session: { sessionId: string } | undefined = sessionFor(
           bridge,
           workspaceCwd,
           agent,
+          threadId,
+          priorSessionId,
         );
         if (!session) {
           const request = {
             workspaceCwd,
-            sessionId: agentSessionId(agent.id),
+            sessionId:
+              priorSessionId ?? agentThreadSessionId(agent.id, threadId),
             sourceType: AGENT_SESSION_SOURCE_TYPE,
             sourceId: agent.id,
           };
           session = (await sessions.sessionExists(request.sessionId))
             ? await bridge.resumeSession(request)
-            : await bridge.spawnOrAttach({ ...request, sessionScope: 'thread' });
+            : await bridge.spawnOrAttach({
+                ...request,
+                sessionScope: 'thread',
+              });
         }
         const context: AgentRunContext = {
           workspaceId,
@@ -184,18 +199,18 @@ export function createSessionDispatchPort(
               runId,
               attempt,
             };
-            executions.set(agent.id, execution);
+            executions.set(sessionId, execution);
             // sendPrompt resolves at turn completion, not queue acceptance.
             // Keep dispatch free to start peers and service cancellation.
             void send(sessionId, prompt, runId, context).then(
               () => {
-                if (executions.get(agent.id) === execution) {
-                  executions.delete(agent.id);
+                if (executions.get(sessionId) === execution) {
+                  executions.delete(sessionId);
                 }
               },
               (error: unknown) => {
-                if (executions.get(agent.id) !== execution) return;
-                executions.set(agent.id, {
+                if (executions.get(sessionId) !== execution) return;
+                executions.set(sessionId, {
                   kind: 'failed',
                   runId,
                   attempt,
@@ -220,9 +235,23 @@ export function createSessionDispatchPort(
       }
     },
 
-    async deliver({ agent, prompt, deliveryId, ...context }): Promise<boolean> {
-      const execution = executions.get(agent.id);
-      const session = sessionFor(bridge, workspaceCwd, agent);
+    async deliver({
+      agent,
+      prompt,
+      deliveryId,
+      sessionId,
+      ...context
+    }): Promise<boolean> {
+      const expected =
+        sessionId ?? agentThreadSessionId(agent.id, context.threadId);
+      const execution = executions.get(expected);
+      const session = sessionFor(
+        bridge,
+        workspaceCwd,
+        agent,
+        context.threadId,
+        sessionId,
+      );
       if (
         !session ||
         execution?.kind !== 'running' ||
@@ -241,8 +270,18 @@ export function createSessionDispatchPort(
       ).accepted;
     },
 
-    async totalTokens(agent): Promise<number | undefined> {
-      const session = sessionFor(bridge, workspaceCwd, agent);
+    async totalTokens({
+      agent,
+      threadId,
+      sessionId,
+    }): Promise<number | undefined> {
+      const session = sessionFor(
+        bridge,
+        workspaceCwd,
+        agent,
+        threadId,
+        sessionId,
+      );
       if (!session) return undefined;
       try {
         const stats = await bridge.getSessionStatsStatus(session.sessionId);
@@ -259,8 +298,15 @@ export function createSessionDispatchPort(
       }
     },
 
-    async cancel({ agent, threadId, runId, attempt }): Promise<boolean> {
-      const execution = executions.get(agent.id);
+    async cancel({
+      agent,
+      threadId,
+      runId,
+      attempt,
+      sessionId,
+    }): Promise<boolean> {
+      const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
+      const execution = executions.get(expected);
       if (
         execution?.kind !== 'running' ||
         execution.threadId !== threadId ||
@@ -269,7 +315,13 @@ export function createSessionDispatchPort(
       ) {
         return false;
       }
-      const session = sessionFor(bridge, workspaceCwd, agent);
+      const session = sessionFor(
+        bridge,
+        workspaceCwd,
+        agent,
+        threadId,
+        sessionId,
+      );
       if (!session) return false;
       try {
         await bridge.cancelSession(session.sessionId);

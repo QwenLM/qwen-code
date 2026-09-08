@@ -9,22 +9,26 @@ import { createHash } from 'node:crypto';
 export const AGENT_HOST_SESSION_SOURCE_TYPE = 'agent-host';
 
 /**
- * A top-level session that belongs to one agent.
+ * A top-level task session that belongs to one agent.
  *
  * The bridge's spawn request carries no persona, so an agent session is told
  * who it is the same way the host session is: by its source type, with the
- * agent's id in `sourceId`. The child recognises itself at `newSession`, reads
+ * agent's id in `sourceId`. The session id also includes the thread. The child
+ * recognises itself at `newSession`, reads
  * the workspace roster, and applies its own definition before it goes live.
  * This identifies the agent; the shared ACP process is not a crash boundary.
  */
 export const AGENT_SESSION_SOURCE_TYPE = 'agent';
 
-/** Deterministic per identity, so an agent has exactly one session. */
-export function agentSessionId(agentId: string): string {
+/** Deterministic per agent and thread, matching Multica's agent × issue scope. */
+export function agentThreadSessionId(
+  agentId: string,
+  threadId: string,
+): string {
   // UUID v5 in the standard URL namespace: ACP only accepts RFC UUIDs.
   const bytes = createHash('sha1')
     .update(Buffer.from('6ba7b8119dad11d180b400c04fd430c8', 'hex'))
-    .update(`qwen-code:workspace-agent:${agentId}`)
+    .update(`qwen-code:workspace-agent:${agentId}:thread:${threadId}`)
     .digest()
     .subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;

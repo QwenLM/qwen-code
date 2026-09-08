@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceAgent } from '@qwen-code/qwen-code-core';
-import { agentSessionId } from '../../runtime/agent-session-source.js';
+import { agentThreadSessionId } from '../../runtime/agent-session-source.js';
 
 import {
   createSessionDispatchPort,
@@ -28,7 +28,16 @@ const TURN = {
 function makeBridge(sessions: unknown[] = []) {
   const sendPrompt = vi.fn().mockResolvedValue({});
   const bridge = {
-    spawnOrAttach: vi.fn().mockResolvedValue({ sessionId: 'agent-ag_alice' }),
+    spawnOrAttach: vi
+      .fn()
+      .mockImplementation(async (input: { sessionId: string }) => ({
+        sessionId: input.sessionId,
+      })),
+    resumeSession: vi
+      .fn()
+      .mockImplementation(async (input: { sessionId: string }) => ({
+        sessionId: input.sessionId,
+      })),
     sendPrompt,
     listWorkspaceSessions: vi.fn().mockReturnValue(sessions),
     cancelSession: vi.fn().mockResolvedValue(undefined),
@@ -44,12 +53,13 @@ function contextOf(sendPrompt: ReturnType<typeof vi.fn>) {
 
 describe('session dispatch port', () => {
   it('uses stable RFC UUID session IDs accepted by ACP', () => {
-    const id = agentSessionId(AGENT.id);
+    const id = agentThreadSessionId(AGENT.id, TURN.threadId);
     expect(id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    expect(agentSessionId(AGENT.id)).toBe(id);
-    expect(agentSessionId('ag_bob')).not.toBe(id);
+    expect(agentThreadSessionId(AGENT.id, TURN.threadId)).toBe(id);
+    expect(agentThreadSessionId(AGENT.id, 'th_2')).not.toBe(id);
+    expect(agentThreadSessionId('ag_bob', TURN.threadId)).not.toBe(id);
   });
   it('tells the agent which run its opening turn belongs to', async () => {
     // Without this the child boots with the right persona and then throws on
@@ -67,7 +77,8 @@ describe('session dispatch port', () => {
 
     expect(result.status).toBe('started');
     expect(sendPrompt).not.toHaveBeenCalled();
-    if (result.status !== 'started') throw new Error('Expected prepared session');
+    if (result.status !== 'started')
+      throw new Error('Expected prepared session');
     expect(result.consumedOnStart).toBe(false);
     result.activate?.();
     expect(contextOf(sendPrompt)?.agentRun).toEqual({
@@ -84,7 +95,7 @@ describe('session dispatch port', () => {
   it('leaves mid-run replies for durable rebooking instead of another prompt', async () => {
     const { bridge, sendPrompt } = makeBridge([
       {
-        sessionId: 'agent-ag_alice',
+        sessionId: agentThreadSessionId(AGENT.id, TURN.threadId),
         sourceType: 'agent',
         sourceId: 'ag_alice',
       },
@@ -117,9 +128,12 @@ describe('session dispatch port', () => {
       prompt: 'work',
       ...TURN,
     });
-    if (result.status !== 'started') throw new Error('Expected prepared session');
+    if (result.status !== 'started')
+      throw new Error('Expected prepared session');
     result.activate?.();
-    await expect(port.inspect(AGENT)).resolves.toEqual({
+    await expect(
+      port.inspect({ agent: AGENT, threadId: TURN.threadId }),
+    ).resolves.toEqual({
       kind: 'running',
       threadId: TURN.threadId,
       runId: TURN.runId,
@@ -127,7 +141,9 @@ describe('session dispatch port', () => {
     });
     reject(new Error('Model connection lost'));
     await vi.waitFor(async () => {
-      expect(await port.inspect(AGENT)).toEqual({
+      expect(
+        await port.inspect({ agent: AGENT, threadId: TURN.threadId }),
+      ).toEqual({
         kind: 'failed',
         runId: TURN.runId,
         attempt: TURN.attempt,
@@ -136,18 +152,19 @@ describe('session dispatch port', () => {
     });
   });
 
-  it('finds the body by source, not by the session id convention', async () => {
-    // The id is a convention; the source attribution is the record.
+  it('does not reuse the same agent session from another thread', async () => {
     const { bridge } = makeBridge([
       {
-        sessionId: 'something-else',
+        sessionId: agentThreadSessionId(AGENT.id, 'th_other'),
         sourceType: 'agent',
         sourceId: 'ag_alice',
       },
     ]);
     const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
 
-    await expect(port.inspect(AGENT)).resolves.toEqual({ kind: 'completed' });
+    await expect(
+      port.inspect({ agent: AGENT, threadId: TURN.threadId }),
+    ).resolves.toEqual({ kind: 'absent' });
   });
 
   it('reports an agent with no session as absent', async () => {
@@ -156,7 +173,9 @@ describe('session dispatch port', () => {
     ]);
     const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
 
-    await expect(port.inspect(AGENT)).resolves.toEqual({ kind: 'absent' });
+    await expect(
+      port.inspect({ agent: AGENT, threadId: TURN.threadId }),
+    ).resolves.toEqual({ kind: 'absent' });
   });
 
   it('does not deliver to an agent whose session is gone', async () => {

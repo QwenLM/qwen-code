@@ -1,5 +1,27 @@
 # What is missing against Multica, and how to close it
 
+## Architecture correction — persistent identity, task-scoped sessions
+
+The previous implementation score confused a working collaboration engine with
+the requested Multica-shaped product. Against that product the branch is about
+45% complete: routing and shared-thread mechanics are substantial, while Agent
+creation, Runtime and task presentation remain partial or absent.
+
+One implementation decision was wrong, not merely incomplete. A deterministic
+session keyed only by agent made every task share one transcript and left
+`maxConcurrentRuns > 1` ineffective because the runtime port held one execution
+slot per agent. Multica's `PriorSessionID` is selected by
+`GetLastTaskSession(agent_id, issue_id)`. Qwen Code now follows the same scope:
+the Agent identity is durable across the workspace, and its ACP session is
+durable only for one `(agent, thread)` pair.
+
+Two structural gaps remain and are not hidden behind UI glue:
+
+- a workspace Agent is still split between a reusable subagent definition and a
+  roster record instead of being one authoritative product object;
+- `runtimeId` and the hidden host session are not a first-class Runtime with
+  provider, health and placement semantics.
+
 ## Current correction — task orchestration before process isolation
 
 ### Browser/source acceptance observations, 2026-09-08
@@ -97,8 +119,7 @@ zero child threads, and no manual retry or extra human message.
 Leader run `rn_3d9be992-e39b-4c11-a5d6-c132595651c8` ran from 1788848276487
 to 1788848297506; worker `rn_a4c2bf69-fc1e-4c29-a032-e391711b8f22` ran from
 1788848288507 to 1788848299517: 8,999 ms overlap. Leader's continuation
-`rn_8c7ba977-9320-4c4f-bd34-a8fe5a5649f6` ran from 1788848297506 to
-1788848305513. Both leader runs used session `63465788-a16b-5328-92fc-8020330969a9`;
+`rn_8c7ba977-9320-4c4f-bd34-a8fe5a5649f6` ran from 1788848297506 to 1788848305513. Both leader runs used session `63465788-a16b-5328-92fc-8020330969a9`;
 worker used `b48bad11-6e7c-5110-92a1-e560bf56eec6`, also reused from the earlier
 demo. The panel displayed 636.3k tokens. Overlap proves concurrent run lifetimes,
 not separate OS processes or simultaneous provider computation.
@@ -362,10 +383,10 @@ Four stages. Each is usable on its own; none needs the next to be worth having.
 
 ### Stage A — an agent is a top-level session
 
-Multica binds an agent to a runtime. This demo binds an identity to one
-top-level ACP session on the current local daemon. That preserves the agent's
-persona and conversation, but it is not Multica's registered runtime or an OS
-process boundary.
+Multica binds an agent to a runtime and resumes a session per agent and issue.
+This demo binds an identity to top-level ACP sessions keyed by agent and thread
+on the current local daemon. That preserves task-local conversation without
+claiming a registered runtime or OS-process boundary.
 
 - No durable runtime record is invented for the local-only demo. An agent's
   deterministic session id and the bridge's live-session record are the source
@@ -458,7 +479,7 @@ hosts without changing the thread rules.
 1. **An agent may work several threads at once.** `WorkspaceAgent.maxConcurrentRuns`,
    default 1, mirroring Multica's `max_concurrent_tasks`. Decision 10 is
    rewritten: serial was a consequence of a subagent owning one chat inside a
-   shared chat, and with a top-level session per agent it is a policy rather
+   shared chat. A task-scoped top-level session makes concurrency a policy rather
    than a fact. The default keeps today's behaviour until someone raises it, and
    `queueLimit` stays a separate bound — throughput and backlog are different
    questions.
@@ -466,9 +487,9 @@ hosts without changing the thread rules.
    own limit instead of treating any live run as busy; `claimRun`'s
    already-live check does the same. Both are single conditions.
 
-2. **An agent's session appears in the normal session list.** A person opens
-   alice the way they open any other conversation. This reuses the existing
-   transcript and renderer for an agent's full work. The shared thread remains
+2. **An agent's task sessions appear in the normal session list.** A person
+   opens them the way they open any other conversation. This reuses the existing
+   transcript and renderer for each task. The shared thread remains
    the cross-agent coordination record because no one agent session owns it.
    Only the dispatch host stays hidden, because it is infrastructure with no
    conversation of its own.
@@ -523,11 +544,12 @@ the changed surface and CI is the verification.
 | `8d6e199cc4` | Deleting an agent retires it instead of erasing it                   |
 | `59d326e422` | Agents are configurable; the capability ceiling is shown             |
 
-Stage A's sessionization is complete: `launcher.ts`, `dispatch-port.ts` and
+Stage A's initial sessionization is complete: `launcher.ts`, `dispatch-port.ts` and
 `runtime-bridge.ts` are gone, along with `launchWorkspaceAgent`,
 `dispatchAgentRuns` and the two ACP control methods behind them. Dispatch runs
-in the daemon, where the sessions are. Multica-style runtime registration and
-process isolation remain absent.
+in the daemon, where the sessions are. The follow-up correction scopes those
+sessions to `(agent, thread)` instead of one transcript per identity.
+Multica-style runtime registration and process isolation remain absent.
 
 Stage B turned out to be smaller than written. Agent sessions were already in
 the ordinary session catalog, but the sidebar's Tasks filter hid them. The
@@ -535,9 +557,8 @@ existing session-source switch now has an Agents tab backed by the same
 `WorkspaceSection` and ordinary session page; no second conversation list was
 added. A session is titled with its agent's name, written once and never over a
 person's `/rename`, and a run row links to it. The thread-scoped transcript
-slice was kept rather than replaced: a session serving several threads cannot
-answer "what did this agent do _here_", which is the narrower question the
-slice exists for.
+slice was kept rather than replaced: it answers which run inside this task
+session produced the visible result.
 
 Stage C landed items 1 and 2 of the four. Labels, project and due date are
 still display-only work and are not done.
