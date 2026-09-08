@@ -87,6 +87,8 @@ export interface AgentRoundEvent {
   subagentId: string;
   round: number;
   promptId: string;
+  /** Expected model backoff before the next attempt starts. */
+  retryDelayMs?: number;
   timestamp: number;
 }
 
@@ -179,6 +181,8 @@ export interface AgentToolProgressEvent {
   subagentId: string;
   round: number;
   callId: string;
+  /** Clears the call's watchdog deadline before batch finalization finishes. */
+  settled?: true;
   timestamp: number;
 }
 

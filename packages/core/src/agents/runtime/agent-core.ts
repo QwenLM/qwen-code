@@ -995,6 +995,17 @@ export class AgentCore {
             DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
+          undefined,
+          {
+            onRetry: (retryDelayMs) =>
+              this.eventEmitter?.emit(AgentEventType.MODEL_RETRY, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                promptId,
+                retryDelayMs,
+                timestamp: Date.now(),
+              } as AgentRoundEvent),
+          },
         );
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
@@ -1040,6 +1051,7 @@ export class AgentCore {
               subagentId: this.subagentId,
               round: turnCounter,
               promptId,
+              retryDelayMs: streamEvent.retryInfo?.delayMs,
               timestamp: Date.now(),
             } as AgentRoundEvent);
             if (
@@ -2043,6 +2055,21 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        for (const call of calls) {
+          if (
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled'
+          ) {
+            this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+              subagentId: this.subagentId,
+              round: currentRound,
+              callId: call.request.callId,
+              settled: true,
+              timestamp: Date.now(),
+            } as AgentToolProgressEvent);
+          }
+        }
         const started = calls.filter(
           (call) =>
             call.status === 'executing' &&

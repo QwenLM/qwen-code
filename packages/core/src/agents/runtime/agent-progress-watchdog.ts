@@ -8,6 +8,7 @@ import { AgentEventType } from './agent-events.js';
 import type {
   AgentEventEmitter,
   AgentApprovalRequestEvent,
+  AgentRoundEvent,
   AgentToolCallEvent,
   AgentToolProgressEvent,
   AgentToolResultEvent,
@@ -54,7 +55,6 @@ export function attachAgentProgressWatchdog(
 ): () => void {
   let disposed = false;
   let waitingForExternalInput = false;
-  let modelRetrying = false;
   let roundHadToolCalls = false;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
   let escalationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -92,17 +92,16 @@ export function attachAgentProgressWatchdog(
     if (modelTimer) clearTimeout(modelTimer);
     modelTimer = undefined;
   };
-  const armModel = () => {
+  const armModel = (retryDelayMs = 0) => {
     clearModel();
     if (
       disposed ||
       waitingForExternalInput ||
-      modelRetrying ||
       [...tools.values()].some((tool) => tool.state !== 'queued')
     )
       return;
     modelTimer = schedule(
-      MODEL_CONTROL_PROGRESS_TIMEOUT_MS,
+      Math.min(MODEL_CONTROL_PROGRESS_TIMEOUT_MS + retryDelayMs, 2_147_483_647),
       () =>
         abort(
           new AgentProgressTimeoutError(
@@ -131,30 +130,25 @@ export function attachAgentProgressWatchdog(
     );
   };
   const onActivity = () => {
-    modelRetrying = false;
     armModel();
   };
   const onRoundStart = () => {
     waitingForExternalInput = false;
-    modelRetrying = false;
     roundHadToolCalls = false;
     armModel();
   };
   const onRoundEnd = () => {
-    modelRetrying = false;
     waitingForExternalInput = !roundHadToolCalls && isWaitingForExternalInput();
     armModel();
   };
-  const onModelRetry = () => {
-    modelRetrying = true;
-    clearModel();
+  const onModelRetry = (event: AgentRoundEvent) => {
+    armModel(event.retryDelayMs);
   };
   const onExternalInput = () => {
     waitingForExternalInput = false;
     armModel();
   };
   const onToolCall = (event: AgentToolCallEvent) => {
-    modelRetrying = false;
     roundHadToolCalls = true;
     tools.set(event.callId, { name: event.name, state: 'queued' });
     armModel();
@@ -162,6 +156,12 @@ export function attachAgentProgressWatchdog(
   const onToolHeartbeat = (event: AgentToolProgressEvent) => {
     const tool = tools.get(event.callId);
     if (!tool) return;
+    if (event.settled) {
+      if (tool.timer) clearTimeout(tool.timer);
+      tools.delete(event.callId);
+      armModel();
+      return;
+    }
     tool.state = 'executing';
     armTool(event.callId);
     clearModel();

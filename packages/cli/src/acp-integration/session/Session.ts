@@ -1474,6 +1474,7 @@ export interface BackgroundNotificationQueueItem {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+  recordOnly?: true;
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -9728,7 +9729,13 @@ export class Session implements SessionContext {
         false,
       );
       if (accepted && !this.disposed && !this.closing) {
-        await this.#emitBackgroundNotificationDisplay(item);
+        this.#enqueueBackgroundNotification({
+          ...item,
+          continuesTodoStopGuardWorkChain:
+            this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+          persisted: true,
+          recordOnly: true,
+        });
       }
     } catch (error) {
       debugLogger.warn(
@@ -9906,6 +9913,14 @@ export class Session implements SessionContext {
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
+          if (item.recordOnly) {
+            try {
+              await this.#emitBackgroundNotificationDisplay(item);
+            } finally {
+              await this.#emitBackgroundNotificationEndTurn('end_turn');
+            }
+            continue;
+          }
           // A notification fires from async resources created inside the
           // turn that spawned the task, so a Goal permit can reach here by
           // lineage after that turn is long over. This is not a Goal turn:

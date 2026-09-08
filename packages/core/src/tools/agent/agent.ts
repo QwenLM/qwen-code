@@ -1460,6 +1460,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.updateDisplay({ status: 'running' }, updateOutput);
     });
 
+    let lastForwardedProgressAt = 0;
+    const forwardProgress = () => {
+      const now = Date.now();
+      if (now - lastForwardedProgressAt < 1_000) return;
+      lastForwardedProgressAt = now;
+      this.updateDisplay({}, updateOutput);
+    };
+    eventEmitter.on(AgentEventType.STREAM_TEXT, forwardProgress);
+    eventEmitter.on(AgentEventType.MODEL_RETRY, forwardProgress);
+    eventEmitter.on(AgentEventType.TOOL_PROGRESS, forwardProgress);
+
     eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
       const event = args[0] as AgentToolCallEvent;
       const skill =
@@ -3713,7 +3724,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
-            if (turnAbortController.signal.aborted && !progressTimeout) {
+            if (
+              turnAbortController.signal.aborted &&
+              (!progressTimeout ||
+                registry.get(hookOpts.agentId)?.status === 'cancelled')
+            ) {
               const completionStats = getCompletionStats();
               registry.finalizeCancelled(
                 hookOpts.agentId,

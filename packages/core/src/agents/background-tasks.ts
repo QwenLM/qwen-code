@@ -919,12 +919,7 @@ export class BackgroundTaskRegistry {
 
   failUnresponsive(agentId: string, error: string): void {
     const entry = this.agents.get(agentId);
-    if (
-      !entry ||
-      (entry.status !== 'running' && entry.status !== 'cancelled') ||
-      entry.notified
-    )
-      return;
+    if (!entry || entry.status !== 'running' || entry.notified) return;
 
     entry.status = 'failed';
     entry.endTime = Date.now();
@@ -1490,15 +1485,15 @@ export class BackgroundTaskRegistry {
    * registry right after passing the gate, which suppresses that very
    * notification, so blocking on it made the command silently no-op
    * when the user cleared immediately after cancelling (issue #5949).
-   * A watchdog-terminal run is excluded even while its physical slot remains
-   * reserved: runtime recycling, not Session work retention, owns its teardown.
+   * A watchdog-terminal run still counts while its underlying execution holds
+   * a physical slot, so session reset cannot erase the only remaining owner.
    * Headless holdback loops must keep using `hasUnfinalizedTasks()` so
    * every task_started still pairs with a task_notification.
    */
   hasRunningTasks(): boolean {
     for (const entry of this.agents.values()) {
       if (!entry.isBackgrounded) continue;
-      if (entry.status === 'running') return true;
+      if (entry.status === 'running' || entry.retainsPhysicalSlot) return true;
     }
     return false;
   }

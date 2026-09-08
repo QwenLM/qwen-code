@@ -1361,7 +1361,11 @@ export class BackgroundAgentResumeService {
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
           if (registry.get(meta.agentId)?.retainsPhysicalSlot) return;
-          if (turnAbortController.signal.aborted && !progressTimeout) {
+          if (
+            turnAbortController.signal.aborted &&
+            (!progressTimeout ||
+              registry.get(meta.agentId)?.status === 'cancelled')
+          ) {
             const stats = getCompletionStats(subagent, liveToolCallCount);
             registry.finalizeCancelled(meta.agentId, errorMessage, stats);
             persistBackgroundCancellation(

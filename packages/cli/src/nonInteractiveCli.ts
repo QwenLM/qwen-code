@@ -878,6 +878,7 @@ export async function runNonInteractive(
       sendMessageType: SendMessageType;
       todoWorkChainId?: string;
       monitorId?: string;
+      recordOnly?: true;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -1531,7 +1532,7 @@ export async function runNonInteractive(
           },
         };
         if (meta.recordOnly) {
-          emitNotificationToSdk(item);
+          localQueue.push({ ...item, recordOnly: true });
           return;
         }
         localQueue.push(item);
@@ -2739,11 +2740,14 @@ export async function runNonInteractive(
               emitNotificationToSdk(queueItem);
             }
 
+            const modelBatch = batch.filter((item) => !item.recordOnly);
+            if (modelBatch.length === 0) return;
+
             const item = {
-              displayText: batch.map((i) => i.displayText).join('; '),
-              modelText: batch.map((i) => i.modelText).join('\n\n'),
+              displayText: modelBatch.map((i) => i.displayText).join('; '),
+              modelText: modelBatch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
-              todoWorkChainId: batch[0]?.todoWorkChainId,
+              todoWorkChainId: modelBatch[0]?.todoWorkChainId,
             };
 
             turnCount++;
