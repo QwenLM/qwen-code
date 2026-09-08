@@ -510,6 +510,171 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       expect(out.status).toBe(404);
       expect(out.body['error']).toBe('no_such_remote');
     });
+
+    it('redacts the main gitdir a linked worktree cannot reach via its toplevel', () => {
+      // A linked worktree's .git is a FILE pointing into the main
+      // repository's .git dir; git echoes THAT absolute path for
+      // config-lock failures, and neither the cwd substitution nor
+      // findGitRoot covers it — the path must still not leave the
+      // process boundary.
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-redact-'));
+      try {
+        function classifyAt(
+          cwd: string,
+          stderr: string,
+        ): { status: number; body: Record<string, unknown> } {
+          const out = { status: 0, body: {} as Record<string, unknown> };
+          const res = {
+            status(code: number) {
+              out.status = code;
+              return res;
+            },
+            json(body: Record<string, unknown>) {
+              out.body = body;
+              return res;
+            },
+          };
+          sendGitError(
+            res as never,
+            { stdout: '', stderr },
+            'test-route',
+            sendBridgeError,
+            cwd,
+          );
+          return out;
+        }
+        const mainGit = path.join(root, 'main', '.git');
+        const wtGit = path.join(mainGit, 'worktrees', 'wt');
+        fs.mkdirSync(wtGit, { recursive: true });
+        const wt = path.join(root, 'wt');
+        fs.mkdirSync(wt, { recursive: true });
+        fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${wtGit}\n`);
+        const out = classifyAt(
+          wt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(out.status).toBe(409);
+        expect(out.body['error']).toBe('git_config_write_failed');
+        const message = String(out.body['message']);
+        expect(message).toContain('<workspace>/config');
+        expect(message).not.toContain(mainGit);
+        expect(message).not.toContain(root);
+
+        // A cwd BELOW the worktree root must not disable the redaction:
+        // the .git file lives at the git root, which is probed instead.
+        const sub = path.join(wt, 'sub');
+        fs.mkdirSync(sub, { recursive: true });
+        const outSub = classifyAt(
+          sub,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outSub.body['message'])).not.toContain(mainGit);
+        expect(String(outSub.body['message'])).toContain('<workspace>/config');
+
+        // A submodule's gitdir (under the superproject, conventionally a
+        // RELATIVE gitdir: value) is outside the workspace tree too.
+        const superGit = path.join(root, 'super', '.git', 'modules', 'sub');
+        fs.mkdirSync(superGit, { recursive: true });
+        const subWt = path.join(root, 'super', 'sub');
+        fs.mkdirSync(subWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(subWt, '.git'),
+          `gitdir: ${path.relative(subWt, superGit)}\n`,
+        );
+        const outModule = classifyAt(
+          subWt,
+          `error: could not lock config file ${superGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outModule.body['message'])).not.toContain(superGit);
+        expect(String(outModule.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // A gitdir whose parent is NOT named worktrees (a relocated
+        // admin dir) is resolved through the commondir FILE git writes
+        // inside it, not the layout heuristic.
+        const movedGit = path.join(root, 'moved-admin');
+        fs.mkdirSync(movedGit, { recursive: true });
+        fs.writeFileSync(
+          path.join(movedGit, 'commondir'),
+          `${path.relative(movedGit, mainGit)}\n`,
+        );
+        const movedWt = path.join(root, 'moved-wt');
+        fs.mkdirSync(movedWt, { recursive: true });
+        fs.writeFileSync(path.join(movedWt, '.git'), `gitdir: ${movedGit}\n`);
+        const outMoved = classifyAt(
+          movedWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outMoved.body['message'])).not.toContain(mainGit);
+        expect(String(outMoved.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // Deliberate over-redaction: the parser accepts forms beyond
+        // git's same-line grammar, because over-redaction cannot leak.
+        const nlWt = path.join(root, 'nl-wt');
+        fs.mkdirSync(nlWt, { recursive: true });
+        fs.writeFileSync(path.join(nlWt, '.git'), `gitdir:\n ${wtGit}\n`);
+        const outNl = classifyAt(
+          nlWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outNl.body['message'])).not.toContain(mainGit);
+        expect(String(outNl.body['message'])).toContain('<workspace>/config');
+
+        // The .git file is workspace-controlled content on the daemon's
+        // shared error path: the read is head-bounded, and a valid
+        // target inside the head must still parse past an oversize tail.
+        const bigWt = path.join(root, 'big-wt');
+        fs.mkdirSync(bigWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(bigWt, '.git'),
+          `gitdir: ${wtGit}\n${'x'.repeat(128 * 1024)}`,
+        );
+        const outBig = classifyAt(
+          bigWt,
+          `error: could not lock config file ${mainGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outBig.body['message'])).not.toContain(mainGit);
+        expect(String(outBig.body['message'])).toContain('<workspace>/config');
+
+        // git echoes the REALPATHED spelling of the gitdir (macOS
+        // /tmp -> /private/tmp, or any symlink component): a gitfile
+        // pointing through a symlink must redact the canonical form.
+        const alias = path.join(root, 'alias-git');
+        fs.symlinkSync(mainGit, alias, 'dir');
+        const aliasWt = path.join(root, 'alias-wt');
+        fs.mkdirSync(aliasWt, { recursive: true });
+        fs.writeFileSync(path.join(aliasWt, '.git'), `gitdir: ${alias}\n`);
+        const realMain = fs.realpathSync(mainGit);
+        const outAlias = classifyAt(
+          aliasWt,
+          `error: could not lock config file ${realMain}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outAlias.body['message'])).not.toContain(realMain);
+        expect(String(outAlias.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // A gitdir line longer than the read head: git echoes the WHOLE
+        // target, so the truncated capture redacts as a prefix token —
+        // the tail past the head must not reach the client either.
+        const longTarget = `/${'p'.repeat(9 * 1024)}`;
+        const longWt = path.join(root, 'long-wt');
+        fs.mkdirSync(longWt, { recursive: true });
+        fs.writeFileSync(path.join(longWt, '.git'), `gitdir: ${longTarget}\n`);
+        const outLong = classifyAt(
+          longWt,
+          `fatal: not a git repository: ${longTarget}`,
+        );
+        const longMessage = String(outLong.body['message']);
+        expect(longMessage).toContain('<workspace>');
+        expect(longMessage).not.toContain('p'.repeat(100));
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 
   it('updates a dirty tree and restores the local changes with stash', async () => {

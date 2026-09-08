@@ -418,6 +418,83 @@ describe('fetchGitRemotes', () => {
     ).toMatch(/invalid refspec/i);
   });
 
+  it('does not complete a worktree section over git’s invalid-refspec refusal', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.evil.url',
+      'https://example.com/e/r.git',
+    );
+    // A config-chosen refspec value carries a real newline whose second
+    // line spoofs the completion phrase; git dies parsing it BEFORE
+    // mutating, so the worktree completion must not fire — the refusal
+    // has its own answer (remote_config_unparsable) and the row stays.
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.evil.fetch',
+      "+refs/heads/*\ncould not remove config section 'remote.evil'",
+    );
+    const err = await gitRemoteRemove(wt, 'evil', fixtureEnv).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const e = err as { stderr?: unknown; message?: unknown };
+    expect(
+      `${typeof e.stderr === 'string' ? e.stderr : ''}${
+        typeof e.message === 'string' ? e.message : ''
+      }`,
+    ).toMatch(/invalid refspec/i);
+    expect(git(wt, 'config', '--worktree', '--get', 'remote.evil.url')).toBe(
+      'https://example.com/e/r.git\n',
+    );
+  });
+
+  it('does not mistake an injected exact-prefix line for git’s refusal', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.evil.url',
+      'https://example.com/e/r.git',
+    );
+    // The injected line now carries git's exact `error: Could not …`
+    // prefix: the line anchor alone would match it, so only the
+    // invalid-refspec precedence keeps the completion from firing.
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.evil.fetch',
+      "+refs/heads/*\nerror: Could not remove config section 'remote.evil'",
+    );
+    const err = await gitRemoteRemove(wt, 'evil', fixtureEnv).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const e = err as { stderr?: unknown; message?: unknown };
+    expect(
+      `${typeof e.stderr === 'string' ? e.stderr : ''}${
+        typeof e.message === 'string' ? e.message : ''
+      }`,
+    ).toMatch(/invalid refspec/i);
+    expect(git(wt, 'config', '--worktree', '--get', 'remote.evil.url')).toBe(
+      'https://example.com/e/r.git\n',
+    );
+  });
+
   it('rejects outside a git repository', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-notrepo-'));
     tmpRoots.push(dir);

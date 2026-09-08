@@ -34,6 +34,7 @@ import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { validateBranchName } from './GitModePopover';
 import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
+import { getShadowAwareActiveElement } from '../utils/dom';
 import styles from './BranchPickerPopover.module.css';
 
 // The daemon's stash/force pull flows chain git commands, each with its own
@@ -92,13 +93,23 @@ function sanitizeRemoteDisplay(value: string): string {
   return value.replace(DISPLAY_INVISIBLE_CHARS, '');
 }
 
-// Tooltip/aria rendering of a raw configured name: the characters the
-// sanitizer strips become visible codepoint escapes, so rows that would
-// otherwise render identically (origin vs ori\u200bgin) stay tellable
-// apart for sighted and screen-reader users alike.
-function escapeInvisibleChars(value: string): string {
+// The popover content may live in a shadow-portal root (Web Shell portal
+// mode): document.activeElement retargets to the host and
+// document.body.querySelector cannot cross the boundary, so every focus
+// capture and lookup resolves from the content element's own root.
+function rootScope(element: Element | null): Document | ShadowRoot {
+  const root = element?.getRootNode();
+  return root instanceof ShadowRoot ? root : document;
+}
+
+// Tooltip/aria escapes for remote names AND URLs: whitespace joins the
+// stripped invisible class, because CSS collapses edge and repeated
+// whitespace out of the inked text — `origin` and `origin ` render one
+// row — so the tooltip (and the name's aria-label) spells those
+// characters out too.
+function escapeNameChars(value: string): string {
   return value.replace(
-    DISPLAY_INVISIBLE_CHARS,
+    /[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu,
     (ch) => `\\u{${ch.codePointAt(0)?.toString(16)}}`,
   );
 }
@@ -387,6 +398,10 @@ export function BranchPickerPopover({
   // signal that the user's changes sit in a stash entry, so it must survive
   // the reopen reset below even when the pull settled while closed.
   const stickyWarningRef = useRef(false);
+  // The standing sticky warning while the remotes view is up: a remotes
+  // mutation's own footer (add/remove status) would otherwise overwrite
+  // the only in-product record of the stash entry AND disarm its flag.
+  const remotesStickySnapshotRef = useRef<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     recent: false,
     local: false,
@@ -434,6 +449,10 @@ export function BranchPickerPopover({
   // open effect on every render (callback → setState → render → refetch…).
   const onStatusRefreshedRef = useRef(onStatusRefreshed);
   onStatusRefreshedRef.current = onStatusRefreshed;
+  // The busy state mirrored into a ref: the open effect reads it without
+  // re-running the open reset on every mutation state flip.
+  const busyActionRef = useRef(busyAction);
+  busyActionRef.current = busyAction;
 
   // `silent` is the post-action refresh: the listing on screen is stale but
   // usable, so the refresh must neither raise the placeholder the render gate
@@ -492,6 +511,7 @@ export function BranchPickerPopover({
     remotesRequestIdRef.current++;
     addFocusRestoreRef.current = null;
     removeFocusRestoreRef.current = null;
+    remotesStickySnapshotRef.current = null;
   }, [ws, gitCwd]);
 
   const effectiveStatus = useMemo(
@@ -514,6 +534,26 @@ export function BranchPickerPopover({
       setRemoteName('');
       setRemoteUrl('');
       setConfirmRemove(null);
+      // A dismissal while the remotes view was up (outside click, trigger
+      // toggle) never runs closeRemotes, so the snapshot can still be
+      // held here: restore it — message AND flag — rather than dropping
+      // the only record of the stash entry. Gated on no in-flight
+      // mutation: a settling mutation lands its own footer after this
+      // restore would run, overwriting it — the held snapshot is
+      // restored on a later open once the mutation has settled.
+      if (!busyActionRef.current) {
+        const stickySnapshot = remotesStickySnapshotRef.current;
+        remotesStickySnapshotRef.current = null;
+        // A warning armed at open time is the same warning the
+        // snapshot holds (a view-up dismissal never disarms it) or a
+        // newer one — either way the standing warning wins and the
+        // held snapshot is dropped.
+        if (stickySnapshot && !stickyWarningRef.current) {
+          setStatusMsg(stickySnapshot);
+          setStatusType('warning');
+          stickyWarningRef.current = true;
+        }
+      }
       if (!stickyWarningRef.current) setStatusMsg(null);
       setPullBlocked(false);
       setConfirmDiscard(false);
@@ -773,8 +813,17 @@ export function BranchPickerPopover({
   const openRemotes = useCallback(() => {
     // Only a standing pull-resolution panel competes with the remotes view;
     // an unrelated sticky warning (a kept stash entry) must survive the
-    // round trip, per stickyWarningRef's contract.
+    // round trip, per stickyWarningRef's contract — so snapshot it: a
+    // remotes mutation's own footer would otherwise overwrite the message
+    // and disarm the flag.
     if (pullBlocked) clearPullPanel();
+    // Snapshot the standing warning only when one actually stands: a
+    // snapshot held through a busy view-exit (a mutation settled after
+    // the exit, disarming the flag) must not be nulled here before any
+    // restore point consumes it.
+    if (stickyWarningRef.current) {
+      remotesStickySnapshotRef.current = statusMsg;
+    }
     setNewBranchMode(false);
     setCheckoutRefMode(false);
     setConfirmRemove(null);
@@ -784,7 +833,7 @@ export function BranchPickerPopover({
     setSearch('');
     setView('remotes');
     void fetchRemotes();
-  }, [pullBlocked, clearPullPanel, fetchRemotes]);
+  }, [pullBlocked, clearPullPanel, fetchRemotes, statusMsg]);
 
   const closeRemotes = useCallback(() => {
     setView('branches');
@@ -793,7 +842,17 @@ export function BranchPickerPopover({
     // The row that opens the panel is unmounted while the remotes view is
     // up, so focus can only be restored after the branches view commits.
     pendingManageFocusRef.current = true;
-  }, []);
+    // Restore the sticky warning the view entry snapshotted — through
+    // showStatus so the sticky flag is re-armed, not just the text. Not
+    // while a mutation is in flight: its settle lands its own footer
+    // after this restore would run, overwriting it — the held snapshot
+    // is restored on the next open instead.
+    if (!busyAction) {
+      const snapshot = remotesStickySnapshotRef.current;
+      remotesStickySnapshotRef.current = null;
+      if (snapshot) showStatus(snapshot, 'warning');
+    }
+  }, [busyAction, showStatus]);
 
   useEffect(() => {
     if (view !== 'branches' || !pendingManageFocusRef.current) return;
@@ -816,12 +875,20 @@ export function BranchPickerPopover({
       return;
     }
     if (busyAction !== null) return;
+    // Dismissed mid-mutation: the content is unmounted, so a root-scoped
+    // lookup would fall back to the whole document — and could steal
+    // focus into ANOTHER popover instance's remotes view.
+    if (!contentRef.current) {
+      addFocusRestoreRef.current = null;
+      removeFocusRestoreRef.current = null;
+      return;
+    }
     // Disabling the add inputs while the mutation ran blurred them; put
     // focus back once they are enabled again.
     const testId = addFocusRestoreRef.current;
     if (testId) {
       addFocusRestoreRef.current = null;
-      const el = document.body.querySelector<HTMLElement>(
+      const el = rootScope(contentRef.current).querySelector<HTMLElement>(
         `[data-testid="${testId}"]`,
       );
       const disabled =
@@ -837,9 +904,9 @@ export function BranchPickerPopover({
     if (!removedName) return;
     removeFocusRestoreRef.current = null;
     let target: HTMLElement | null = null;
-    for (const button of document.body.querySelectorAll<HTMLButtonElement>(
-      '[data-testid^="remote-remove-"]',
-    )) {
+    for (const button of rootScope(
+      contentRef.current,
+    ).querySelectorAll<HTMLButtonElement>('[data-testid^="remote-remove-"]')) {
       if (
         button.dataset.testid === `remote-remove-${removedName}` &&
         !button.disabled
@@ -850,7 +917,9 @@ export function BranchPickerPopover({
     }
     (
       target ??
-      document.body.querySelector<HTMLElement>('[data-testid="remotes-back"]')
+      rootScope(contentRef.current).querySelector<HTMLElement>(
+        '[data-testid="remotes-back"]',
+      )
     )?.focus();
   }, [busyAction, view]);
 
@@ -867,7 +936,7 @@ export function BranchPickerPopover({
     }
     const requestId = remotesRequestIdRef.current;
     setConfirmRemove(null);
-    const active = document.activeElement;
+    const active = getShadowAwareActiveElement(contentRef.current);
     addFocusRestoreRef.current =
       active instanceof HTMLElement &&
       (active.dataset.testid === 'remote-add-name' ||
@@ -925,7 +994,7 @@ export function BranchPickerPopover({
       // buttons do not take focus on click (Safari) or on programmatic
       // triggers, the row button never held focus, so there is nothing to
       // restore and the settle effect must not yank focus elsewhere.
-      const active = document.activeElement;
+      const active = getShadowAwareActiveElement(contentRef.current);
       removeFocusRestoreRef.current =
         active instanceof HTMLElement &&
         active.dataset.testid === `remote-remove-${name}`
@@ -1043,13 +1112,22 @@ export function BranchPickerPopover({
     if (!q) return remotes;
     // Match the values the row actually renders (sanitized), on both sides:
     // a needle copied from a raw config string carries the same invisible
-    // characters the row strips, so sanitize it too.
-    const needle = sanitizeRemoteDisplay(q).toLowerCase();
+    // characters the row strips, so sanitize it too — and collapse
+    // whitespace the way CSS inks it, so a needle copied from the row's
+    // displayed (collapsed) text finds the row.
+    const collapse = (v: string) => v.replace(/\s+/g, ' ');
+    const needle = collapse(sanitizeRemoteDisplay(q)).toLowerCase();
     return remotes.filter(
       (r) =>
-        sanitizeRemoteDisplay(r.name).toLowerCase().includes(needle) ||
-        sanitizeRemoteDisplay(r.fetchUrl).toLowerCase().includes(needle) ||
-        sanitizeRemoteDisplay(r.pushUrl).toLowerCase().includes(needle),
+        collapse(sanitizeRemoteDisplay(r.name))
+          .toLowerCase()
+          .includes(needle) ||
+        collapse(sanitizeRemoteDisplay(r.fetchUrl))
+          .toLowerCase()
+          .includes(needle) ||
+        collapse(sanitizeRemoteDisplay(r.pushUrl))
+          .toLowerCase()
+          .includes(needle),
     );
   }, [remotes, q]);
 
@@ -1701,15 +1779,25 @@ function RemotesView({
               // sibling row (origin vs ori\u200bgin): flag every row whose
               // rendered text differs from its raw name, and carry the
               // escaped raw name into the tooltip and the aria-labels so
-              // two lookalikes never present one identity.
-              const hiddenChars = displayName !== r.name;
+              // two lookalikes never present one identity. CSS also
+              // collapses edge and repeated whitespace out of the inked
+              // text, so a name differing only by whitespace (origin vs
+              // "origin ") flags the same way.
+              const hiddenChars =
+                displayName !== r.name ||
+                r.name.replace(/\s+/g, ' ').trim() !== r.name;
+              // The marker's visible part shows the name as CSS inks it
+              // (whitespace collapsed, edges trimmed) so the raw name's
+              // padding does not double the separator before the marker;
+              // the raw name itself is in the tooltip/aria escapes.
+              const visibleName = displayName.replace(/\s+/g, ' ').trim();
               const rowName = hiddenChars
-                ? displayName
-                  ? `${displayName} ${t('branchPicker.remotes.hiddenChars')}`
+                ? visibleName
+                  ? `${visibleName} ${t('branchPicker.remotes.hiddenChars')}`
                   : t('branchPicker.remotes.invisibleName')
                 : displayName;
               const escapedName = hiddenChars
-                ? escapeInvisibleChars(r.name)
+                ? escapeNameChars(r.name)
                 : undefined;
               const ariaName = escapedName
                 ? `${rowName} ${escapedName}`
@@ -1717,15 +1805,19 @@ function RemotesView({
               const fetchDisplay = sanitizeRemoteDisplay(r.fetchUrl);
               const pushDisplay = sanitizeRemoteDisplay(r.pushUrl);
               // Same lookalike treatment as the name: two URLs that differ
-              // only by invisible characters must not tooltip identically.
+              // only by invisible characters OR whitespace must not
+              // tooltip identically (CSS collapses the latter out of the
+              // inked text, so the tooltip carries the escapes).
               const fetchTitle =
-                fetchDisplay === r.fetchUrl
+                fetchDisplay === r.fetchUrl &&
+                r.fetchUrl.replace(/\s+/g, ' ').trim() === r.fetchUrl
                   ? fetchDisplay
-                  : escapeInvisibleChars(r.fetchUrl);
+                  : escapeNameChars(r.fetchUrl);
               const pushTitle =
-                pushDisplay === r.pushUrl
+                pushDisplay === r.pushUrl &&
+                r.pushUrl.replace(/\s+/g, ' ').trim() === r.pushUrl
                   ? pushDisplay
-                  : escapeInvisibleChars(r.pushUrl);
+                  : escapeNameChars(r.pushUrl);
               const extras = remoteExtras(r, t);
               return (
                 <div key={r.name} className={styles.remoteRow}>
@@ -1791,6 +1883,11 @@ function RemotesView({
               disabled={!!busyAction}
               onChange={(e) => onNameChange(e.target.value)}
               onKeyDown={(e) => {
+                // An IME-owned Enter commits the composition, not the
+                // form (WebKit marks it keyCode 229 while isComposing is
+                // still false — the house guard shape).
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)
+                  return;
                 if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
               }}
               spellCheck={false}
@@ -1804,6 +1901,8 @@ function RemotesView({
               disabled={!!busyAction}
               onChange={(e) => onUrlChange(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)
+                  return;
                 if (e.key === 'Enter' && name.trim() && url.trim()) onAdd();
               }}
               spellCheck={false}

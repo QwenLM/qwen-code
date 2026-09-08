@@ -17,6 +17,8 @@ import {
   isValidRefName,
   isValidCheckoutRef,
 } from '@qwen-code/qwen-code-core';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -41,7 +43,147 @@ function redactGitPaths(detail: string, cwd: string): string {
   if (gitRoot && gitRoot !== cwd) {
     message = message.split(gitRoot).join('<workspace>');
   }
+  // The gitdir git echoes for config writes can live OUTSIDE the cwd's
+  // tree: a linked worktree shares the MAIN repository's .git dir (`could
+  // not lock config file /srv/main/.git/config`), a submodule's gitdir
+  // lives under the superproject's .git/modules. Probe from the git root
+  // (it holds the .git file; cwd may be a sub-directory).
+  const externals = gitExternalDirs(gitRoot ?? cwd);
+  for (const dir of externals.dirs) {
+    message = message.split(dir).join('<workspace>');
+  }
+  for (const key of externals.truncatedKeys) {
+    // A target longer than the read head: git echoes it whole, so the
+    // head is redacted as a PREFIX TOKEN — an exact split would leave
+    // the tail of the absolute path on the wire.
+    message = message.replace(
+      new RegExp(`${escapeRegExp(key)}\\S*`, 'g'),
+      '<workspace>',
+    );
+  }
   return message;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The absolute dirs outside a `.git`-FILE repo's own tree whose paths git
+// can echo: the gitdir the file points at (resolved — a submodule's
+// conventionally relative `gitdir:` value included) and, for the
+// worktrees layout, the shared common dir two levels up. Empty for a
+// plain repository, where findGitRoot's substitution already covers the
+// path.
+function gitExternalDirs(repoRoot: string): {
+  dirs: string[];
+  truncatedKeys: string[];
+} {
+  const out = { dirs: [] as string[], truncatedKeys: [] as string[] };
+  try {
+    const dotgit = path.join(repoRoot, '.git');
+    if (!fs.statSync(dotgit).isFile()) return out;
+    // HEAD-BOUNDED reads: the .git file is workspace-controlled content
+    // on the daemon's shared error path (a symlinked multi-GB target
+    // would otherwise be slurped whole on every git route failure). A
+    // valid gitdir target is a path (PATH_MAX 4096), so 8 KiB is
+    // lossless.
+    const head = readHead(dotgit, 8192);
+    if (head === null) return out;
+    // git accepts only a same-line target (probed 2.50.1: a newline
+    // after the prefix is rejected); the parser deliberately
+    // over-accepts — redaction must never under-accept a form git
+    // might parse, and over-redaction cannot leak.
+    const m = /^gitdir:\s*(\S[^\n]*?)(?:\r?\n|$)/m.exec(head.text);
+    if (!m) return out;
+    if (head.truncated && !m[0].endsWith('\n')) {
+      // The gitdir line is cut at the head boundary: git echoes the
+      // WHOLE target, so an exact partial key would leave the tail on
+      // the wire (a multibyte cut could even end it in U+FFFD) — the
+      // prefix-token arm handles it.
+      const key = m[1].replace(/\uFFFD+$/, '');
+      if (key) out.truncatedKeys.push(key);
+      return out;
+    }
+    const gitdir = path.resolve(path.dirname(dotgit), m[1]);
+    const dirs: string[] = [];
+    // git echoes the REALPATHED form of these paths (macOS /tmp ->
+    // /private/tmp and any user-created symlink component), so redact
+    // both the literal and the canonical spelling of every candidate.
+    const push = (dir: string): void => {
+      dirs.push(dir);
+      try {
+        dirs.push(fs.realpathSync(dir));
+      } catch {
+        // A dangling target leaves only the literal spelling to redact.
+      }
+    };
+    push(gitdir);
+    let canonical = gitdir;
+    try {
+      canonical = fs.realpathSync(gitdir);
+    } catch {
+      // Dangling gitdir: only the literal can be redacted anyway.
+    }
+    // git's authoritative pointer to the shared config dir: the
+    // `commondir` file inside the gitdir (relative to it). The
+    // worktrees-layout heuristic is the fallback for gitdirs without one
+    // (a relocated admin dir has no worktrees-named parent).
+    const common = readHead(path.join(canonical, 'commondir'), 4096);
+    if (common !== null) {
+      if (common.truncated && !common.text.includes('\n')) {
+        const key = common.text.trim().replace(/\uFFFD+$/, '');
+        if (key) out.truncatedKeys.push(key);
+      } else {
+        const first = common.text.split('\n', 1)[0].trim();
+        // git resolves the pointer against the gitdir it read; the echo
+        // can carry either spelling (the literal the user configured, or
+        // the canonical form git realpaths at setup).
+        if (first) {
+          push(path.resolve(gitdir, first));
+          if (canonical !== gitdir) push(path.resolve(canonical, first));
+        }
+      }
+    }
+    for (const base of new Set([gitdir, canonical])) {
+      if (path.basename(path.dirname(base)) === 'worktrees') {
+        push(path.dirname(path.dirname(base)));
+      }
+    }
+    out.dirs = dirs;
+    return out;
+  } catch {
+    return out;
+  }
+}
+
+// The first `cap` bytes of a file as utf8 plus whether the file continues
+// past them, or null when unreadable. The daemon is long-lived and these
+// files are workspace-controlled, so the read must never be sized by the
+// file itself.
+function readHead(
+  file: string,
+  cap: number,
+): { text: string; truncated: boolean } | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(cap + 1);
+    const bytes = fs.readSync(fd, buf, 0, cap + 1, 0);
+    return {
+      text: buf.toString('utf8', 0, Math.min(bytes, cap)),
+      truncated: bytes > cap,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // The head read already settled; a close failure carries nothing.
+      }
+    }
+  }
 }
 
 function redactGitMessage(detail: string, cwd: string): string {

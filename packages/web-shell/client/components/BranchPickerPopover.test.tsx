@@ -18,31 +18,40 @@ import type {
 // settle under `act` in jsdom. Render the trigger and content inline instead
 // so the action wiring can be exercised directly.
 vi.mock('./ui/popover', async () => {
-  const { createElement } = await import('react');
+  const { createElement, createContext, forwardRef, useContext } = await import(
+    'react'
+  );
+  const OpenContext = createContext(true);
+  const PopoverContent = forwardRef<
+    HTMLDivElement,
+    {
+      children?: unknown;
+      onEscapeKeyDown?: (e: KeyboardEvent) => void;
+    }
+  >(({ children, onEscapeKeyDown }, ref) => {
+    // Like Radix, the content unmounts when the popover closes.
+    if (!useContext(OpenContext)) return null;
+    return createElement(
+      'div',
+      {
+        'data-test-popover-content': '',
+        ref,
+        onKeyDown: (e: KeyboardEvent) => {
+          if (e.key === 'Escape') onEscapeKeyDown?.(e);
+        },
+      },
+      children,
+    );
+  });
+  PopoverContent.displayName = 'PopoverContent';
   return {
-    Popover: ({ children }: { children?: unknown }) =>
-      createElement('div', null, children),
+    Popover: ({ children, open }: { children?: unknown; open?: boolean }) =>
+      createElement(OpenContext.Provider, { value: open ?? true }, children),
     PopoverTrigger: ({ children }: { children?: unknown }) =>
       createElement('div', null, children),
     // Forward onEscapeKeyDown the way Radix's DismissableLayer does, so the
     // component's Escape handling is exercised without the real dependency.
-    PopoverContent: ({
-      children,
-      onEscapeKeyDown,
-    }: {
-      children?: unknown;
-      onEscapeKeyDown?: (e: KeyboardEvent) => void;
-    }) =>
-      createElement(
-        'div',
-        {
-          'data-test-popover-content': '',
-          onKeyDown: (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onEscapeKeyDown?.(e);
-          },
-        },
-        children,
-      ),
+    PopoverContent,
   };
 });
 
@@ -1743,6 +1752,13 @@ describe('BranchPickerPopover remotes view', () => {
   ): Promise<void> {
     mountWithBranches(BRANCHES, overrides);
     await flush();
+    // The popover's open-time autofocus fires on an unawaited 50ms timer:
+    // let it land before a test moves focus, or under load the timer
+    // steals the asserted target back to the search box (and blesses the
+    // search-box fallback for the wrong reason).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
     clickTestId('branch-picker-manage-remotes');
     await flush();
   }
@@ -2015,6 +2031,217 @@ describe('BranchPickerPopover remotes view', () => {
 
     expect(footerText()).toContain('restoring your stashed changes failed');
     expect(footerText()).toContain('dcda4a53ed65');
+  });
+
+  it('restores the sticky stash warning a remotes mutation overwrote', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    // A remotes mutation writes its own footer: the stash warning must
+    // come back — message AND sticky flag — when leaving the view, or
+    // the only record of the stash entry is lost.
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('Added remote');
+    clickTestId('remotes-back');
+    await flush();
+
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Added remote');
+
+    // The sticky flag is restored too: the reopen reset must keep the
+    // warning, not clear it.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+  });
+
+  it('restores the sticky warning after a dismiss with the remotes view up', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('Added remote');
+
+    // Dismissal (outside click, trigger toggle) never runs the back
+    // button's restore path — the snapshot must still come back, message
+    // AND flag, on the next open.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Added remote');
+  });
+
+  it('keeps the sticky warning when a mutation settles after the view exit', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // Leave the view while the removal is still in flight: the settle's
+    // footer must win the exit, not clobber the restored warning.
+    clickTestId('remotes-back');
+    await flush();
+    // A dismiss+reopen WHILE BUSY must not consume the held snapshot
+    // either — the open effect's busy gate keeps it for a post-settle
+    // open.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(footerText()).toContain('Removed remote');
+
+    // Re-entering the view before any restore point must not null the
+    // held snapshot (the settle disarmed the flag, so the re-snapshot
+    // reads null and the held copy is the only surviving one). The back
+    // click below is unblocked, so closeRemores restores and consumes
+    // the held snapshot there.
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+
+    // The dismiss/reopen pins the re-armed warning surviving the open
+    // reset.
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('restoring your stashed changes failed');
+    expect(footerText()).toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Removed remote');
+  });
+
+  it('a newer sticky warning outranks a snapshot held from an older one', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 1..2',
+      stashRestoreConflict: true,
+      stashSha: 'dcda4a53ed6526ecc6c4cda837d665140a2baff1',
+    });
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('dcda4a53ed65');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    clickTestId('remotes-back');
+    await flush();
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+
+    // A second pull arms a NEWER warning while the older one is still
+    // held: the standing warning wins and the stale snapshot is dropped.
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPull.mockResolvedValueOnce({
+      success: true,
+      output: 'Updating 3..4',
+      stashRestoreConflict: true,
+      stashSha: 'aaaa1111bbbb6526ecc6c4cda837d665140a2baff1',
+    });
+    clickButton('Update Project');
+    await flush();
+    clickButton('Stash Changes and Update');
+    await flush();
+    expect(footerText()).toContain('aaaa1111bbbb');
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+    expect(footerText()).toContain('aaaa1111bbbb');
+    expect(footerText()).not.toContain('dcda4a53ed65');
+    expect(footerText()).not.toContain('Removed remote');
   });
 
   it('disarms a pending remove confirm when the popover reopens', async () => {
@@ -2623,6 +2850,167 @@ describe('BranchPickerPopover remotes view', () => {
     );
   });
 
+  it('tells apart rows whose names differ only by whitespace', async () => {
+    // CSS collapses edge whitespace out of the inked text, so `origin`
+    // and `origin ` present one row and one aria-label — the exact
+    // hand-edited-config threat the hidden-characters marker exists for.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'origin ',
+          fetchUrl: 'https://example.com/evil/r.git',
+          pushUrl: 'https://example.com/evil/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // URLs differing only by whitespace must not tooltip identically.
+          name: 'mirror',
+          fetchUrl: 'https://example.com/m/r.git',
+          pushUrl: 'https://example.com/m/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          name: 'mirror2',
+          fetchUrl: 'https://example.com/m/r.git ',
+          pushUrl: 'https://example.com/m/r.git ',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+        {
+          // An internal whitespace run renders collapsed, and the search
+          // must still find the row by its displayed (collapsed) text.
+          name: 'upstream  x',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+
+    const plain = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    )?.parentElement;
+    const padded = document.body.querySelector(
+      '[data-testid="remote-remove-origin "]',
+    )?.parentElement;
+    expect(plain?.textContent).not.toContain('(hidden characters)');
+    expect(padded?.textContent).toContain('(hidden characters)');
+    // The tooltip and the aria-label spell the whitespace out as a
+    // codepoint escape, so the two identities stay tellable apart.
+    expect(
+      padded?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin\\u{20}');
+    expect(
+      plain?.querySelector('[class*="remoteName"]')?.getAttribute('title'),
+    ).toBe('origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin "]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove origin (hidden characters) origin\\u{20}');
+
+    // URLs differing only by whitespace tooltip differently, with the
+    // whitespace spelled out as a codepoint escape.
+    const mirrorUrl = document.body
+      .querySelector('[data-testid="remote-remove-mirror"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    const mirror2Url = document.body
+      .querySelector('[data-testid="remote-remove-mirror2"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(mirrorUrl?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git',
+    );
+    expect(mirror2Url?.getAttribute('title')).toBe(
+      'https://example.com/m/r.git\\u{20}',
+    );
+
+    // The search finds a whitespace-collapsed name by its displayed text.
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    expect(search).toBeTruthy();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, 'upstream x');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    const internalRow = document.body.querySelector(
+      '[data-testid="remote-remove-upstream  x"]',
+    );
+    expect(internalRow).toBeTruthy();
+    // The internal run gets the same marker treatment: the row flags, and
+    // the tooltip and aria-label spell the run out as codepoint escapes.
+    expect(internalRow?.parentElement?.textContent).toContain(
+      '(hidden characters)',
+    );
+    expect(
+      internalRow?.parentElement
+        ?.querySelector('[class*="remoteName"]')
+        ?.getAttribute('title'),
+    ).toBe('upstream\\u{20}\\u{20}x');
+    expect(internalRow?.getAttribute('aria-label')).toBe(
+      'Remove upstream x (hidden characters) upstream\\u{20}\\u{20}x',
+    );
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, '');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Removal still targets the raw configured name, padding included.
+    clickTestId('remote-remove-origin ');
+    clickTestId('remote-remove-origin ');
+    await flush();
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith('origin ', undefined);
+  });
+
   it('refreshes the branch list when a remove fails on the config write', async () => {
     // git deletes refs/remotes/<name>/* before removing the config
     // section, so a lock-failed section write leaves the branch list
@@ -2923,6 +3311,179 @@ describe('BranchPickerPopover remotes view', () => {
     // The success path clears the draft and puts focus on the name input
     // for the next remote, instead of leaving it on document.body.
     expect(document.activeElement).toBe(nameInput);
+  });
+
+  it('does not submit the add form on an IME-owned Enter', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    setInput('remote-add-name', 'shangyou');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    // An IME-owned Enter commits the composition, not the form — in both
+    // shapes the house documents (isComposing, and WebKit's keyCode 229
+    // with isComposing already false).
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          isComposing: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    // The URL input carries the identical guard.
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          isComposing: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    act(() => {
+      urlInput?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+        }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).not.toHaveBeenCalled();
+    // A plain Enter still submits — the guard does not swallow the real
+    // key.
+    act(() => {
+      nameInput?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+    expect(workspaceGitRemoteAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores focus inside a shadow-portal root', async () => {
+    // In the shadowDom/{portals:true} embedding the popover content lives
+    // in a shadow root: document.activeElement retargets to the host and
+    // document.body lookups cannot cross the boundary, so the focus
+    // capture and restore must resolve from the content's own root.
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    workspaceGitBranches.mockResolvedValue(BRANCHES);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    container = document.createElement('div');
+    shadow.appendChild(container);
+    root = createRoot(container);
+    mount();
+    try {
+      await flush();
+      // The open-time autofocus timer must land before focus moves.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 60));
+      });
+      const manage = shadow.querySelector(
+        '[data-testid="branch-picker-manage-remotes"]',
+      );
+      act(() => {
+        manage?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      const button = shadow.querySelector<HTMLButtonElement>(
+        '[data-testid="remote-remove-origin"]',
+      );
+      expect(button).toBeTruthy();
+      act(() => {
+        button?.focus();
+      });
+      expect(shadow.activeElement).toBe(button);
+      act(() => {
+        button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      act(() => {
+        shadow
+          .querySelector('[data-testid="remote-remove-origin"]')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await flush();
+      expect(
+        shadow.querySelector('[data-testid="remote-remove-origin"]'),
+      ).toBeNull();
+      // The row is gone with its focused button: the restore lands on the
+      // panel's back button INSIDE the shadow root — not the host, and
+      // not document.body.
+      expect(shadow.activeElement).toBe(
+        shadow.querySelector('[data-testid="remotes-back"]'),
+      );
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('does not restore focus into another mounted popover after a mid-mutation dismissal', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    // Focus the URL input so the mutation remembers it as the restore
+    // target.
+    act(() => {
+      document.body
+        .querySelector<HTMLInputElement>('input[data-testid="remote-add-url"]')
+        ?.focus();
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    // Dismiss mid-flight: the content unmounts, and the settle must not
+    // fall back to a document-wide lookup that can land on ANOTHER
+    // popover instance's control.
+    mount({ open: false });
+    await flush();
+    const foreign = document.createElement('input');
+    foreign.setAttribute('data-testid', 'remote-add-name');
+    document.body.appendChild(foreign);
+    try {
+      await act(async () => {
+        release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+      });
+      await flush();
+      expect(document.activeElement).not.toBe(foreign);
+    } finally {
+      foreign.remove();
+    }
   });
 
   it('falls back to the search box when the manage row is busy', async () => {

@@ -239,19 +239,23 @@ function* iterConfigRecords(raw: string): Generator<ConfigRecord> {
 /**
  * List the remotes configured in the repository's own editable scope — the
  * `local` config plus, where `extensions.worktreeConfig` enables it, the
- * per-worktree `config.worktree` — which is what git's own remote commands
- * resolve against inside the repository. `git config --local` alone is
- * NARROWER than that scope: an `include.path` entry in `.git/config`
- * contributes keys git still labels `local`, and worktree remotes live in a
- * separate file, so a `--local` read under-lists, dead-ends `git remote add`
- * (git's duplicate check sees the included name), and lets `git remote
- * remove` report success over a split section whose included half survives.
- * Reading `--list --show-scope` and filtering on the scope field covers
- * every repository-owned record while keeping inherited `global`/`system`
- * remotes out (git cannot remove those either). Reading config rather than
- * `git remote` + `get-url` also keeps the listing immune to insteadOf
- * rewriting, complete for multi-valued urls, and free of the per-name spawn
- * fan-out — one git process for the whole listing.
+ * per-worktree `config.worktree`. This is the panel's manage surface: each
+ * row is the repository-scope section `git remote remove` will edit, NOT
+ * git's full cross-scope resolution (a same-name section split across
+ * global and local resolves fetch/push across both in git, but only the
+ * repository half is listed or mutable here). `git config --local` alone
+ * is NARROWER than that scope: an `include.path` entry in `.git/config`
+ * contributes keys git still labels `local`, and worktree remotes live in
+ * a separate file, so a `--local` read under-lists, dead-ends `git remote
+ * add` (git's duplicate check sees the included name), and lets `git
+ * remote remove` report success over a split section whose included half
+ * survives. Reading `--list --show-scope` and filtering on the scope
+ * field covers every repository-owned record while keeping inherited
+ * `global`/`system` remotes out (git cannot remove those either).
+ * Reading config rather than `git remote` + `get-url` also keeps the
+ * listing immune to insteadOf rewriting, complete for multi-valued urls,
+ * and free of the per-name spawn fan-out — one git process for the whole
+ * listing.
  *
  * Records are read NUL-framed (`-z`): a config value may contain an escaped
  * newline, which the line-oriented form prints across two lines, and a
@@ -399,12 +403,20 @@ export async function gitRemoteRemove(
   // upstream keys, so every retry would repeat the destruction. Complete
   // the removal in the scope git could not write.
   if (removeError !== null) {
+    const detail = execDetail(removeError);
+    // git echoes a config-chosen refspec value verbatim inside its fatal
+    // line, and that value can carry a real newline — so the completion
+    // phrase is matched at a line start, and a fatal parse failure must
+    // NEVER read as the completion signal: git died before mutating, the
+    // row stayed, and the refusal has its own classifier answer
+    // (remote_config_unparsable), which the completion would bury.
     const completed =
-      /could not remove config section/i.test(execDetail(removeError)) &&
+      !/^(?:error|fatal): invalid refspec/m.test(detail) &&
+      /^(?:error|fatal): Could not remove config section/m.test(detail) &&
       (await removeWorktreeScopeSection(cwd, name, env));
     if (!completed) {
       if (
-        /no such remote/i.test(execDetail(removeError)) &&
+        /^(?:error|fatal): No such remote: /m.test(detail) &&
         (await remoteSectionScopes(cwd, name, env)).size === 0
       ) {
         // The section is already gone — an earlier attempt died after
