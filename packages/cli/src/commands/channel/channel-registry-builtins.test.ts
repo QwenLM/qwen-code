@@ -53,6 +53,18 @@ describe('built-in channel registry', () => {
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual(['dws', 'wecom', 'feishu', 'github', 'gitlab']);
+    expect(
+      catalog
+        .find((entry) => entry.type === 'dws')
+        ?.fields.find((field) => field.key === 'dmPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    });
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',

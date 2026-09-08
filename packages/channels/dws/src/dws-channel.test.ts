@@ -728,6 +728,77 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('does not subscribe to or poll group messages when group access is disabled', async () => {
+    const client = new FakeDwsClient();
+    client.mentionedMessages = [
+      message('user_im_message_receive_at', 'disabled-group', 'please help'),
+    ];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'disabled',
+        groups: { 'cid-1': { requireMention: false } },
+      }),
+    );
+
+    expect(client.streams.map((item) => item.source)).toEqual([
+      { kind: 'direct' },
+    ]);
+
+    await channel.poll();
+
+    expect(client.listMentionedMessages).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
+  it('drops persisted messages from disabled chat sources', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groupPolicy: 'disabled', dmPolicy: 'disabled' }),
+    );
+    channel.appendPendingMessage(
+      { kind: 'at' },
+      message('user_im_message_receive_at', 'pending-group', 'group request'),
+    );
+    channel.appendPendingMessage(
+      { kind: 'direct' },
+      message(
+        'user_im_message_receive_o2o_all',
+        'pending-direct',
+        'direct request',
+      ),
+    );
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([]);
+    expect(channel.pendingMessageIds()).toEqual([]);
+    expect(channel.processedMessageIds()).toEqual(
+      expect.arrayContaining(['cid-1\0pending-group', 'cid-1\0pending-direct']),
+    );
+  });
+
+  it('keeps native todo polling independent from disabled chat sources', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'disabled',
+        dmPolicy: 'disabled',
+        watchTodos: true,
+      }),
+    );
+
+    await channel.poll();
+
+    expect(client.listMentionedMessages).not.toHaveBeenCalled();
+    expect(client.listDirectMessages).not.toHaveBeenCalled();
+    expect(client.listTodoTasks).toHaveBeenCalledOnce();
+    expect(channel.inbound).toEqual([]);
+  });
+
   it('starts direct messages without querying account identity metadata', async () => {
     const client = new FakeDwsClient();
 
@@ -6886,16 +6957,59 @@ describe('DwsChannel', () => {
 
   it('drops direct messages when direct-message access is disabled', async () => {
     const client = new FakeDwsClient();
-    const { bridge } = await readyPolicyChannel(
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'disabled-document',
+        documentMentionCard('doc-disabled', 'comment-disabled'),
+      ),
+    ];
+    const { channel, bridge } = await readyPolicyChannel(
       client,
       makeConfig({
         dmPolicy: 'disabled',
       }),
     );
+    channel.seedPendingDocumentNotifications(1);
 
     expect(client.streams.map((stream) => stream.source)).toEqual([
       { kind: 'at' },
     ]);
+
+    await channel.poll();
+
+    expect(client.listDirectMessages).not.toHaveBeenCalled();
+    expect(client.readDocument).not.toHaveBeenCalled();
+    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
+  it('persists disabled direct work before polling enabled sources', async () => {
+    const name = 'disabled-direct-persistence-dws';
+    const firstClient = new FakeDwsClient();
+    const { channel: first } = await readyPolicyChannel(
+      firstClient,
+      makeConfig({ dmPolicy: 'disabled' }),
+      name,
+    );
+    firstClient.listMentionedMessages.mockImplementation(async () => {
+      first.disconnect();
+      throw new Error('channel disconnected');
+    });
+    first.seedPendingDocumentNotifications(1);
+
+    await first.poll();
+
+    const secondClient = new FakeDwsClient();
+    const { channel: second, bridge } = await readyPolicyChannel(
+      secondClient,
+      makeConfig({ groupPolicy: 'disabled' }),
+      name,
+    );
+    await second.poll();
+
+    expect(second.pendingDocumentNotifications()).toEqual([]);
+    expect(secondClient.readDocument).not.toHaveBeenCalled();
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 

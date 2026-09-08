@@ -597,26 +597,31 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         'DWS channel profile must select exactly one login profile.',
       );
     }
+    const groupMessagesEnabled = config.groupPolicy !== 'disabled';
     const allGroups =
-      config.groupPolicy !== 'disabled' &&
+      groupMessagesEnabled &&
       config.groupPolicy !== 'allowlist' &&
       config.groups['*']?.requireMention === false;
-    const groupSources: DwsImSource[] = allGroups
-      ? [{ kind: 'group-all' }]
-      : Object.entries(config.groups)
-          .filter(
-            ([conversationId, group]) =>
-              conversationId !== '*' &&
-              conversationId.trim().length > 0 &&
-              group.requireMention === false,
-          )
-          .map(
-            ([conversationId]): DwsImSource => ({
-              kind: 'group',
-              conversationId,
-            }),
-          );
-    const imSources: DwsImSource[] = [{ kind: 'at' }, ...groupSources];
+    const groupSources: DwsImSource[] = groupMessagesEnabled
+      ? allGroups
+        ? [{ kind: 'group-all' }]
+        : Object.entries(config.groups)
+            .filter(
+              ([conversationId, group]) =>
+                conversationId !== '*' &&
+                conversationId.trim().length > 0 &&
+                group.requireMention === false,
+            )
+            .map(
+              ([conversationId]): DwsImSource => ({
+                kind: 'group',
+                conversationId,
+              }),
+            )
+      : [];
+    const imSources: DwsImSource[] = groupMessagesEnabled
+      ? [{ kind: 'at' }, ...groupSources]
+      : [];
     if (config.dmPolicy !== 'disabled') imSources.push({ kind: 'direct' });
 
     if (
@@ -1202,114 +1207,139 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (!this.connected || signal.aborted) return;
     this.attemptedPendingMessages.clear();
     const endTime = Date.now();
+    const groupMessagesEnabled = this.config.groupPolicy !== 'disabled';
+    const directMessagesEnabled = this.config.dmPolicy !== 'disabled';
+    this.discardDisabledPendingMessages();
+    if (!directMessagesEnabled) {
+      for (const pending of this.cursor.pendingDocumentNotifications ?? []) {
+        this.markProcessedMessage(
+          `${pending.conversationId}\0${pending.messageId}`,
+        );
+      }
+      this.cursor.pendingDocumentNotifications = [];
+      this.cursor.notificationCheckpoint = undefined;
+      this.cursor.notificationWatermark = endTime;
+      this.notificationWatermarkPulledBack = false;
+    }
+    if (!groupMessagesEnabled) {
+      this.cursor.mentionCheckpoint = undefined;
+      this.cursor.mentionWatermark = endTime;
+    }
+    if (!groupMessagesEnabled || !directMessagesEnabled) this.saveCursor();
     await this.replayPendingMessages(signal);
     if (signal.aborted || !this.connected) return;
-    await this.replayPendingDocumentNotifications(signal);
+    if (directMessagesEnabled) {
+      await this.replayPendingDocumentNotifications(signal);
+    }
     if (signal.aborted || !this.connected) return;
-    try {
-      const mentionCheckpoint = this.cursor.mentionCheckpoint ?? {
-        startTime: Math.max(
-          0,
-          (this.cursor.mentionWatermark ?? endTime) -
-            NOTIFICATION_HISTORY_OVERLAP_MS,
-        ),
-        endTime,
-        cursor: '0',
-      };
-      const mentions = await this.client.listMentionedMessages(
-        mentionCheckpoint.startTime,
-        mentionCheckpoint.endTime,
-        signal,
-        mentionCheckpoint.cursor,
-      );
-      mentions.messages.sort(
-        (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
-      );
-      for (const message of mentions.messages) {
-        if (signal.aborted || !this.connected) return;
-        const key = messageKey(message);
-        if (this.cursor.processedMessages.includes(key)) continue;
-        if (this.hasPendingMessage(key)) continue;
-        this.enqueuePendingConversation(message.conversationId);
-        await this.admitHistoryMessage({ kind: 'at' }, message);
-      }
-      if (signal.aborted || !this.connected) return;
-      if (mentions.nextCursor) {
-        this.cursor.mentionCheckpoint = {
-          ...mentionCheckpoint,
-          cursor: mentions.nextCursor,
+    if (groupMessagesEnabled) {
+      try {
+        const mentionCheckpoint = this.cursor.mentionCheckpoint ?? {
+          startTime: Math.max(
+            0,
+            (this.cursor.mentionWatermark ?? endTime) -
+              NOTIFICATION_HISTORY_OVERLAP_MS,
+          ),
+          endTime,
+          cursor: '0',
         };
-      } else {
-        this.cursor.mentionCheckpoint = undefined;
-        this.cursor.mentionWatermark = mentionCheckpoint.endTime;
-      }
-    } catch (error) {
-      if (signal.aborted || !this.connected) return;
-      process.stderr.write(
-        `[Channel:${this.name}] failed to poll DWS mention history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-      );
-    }
-    try {
-      const checkpoint = this.cursor.notificationCheckpoint ?? {
-        startTime: Math.max(
-          0,
-          (this.cursor.notificationWatermark ?? endTime) -
-            NOTIFICATION_HISTORY_OVERLAP_MS,
-        ),
-        endTime,
-        cursor: '0',
-      };
-      this.notificationWatermarkPulledBack = false;
-      const page = await this.client.listDirectMessages(
-        checkpoint.startTime,
-        checkpoint.endTime,
-        signal,
-        checkpoint.cursor,
-      );
-      page.messages.sort(
-        (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
-      );
-      for (const message of page.messages) {
-        if (signal.aborted || !this.connected) return;
-        const key = messageKey(message);
-        if (this.cursor.processedMessages.includes(key)) {
-          continue;
+        const mentions = await this.client.listMentionedMessages(
+          mentionCheckpoint.startTime,
+          mentionCheckpoint.endTime,
+          signal,
+          mentionCheckpoint.cursor,
+        );
+        mentions.messages.sort(
+          (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
+        );
+        for (const message of mentions.messages) {
+          if (signal.aborted || !this.connected) return;
+          const key = messageKey(message);
+          if (this.cursor.processedMessages.includes(key)) continue;
+          if (this.hasPendingMessage(key)) continue;
+          this.enqueuePendingConversation(message.conversationId);
+          await this.admitHistoryMessage({ kind: 'at' }, message);
         }
-        // A parked message is already re-driven every poll by
-        // `replayPendingMessages`; dispatching it here too would spend the
-        // shared retry budget twice per poll.
-        if (this.hasPendingMessage(key)) continue;
-        this.enqueuePendingConversation(message.conversationId);
-        await this.admitHistoryMessage({ kind: 'direct' }, message);
+        if (signal.aborted || !this.connected) return;
+        if (mentions.nextCursor) {
+          this.cursor.mentionCheckpoint = {
+            ...mentionCheckpoint,
+            cursor: mentions.nextCursor,
+          };
+        } else {
+          this.cursor.mentionCheckpoint = undefined;
+          this.cursor.mentionWatermark = mentionCheckpoint.endTime;
+        }
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to poll DWS mention history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
       }
-      if (signal.aborted || !this.connected) return;
-      if (this.notificationWatermarkPulledBack) {
-        // R4-4: a stale direct message replayed while this window's
-        // fetch was in flight, and `admitReceivedMessage` pulled the
-        // watermark back
-        // to cover it. That replay was left UNMARKED on purpose for history
-        // polling, so finishing this window normally would undo the rescue:
-        // `checkpoint.endTime` is always past the replay's `eventTime`, and
-        // `checkpoint` itself was derived from the pre-pullback watermark, so
-        // resuming it would skip the replay too. Both are dropped; the next
-        // poll re-derives a window from the pulled-back watermark.
-        this.cursor.notificationCheckpoint = undefined;
-      } else if (page.nextCursor) {
-        this.cursor.notificationCheckpoint = {
-          ...checkpoint,
-          cursor: page.nextCursor,
-        };
-      } else {
-        this.cursor.notificationCheckpoint = undefined;
-        this.cursor.notificationWatermark = checkpoint.endTime;
-      }
-    } catch (error) {
-      if (signal.aborted || !this.connected) return;
-      process.stderr.write(
-        `[Channel:${this.name}] failed to poll DWS direct-message history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-      );
     }
-    this.saveCursor();
+    if (directMessagesEnabled) {
+      try {
+        const checkpoint = this.cursor.notificationCheckpoint ?? {
+          startTime: Math.max(
+            0,
+            (this.cursor.notificationWatermark ?? endTime) -
+              NOTIFICATION_HISTORY_OVERLAP_MS,
+          ),
+          endTime,
+          cursor: '0',
+        };
+        this.notificationWatermarkPulledBack = false;
+        const page = await this.client.listDirectMessages(
+          checkpoint.startTime,
+          checkpoint.endTime,
+          signal,
+          checkpoint.cursor,
+        );
+        page.messages.sort(
+          (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
+        );
+        for (const message of page.messages) {
+          if (signal.aborted || !this.connected) return;
+          const key = messageKey(message);
+          if (this.cursor.processedMessages.includes(key)) {
+            continue;
+          }
+          // A parked message is already re-driven every poll by
+          // `replayPendingMessages`; dispatching it here too would spend the
+          // shared retry budget twice per poll.
+          if (this.hasPendingMessage(key)) continue;
+          this.enqueuePendingConversation(message.conversationId);
+          await this.admitHistoryMessage({ kind: 'direct' }, message);
+        }
+        if (signal.aborted || !this.connected) return;
+        if (this.notificationWatermarkPulledBack) {
+          // R4-4: a stale direct message replayed while this window's
+          // fetch was in flight, and `admitReceivedMessage` pulled the
+          // watermark back
+          // to cover it. That replay was left UNMARKED on purpose for history
+          // polling, so finishing this window normally would undo the rescue:
+          // `checkpoint.endTime` is always past the replay's `eventTime`, and
+          // `checkpoint` itself was derived from the pre-pullback watermark, so
+          // resuming it would skip the replay too. Both are dropped; the next
+          // poll re-derives a window from the pulled-back watermark.
+          this.cursor.notificationCheckpoint = undefined;
+        } else if (page.nextCursor) {
+          this.cursor.notificationCheckpoint = {
+            ...checkpoint,
+            cursor: page.nextCursor,
+          };
+        } else {
+          this.cursor.notificationCheckpoint = undefined;
+          this.cursor.notificationWatermark = checkpoint.endTime;
+        }
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to poll DWS direct-message history: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
+    }
+    if (groupMessagesEnabled || directMessagesEnabled) this.saveCursor();
     if (
       this.watchTodos &&
       (this.lastTodoPollAt === 0 ||
@@ -1607,6 +1637,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
+  private isImSourceEnabled(source: DwsImSource): boolean {
+    return source.kind === 'direct'
+      ? this.config.dmPolicy !== 'disabled'
+      : this.config.groupPolicy !== 'disabled';
+  }
+
   private receiveImMessage(
     source: DwsImSource,
     message: DwsImMessage,
@@ -1646,6 +1682,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return { completion: Promise.resolve(), remembered: true };
     }
     const key = messageKey(message);
+    if (!this.isImSourceEnabled(source)) {
+      this.markProcessedMessage(key);
+      this.removePendingMessage(key);
+      this.saveCursor();
+      return { completion: Promise.resolve(), remembered: true };
+    }
     if (this.markSelfMessageProcessed(message)) {
       return { completion: Promise.resolve(), remembered: true };
     }
@@ -2466,6 +2508,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         })
         .catch(() => undefined);
     }
+  }
+
+  private discardDisabledPendingMessages(): void {
+    const pending = this.cursor.pendingMessages ?? [];
+    const disabled = pending.filter(
+      (item) => !this.isImSourceEnabled(item.source),
+    );
+    if (disabled.length === 0) return;
+    for (const item of disabled) {
+      this.markProcessedMessage(messageKey(item.message));
+    }
+    this.cursor.pendingMessages = pending.filter((item) =>
+      this.isImSourceEnabled(item.source),
+    );
+    for (const resolve of this.pendingMessageCapacityWaiters) resolve();
+    this.pendingMessageCapacityWaiters.clear();
   }
 
   private async replayPendingDocumentNotifications(

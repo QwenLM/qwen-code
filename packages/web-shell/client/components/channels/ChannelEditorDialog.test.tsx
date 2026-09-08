@@ -96,6 +96,50 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const DWS_WITH_ACCESS: DaemonChannelTypeDescriptor = {
+  type: 'dws',
+  displayName: 'DingTalk Workspace',
+  manageable: true,
+  fields: [
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'dmPolicy',
+      label: 'Direct Message Access',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+  ],
+};
+
 const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: DINGTALK.fields.map((field) =>
@@ -834,6 +878,36 @@ describe('ChannelEditorDialog', () => {
           value: 'ding-client-secret',
         },
       },
+    });
+  });
+
+  it('keeps DWS sender policy separate from direct-message access', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: DWS_WITH_ACCESS, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'workspace-bot');
+    });
+
+    expect(fieldByLabel('Sender policy')).not.toBeNull();
+    await selectOption('Direct message access', 'Disabled');
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('workspace-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'dws',
+        senderPolicy: 'pairing',
+        dmPolicy: 'disabled',
+        groupPolicy: 'pairing',
+      },
+      secrets: {},
     });
   });
 
