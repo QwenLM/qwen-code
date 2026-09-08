@@ -33,5 +33,7 @@ definition-level turn and wall-clock limits are unchanged.
 
 ## Scope
 
-Workflow dispatch remains unchanged. Runtime generation draining and an Agent
-that ignores the cooperative abort remain Layers 4 and 5 of #8586.
+Workflow dispatch remains unchanged. An Agent that ignores the cooperative
+abort retains its physical slot while the daemon drains and replaces that
+Session's runtime generation, as described in
+`background-agent-runtime-generations.md`.
