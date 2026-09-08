@@ -100,7 +100,7 @@ function questionContext(
   };
 }
 
-function createHarness() {
+function createHarness(options: { language?: string } = {}) {
   const projectionOrder: string[] = [];
   const client = {
     createAndDeliver: vi.fn().mockImplementation(async (request) => {
@@ -140,6 +140,7 @@ function createHarness() {
   const presenter = new DingtalkInteractionPresenter({
     statusCards,
     questionCards,
+    ...(options.language ? { language: options.language } : {}),
     sendFallback,
   });
   presenterRef.current = presenter;
@@ -170,12 +171,29 @@ describe('DingtalkInteractionPresenter', () => {
         expect.objectContaining({
           templateId: STATUS_CARD_TEMPLATE_ID,
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
             flowStatus: 2,
           }),
         }),
       );
     });
+  });
+
+  it('serializes lifecycle phases into the status card before output', async () => {
+    const { client, presenter } = createHarness();
+
+    presenter.startStatusCard('run-1');
+    presenter.updateStatusCardPhase('run-1', 'searching');
+
+    await vi.waitFor(() => {
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: '🔎 Searching',
+          finalize: false,
+        }),
+      );
+    });
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('renders one escaped source label through running, streaming, and terminal cards', async () => {
@@ -196,13 +214,13 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '\\[IMAGE\\: x · review\\_\\*\\]',
+            content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]',
           }),
         }),
       );
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
+          content: '🤔 Thinking\n\n\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
         }),
       );
     });
@@ -254,7 +272,7 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '',
+            content: '🤔 Thinking',
           }),
         }),
       );
@@ -263,7 +281,7 @@ describe('DingtalkInteractionPresenter', () => {
         .mock.calls.map(([request]) => request.content)
         .filter(Boolean)
         .at(-1);
-      expect(streamed).toBe('正在分析');
+      expect(streamed).toBe('🤔 Thinking\n\n正在分析');
     });
 
     await presenter.closeOutput(
@@ -640,7 +658,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
 
     presenter.appendOutput(segment('segment-2'), 'segment two');
     await presenter.closeOutput('segment-2', '', 'completed');
@@ -662,7 +680,9 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
     );
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'intermediate result' }),
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nintermediate result',
+      }),
     );
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new Error('stream blip'),
@@ -679,7 +699,7 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).not.toHaveBeenCalled();
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content: 'intermediate result updated',
+        content: '🤔 Thinking\n\nintermediate result updated',
         finalize: false,
       }),
     );
@@ -761,6 +781,31 @@ describe('DingtalkInteractionPresenter', () => {
         expect(terminalPayload).toMatchObject({
           content: `@衍\\*星\n\n${expectedBody}`,
           copy_content: `@衍\\*星\n\n${expectedBody}`,
+        });
+      });
+    },
+  );
+
+  it.each([
+    ['failed', 'boom', 'Processing failed, please try again later.'],
+    ['cancelled', 'cancel_command', 'Task stopped'],
+    ['cancelled', 'steer', 'Task cancelled'],
+  ] as const)(
+    'renders English terminal card copy for a non-Chinese display language when the run is %s',
+    async (terminal, detail, expectedBody) => {
+      const { client, presenter } = createHarness({ language: 'en' });
+      presenter.appendOutput(segment('segment-1'), 'Explanation');
+
+      presenter.terminalizeRun('run-1', terminal, detail);
+
+      await vi.waitFor(() => {
+        const terminalPayload = vi
+          .mocked(client.updateInstance)
+          .mock.calls.map(([request]) => request.cardParamMap)
+          .find((payload) => payload.flowStatus === 3);
+        expect(terminalPayload).toMatchObject({
+          content: expectedBody,
+          copy_content: expectedBody,
         });
       });
     },
@@ -959,7 +1004,7 @@ describe('DingtalkInteractionPresenter', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('segment one');
+    ).toContain('🤔 Thinking\n\nsegment one');
   });
 
   it('falls back at a boundary when the in-flight card creation fails', async () => {
