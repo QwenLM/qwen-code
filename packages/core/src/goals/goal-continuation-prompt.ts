@@ -5,15 +5,19 @@
  */
 
 import type { Part } from '@google/genai';
-import type { GoalTurnPermit } from './goal-protocol.js';
+import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
+
+export type GoalContinuationUsage = Pick<
+  GoalRecord,
+  'tokensUsed' | 'tokenBudget' | 'turnCount'
+>;
 
 /**
  * The prompt a host sends when `runtime.finishTurn` schedules another Goal
  * turn. Every host renders it from here so that a new line lands in one place
  * instead of drifting across the hosts that assemble it.
  */
-
 export interface GoalContinuationPromptInput {
   /** Goal identity from the runtime permit that admitted this turn. */
   goalId: string;
@@ -37,11 +41,7 @@ export interface GoalContinuationPromptInput {
    * record when the turn was scheduled. Absent on a host that has no runtime
    * figures to pass, which is also how every test that predates them reads.
    */
-  usage?: {
-    tokensUsed: number;
-    tokenBudget?: number;
-    turnCount: number;
-  };
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
 }
 
@@ -90,13 +90,10 @@ const OBJECTIVE_UPDATED_LINE =
  * Figures the model would otherwise have to spend a `get_goal` call to learn,
  * and which it cannot act on if it learns them too late.
  *
- * Kept out of the data block on purpose: that block is untrusted task data
- * compared by content to decide whether the objective changed, and a number
- * that moves every turn would make every turn look like an edit.
+ * Kept out of the data block on purpose: these are trusted runtime figures,
+ * while that block is explicitly framed as untrusted task data.
  */
-function renderBudgetLine(
-  usage: NonNullable<GoalContinuationPromptInput['usage']>,
-): string {
+function renderBudgetLine(usage: GoalContinuationUsage): string {
   const used = usage.tokensUsed.toLocaleString('en-US');
   const spend =
     usage.tokenBudget === undefined
@@ -106,7 +103,7 @@ function renderBudgetLine(
           usage.tokenBudget - usage.tokensUsed,
         ).toLocaleString('en-US')} remaining`;
   const turns = `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`;
-  return `Budget: ${spend}; ${turns}.`;
+  return `Token budget: ${spend}; ${turns}.`;
 }
 
 /**
@@ -211,7 +208,7 @@ export function buildGoalContinuationParts(turn: {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
-  usage?: GoalContinuationPromptInput['usage'];
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
 }): Part[] {
   return [

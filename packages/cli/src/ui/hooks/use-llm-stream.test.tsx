@@ -646,7 +646,7 @@ describe('useLlmStream', () => {
     });
 
     expect(streamMock.mock.calls[0]?.[0] as string).toContain(
-      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+      'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
     );
   });
 

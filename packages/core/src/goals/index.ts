@@ -74,4 +74,7 @@ export {
   buildGoalContinuationParts,
   renderGoalContinuationPrompt,
 } from './goal-continuation-prompt.js';
-export type { GoalContinuationPromptInput } from './goal-continuation-prompt.js';
+export type {
+  GoalContinuationPromptInput,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';

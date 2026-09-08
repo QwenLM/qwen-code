@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
 import type {
-  GoalContinuationPromptInput,
+  GoalContinuationUsage,
   GoalTurnHost,
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
@@ -21,7 +21,7 @@ export interface QueuedGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
-  usage?: GoalContinuationPromptInput['usage'];
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
 }
 

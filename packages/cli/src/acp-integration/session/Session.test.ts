@@ -24435,7 +24435,7 @@ describe('Session', () => {
             (part) =>
               typeof part['text'] === 'string' &&
               (part['text'] as string).includes(
-                'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+                'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
               ),
           ),
         ).toBe(true);

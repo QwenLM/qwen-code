@@ -61,6 +61,7 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+import type { GoalContinuationUsage } from './goal-continuation-prompt.js';
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -138,11 +139,7 @@ export interface GoalTurnHost {
      * prompt's budget line. Hosts pass it straight to
      * `renderGoalContinuationPrompt`.
      */
-    usage?: {
-      tokensUsed: number;
-      tokenBudget?: number;
-      turnCount: number;
-    };
+    usage?: GoalContinuationUsage;
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -535,7 +532,7 @@ export function createGoalRuntime(
     const continuationContext = snapshot.goal.objective;
     // Read here, before the broadcast below hands listeners a snapshot they
     // may act on: these figures describe the turn being scheduled.
-    const usage = {
+    const usage: GoalContinuationUsage = {
       tokensUsed: snapshot.goal.tokensUsed,
       ...(snapshot.goal.tokenBudget === undefined
         ? {}

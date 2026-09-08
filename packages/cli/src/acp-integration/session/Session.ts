@@ -41,7 +41,7 @@ import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnHost,
-  GoalContinuationPromptInput,
+  GoalContinuationUsage,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -624,7 +624,7 @@ interface AcpGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
-  usage?: GoalContinuationPromptInput['usage'];
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
   modelStarted: boolean;
 }

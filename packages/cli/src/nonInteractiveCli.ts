@@ -13,7 +13,7 @@ import type {
   GoalRuntime,
   GoalSnapshotV2,
   GoalTurnHost,
-  GoalContinuationPromptInput,
+  GoalContinuationUsage,
   GoalTurnPermit,
   ActiveGoal,
   ToolCallRequestInfo,
@@ -231,7 +231,7 @@ interface HeadlessGoalTurn {
   continuationContext: string;
   objectiveUpdated?: boolean;
   windDown?: boolean;
-  usage?: GoalContinuationPromptInput['usage'];
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
 }
 
