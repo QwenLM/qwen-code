@@ -13,6 +13,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  FIXED_CAPTURE_TIME,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -51,7 +52,11 @@ test('branch picker, commit dialog, create PR form', async ({
       behind: 0,
       stashCount: 0,
       operation: null,
-      computedAt: Date.now(),
+      // Node's real clock here would sit months from the page's frozen one
+      // (harness `freezeWallClock`), making the status look newer than the
+      // branch listing and triggering a reconcile re-fetch that never happens
+      // in a real session.
+      computedAt: FIXED_CAPTURE_TIME.getTime(),
     },
     events: [
       userTextEvent('Add a branch picker to the web shell', { id: 1 }),

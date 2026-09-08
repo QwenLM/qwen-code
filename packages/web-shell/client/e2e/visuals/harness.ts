@@ -65,11 +65,25 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
 }
 
 /**
- * Wall-clock instant every capture renders at. Arbitrary, but fixed -- paired
- * with `timezoneId: 'UTC'` in playwright.visuals.config.ts it makes the
- * rendered time-of-day identical on every machine, not just within one job.
+ * Wall-clock instant every capture renders at. Paired with `timezoneId: 'UTC'`
+ * in playwright.visuals.config.ts it makes the rendered time-of-day identical
+ * on every machine, not just within one job.
+ *
+ * It is deliberately in the FUTURE relative to every date a fixture hardcodes.
+ * Relative formatters measure `Date.now() - value` (`formatRelativeTime`), so a
+ * fixture date on the far side of this instant yields a negative age and
+ * collapses to "just now": with an earlier constant the channel editor's
+ * pairing requests, dated 2026-07-28, rendered as "just now" instead of the
+ * "7/28/2026" the real clock produced. Future-dating is the safe direction --
+ * a fixture then reads as older than now, which is what every one of them
+ * means.
+ *
+ * Two rules follow for anyone adding a fixture. An absolute date must be
+ * earlier than this instant. A value meant to be "now" must be derived from
+ * this constant rather than from `Date.now()`, which in a spec runs on Node's
+ * real clock and would land months away from the page's frozen one.
  */
-export const FIXED_CAPTURE_TIME = new Date('2026-01-01T09:00:00.000Z');
+export const FIXED_CAPTURE_TIME = new Date('2027-01-01T09:00:00.000Z');
 
 /**
  * Pin `Date.now()` / `new Date()` so anything rendering a wall-clock time is
