@@ -18,7 +18,14 @@ export const deepseekProvider: ProviderConfig = {
     {
       id: 'deepseek-v4-pro',
       contextWindowSize: 1000000,
-      enableThinking: true,
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+        },
+      },
     },
     { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
   ],

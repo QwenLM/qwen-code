@@ -11,6 +11,9 @@ import {
   goalLimitKindForReason,
   goalTokenBudgetReason,
   goalRequiresExactPermit,
+  GOAL_PAUSE_REASON_COMMAND,
+  GOAL_PAUSE_REASON_MAX_CHARACTERS,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   type GoalControlRequest,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -212,6 +215,93 @@ describe('goal reducer', () => {
     }
   });
 
+  it('records the pause reason a host supplies', () => {
+    const paused = reduceGoalControl(
+      goalRecord({ lastReason: 'the verifier wanted the test output pasted' }),
+      {
+        request: {
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+        },
+        now: 150,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-150' },
+      },
+    );
+
+    expect(paused?.status).toBe('paused');
+    expect(paused?.lastReason).toBe(GOAL_PAUSE_REASON_USER_INTERRUPT);
+  });
+
+  it('clears a stale reason when a pause supplies none', () => {
+    // The value it would otherwise keep is the previous turn's verifier
+    // rejection, which explains why the Goal was still running rather than
+    // why it stopped -- so a reasonless pause must not inherit it.
+    const paused = reduceGoalControl(
+      goalRecord({ lastReason: 'the verifier wanted the test output pasted' }),
+      {
+        request: {
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 150,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-150' },
+      },
+    );
+
+    expect(paused?.status).toBe('paused');
+    expect(paused?.lastReason).toBeUndefined();
+  });
+
+  it('parses a pause reason, and rejects one that is empty, oversized, or misplaced', () => {
+    expect(
+      parseGoalControlRequest({
+        action: 'pause',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_COMMAND,
+      }),
+    ).toEqual({
+      action: 'pause',
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+      reason: GOAL_PAUSE_REASON_COMMAND,
+    });
+
+    for (const reason of [
+      '   ',
+      '',
+      'x'.repeat(GOAL_PAUSE_REASON_MAX_CHARACTERS + 1),
+      42,
+      { text: 'nope' },
+    ]) {
+      expect(
+        parseGoalControlRequest({
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason,
+        }),
+      ).toBeUndefined();
+    }
+
+    // Only a pause carries one: resume and clear stay exact-key requests.
+    for (const action of ['resume', 'clear'] as const) {
+      expect(
+        parseGoalControlRequest({
+          action,
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason: GOAL_PAUSE_REASON_COMMAND,
+        }),
+      ).toBeUndefined();
+    }
+  });
+
   it('pauses and resumes without changing revision or evidence cursor', () => {
     const paused = reduceGoalControl(goalRecord(), {
       request: {
@@ -244,6 +334,54 @@ describe('goal reducer', () => {
       revision: 1,
       evidenceCursor: { recordId: 'r-100' },
     });
+  });
+
+  it('clears the pause reason when a paused goal resumes', () => {
+    const paused = reduceGoalControl(goalRecord(), {
+      request: {
+        action: 'pause',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      },
+      now: 150,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-150' },
+    });
+    expect(paused?.lastReason).toBe(GOAL_PAUSE_REASON_USER_INTERRUPT);
+
+    const resumed = reduceGoalControl(paused, {
+      request: {
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-200' },
+    });
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBeUndefined();
+  });
+
+  it("keeps a blocked goal's reason when it resumes", () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'blocked', lastReason: 'Waiting on a credential.' }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBe('Waiting on a credential.');
   });
 
   it('rejects resuming an already-active goal', () => {
@@ -1418,5 +1556,106 @@ describe('budget wind-down marker', () => {
     expect(
       parseGoalSnapshotV2(snapshot(goalRecord({ windDownTurnId: 7 as never }))),
     ).toBeUndefined();
+  });
+});
+
+describe('no-progress streak', () => {
+  const control = (
+    request: Extract<
+      Parameters<typeof reduceGoalControl>[1]['request'],
+      { action: 'edit' | 'resume' }
+    >,
+  ) => ({
+    request,
+    now: 200,
+    nextGoalId: 'g-next',
+    cursor: { recordId: 'r-200' } as const,
+  });
+
+  it('records a streak a finished turn reports, and spells zero as no field', () => {
+    const counted = reduceGoalTurnFinished(goalRecord(), {
+      now: 200,
+      noProgressTurns: 2,
+    });
+    expect(counted).toMatchObject({ turnCount: 1, noProgressTurns: 2 });
+
+    const cleared = reduceGoalTurnFinished(counted, {
+      now: 300,
+      noProgressTurns: 0,
+    });
+    expect(cleared).not.toHaveProperty('noProgressTurns');
+  });
+
+  it('leaves the streak untouched when a finished turn reports none', () => {
+    // The runtime reports nothing when it cannot tell a quiet turn from a
+    // busy one. "Unmeasured" must not read as "idle" or as "made progress".
+    const finished = reduceGoalTurnFinished(
+      goalRecord({ noProgressTurns: 2 }),
+      { now: 200 },
+    );
+    expect(finished).toMatchObject({ noProgressTurns: 2 });
+  });
+
+  it('clears the streak on edit', () => {
+    const edited = reduceGoalControl(goalRecord({ noProgressTurns: 2 }), {
+      ...control({
+        action: 'edit',
+        objective: 'deliver the rest',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      }),
+    });
+    expect(edited).not.toHaveProperty('noProgressTurns');
+  });
+
+  it.each([
+    ['paused', { status: 'paused' as const }],
+    [
+      'budget-limited',
+      { status: 'usage_limited' as const, limitKind: 'token_budget' as const },
+    ],
+    [
+      'evidence-limited',
+      {
+        status: 'usage_limited' as const,
+        limitKind: 'evidence_catalog' as const,
+      },
+    ],
+  ])('clears the streak when a %s Goal resumes', (_label, state) => {
+    // Resuming is the user asking for another run at the objective. Starting
+    // that run three-quarters of the way to the bound would end it after a
+    // single quiet turn.
+    const resumed = reduceGoalControl(
+      goalRecord({ ...state, noProgressTurns: 2 }),
+      control({
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      }),
+    );
+
+    expect(resumed).toMatchObject({ status: 'active' });
+    expect(resumed).not.toHaveProperty('noProgressTurns');
+  });
+
+  it('restores a persisted streak and rejects a malformed one', () => {
+    const idling = snapshot(goalRecord({ noProgressTurns: 2 }));
+    expect(parseGoalSnapshotV2(idling)).toEqual(idling);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: 0 })))?.goal,
+    ).not.toHaveProperty('noProgressTurns');
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: -1 }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ noProgressTurns: 1.5 }))),
+    ).toBeUndefined();
+  });
+
+  it('restores a Goal persisted before the streak existed', () => {
+    const goal = goalRecord();
+    expect(parseGoalSnapshotV2(snapshot(goal))?.goal).not.toHaveProperty(
+      'noProgressTurns',
+    );
   });
 });

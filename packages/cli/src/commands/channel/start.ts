@@ -11,7 +11,12 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   AcpBridge,
   ChannelLoopScheduler,
@@ -48,6 +53,7 @@ import {
   createChannelLoopController,
   isChannelCronEnabled,
 } from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 export { resolveProxy } from './proxy.js';
@@ -55,7 +61,21 @@ export { resolveProxy } from './proxy.js';
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
+export const CHANNEL_DISCONNECT_DRAIN_MS = 4_000;
 export const BRIDGE_SESSION_RESTORE_TIMEOUT_MS = 60 * 1000;
+
+function disconnectStartedChannels(
+  channels: Iterable<ChannelBase>,
+): Promise<void> {
+  return disconnectChannels(channels, {
+    timeoutMs: CHANNEL_DISCONNECT_DRAIN_MS,
+    onTimeout: () => {
+      writeStderrLine(
+        `[Channel] disconnect drain exceeded ${CHANNEL_DISCONNECT_DRAIN_MS}ms; continuing shutdown.`,
+      );
+    },
+  });
+}
 
 function isFileExistsError(err: unknown): boolean {
   return (
@@ -90,11 +110,14 @@ function channelMemoryOptions(
   };
 }
 
-function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
+async function writeServiceInfoOrExit(
+  channels: string[],
+  cleanup: () => Promise<void>,
+): Promise<void> {
   try {
     writeServiceInfo(channels);
   } catch (err) {
-    cleanup();
+    await cleanup();
     if (isFileExistsError(err)) {
       writeStderrLine(
         'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
@@ -105,18 +128,12 @@ function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
   }
 }
 
-function cleanupStartedChannels(
+async function cleanupStartedChannels(
   channels: Iterable<ChannelBase>,
   bridge: AcpBridge,
   router: SessionRouter,
-): void {
-  for (const channel of channels) {
-    try {
-      channel.disconnect();
-    } catch {
-      // best-effort
-    }
-  }
+): Promise<void> {
+  await disconnectStartedChannels(channels);
   try {
     bridge.stop();
   } catch {
@@ -183,6 +200,7 @@ interface BridgeRecoveryOptions {
   scheduler: ChannelLoopScheduler | undefined;
   bridgeReadiness: ReturnType<typeof createBridgeReadinessGate>;
   isShuttingDown: () => boolean;
+  beginShutdown: () => void;
   getBridge: () => AcpBridge;
   setBridge: (bridge: AcpBridge) => void;
 }
@@ -202,6 +220,7 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
     scheduler,
     bridgeReadiness,
     isShuttingDown,
+    beginShutdown,
     getBridge,
     setBridge,
   } = options;
@@ -236,11 +255,12 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
         const recentCrashCount = crashTimestamps.length;
 
         if (recentCrashCount > MAX_CRASH_RESTARTS) {
+          beginShutdown();
           writeStderrLine(
             `[Channel] Bridge crashed ${recentCrashCount} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
           );
           scheduler?.stop();
-          cleanupStartedChannels(channels.values(), getBridge(), router);
+          await cleanupStartedChannels(channels.values(), getBridge(), router);
           removeServiceInfo();
           process.exit(1);
         }
@@ -249,11 +269,21 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
           `[Channel] Bridge crashed (${recentCrashCount}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
         );
         await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
+        if (isShuttingDown()) return;
 
         const bridge = new AcpBridge(bridgeOpts);
+        try {
+          await bridge.start();
+        } catch (error) {
+          bridge.stop();
+          throw error;
+        }
+        if (isShuttingDown()) {
+          bridge.stop();
+          return;
+        }
         setBridge(bridge);
         attachDisconnectHandler(bridge);
-        await bridge.start();
         router.setBridge(bridge);
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
@@ -264,17 +294,23 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
         registerSessionCleanup(bridge, router, channels);
 
         const result = await restoreBridgeSessions(router);
+        if (isShuttingDown()) {
+          bridge.stop();
+          return;
+        }
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
       } while (recoveryRequested && !isShuttingDown());
     })()
-      .catch((err) => {
+      .catch(async (err) => {
+        if (isShuttingDown()) return;
+        beginShutdown();
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
         scheduler?.stop();
-        cleanupStartedChannels(channels.values(), getBridge(), router);
+        await cleanupStartedChannels(channels.values(), getBridge(), router);
         removeServiceInfo();
         process.exit(1);
       })
@@ -391,19 +427,56 @@ async function startSingle(
   registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
+  let serviceInfoWritten = false;
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
+      process.exit(1);
+      return runningShutdown!;
+    }
+    shuttingDown = true;
+    shutdownTask = (async () => {
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectStartedChannels([channel]);
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
+  };
+  const detachShutdownHandlers = () => {
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   try {
     await channel.connect();
   } catch (err) {
+    if (shuttingDown) return shutdownTask;
+    detachShutdownHandlers();
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
     );
-    bridge.stop();
+    await cleanupStartedChannels([channel], bridge, router);
     process.exit(1);
   }
-  writeServiceInfoOrExit([name], () =>
-    cleanupStartedChannels([channel], bridge, router),
-  );
+  if (shuttingDown) return shutdownTask;
+  try {
+    await writeServiceInfoOrExit([name], () => {
+      detachShutdownHandlers();
+      return cleanupStartedChannels([channel], bridge, router);
+    });
+    serviceInfoWritten = true;
+  } catch (error) {
+    detachShutdownHandlers();
+    throw error;
+  }
   // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
   scheduler?.start();
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
@@ -415,25 +488,17 @@ async function startSingle(
     scheduler,
     bridgeReadiness,
     isShuttingDown: () => shuttingDown,
+    beginShutdown: () => {
+      shuttingDown = true;
+      detachShutdownHandlers();
+      shutdownTask ??= Promise.resolve();
+    },
     getBridge: () => bridge,
     setBridge: (next) => {
       bridge = next;
     },
   });
   attachDisconnectHandler(bridge);
-
-  const shutdown = () => {
-    shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    scheduler?.stop();
-    channel.disconnect();
-    bridge.stop();
-    router.clearAll();
-    removeServiceInfo();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 
   await new Promise<void>(() => {});
 }
@@ -520,28 +585,7 @@ async function startAll(
   registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
-
-  // Connect all channels
-  let connectedCount = 0;
   const connectedChannels: Map<string, ChannelBase> = new Map();
-  for (const [name, channel] of channels) {
-    try {
-      await channel.connect();
-      connectedChannels.set(name, channel);
-      connectedCount++;
-      writeStdoutLine(`[Channel] "${name}" connected.`);
-    } catch (err) {
-      writeStderrLine(
-        `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  if (connectedCount === 0) {
-    writeStderrLine('[Channel] No channels connected. Exiting.');
-    bridge.stop();
-    process.exit(1);
-  }
   const scheduler = loopStore
     ? new ChannelLoopScheduler({
         store: loopStore,
@@ -549,10 +593,74 @@ async function startAll(
         nextFireTime,
       })
     : undefined;
-  writeServiceInfoOrExit(
-    parsed.map((p) => p.name),
-    () => cleanupStartedChannels(channels.values(), bridge, router),
-  );
+  let serviceInfoWritten = false;
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
+      process.exit(1);
+      return runningShutdown!;
+    }
+    shuttingDown = true;
+    shutdownTask = (async () => {
+      ignoreBrokenPipe();
+      writeStdoutLineSafe('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectStartedChannels(channels.values());
+      for (const name of channels.keys()) {
+        writeStdoutLineSafe(`[Channel] "${name}" disconnected.`);
+      }
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
+  };
+  const detachShutdownHandlers = () => {
+    process.off('SIGINT', shutdown);
+    process.off('SIGTERM', shutdown);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // Connect all channels
+  let connectedCount = 0;
+  for (const [name, channel] of channels) {
+    if (shuttingDown) return shutdownTask;
+    try {
+      await channel.connect();
+      if (shuttingDown) return shutdownTask;
+      connectedChannels.set(name, channel);
+      connectedCount++;
+      writeStdoutLine(`[Channel] "${name}" connected.`);
+    } catch (err) {
+      if (shuttingDown) return shutdownTask;
+      writeStderrLine(
+        `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  if (connectedCount === 0) {
+    detachShutdownHandlers();
+    writeStderrLine('[Channel] No channels connected. Exiting.');
+    await cleanupStartedChannels(channels.values(), bridge, router);
+    process.exit(1);
+  }
+  try {
+    await writeServiceInfoOrExit(
+      parsed.map((p) => p.name),
+      () => {
+        detachShutdownHandlers();
+        return cleanupStartedChannels(channels.values(), bridge, router);
+      },
+    );
+    serviceInfoWritten = true;
+  } catch (error) {
+    detachShutdownHandlers();
+    throw error;
+  }
   // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
   scheduler?.start();
   writeStdoutLine(
@@ -566,32 +674,17 @@ async function startAll(
     scheduler,
     bridgeReadiness,
     isShuttingDown: () => shuttingDown,
+    beginShutdown: () => {
+      shuttingDown = true;
+      detachShutdownHandlers();
+      shutdownTask ??= Promise.resolve();
+    },
     getBridge: () => bridge,
     setBridge: (next) => {
       bridge = next;
     },
   });
   attachDisconnectHandler(bridge);
-
-  const shutdown = () => {
-    shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    scheduler?.stop();
-    for (const [name, channel] of channels) {
-      try {
-        channel.disconnect();
-        writeStdoutLine(`[Channel] "${name}" disconnected.`);
-      } catch {
-        // best-effort
-      }
-    }
-    bridge.stop();
-    router.clearAll();
-    removeServiceInfo();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 
   await new Promise<void>(() => {});
 }

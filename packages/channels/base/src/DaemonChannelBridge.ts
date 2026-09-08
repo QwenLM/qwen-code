@@ -7,6 +7,7 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
@@ -90,6 +91,11 @@ export interface DaemonChannelSessionFactoryRequest {
   /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
   worktree?: Record<string, never>;
+  /**
+   * Worktree ownership transfer: replace this session with a fresh session
+   * that takes over its worktree (daemon `session_worktree_reset_v1`).
+   */
+  worktreeReset?: { sessionId: string };
 }
 
 export type DaemonChannelSessionFactory = (
@@ -129,6 +135,8 @@ export interface DaemonChannelBridgeOptions {
   sessionPermissionVote?: boolean;
   /** Daemon guarantees durable worktree create/restore attestation. */
   sessionWorktreePersistence?: boolean;
+  /** Daemon supports worktree ownership transfer (`session_worktree_reset_v1`). */
+  sessionWorktreeReset?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -472,6 +480,46 @@ export class DaemonChannelBridge
     return session.sessionId;
   }
 
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (daemon `session_worktree_reset_v1`). The returned id is the
+   * replacement's; the superseded session's clients stay bound to it (and
+   * are forgotten by the caller). Gated on the capability flag so a daemon
+   * without reset support fails before any session is created.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
+    if (!this.options.sessionWorktreeReset) {
+      throw new Error(
+        'The daemon does not support worktree reset for Channel tasks.',
+      );
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const session = await this.options.sessionFactory({
+      workspaceCwd: cwd || this.options.cwd,
+      modelServiceId: this.options.modelServiceId,
+      sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      worktreeReset: { sessionId },
+    });
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
+    this.attachSession(session, bindingToken);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
+    return session.sessionId;
+  }
+
   registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
     if (!this.channelLoopToolHandlers.includes(handler)) {
       this.channelLoopToolHandlers.push(handler);
@@ -554,7 +602,7 @@ export class DaemonChannelBridge
         removeAttachment
       ) {
         try {
-          // Fan the uploads out like the webui's attachment path: names are
+          // Fan the uploads out like the browser attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
           // so nothing serializes the uploads themselves.
           const uploads = await Promise.allSettled(
@@ -1012,10 +1060,14 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (text || context?.turnComplete) {
+              this.emit('backgroundResponse', sessionId, text ?? '', context);
+            }
           } else if (meta['source'] === 'vision_bridge_notice' && text) {
             this.emit('textChunk', sessionId, text);
           }
@@ -1048,15 +1100,17 @@ export class DaemonChannelBridge
           !kind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
         ) {
-          // Silent-shell liveness heartbeat: a kind-less in_progress frame
-          // carrying only the id, status, and _meta.shellProgress stats.
-          // Channels have no use for it — drop it without flagging the
-          // session as malformed. Gate on shellProgress (matching the
-          // qwen-agent and web-shell normalizer guards) so a genuinely
-          // malformed kind-less tool_call still reaches emitProtocolError
-          // below instead of being silently swallowed.
+          // Silent-shell liveness heartbeat OR subagent progress update.
+          // A kind-less in_progress frame carrying only the id, status, and
+          // _meta.shellProgress stats OR _meta.subagentProgress. Drop without
+          // flagging the session as malformed. Gate on kind-absent + in_progress
+          // (matching the qwen-agent and web-shell normalizer guards) so a
+          // kind-bearing or terminal frame — including the compacted parent
+          // Agent slot, which inherits subagentProgress additively — still
+          // reaches the normal flow below instead of being silently swallowed.
           break;
         }
         if (!toolCallId || !kind) {

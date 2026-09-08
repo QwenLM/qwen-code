@@ -24,8 +24,11 @@
       <html> background matches the app theme on mobile. Without this, the
       iOS Safari rubber-band overscroll and the status-bar / home-indicator
       safe areas briefly show the default white canvas. Storage key mirrors
-      THEME_STORAGE_KEY in main.tsx.
+      THEME_STORAGE_KEY in main.tsx. Kept on one line behind the guard below:
+      this comment ships verbatim in the built index.html, so the rationale
+      stays short.
     -->
+    <!-- prettier-ignore -->
     <script>
       !function(){try{var k='qwen-code-web-shell-theme',p=new URLSearchParams(location.search),t=p.get('theme');if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem(k)}catch(_){t=null}}if(t!=='dark'&&t!=='light')t='dark';document.documentElement.classList.add('theme-'+t);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0d0d0d')}catch(e){console.warn('theme-init:',e)}}();
     </script>

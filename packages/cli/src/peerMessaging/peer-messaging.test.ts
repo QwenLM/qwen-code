@@ -15,11 +15,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  addPeerController,
   ApprovalMode,
   buildDeliveryStatusFrame,
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  removePeerController,
+  resetPeerControllerRegistryPathForTest,
   resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
@@ -140,6 +143,7 @@ async function start(
     getPolicySetting?: () => InboundPolicy | undefined;
     getHeldExpiryMs?: () => number | null;
     getPolicyScope?: () => PolicyScope | undefined;
+    controllerRegistryPath?: string;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -1582,5 +1586,276 @@ describe.skipIf(isWindows)('held message expiry', () => {
       .filter((frame) => frame.type === 'control')
       .map((frame) => (frame as { status: string }).status);
     expect(statuses).toEqual(['refused']);
+  });
+});
+
+describe.skipIf(isWindows)('controller grants', () => {
+  let registryPath: string;
+
+  beforeEach(() => {
+    registryPath = path.join(tmpDir, 'peer-controllers.json');
+  });
+
+  async function grant(label: string): Promise<{ id: string; token: string }> {
+    const { record, token } = await addPeerController(label, registryPath);
+    return { id: record.id, token };
+  }
+
+  it('delivers a message the parity rule would hold, and says which grant let it in', async () => {
+    // No fromMode at all — an external program has no review class — into
+    // a prompting receiver, which holds exactly this under parity alone.
+    const { token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(m.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain(
+      '<cross_session_message from="controller" origin="controller" controller="voice bridge">',
+    );
+    expect(submitted[0].modelText).toContain(
+      "relaying your user's instructions",
+    );
+    expect(submitted[0].displayText).toBe(
+      'Message from a trusted controller (voice bridge): open the diff',
+    );
+  });
+
+  it('holds the same frame when it arrives on the published peer token', async () => {
+    // The grant is a fact about the connection, not about the sender: the
+    // same bytes on an ordinary peer token are held as before.
+    await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }));
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('stops admitting a revoked token at once, with no restart', async () => {
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'first' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(submitted).toHaveLength(1);
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+
+    // The connection is now dropped at the auth line: nothing is
+    // submitted, nothing is held, and no receipt comes back — the same
+    // as any other unknown token.
+    await send(m.socketPath!, buildUserFrame({ content: 'second' }), {
+      authToken: token,
+    }).catch(() => {});
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(m.getHeld()).toHaveLength(0);
+  });
+
+  it('admits a grant minted after the session started', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+    const { token } = await grant('voice bridge');
+
+    await send(m.socketPath!, buildUserFrame({ content: 'later' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain('origin="controller"');
+  });
+
+  it('pins a relative controller registry path before the cwd changes', async () => {
+    const originalCwd = process.cwd();
+    const originalHome = process.env['QWEN_HOME'];
+    const relativeHome = 'relative-qwen-home';
+    try {
+      process.env['QWEN_HOME'] = relativeHome;
+      process.chdir(tmpDir);
+      resetPeerControllerRegistryPathForTest();
+      const expectedRegistry = path.join(
+        tmpDir,
+        relativeHome,
+        'peer-controllers.json',
+      );
+      const { token } = await addPeerController(
+        'voice bridge',
+        expectedRegistry,
+      );
+      const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+
+      process.chdir(path.dirname(tmpDir));
+      await send(m.socketPath!, buildUserFrame({ content: 'after cd' }), {
+        authToken: token,
+      });
+      await settle();
+
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0].modelText).toContain('origin="controller"');
+    } finally {
+      process.chdir(originalCwd);
+      if (originalHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalHome;
+      resetPeerControllerRegistryPathForTest();
+    }
+  });
+
+  it('keeps controller attribution while waiting for the UI submitter', async () => {
+    const { token } = await grant('voice bridge');
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+      controllerRegistryPath: registryPath,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(started.socketPath!, buildUserFrame({ content: 'buffered' }), {
+      authToken: token,
+    });
+    await settle();
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain(
+      'origin="controller" controller="voice bridge"',
+    );
+  });
+
+  it('parks a controller message under an explicit hold and releases it as itself', async () => {
+    const { token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => 'hold',
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([
+      { cause: 'explicit-setting', controller: { label: 'voice bridge' } },
+    ]);
+    expect(m.decide(m.getHeld()[0].frame.msgId, 'approve')).toBe('done');
+    expect(submitted[0].modelText).toContain(
+      'origin="controller" controller="voice bridge"',
+    );
+  });
+
+  it('keeps a revoked controller message parked without controller authority', async () => {
+    let policy: 'hold' | undefined = 'hold';
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => policy,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+    expect(m.forgetController(id)).toBe(1);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+
+    policy = undefined;
+    expect(m.reevaluate('setting cleared')).toBe(0);
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+  });
+
+  it('keeps an externally revoked controller message parked without controller authority', async () => {
+    let policy: 'hold' | undefined = 'hold';
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => policy,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+    policy = undefined;
+    expect(m.reevaluate('setting cleared')).toBe(0);
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('removes revoked controller authority from startup-buffered messages', async () => {
+    const { id, token } = await grant('voice bridge');
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+      controllerRegistryPath: registryPath,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(started.socketPath!, buildUserFrame({ content: 'buffered' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+
+    expect(started.reevaluate('controller removed')).toBe(0);
+    const submitted: Array<{ modelText: string; displayText: string }> = [];
+    started.setSubmitFn((modelText, displayText) => {
+      submitted.push({ modelText, displayText });
+      return true;
+    });
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).not.toContain('origin="controller"');
+    expect(submitted[0].displayText).toBe(
+      'Message from another session (unknown session): buffered',
+    );
+  });
+
+  it('is unavailable when this home has minted nothing', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+    await send(m.socketPath!, buildUserFrame({ content: 'let me in' }), {
+      authToken: `qpc_${'f'.repeat(64)}`,
+    }).catch(() => {});
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
   });
 });

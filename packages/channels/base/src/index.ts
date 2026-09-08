@@ -13,6 +13,7 @@ export {
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
+  BackgroundResponseContext,
   BridgeSessionInfo,
   ChannelBtwResult,
   ChannelAgentBridge,
@@ -41,6 +42,10 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
+export {
+  startsWithMessagePrefix,
+  stripMessagePrefix,
+} from './message-prefix.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,

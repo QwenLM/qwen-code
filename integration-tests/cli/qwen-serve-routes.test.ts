@@ -371,6 +371,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_vote',
       'workspace_mcp',
       'workspace_skills',
+      'workspace_skills_config_runtime',
       'workspace_providers',
       'workspace_acp_preheat',
       'workspace_acp_status',
@@ -473,6 +474,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
+      'session_worktree_reset_v1',
       'voice_transcribe',
       'web_terminal',
     ]);
