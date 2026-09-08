@@ -532,6 +532,19 @@ class PolicyDwsChannel extends DwsChannel {
     return this.cursor.pendingDocumentNotifications ?? [];
   }
 
+  processedMessageIds(): string[] {
+    return this.cursor.processedMessages;
+  }
+
+  seedInboundFailure(key: string, attempts: number): void {
+    this.cursor.inboundFailures = [{ key, attempts }];
+    this.saveCursor();
+  }
+
+  inboundFailures(): unknown[] {
+    return this.cursor.inboundFailures ?? [];
+  }
+
   queuedMessageCount(): number {
     return (
       this as unknown as {
@@ -751,6 +764,27 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 
+  it('keeps direct history active when group access is disabled', async () => {
+    const client = new FakeDwsClient();
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'direct-only-history',
+        'please help',
+      ),
+    ];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ groupPolicy: 'disabled' }),
+    );
+
+    await channel.poll();
+
+    expect(client.listMentionedMessages).not.toHaveBeenCalled();
+    expect(client.listDirectMessages).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+  });
+
   it('drops persisted messages from disabled chat sources', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
@@ -779,6 +813,37 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('retains pending work from an enabled chat source', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dmPolicy: 'disabled' }),
+    );
+    channel.appendPendingMessage(
+      { kind: 'at' },
+      message('user_im_message_receive_at', 'kept-group', 'group request'),
+    );
+    channel.appendPendingMessage(
+      { kind: 'direct' },
+      message(
+        'user_im_message_receive_o2o_all',
+        'discarded-direct',
+        'direct request',
+      ),
+    );
+    channel.seedInboundFailure('cid-1\0discarded-direct', 4);
+    channel.inboundError = new Error('agent unavailable');
+
+    await channel.poll();
+
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    expect(channel.pendingMessageIds()).toEqual(['kept-group']);
+    expect(channel.processedMessageIds()).toContain('cid-1\0discarded-direct');
+    expect(channel.inboundFailures()).not.toContainEqual(
+      expect.objectContaining({ key: 'cid-1\0discarded-direct' }),
+    );
+  });
+
   it('keeps native todo polling independent from disabled chat sources', async () => {
     const client = new FakeDwsClient();
     client.todoTasks = [todoTask('task-existing', 'Historical task')];
@@ -797,6 +862,25 @@ describe('DwsChannel', () => {
     expect(client.listDirectMessages).not.toHaveBeenCalled();
     expect(client.listTodoTasks).toHaveBeenCalledOnce();
     expect(channel.inbound).toEqual([]);
+  });
+
+  it('dispatches native todos when chat sources are disabled', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'disabled',
+        dmPolicy: 'disabled',
+        watchTodos: true,
+      }),
+    );
+    await channel.poll();
+    client.todoTasks.push(todoTask('task-new', 'New task'));
+
+    await channel.poll();
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
   });
 
   it('starts direct messages without querying account identity metadata', async () => {
@@ -3853,6 +3937,52 @@ describe('DwsChannel', () => {
 
     expect(channel.inbound).toEqual([]);
     expect(saveCursor).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves the cursor once per steady poll when one source is disabled', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dmPolicy: 'disabled' }),
+    );
+    const saveCursor = vi.spyOn(
+      channel as unknown as { saveCursor: () => void },
+      'saveCursor',
+    );
+
+    await channel.poll();
+
+    expect(saveCursor).toHaveBeenCalledOnce();
+  });
+
+  it('polls the enabled source when an early policy save fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dmPolicy: 'disabled' }),
+    );
+    channel.appendPendingMessage(
+      { kind: 'direct' },
+      message(
+        'user_im_message_receive_o2o_all',
+        'discard-before-save-failure',
+        'discard me',
+      ),
+    );
+    channel.nextCursorSaveError = new Error('disk unavailable');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await channel.poll();
+
+      expect(client.listMentionedMessages).toHaveBeenCalledOnce();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'could not persist DWS source-policy transition before polling',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   // R2-2: an inbound-turn failure during history dispatch escaped into the
@@ -6984,6 +7114,110 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 
+  it('does not replay the disabled direct-message window after re-enable', async () => {
+    const name = 'disabled-direct-window-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ dmPolicy: 'disabled' }),
+        name,
+      );
+      await first.poll();
+      first.disconnect();
+
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'disabled-window-message',
+          'must stay disabled',
+          { eventTime: 19_999 },
+        ),
+      ];
+      const { channel: second, bridge } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+
+      await second.poll();
+
+      expect(secondClient.listDirectMessages).toHaveBeenCalledWith(
+        20_000,
+        20_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not replay the disabled group window after re-enable', async () => {
+    const name = 'disabled-group-window-dws';
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const firstClient = new FakeDwsClient();
+      const { channel: first } = await readyPolicyChannel(
+        firstClient,
+        makeConfig({ groupPolicy: 'disabled' }),
+        name,
+      );
+      await first.poll();
+      first.disconnect();
+
+      now.mockReturnValue(20_000);
+      const secondClient = new FakeDwsClient();
+      secondClient.mentionedMessages = [
+        message(
+          'user_im_message_receive_at',
+          'disabled-window-mention',
+          'must stay disabled',
+          { eventTime: 19_999 },
+        ),
+      ];
+      const { channel: second, bridge } = await readyPolicyChannel(
+        secondClient,
+        makeConfig({ dmPolicy: 'disabled' }),
+        name,
+      );
+
+      await second.poll();
+
+      expect(secondClient.listMentionedMessages).toHaveBeenCalledWith(
+        20_000,
+        20_000,
+        expect.any(AbortSignal),
+        '0',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('clears document failure budgets when direct messages are disabled', async () => {
+    const client = new FakeDwsClient();
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ dmPolicy: 'disabled' }),
+    );
+    channel.seedInboundFailure(
+      'document-notification\0doc-disabled\0comment-disabled',
+      4,
+    );
+
+    await channel.poll();
+
+    expect(channel.inboundFailures()).toEqual([]);
+  });
+
   it('persists disabled direct work before polling enabled sources', async () => {
     const name = 'disabled-direct-persistence-dws';
     const firstClient = new FakeDwsClient();
@@ -7005,6 +7239,9 @@ describe('DwsChannel', () => {
       secondClient,
       makeConfig({ groupPolicy: 'disabled' }),
       name,
+    );
+    expect(second.processedMessageIds()).toContain(
+      'cid-parked\0parked-message-0',
     );
     await second.poll();
 
