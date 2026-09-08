@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -1458,6 +1459,12 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
+        allowDynamicHeaderValues: {
+          description:
+            'SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders — currently `${session_id}` — expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether `${session_id}` may be expanded from live session state and does not identify which settings source supplied the header.',
+          type: 'boolean',
+          default: false,
+        },
       },
       additionalProperties: false,
     },
@@ -1633,6 +1640,18 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         description:
           'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
+      goalCheckpointTimeoutSeconds: {
+        type: 'integer',
+        label: 'Goal Checkpoint Timeout (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        minimum: 1,
+        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        description:
+          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; a call that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The call is streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the call. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {

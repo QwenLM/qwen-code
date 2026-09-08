@@ -813,12 +813,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                   </text>
                 </box>
                 <box flexGrow={1} flexShrink={1}>
-                  <text fg={isActive ? C.green : C.text}>
-                    {item.label}
+                  <box flexDirection="row">
+                    <text fg={isActive ? C.green : C.text}>{item.label}</text>
                     {scopeMessage ? (
-                      <text fg={C.dim}> {scopeMessage}</text>
+                      <text fg={C.dim}>{` ${scopeMessage}`}</text>
                     ) : null}
-                  </text>
+                  </box>
                 </box>
                 <box marginLeft={1} flexShrink={0}>
                   <text
