@@ -6,8 +6,8 @@
 
 import { spawnSync } from 'node:child_process';
 
-// Release workflow jobs set this when they run explicit build/bundle steps after
-// npm ci. Workflows that rely on prepare-during-install should leave it unset.
+// QWEN_SKIP_PREPARE=1 skips husky (prepare otherwise only runs husky + generate).
+// Set it when the job does an explicit build/bundle after npm ci; otherwise leave unset.
 const skipPrepare = ['1', 'true'].includes(
   (process.env.QWEN_SKIP_PREPARE ?? '').toLowerCase(),
 );

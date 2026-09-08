@@ -100,6 +100,9 @@ jobs:
         run: |-
           npm ci
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Verify published export renderer'
         run: |-
           renderer_version=$(node -p "require('./package.json').version")

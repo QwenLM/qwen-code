@@ -213,10 +213,7 @@ jobs:
 
       - name: 'Install dependencies'
         env:
-          # `npm ci` runs the `prepare` script, which builds and bundles the
-          # whole workspace; this leg unpacks the `build` job's outputs
-          # instead. (The web-shell job below has no build step of its own,
-          # so it keeps building during install.)
+          # `npm ci` runs `prepare` which only generates git-commit.ts and installs husky; this leg unpacks the `build` job's outputs instead. (The web-shell job below has no build step of its own in the old flow, so it kept building during install — now explicit.)
           QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
@@ -647,6 +644,11 @@ jobs:
       - name: 'Install dependencies'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Build packages and bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Install Playwright Chromium'
         run: |-

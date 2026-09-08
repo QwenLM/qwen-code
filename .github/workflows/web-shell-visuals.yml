@@ -84,6 +84,9 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Install Playwright Chromium'
         run: 'npx playwright install --with-deps chromium'
 
@@ -161,6 +164,12 @@ jobs:
         continue-on-error: true
         working-directory: 'base'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      - name: 'Build base packages'
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        working-directory: 'base'
+        continue-on-error: true
+        run: 'npm run build'
 
       # Run ONLY when the checkout AND install both succeeded. `base/` is nested
       # under the head checkout, so if the base's own node_modules is absent (a
