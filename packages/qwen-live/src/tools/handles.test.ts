@@ -202,6 +202,20 @@ describe('HandleRegistry jobs', () => {
 
     expect(registry.activeJobForSession('session_2')).toBeUndefined();
   });
+
+  it('retires unknown idle outcomes as interrupted instead of successful', () => {
+    const registry = new HandleRegistry();
+    const job = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      task: 'Task',
+    });
+    job.state = 'running';
+    expect(registry.reconcileIdleSession('session_1')).toEqual([job]);
+    expect(job.state).toBe('interrupted');
+    expect(registry.activeJobForSession('session_1')).toBeUndefined();
+    expect(registry.reconcileIdleSession('session_1')).toEqual([]);
+  });
 });
 
 describe('HandleRegistry assets', () => {

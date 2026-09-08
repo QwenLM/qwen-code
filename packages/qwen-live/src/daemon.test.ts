@@ -11,9 +11,10 @@ import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BackendRegistry } from './adaptor/registry.js';
-import type { LiveConfig } from './config.js';
+import { DEFAULT_PROACTIVE_CONFIG, type LiveConfig } from './config.js';
+import { DEFAULT_MEMORY_CONFIG } from './memory/config.js';
 import { LiveDaemon } from './daemon.js';
 import {
   getLiveDiscoveryPath,
@@ -21,6 +22,10 @@ import {
 } from './host/discovery.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './host/types.js';
 import { LiveLogger } from './logger.js';
+import { LiveSession } from './orchestrator/live-session.js';
+import { MemoryService } from './memory/service.js';
+import { SessionLog } from './log/session-log.js';
+import { parseSubagentsSnapshot } from './subagents/types.js';
 
 const temporaryDirectories: string[] = [];
 const daemons: LiveDaemon[] = [];
@@ -36,6 +41,7 @@ function fakeAdaptor(): import('./adaptor/types.js').BackendAdaptor {
   return {
     name: 'qwen-code',
     preflight: async () => undefined,
+    close: async () => undefined,
   } as unknown as import('./adaptor/types.js').BackendAdaptor;
 }
 
@@ -57,6 +63,21 @@ async function testConfig(): Promise<LiveConfig> {
     ],
     dataDir: join(base, 'data'),
     discoveryDir: join(base, 'discovery'),
+    visualInput: {
+      source: 'screen',
+      mode: 'on-demand',
+      fps: 1,
+      cameraResolution: { width: 1280, height: 720 },
+      cameraSnapshotResolution: 'native',
+      liveResolution: { width: 1280, height: 720 },
+      snapshotResolution: 'native',
+    },
+    proactive: DEFAULT_PROACTIVE_CONFIG,
+    memory: {
+      ...structuredClone(DEFAULT_MEMORY_CONFIG),
+      enabled: false,
+      dir: join(base, 'data', 'memories'),
+    },
     port: 0,
   };
 }
@@ -71,6 +92,11 @@ function startedDaemon(config: LiveConfig): LiveDaemon {
   });
   daemons.push(daemon);
   return daemon;
+}
+
+function ownedBackend(daemon: LiveDaemon) {
+  return (daemon as unknown as { registry: BackendRegistry }).registry
+    .defaultAdaptor;
 }
 
 async function readDiscoveryRecord(
@@ -139,9 +165,93 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
+  vi.restoreAllMocks();
 });
 
 describe('LiveDaemon', () => {
+  it('confirms and persists language independently of disabled Memory', async () => {
+    const config = await testConfig();
+    await mkdir(config.dataDir, { recursive: true });
+    const configPath = join(config.dataDir, 'config.json');
+    const previous = {
+      realtimeApiKey: 'fixture-private-key',
+      memory: { enabled: false },
+      custom: ['preserved'],
+    };
+    await writeFile(configPath, JSON.stringify(previous), { mode: 0o600 });
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const socket = connectHost(url, hostHeaders(record));
+    await waitForOpen(socket);
+    const messages: Array<Record<string, unknown>> = [];
+    socket.on('message', (message) =>
+      messages.push(JSON.parse(String(message))),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'host.hello',
+        subagentsV1: true,
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+        hostVersion: '1.0.0',
+        bundleId: 'com.alibaba.qwen-code.live-host',
+        instanceNonce: 'host_instance_nonce_0001',
+        permissions: {
+          microphone: 'granted',
+          camera: 'granted',
+          accessibility: 'granted',
+          screenRecording: 'granted',
+        },
+        selfChecks: {
+          audioInput: true,
+          audioOutput: true,
+          globalShortcut: true,
+          appshot: true,
+        },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        messages.find((message) => message['type'] === 'host.welcome'),
+      ).toMatchObject({ uiLanguageV1: { language: 'en' } }),
+    );
+    expect(
+      parseSubagentsSnapshot(
+        messages.find((message) => message['type'] === 'host.welcome')?.[
+          'subagentsV1'
+        ],
+      ),
+    ).toMatchObject({
+      revision: 0,
+      tasks: [],
+      omitted: 0,
+      counts: { running: 0, completed: 0, needsAttention: 0 },
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'host.language_action',
+        requestId: 'language-1',
+        epoch: 0,
+        language: 'zh-CN',
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        messages.find((message) => message['type'] === 'host.language_result'),
+      ).toMatchObject({
+        requestId: 'language-1',
+        ok: true,
+        uiLanguageV1: { language: 'zh-CN' },
+      }),
+    );
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({
+      ...previous,
+      language: 'zh-CN',
+    });
+    expect(config.language).toBe('zh-CN');
+    socket.terminate();
+  });
+
   it('stop() without start() resolves quickly', async () => {
     const daemon = startedDaemon(await testConfig());
     const outcome = await Promise.race([
@@ -151,8 +261,10 @@ describe('LiveDaemon', () => {
     expect(outcome).toBe('stopped');
   });
 
-  it('publishes a discovery record and accepts a Host presenting it', async () => {
+  it('accepts a discovered Host and advertises independent visual resolutions', async () => {
     const config = await testConfig();
+    config.visualInput.cameraSnapshotResolution = { width: 3840, height: 2160 };
+    config.visualInput.snapshotResolution = { width: 2560, height: 1440 };
     const daemon = startedDaemon(config);
     const { url, port } = await daemon.start();
     expect(url).toBe(`http://127.0.0.1:${port}`);
@@ -165,7 +277,158 @@ describe('LiveDaemon', () => {
     const socket = connectHost(url, hostHeaders(record));
     await waitForOpen(socket);
     expect(socket.readyState).toBe(WebSocket.OPEN);
+    const welcome = new Promise<Record<string, unknown>>((resolve) => {
+      socket.once('message', (message) => resolve(JSON.parse(String(message))));
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'host.hello',
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+        hostVersion: '1.0.0',
+        bundleId: 'com.alibaba.qwen-code.live-host',
+        instanceNonce: 'host_instance_nonce_0001',
+        permissions: {
+          microphone: 'granted',
+          camera: 'granted',
+          accessibility: 'granted',
+          screenRecording: 'granted',
+        },
+        selfChecks: {
+          audioInput: true,
+          audioOutput: true,
+          globalShortcut: true,
+          appshot: true,
+        },
+      }),
+    );
+    await expect(welcome).resolves.toMatchObject({
+      type: 'host.welcome',
+      daemonShutdownV1: true,
+      visualInput: {
+        cameraWidth: 1280,
+        cameraHeight: 720,
+        cameraSnapshotWidth: 3840,
+        cameraSnapshotHeight: 2160,
+        snapshotWidth: 2560,
+        snapshotHeight: 1440,
+      },
+    });
     socket.terminate();
+  });
+
+  it('wires active-epoch playback receipts and gracefully quits during a call', async () => {
+    const start = vi
+      .spyOn(LiveSession.prototype, 'start')
+      .mockResolvedValue(undefined);
+    const playbackStarted = vi
+      .spyOn(LiveSession.prototype, 'playbackStarted')
+      .mockImplementation(() => undefined);
+    const playbackCompleted = vi
+      .spyOn(LiveSession.prototype, 'playbackCompleted')
+      .mockImplementation(() => undefined);
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const socket = connectHost(url, hostHeaders(record));
+    await waitForOpen(socket);
+
+    socket.send(
+      JSON.stringify({
+        type: 'host.hello',
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+        hostVersion: '1.0.0',
+        bundleId: 'com.alibaba.qwen-code.live-host',
+        instanceNonce: 'host_instance_nonce_0001',
+        permissions: {
+          microphone: 'granted',
+          camera: 'granted',
+          accessibility: 'granted',
+          screenRecording: 'granted',
+        },
+        selfChecks: {
+          audioInput: true,
+          audioOutput: true,
+          globalShortcut: true,
+          appshot: true,
+        },
+      }),
+    );
+    socket.send(JSON.stringify({ type: 'host.action', action: 'toggle' }));
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const call = start.mock.calls[0]?.[0];
+    if (!call) throw new Error('Live call did not start');
+    const coordinator = (
+      daemon as unknown as {
+        coordinator?: {
+          sendOutputAudio(epoch: number, audio: Uint8Array): boolean;
+          finishOutputAudio(epoch: number): void;
+        };
+      }
+    ).coordinator;
+    expect(coordinator?.sendOutputAudio(call.epoch, Buffer.from([0, 0]))).toBe(
+      true,
+    );
+    coordinator?.finishOutputAudio(call.epoch);
+
+    socket.send(
+      JSON.stringify({
+        type: 'host.playback_started',
+        epoch: call.epoch - 1,
+        outputId: 1,
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'host.playback_completed',
+        epoch: call.epoch - 1,
+        outputId: 1,
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'host.playback_started',
+        epoch: call.epoch,
+        outputId: 2,
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'host.playback_started',
+        epoch: call.epoch,
+        outputId: 1,
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'host.playback_completed',
+        epoch: call.epoch,
+        outputId: 1,
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(playbackStarted).toHaveBeenCalledOnce();
+      expect(playbackCompleted).toHaveBeenCalledOnce();
+    });
+    expect(playbackStarted).toHaveBeenCalledWith({ epoch: call.epoch });
+    expect(playbackCompleted).toHaveBeenCalledWith({ epoch: call.epoch });
+    const dispose = vi.spyOn(LiveSession.prototype, 'dispose');
+    const closeBackends = vi.spyOn(ownedBackend(daemon), 'close');
+    const hostClosed = new Promise<void>((resolve) =>
+      socket.once('close', () => resolve()),
+    );
+    const response = await fetch(`${url}/live/quit`, {
+      method: 'POST',
+      headers: hostHeaders(record),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    await daemon.stop();
+    await hostClosed;
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(closeBackends).toHaveBeenCalledOnce();
+    await expect(readDiscoveryRecord(config.discoveryDir)).rejects.toThrow();
   });
 
   it('refuses an upgrade that carries an Origin header (CSRF wall)', async () => {
@@ -193,6 +456,174 @@ describe('LiveDaemon', () => {
       authorization: 'Bearer not-the-token',
     });
     await expect(waitForRefusal(socket)).resolves.toBe(401);
+  });
+
+  it('refuses shutdown without authentication or with the wrong instance', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    for (const [headers, status] of [
+      [{}, 401],
+      [{ ...hostHeaders(record), origin: 'https://untrusted.example' }, 401],
+      [{ ...hostHeaders(record), authorization: 'Bearer wrong' }, 401],
+      [{ ...hostHeaders(record), 'x-qwen-live-nonce': 'wrong-instance' }, 409],
+    ] as const) {
+      const response = await fetch(`${url}/live/quit`, {
+        method: 'POST',
+        headers,
+      });
+      expect(response.status).toBe(status);
+      await response.text();
+      expect((await fetch(`${url}/healthz`)).status).toBe(200);
+    }
+    expect(await readDiscoveryRecord(config.discoveryDir)).toEqual(record);
+  });
+
+  it('acknowledges concurrent authenticated shutdowns only after cleaning owned resources', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    const { url } = await daemon.start();
+    const record = await readDiscoveryRecord(config.discoveryDir);
+    const dispose = vi.spyOn(LiveSession.prototype, 'dispose');
+    let finishMemory!: () => void;
+    const actualClose = MemoryService.prototype.close;
+    const close = vi
+      .spyOn(MemoryService.prototype, 'close')
+      .mockImplementation(async function (this: MemoryService) {
+        await new Promise<void>((resolve) => {
+          finishMemory = resolve;
+        });
+        await actualClose.call(this);
+      });
+    let acknowledged = 0;
+    const requests = [1, 2].map(() =>
+      fetch(`${url}/live/quit`, {
+        method: 'POST',
+        headers: hostHeaders(record),
+      }).then(async (response) => {
+        acknowledged++;
+        expect(response.status).toBe(200);
+        return response.json();
+      }),
+    );
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(acknowledged).toBe(0);
+    const refusedSetup = await fetch(`${url}/live/setup`, {
+      headers: hostHeaders(record),
+    });
+    expect(refusedSetup.status).toBe(503);
+    await refusedSetup.text();
+    const firstStop = daemon.stop();
+    const secondStop = daemon.stop();
+    expect(firstStop).toBe(secondStop);
+    finishMemory();
+    expect(await Promise.all(requests)).toEqual([
+      { stopped: true, instanceNonce: record.instanceNonce },
+      { stopped: true, instanceNonce: record.instanceNonce },
+    ]);
+    await firstStop;
+    await expect(readDiscoveryRecord(config.discoveryDir)).rejects.toThrow();
+    await expect(fetch(`${url}/healthz`)).rejects.toThrow();
+  });
+
+  it.each(['session', 'backend'] as const)(
+    'keeps shutdown-only control and retries only failed %s cleanup',
+    async (failure) => {
+      const config = await testConfig();
+      const daemon = startedDaemon(config);
+      const { url } = await daemon.start();
+      const record = await readDiscoveryRecord(config.discoveryDir);
+      const dispose = vi.spyOn(LiveSession.prototype, 'dispose');
+      const backendClose = vi.spyOn(ownedBackend(daemon), 'close');
+      if (failure === 'session')
+        dispose.mockImplementationOnce(() => {
+          throw new Error('Simulated session cleanup failure');
+        });
+      else
+        backendClose.mockRejectedValueOnce(
+          new Error('Simulated backend cleanup failure'),
+        );
+      const close = vi.spyOn(MemoryService.prototype, 'close');
+      const closeLog = vi.spyOn(SessionLog.prototype, 'close');
+      const response = await fetch(`${url}/live/quit`, {
+        method: 'POST',
+        headers: hostHeaders(record),
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: 'Live shutdown cleanup failed.',
+      });
+      expect(close).toHaveBeenCalledOnce();
+      expect(await readDiscoveryRecord(config.discoveryDir)).toEqual(record);
+      const blocked = await fetch(`${url}/live/setup`, {
+        headers: hostHeaders(record),
+      });
+      expect(blocked.status).toBe(503);
+      await blocked.text();
+      const repeated = await fetch(`${url}/live/quit`, {
+        method: 'POST',
+        headers: hostHeaders(record),
+      });
+      expect(repeated.status).toBe(200);
+      expect(await repeated.json()).toEqual({
+        stopped: true,
+        instanceNonce: record.instanceNonce,
+      });
+      await daemon.stop();
+      expect(dispose).toHaveBeenCalledTimes(failure === 'session' ? 2 : 1);
+      expect(backendClose).toHaveBeenCalledTimes(failure === 'backend' ? 2 : 1);
+      expect(close).toHaveBeenCalledOnce();
+      expect(closeLog).toHaveBeenCalledOnce();
+      await expect(readDiscoveryRecord(config.discoveryDir)).rejects.toThrow();
+      await expect(fetch(`${url}/healthz`)).rejects.toThrow();
+    },
+  );
+
+  it('shares a failed stop attempt and permits an explicit retry without re-closing successful resources', async () => {
+    const config = await testConfig();
+    const daemon = startedDaemon(config);
+    await daemon.start();
+    const backendClose = vi
+      .spyOn(ownedBackend(daemon), 'close')
+      .mockRejectedValueOnce(new Error('Retry this cleanup'));
+    const closeMemory = vi.spyOn(MemoryService.prototype, 'close');
+    const first = daemon.stop();
+    expect(daemon.stop()).toBe(first);
+    await expect(first).rejects.toThrow('Live shutdown cleanup failed.');
+    const retry = daemon.stop();
+    expect(daemon.stop()).toBe(retry);
+    await retry;
+    expect(backendClose).toHaveBeenCalledTimes(2);
+    expect(closeMemory).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry successful backends when a different owned backend fails', async () => {
+    const config = await testConfig();
+    const first = fakeAdaptor();
+    const second = { ...fakeAdaptor(), name: 'second' };
+    const firstClose = vi
+      .spyOn(first, 'close')
+      .mockRejectedValueOnce(new Error('First backend is busy'));
+    const secondClose = vi.spyOn(second, 'close');
+    const daemon = new LiveDaemon(config, {
+      registry: new BackendRegistry([
+        { adaptor: first, isDefault: true },
+        { adaptor: second, isDefault: false },
+      ]),
+      logger: new LiveLogger('error'),
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    await expect(daemon.stop()).rejects.toThrow(
+      'Live shutdown cleanup failed.',
+    );
+    expect(firstClose).toHaveBeenCalledOnce();
+    expect(secondClose).toHaveBeenCalledOnce();
+    await daemon.stop();
+    expect(firstClose).toHaveBeenCalledTimes(2);
+    expect(secondClose).toHaveBeenCalledOnce();
   });
 
   it('stop() resolves within a deadline while a Host keeps reconnecting', async () => {

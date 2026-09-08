@@ -7,10 +7,16 @@
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+import type { ChildProcess } from 'node:child_process';
 import type { Client } from '@agentclientprotocol/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LiveLogger } from '../logger.js';
-import { AcpAdaptor, type AcpConnectionLike } from './acp-adaptor.js';
+import {
+  ACP_INIT_TIMEOUT_MS,
+  ACP_PACKAGE_RUNNER_INIT_TIMEOUT_MS,
+  AcpAdaptor,
+  type AcpConnectionLike,
+} from './acp-adaptor.js';
 import type { BackendEvent } from './types.js';
 
 /**
@@ -30,6 +36,8 @@ class FakeConnection implements AcpConnectionLike {
   settlePrompt: (stopReason?: string, error?: unknown) => void = () => {};
   /** Reject newSession once with this, then succeed. */
   newSessionError: unknown = undefined;
+  /** Reject initialize with this non-undefined value. */
+  initializeError: unknown = undefined;
   private promptWaiter?: {
     promise: Promise<unknown>;
     resolve: (value: unknown) => void;
@@ -63,6 +71,9 @@ class FakeConnection implements AcpConnectionLike {
     () => {};
 
   initialize(): Promise<Record<string, unknown>> {
+    if (this.initializeError !== undefined) {
+      return Promise.reject(this.initializeError);
+    }
     return this.initialized;
   }
 
@@ -208,6 +219,87 @@ describe('AcpAdaptor sessions and receipts', () => {
     expect(connection.authCalls).toHaveLength(1);
   });
 
+  it('keeps the native ACP initialization timeout fail-fast', async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      connection.initialize = () => new Promise(() => {});
+      const adaptor = makeAdaptor(connection);
+      adaptors.push(adaptor);
+
+      let settled = false;
+      const result = adaptor.preflight().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      void result.finally(() => {
+        settled = true;
+      });
+      // Let the async connect seam settle and arm the deadline.
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(ACP_INIT_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toMatchObject({
+        message: "acp backend 'acp' did not initialize",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows five minutes for a cold package-runner adapter bootstrap', async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      connection.initialize = () => new Promise(() => {});
+      const adaptor = new AcpAdaptor({
+        name: 'acp',
+        command: '/opt/homebrew/bin/npx',
+        defaultCwd: '/ws',
+        logger,
+        connect: connection.connect(),
+      });
+      adaptors.push(adaptor);
+
+      let settled = false;
+      const result = adaptor.preflight().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      void result.finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(ACP_PACKAGE_RUNNER_INIT_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toMatchObject({
+        message: "acp backend 'acp' did not initialize",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders structured initialize rejections as readable errors', async () => {
+    const connection = new FakeConnection();
+    connection.initializeError = {
+      code: -32_602,
+      message: 'Unsupported protocol version',
+    };
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+
+    await expect(adaptor.preflight()).rejects.toThrow(
+      "acp backend 'acp' failed to initialize: Unsupported protocol version (code -32602)",
+    );
+  });
+
   it('authenticates and retries when newSession returns auth_required', async () => {
     const connection = new FakeConnection();
     connection.newSessionError = Object.assign(new Error('auth required'), {
@@ -243,6 +335,7 @@ describe('AcpAdaptor sessions and receipts', () => {
 
     expect(events).toEqual([
       { type: 'turn_started', jobRef: 'turn-1' },
+      { type: 'activity', jobRef: 'turn-1', kind: 'message', text: 'working' },
       {
         type: 'turn_complete',
         jobRef: 'turn-1',
@@ -472,12 +565,38 @@ describe('AcpAdaptor real child lifecycle', () => {
     expect(events).toEqual([
       { type: 'turn_started', jobRef: 'turn-1' },
       {
+        type: 'activity',
+        jobRef: 'turn-1',
+        kind: 'message',
+        text: 'echo: hello fixture',
+      },
+      {
         type: 'turn_complete',
         jobRef: 'turn-1',
         summary: 'echo: hello fixture',
         detail: 'echo: hello fixture',
       },
     ]);
+  });
+
+  it('retains a failed child shutdown handle and retries it without allowing new work', async () => {
+    const adaptor = spawnedAdaptor();
+    adaptors.push(adaptor);
+    await adaptor.preflight();
+    const owned = adaptor as unknown as { child: ChildProcess | undefined };
+    const child = owned.child!;
+    const kill = vi.spyOn(child, 'kill').mockImplementationOnce(() => {
+      throw new Error('Synthetic signal failure');
+    });
+    const first = adaptor.close();
+    expect(adaptor.close()).toBe(first);
+    await expect(first).rejects.toThrow('Synthetic signal failure');
+    expect(owned.child).toBe(child);
+    await expect(adaptor.preflight()).rejects.toThrow('closed');
+    await adaptor.close();
+    expect(owned.child).toBeUndefined();
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+    expect(kill).toHaveBeenCalledTimes(2);
   });
 
   it('fails preflight in milliseconds when the child crashes at boot', async () => {

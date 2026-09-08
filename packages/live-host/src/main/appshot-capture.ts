@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MAX_CAPTURE_ASSET_BYTES } from '../shared/protocol.ts';
 import {
   loadNativeAppshot,
   type NativeAppshot,
@@ -11,14 +12,14 @@ import {
 const MAX_APP_NAME_CHARS = 512;
 const MAX_WINDOW_TITLE_CHARS = 2_048;
 const MAX_ACCESSIBILITY_TEXT_CHARS = 32_000;
-const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
+const MAX_SCREENSHOT_BYTES = MAX_CAPTURE_ASSET_BYTES;
 const CAPTURE_FILE_TTL_MS = 60_000;
 
-export interface AppshotCapture {
+export interface AppshotFrame {
   appName: string;
   windowTitle?: string;
   accessibilityText: string;
-  screenshotPath: string;
+  screenshot: Uint8Array;
 }
 
 function boundedText(value: unknown, maximum: number, field: string): string {
@@ -30,7 +31,7 @@ function boundedText(value: unknown, maximum: number, field: string): string {
 
 export function validateNativeCapture(
   value: NativeAppshotCapture,
-): Omit<AppshotCapture, 'screenshotPath'> & { screenshot: Uint8Array } {
+): AppshotFrame {
   if (
     !value ||
     typeof value !== 'object' ||
@@ -59,7 +60,7 @@ export function validateNativeCapture(
 }
 
 export class AppshotCaptureService {
-  private capturing = false;
+  private captureTail?: Promise<void>;
   private readonly cleanupTimers = new Map<NodeJS.Timeout, string>();
 
   constructor(
@@ -67,55 +68,53 @@ export class AppshotCaptureService {
     private readonly native: () => NativeAppshot = loadNativeAppshot,
   ) {}
 
-  async capture(): Promise<AppshotCapture> {
-    if (this.capturing) {
-      throw new Error('An Appshot capture is already in progress.');
-    }
-    this.capturing = true;
-    let screenshotPath: string | undefined;
-    try {
-      await mkdir(this.captureDirectory, { recursive: true, mode: 0o700 });
-      const directoryStat = await lstat(this.captureDirectory);
-      if (
-        !directoryStat.isDirectory() ||
-        directoryStat.isSymbolicLink() ||
-        (directoryStat.mode & 0o077) !== 0
-      ) {
-        throw new Error('The Appshot capture directory is not private.');
-      }
-      await this.removeStaleCaptures();
+  captureFrame(): Promise<AppshotFrame> {
+    const capture = this.captureTail
+      ? this.captureTail.then(() => this.captureFrameNow())
+      : this.captureFrameNow();
+    const tail = capture.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.captureTail = tail;
+    void tail.then(() => {
+      if (this.captureTail === tail) this.captureTail = undefined;
+    });
+    return capture;
+  }
 
-      const capture = validateNativeCapture(
-        await this.native().captureAppshot(),
-      );
-      screenshotPath = join(this.captureDirectory, `${randomUUID()}.png`);
-      await writeFile(screenshotPath, capture.screenshot, {
-        flag: 'wx',
-        mode: 0o600,
-      });
-      const stat = await lstat(screenshotPath);
-      if (
-        !stat.isFile() ||
-        stat.isSymbolicLink() ||
-        stat.size <= 0 ||
-        stat.size > MAX_SCREENSHOT_BYTES ||
-        (stat.mode & 0o077) !== 0
-      ) {
-        throw new Error('Native Appshot wrote an invalid screenshot file.');
-      }
-      const result: AppshotCapture = {
-        appName: capture.appName,
-        ...(capture.windowTitle ? { windowTitle: capture.windowTitle } : {}),
-        accessibilityText: capture.accessibilityText,
-        screenshotPath,
-      };
-      this.scheduleCleanup(screenshotPath);
-      screenshotPath = undefined;
-      return result;
-    } finally {
-      this.capturing = false;
-      if (screenshotPath) await unlink(screenshotPath).catch(() => undefined);
+  async storeJpeg(image: Uint8Array): Promise<string> {
+    if (
+      image.byteLength < 4 ||
+      image.byteLength > MAX_SCREENSHOT_BYTES ||
+      image[0] !== 0xff ||
+      image[1] !== 0xd8 ||
+      image[image.byteLength - 2] !== 0xff ||
+      image[image.byteLength - 1] !== 0xd9
+    ) {
+      throw new Error('Camera returned an invalid JPEG screenshot.');
     }
+    await this.prepareCaptureDirectory();
+    const path = join(this.captureDirectory, `${randomUUID()}.jpg`);
+    await this.writePrivateCapture(path, image);
+    this.scheduleCleanup(path);
+    return path;
+  }
+
+  async storePng(image: Uint8Array): Promise<string> {
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (
+      image.byteLength <= signature.length ||
+      image.byteLength > MAX_SCREENSHOT_BYTES ||
+      signature.some((byte, index) => image[index] !== byte)
+    ) {
+      throw new Error('Appshot returned an invalid PNG screenshot.');
+    }
+    await this.prepareCaptureDirectory();
+    const path = join(this.captureDirectory, `${randomUUID()}.png`);
+    await this.writePrivateCapture(path, image);
+    this.scheduleCleanup(path);
+    return path;
   }
 
   dispose(): void {
@@ -124,6 +123,10 @@ export class AppshotCaptureService {
       void unlink(path).catch(() => undefined);
     }
     this.cleanupTimers.clear();
+  }
+
+  private async captureFrameNow(): Promise<AppshotFrame> {
+    return validateNativeCapture(await this.native().captureAppshot());
   }
 
   private scheduleCleanup(path: string): void {
@@ -135,6 +138,41 @@ export class AppshotCaptureService {
     this.cleanupTimers.set(timer, path);
   }
 
+  private async prepareCaptureDirectory(): Promise<void> {
+    await mkdir(this.captureDirectory, { recursive: true, mode: 0o700 });
+    const directoryStat = await lstat(this.captureDirectory);
+    if (
+      !directoryStat.isDirectory() ||
+      directoryStat.isSymbolicLink() ||
+      (directoryStat.mode & 0o077) !== 0
+    ) {
+      throw new Error('The Appshot capture directory is not private.');
+    }
+    await this.removeStaleCaptures();
+  }
+
+  private async writePrivateCapture(
+    path: string,
+    image: Uint8Array,
+  ): Promise<void> {
+    try {
+      await writeFile(path, image, { flag: 'wx', mode: 0o600 });
+      const stat = await lstat(path);
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.size <= 0 ||
+        stat.size > MAX_SCREENSHOT_BYTES ||
+        (stat.mode & 0o077) !== 0
+      ) {
+        throw new Error('Appshot wrote an invalid screenshot file.');
+      }
+    } catch (error) {
+      await unlink(path).catch(() => undefined);
+      throw error;
+    }
+  }
+
   private async removeStaleCaptures(): Promise<void> {
     const entries = await readdir(this.captureDirectory, {
       withFileTypes: true,
@@ -142,7 +180,11 @@ export class AppshotCaptureService {
     const now = Date.now();
     await Promise.all(
       entries.map(async (entry) => {
-        if (!entry.isFile() || !entry.name.endsWith('.png')) return;
+        if (
+          !entry.isFile() ||
+          (!entry.name.endsWith('.png') && !entry.name.endsWith('.jpg'))
+        )
+          return;
         const path = join(this.captureDirectory, entry.name);
         const stat = await lstat(path).catch(() => undefined);
         if (stat && now - stat.mtimeMs > CAPTURE_FILE_TTL_MS) {

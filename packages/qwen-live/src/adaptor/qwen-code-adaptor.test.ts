@@ -554,8 +554,18 @@ describe('QwenCodeAdaptor.events', () => {
     expect(started.value).toEqual({ type: 'turn_started', jobRef: 'p1' });
     expect(adaptor.isBusy(handle)).toBe(true);
 
-    // The two agent_message_chunk envelopes yield no events of their own;
-    // the next observable event is the tool_call progress line.
+    expect((await iterator.next()).value).toEqual({
+      type: 'activity',
+      jobRef: 'p1',
+      kind: 'message',
+      text: 'Hello ',
+    });
+    expect((await iterator.next()).value).toEqual({
+      type: 'activity',
+      jobRef: 'p1',
+      kind: 'message',
+      text: 'world',
+    });
     const progress = await iterator.next();
     expect(progress.value).toEqual({
       type: 'progress',

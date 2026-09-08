@@ -6,7 +6,7 @@
 
 /**
  * LiveDaemon wires everything together: the Host WebSocket endpoint
- * (protocol v6, same wire contract as the shipped Qwen Live Host), the
+ * (protocol v9, including optional visual input), the
  * discovery file that Host binaries poll, the realtime orchestrator, and
  * the qwen serve adaptor.
  *
@@ -35,6 +35,11 @@ import { LIVE_HOST_PROTOCOL_VERSION } from './host/types.js';
 import { SessionLog } from './log/session-log.js';
 import { LiveLogger } from './logger.js';
 import { LiveSession } from './orchestrator/live-session.js';
+import { MemoryService } from './memory/service.js';
+import { MemoryStoreError } from './memory/store.js';
+import { deriveMemoryBaseUrl } from './memory/config.js';
+import { persistLanguagePreference } from './language-preferences.js';
+import { liveMessage } from './i18n/messages.js';
 
 const HOST_WS_PATH = '/live/host';
 
@@ -81,9 +86,13 @@ export class LiveDaemon {
   private wss: WebSocketServer | undefined;
   private coordinator: LiveHostCoordinator | undefined;
   private session: LiveSession | undefined;
+  private memory: MemoryService | undefined;
   private log: SessionLog | undefined;
   private discoveryPublished = false;
   private stopping = false;
+  private resourcesStopPromise: Promise<void> | undefined;
+  private stopPromise: Promise<void> | undefined;
+  private pendingCleanup: Map<string, () => unknown> | undefined;
 
   constructor(
     private readonly config: LiveConfig,
@@ -111,8 +120,71 @@ export class LiveDaemon {
     // best-effort: a failure marks them unavailable and startup continues.
     await this.registry.preflight((message) => this.logger.warn(message));
 
+    this.memory = new MemoryService({
+      config: this.config.memory,
+      dataDir: this.config.dataDir,
+      connection: {
+        baseUrl: deriveMemoryBaseUrl(this.config.realtime.endpoint),
+        apiKey: this.config.realtime.apiKey,
+      },
+      log: (event, details) =>
+        this.logger.debug(`${event} ${JSON.stringify(details ?? {})}`),
+      onChange: () => this.coordinator?.refreshMemoryState(),
+    });
+
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: this.instanceNonce,
+      daemonShutdownV1: true,
+      getUiLanguage: () => ({ language: this.config.language ?? 'en' }),
+      getSubagents: () => this.session?.getSubagentsSnapshot(),
+      onLanguageAction: (language) => {
+        this.config.language = persistLanguagePreference(
+          this.config.dataDir,
+          language,
+        );
+        return { language: this.config.language };
+      },
+      getMemoryState: () => this.memory!.state(),
+      onMemoryAction: (action) => {
+        try {
+          this.memory!.applyAction(action);
+        } catch (error) {
+          if (error instanceof MemoryStoreError)
+            throw new Error(liveMessage(error.messageKey));
+          if (
+            error instanceof Error &&
+            error.message.startsWith('qwen-live-ui:')
+          )
+            throw error;
+          throw new Error(liveMessage('memoryUI.updateFailed'));
+        }
+        this.session?.syncMemorySettings();
+        return this.memory!.state();
+      },
+      visualInput: {
+        source: this.config.visualInput.source,
+        mode: this.config.visualInput.mode,
+        fps: this.config.visualInput.fps,
+        cameraWidth: this.config.visualInput.cameraResolution.width,
+        cameraHeight: this.config.visualInput.cameraResolution.height,
+        ...(this.config.visualInput.cameraSnapshotResolution === 'native'
+          ? {}
+          : {
+              cameraSnapshotWidth:
+                this.config.visualInput.cameraSnapshotResolution.width,
+              cameraSnapshotHeight:
+                this.config.visualInput.cameraSnapshotResolution.height,
+            }),
+        liveWidth: this.config.visualInput.liveResolution.width,
+        liveHeight: this.config.visualInput.liveResolution.height,
+        ...(this.config.visualInput.snapshotResolution === 'native'
+          ? {}
+          : {
+              snapshotWidth: this.config.visualInput.snapshotResolution.width,
+              snapshotHeight: this.config.visualInput.snapshotResolution.height,
+            }),
+      },
+      logger: this.logger,
       ...(this.config.shortcut ? { shortcut: this.config.shortcut } : {}),
       getProviderReadiness: () =>
         this.config.realtime.apiKey
@@ -120,14 +192,14 @@ export class LiveDaemon {
           : {
               state: 'unavailable',
               blocker: 'provider_config',
-              message: 'DashScope realtime API key is not configured.',
+              message: liveMessage('runtime.apiKeyMissing'),
             },
     });
     this.coordinator = coordinator;
     // The ported coordinator fails closed until the Appshot delivery channel
     // is verified (in qwen serve that channel is a separate reverse-RPC hop
-    // booted lazily). Here the channel is the in-process
-    // captureScreenContext call, verified by construction.
+    // booted lazily). Here the channel is the in-process visual capture call,
+    // verified by construction.
     coordinator.setAppshotReadiness({ state: 'ready' });
 
     const log = new SessionLog({
@@ -147,7 +219,11 @@ export class LiveDaemon {
           ? { voice: this.config.realtime.voice }
           : {}),
       },
+      proactive: this.config.proactive,
+      memory: this.memory,
       log,
+      logger: this.logger,
+      onSubagentsChanged: () => coordinator.refreshSubagentsState(),
     });
     this.session = session;
 
@@ -155,8 +231,11 @@ export class LiveDaemon {
       onStart: (call) => session.start(call),
       onStop: (call) => session.stop(call),
       onInputAudio: (call) => session.pushAudio(call),
-      onPlaybackStarted: (call) => session.notePlaybackStarted(call),
-      onPlaybackCompleted: (call) => session.notePlaybackCompleted(call),
+      onInputImage: (call) => session.pushImage(call),
+      onVisualSettings: (call) => session.setVisualSettings(call),
+      onPlaybackStarted: (call) => session.playbackStarted(call),
+      onPlaybackCompleted: (call) => session.playbackCompleted(call),
+      onOutputMuted: (call) => session.outputMuted(call),
     });
 
     const port = await this.listen();
@@ -167,35 +246,103 @@ export class LiveDaemon {
     // The single machine-readable stdout line; harnesses parse the port
     // from it (same pattern as `qwen serve`).
     process.stdout.write(`qwen-live listening on ${url}\n`);
+    this.logger.debug(
+      `configuration ${JSON.stringify({
+        model: this.config.realtime.model,
+        visualInput: this.config.visualInput,
+        proactive: this.config.proactive,
+        backends: this.config.backends.map((backend) => backend.name),
+        sessionLog: log.filePath,
+      })}`,
+    );
     this.logger.info(
       `host endpoint ready at ${url}${HOST_WS_PATH} (protocol v${LIVE_HOST_PROTOCOL_VERSION})`,
     );
     return { port, url };
   }
 
-  async stop(): Promise<void> {
-    if (this.stopping) return;
+  stop(): Promise<void> {
+    this.stopPromise ??= this.finishStop().catch((error: unknown) => {
+      this.stopPromise = undefined;
+      throw error;
+    });
+    return this.stopPromise;
+  }
+
+  private stopResources(): Promise<void> {
     this.stopping = true;
-    this.session?.dispose();
-    this.coordinator?.dispose();
-    // Pumps are aborted by dispose, so no event can race the close; this
-    // terminates ACP subprocesses (and clears the serve adaptor's state).
-    await this.registry.closeAll((message) => this.logger.warn(message));
-    if (this.discoveryPublished) {
-      try {
-        await removeLiveDiscoveryFile(this.config.discoveryDir, {
-          pid: process.pid,
-          instanceNonce: this.instanceNonce,
-        });
-      } catch (error) {
-        this.logger.warn(
-          `could not remove the discovery file: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+    this.pendingCleanup ??= new Map<string, () => unknown>([
+      ['session', () => this.session?.dispose()],
+      ['coordinator', () => this.coordinator?.dispose()],
+      ...this.registry
+        .all()
+        .map(({ adaptor }): [string, () => unknown] => [
+          `backend:${adaptor.name}`,
+          () => adaptor.close(),
+        ]),
+      ['memory', () => this.memory?.close()],
+      ['log', () => this.log?.close()],
+      [
+        'discovery',
+        () =>
+          this.discoveryPublished
+            ? removeLiveDiscoveryFile(this.config.discoveryDir, {
+                pid: process.pid,
+                instanceNonce: this.instanceNonce,
+              })
+            : undefined,
+      ],
+    ]);
+    const pending = this.pendingCleanup;
+    this.resourcesStopPromise ??= (async () => {
+      const errors: unknown[] = [];
+      const clean = async (
+        name: string,
+        dispose: () => unknown,
+      ): Promise<void> => {
+        try {
+          await dispose();
+          pending.delete(name);
+        } catch (error) {
+          errors.push(error);
+        }
+      };
+      await Promise.all(
+        ['session', 'coordinator'].map((name) => {
+          const dispose = pending.get(name);
+          return dispose ? clean(name, dispose) : undefined;
+        }),
+      );
+      await Promise.all(
+        [...pending]
+          .filter(([name]) => name.startsWith('backend:'))
+          .map(([name, dispose]) => clean(name, dispose)),
+      );
+      for (const [name, dispose] of pending) {
+        if (
+          name === 'session' ||
+          name === 'coordinator' ||
+          name.startsWith('backend:')
+        )
+          continue;
+        if (name === 'discovery' && errors.length) continue;
+        await clean(name, dispose);
       }
-    }
-    await this.log?.close();
+      if (errors.length)
+        throw new AggregateError(errors, 'Live shutdown cleanup failed.');
+    })().catch((error: unknown) => {
+      this.resourcesStopPromise = undefined;
+      throw error;
+    });
+    return this.resourcesStopPromise;
+  }
+
+  private async finishStop(): Promise<void> {
+    await this.stopResources();
+    await this.closeTransports();
+  }
+
+  private async closeTransports(): Promise<void> {
     // Graceful close waits on the peer; shutdown must not. Any client still
     // attached (or attached between dispose() and here) is torn down hard.
     if (this.wss) {
@@ -231,6 +378,28 @@ export class LiveDaemon {
   ): void {
     const url = (req.url ?? '').split('?', 1)[0];
     const route = `${req.method} ${url}`;
+    if (route === 'POST /live/quit') {
+      if (!this.authorize(req)) {
+        res.writeHead(401).end();
+        return;
+      }
+      const nonce = req.headers['x-qwen-live-nonce'];
+      const presented = Buffer.from(typeof nonce === 'string' ? nonce : '');
+      const expected = Buffer.from(this.instanceNonce);
+      if (
+        presented.length !== expected.length ||
+        !timingSafeEqual(presented, expected)
+      ) {
+        res.writeHead(409).end();
+        return;
+      }
+      void this.serveQuit(res);
+      return;
+    }
+    if (this.stopping) {
+      res.writeHead(503).end();
+      return;
+    }
     if (
       (route === 'GET /live/setup' ||
         route === 'POST /live/setup/install' ||
@@ -247,6 +416,28 @@ export class LiveDaemon {
     }
     res.statusCode = route.startsWith('GET /live/setup') ? 401 : 404;
     res.end();
+  }
+
+  private async serveQuit(
+    res: import('node:http').ServerResponse,
+  ): Promise<void> {
+    try {
+      await this.stopResources();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({ stopped: true, instanceNonce: this.instanceNonce }),
+      );
+    } catch {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Live shutdown cleanup failed.' }));
+      this.logger.error('Live shutdown cleanup failed; retry Quit.');
+      return;
+    }
+    // Close the listener after replying; server.close otherwise waits on
+    // the very HTTP request that is awaiting its shutdown acknowledgement.
+    void this.stop().catch(() =>
+      this.logger.error('Live shutdown cleanup failed; retry Quit.'),
+    );
   }
 
   private async serveSetup(

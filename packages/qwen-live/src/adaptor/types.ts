@@ -75,6 +75,12 @@ export interface PermissionOption {
 
 export type BackendEvent =
   | { type: 'turn_started'; jobRef?: string }
+  | {
+      type: 'activity';
+      jobRef?: string;
+      kind: 'message' | 'plan' | 'tool';
+      text: string;
+    }
   | { type: 'progress'; jobRef?: string; summary: string }
   | { type: 'speak'; text: string }
   | {

@@ -29,6 +29,7 @@ export const QWEN_REALTIME_OUTPUT_SAMPLE_RATE = 24_000;
 
 export const QWEN_REALTIME_LIMITS = {
   maxInputAudioFrameBytes: 64 * 1024,
+  maxInputImageBytes: 190 * 1024,
   maxOutputAudioFrameBytes: 256 * 1024,
   maxBufferedSocketBytes: 1024 * 1024,
   maxIncomingMessageBytes: 1024 * 1024,
@@ -41,14 +42,35 @@ export const QWEN_REALTIME_LIMITS = {
 } as const;
 
 const CONNECT_TIMEOUT_MS = 8000;
+const NON_DIRECT_RESPONSE_CREATED_TIMEOUT_MS = 15_000;
+const NON_DIRECT_RESPONSE_DONE_TIMEOUT_MS = 120_000;
 const MAX_ERROR_MESSAGE_CHARS = 300;
+const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const MAX_RECENT_EVENT_IDS = 512;
 const MAX_TRACKED_INPUT_ITEMS = 32;
 const MAX_RETAINED_TRANSCRIPT_ENTRIES = 512;
+const PROTOCOL_DEBUG_EVENT_TYPES = new Set([
+  'input_audio_buffer.speech_started',
+  'input_audio_buffer.speech_stopped',
+  'input_audio_buffer.committed',
+  'conversation.item.created',
+  'conversation.item.input_audio_transcription.completed',
+  'conversation.item.input_audio_transcription.failed',
+  'response.created',
+  'response.done',
+]);
 export const REMAIN_SILENT_TOOL_NAME = 'remain_silent';
 const REALTIME_BACKEND_TEXT_PREFIX = '[BACKEND] ';
 const REALTIME_SPEAK_TO_USER_PREFIX = '[SPEAK_TO_USER] ';
 const REALTIME_MERGED_SPEECH_PREFIX = '[MERGE_WITH_USER] ';
+const PROACTIVE_REPAIR_REJECTION_OUTPUT = JSON.stringify({
+  status: 'error',
+  note: 'This tool is not authorized for the Proactive repair turn.',
+});
+const RESPONSE_TOOL_REJECTION_OUTPUT = JSON.stringify({
+  status: 'error',
+  note: 'This response is not authorized to call tools.',
+});
 
 /**
  * OpenAI-style function tool declaration forwarded to the realtime provider.
@@ -95,6 +117,8 @@ export interface QwenRealtimeDeps {
   ) => SocketLike;
   abortSignal?: AbortSignal;
   connectTimeoutMs?: number;
+  responseCreatedTimeoutMs?: number;
+  responseDoneTimeoutMs?: number;
 }
 
 export interface RealtimeEventContext {
@@ -125,7 +149,21 @@ export interface RealtimeResponseEvent extends RealtimeEventContext {
 export type RealtimeResponseAuthority =
   | 'direct'
   | 'tool_continuation'
-  | 'backend_speech';
+  | 'backend_speech'
+  | 'proactive'
+  | 'proactive_repair';
+
+type RealtimeToolCapability = 'none' | 'direct';
+
+export type RealtimeResponseCancellationReason =
+  | 'user_interrupted'
+  | 'client_cancelled'
+  | 'superseded';
+
+export interface RealtimeResponseDoneEvent extends RealtimeResponseEvent {
+  authority?: RealtimeResponseAuthority;
+  cancellationReason?: RealtimeResponseCancellationReason;
+}
 
 export interface RealtimeResponseCreatedEvent extends RealtimeResponseEvent {
   authority: RealtimeResponseAuthority;
@@ -159,6 +197,15 @@ export interface RealtimeDirectTranscriptEvent extends RealtimeEventContext {
   entries: readonly RealtimeTranscriptEntry[];
 }
 
+export interface RealtimeImageDroppedEvent extends RealtimeEventContext {
+  reason:
+    | 'audio_not_started'
+    | 'connection_unavailable'
+    | 'socket_backpressure'
+    | 'speech_superseded';
+  bufferedBytes: number;
+}
+
 export interface RealtimeFunctionCall extends RealtimeResponseEvent {
   itemId?: string;
   callId: string;
@@ -185,10 +232,21 @@ export interface RealtimeCloseInfo {
 }
 
 export interface QwenRealtimeCallbacks {
+  onDialogue?: (
+    event: RealtimeEventContext & {
+      inputItemId: string;
+      role: 'user' | 'assistant';
+      text: string;
+      source?: 'normal' | 'filler';
+      interrupted?: boolean;
+    },
+  ) => void;
   onReady?: (event: RealtimeEventContext & { sessionId?: string }) => void;
   onSpeechStarted?: (event: RealtimeSpeechEvent) => void;
   onSpeechStopped?: (event: RealtimeSpeechEvent) => void;
-  onInputCommitted?: (event: RealtimeSpeechEvent) => void;
+  onInputCommitted?: (
+    event: RealtimeSpeechEvent & { responsePending: boolean },
+  ) => void;
   onInputTranscriptDelta?: (event: RealtimeInputTranscriptEvent) => void;
   onInputTranscriptDone?: (event: RealtimeInputTranscriptEvent) => void;
   onOutputTextDelta?: (event: RealtimeOutputTextEvent) => void;
@@ -200,11 +258,13 @@ export interface QwenRealtimeCallbacks {
   onFunctionArgumentsDelta?: (event: RealtimeFunctionArgumentsEvent) => void;
   onFunctionCall?: (event: RealtimeFunctionCall) => void;
   onResponseCreated?: (event: RealtimeResponseCreatedEvent) => void;
-  onResponseDone?: (event: RealtimeResponseEvent) => void;
+  onResponseDone?: (event: RealtimeResponseDoneEvent) => void;
   onDirectTranscript?: (event: RealtimeDirectTranscriptEvent) => void;
   onBargeIn?: (event: RealtimeResponseEvent) => void;
   onIgnoredEvent?: (event: RealtimeIgnoredEvent) => void;
+  onProtocolDebug?: (details: Record<string, unknown>) => void;
   onAudioDropped?: (event: RealtimeEventContext) => void;
+  onImageDropped?: (event: RealtimeImageDroppedEvent) => void;
   onError?: (error: QwenRealtimeError) => void;
   onClose?: (info: RealtimeCloseInfo) => void;
 }
@@ -221,7 +281,13 @@ export interface RealtimeCloseOptions {
 export interface QwenRealtimeSession {
   readonly callEpoch: RealtimeCallEpoch;
   readonly closed: Promise<RealtimeCloseInfo>;
+  flushDialogue: () => void;
+  configure: (update: {
+    instructions: string;
+    tools: readonly RealtimeToolDefinition[];
+  }) => boolean;
   pushAudio: (pcm16: Uint8Array) => boolean;
+  pushImage: (jpegBase64: string) => boolean;
   commitInputAudio: () => boolean;
   clearInputAudio: () => boolean;
   cancelResponse: () => boolean;
@@ -232,6 +298,11 @@ export interface QwenRealtimeSession {
   ) => boolean;
   sendBackendContext: (text: string) => boolean;
   speakToUser: (message: string) => boolean;
+  respondToProactiveEvent: (event: string) => boolean;
+  requestProactiveRepair: (
+    instruction: string,
+    allowedToolNames: readonly string[],
+  ) => boolean;
   takeTranscriptTail: () => readonly RealtimeTranscriptEntry[];
   close: (options?: RealtimeCloseOptions) => void;
 }
@@ -320,17 +391,29 @@ interface PendingFunctionCall {
   outputSubmitted: boolean;
   responseCompleted: boolean;
   speechGeneration: number;
+  repairDeferred?: boolean;
+  repairEventId?: string;
   pendingOutput?: {
     output: string;
   };
 }
 
 interface ResponseCreateRequest {
+  requestId: string;
   authority: RealtimeResponseAuthority;
   speechMessage?: string;
   inputItemId?: string;
   speechGeneration: number;
   cancelled: boolean;
+  cancellationReason?: RealtimeResponseCancellationReason;
+  repairAllowedToolNames?: ReadonlySet<string>;
+  toolCapability: RealtimeToolCapability;
+}
+
+interface ToolContinuationState {
+  speechGeneration: number;
+  toolCapability: RealtimeToolCapability;
+  inputItemId?: string;
 }
 
 interface ProviderMessage extends Record<string, unknown> {
@@ -416,6 +499,67 @@ function optionalHttpStatus(value: unknown): number | undefined {
     : undefined;
 }
 
+function responseFailureError(
+  response: Record<string, unknown> | undefined,
+  apiKey?: string,
+): QwenRealtimeError {
+  const details = isRecord(response?.['status_details'])
+    ? response['status_details']
+    : undefined;
+  const providerError = isRecord(details?.['error'])
+    ? details['error']
+    : undefined;
+  const code = optionalString(providerError?.['code']) ?? 'response_failed';
+  const status = optionalHttpStatus(
+    providerError?.['status'] ?? details?.['status'],
+  );
+  const providerType = optionalString(providerError?.['type']);
+  const param = optionalString(providerError?.['param']);
+  const message = sanitizeErrorText(
+    providerError?.['message'] ??
+      details?.['reason'] ??
+      'Realtime response failed.',
+    apiKey,
+  );
+  return new QwenRealtimeError(message, code, false, {
+    kind: classifyRealtimeErrorKind(code, message, status),
+    ...(status !== undefined ? { status } : {}),
+    ...(providerType ? { providerType } : {}),
+    ...(param ? { param } : {}),
+  });
+}
+
+function upgradeFailureError(
+  status: number | undefined,
+  body: string,
+  apiKey?: string,
+): QwenRealtimeError {
+  let payload: Record<string, unknown> | undefined;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    payload = isRecord(parsed) ? parsed : undefined;
+  } catch {
+    payload = undefined;
+  }
+  const providerError = isRecord(payload?.['error'])
+    ? payload['error']
+    : payload;
+  const code =
+    optionalString(providerError?.['code']) ??
+    (status ? `http_${status}` : 'connection_failed');
+  const fallback = status
+    ? `Realtime provider rejected the WebSocket upgrade (${status}).`
+    : 'Realtime provider rejected the WebSocket upgrade.';
+  const message =
+    typeof providerError?.['message'] === 'string'
+      ? sanitizeErrorText(providerError['message'], apiKey)
+      : fallback;
+  return new QwenRealtimeError(message, code, true, {
+    kind: classifyRealtimeErrorKind(code, message, status),
+    ...(status !== undefined ? { status } : {}),
+  });
+}
+
 function parseAudioDelta(value: unknown): Uint8Array | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
   const maxBase64Chars =
@@ -434,12 +578,39 @@ function parseAudioDelta(value: unknown): Uint8Array | undefined {
   return new Uint8Array(decoded);
 }
 
+function isBoundedJpegBase64(value: string): boolean {
+  const maxBase64Chars =
+    Math.ceil(QWEN_REALTIME_LIMITS.maxInputImageBytes / 3) * 4;
+  if (
+    value.length === 0 ||
+    value.length > maxBase64Chars ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(value)
+  ) {
+    return false;
+  }
+  const jpeg = Buffer.from(value, 'base64');
+  return (
+    jpeg.byteLength >= 4 &&
+    jpeg.byteLength <= QWEN_REALTIME_LIMITS.maxInputImageBytes &&
+    jpeg[0] === 0xff &&
+    jpeg[1] === 0xd8 &&
+    jpeg[jpeg.byteLength - 2] === 0xff &&
+    jpeg[jpeg.byteLength - 1] === 0xd9 &&
+    jpeg.toString('base64') === value
+  );
+}
+
 export function openQwenRealtimeSession(
   config: QwenRealtimeConfig,
   callbacks: QwenRealtimeCallbacks = {},
   deps: QwenRealtimeDeps = {},
 ): Promise<QwenRealtimeSession> {
   const connectTimeoutMs = deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+  const responseCreatedTimeoutMs =
+    deps.responseCreatedTimeoutMs ?? NON_DIRECT_RESPONSE_CREATED_TIMEOUT_MS;
+  const responseDoneTimeoutMs =
+    deps.responseDoneTimeoutMs ?? NON_DIRECT_RESPONSE_DONE_TIMEOUT_MS;
   const createWebSocket =
     deps.createWebSocket ??
     ((url, options) =>
@@ -451,6 +622,15 @@ export function openQwenRealtimeSession(
       }) as unknown as SocketLike);
 
   return new Promise<QwenRealtimeSession>((resolve, reject) => {
+    if (
+      typeof config.instructions !== 'string' ||
+      config.instructions.length > 100_000
+    ) {
+      reject(
+        new RangeError('Realtime instructions exceed the supported size.'),
+      );
+      return;
+    }
     if (deps.abortSignal?.aborted) {
       reject(new QwenRealtimeError('Realtime connection was aborted.'));
       return;
@@ -513,18 +693,30 @@ export function openQwenRealtimeSession(
     let speechGenerationAdvancedForInput = false;
     let directResponsePending = false;
     let activeResponseAuthority: RealtimeResponseAuthority | undefined;
+    let effectiveInstructions = config.instructions;
+    let effectiveTools = [...config.tools];
+    let configurationDirty = false;
+    let responseInstructions = false;
     const toolsByName = new Map<string, RealtimeToolDefinition>(
       config.tools.map((tool) => [tool.function.name, tool]),
     );
     let backpressureWarned = false;
+    let hasSentInputAudio = false;
     let speechInputInProgress = false;
     let speechCommitPending = false;
+    let responseCreatedInProgress = false;
     let connectTimer: ReturnType<typeof setTimeout> | undefined;
+    let responseCreatedTimer: ReturnType<typeof setTimeout> | undefined;
+    let responseDoneTimer: ReturnType<typeof setTimeout> | undefined;
     let abortListener: (() => void) | undefined;
     const cancelledResponseIds = new Set<string>();
+    const cancelledResponseReasons = new Map<
+      string,
+      RealtimeResponseCancellationReason
+    >();
     const recentEventIds = new Set<string>();
     const pendingCalls = new Map<string, PendingFunctionCall>();
-    const toolContinuationGenerations = new Map<string, number>();
+    const toolContinuationStates = new Map<string, ToolContinuationState>();
     const pendingSpeechItemIds = new Set<string>();
     const committedInputItemIds = new Set<string>();
     const completedInputTranscripts = new Map<string, string>();
@@ -535,6 +727,12 @@ export function openQwenRealtimeSession(
     const collectedDirectResponseIds = new Set<string>();
     const collectedDirectInputItemIds = new Set<string>();
     const responseAuthorities = new Map<string, RealtimeResponseAuthority>();
+    const responseToolCapabilities = new Map<string, RealtimeToolCapability>();
+    const responseWithTools = new Set<string>();
+    const dialogueInputs = new Set<string>();
+    const dialogueResponses = new Set<string>();
+    const dialoguePrefixes = new Map<string, string>();
+    const repairToolAllowlists = new Map<string, ReadonlySet<string>>();
     const delegatedResponseIds = new Set<string>();
     const responseOutputText = new Map<
       string,
@@ -547,6 +745,120 @@ export function openQwenRealtimeSession(
       resolveClosed = res;
     });
     let closedSettled = false;
+
+    const protocolDebug = (message: ProviderMessage, type: string): void => {
+      if (!callbacks.onProtocolDebug || !PROTOCOL_DEBUG_EVENT_TYPES.has(type))
+        return;
+      try {
+        const identifier = (value: unknown): string | undefined => {
+          const id = optionalString(value);
+          return id &&
+            /^[A-Za-z0-9_.:-]+$/.test(id) &&
+            (!config.apiKey || !id.includes(config.apiKey))
+            ? id
+            : undefined;
+        };
+        const enumeration = (value: unknown, allowed: readonly string[]) =>
+          typeof value === 'string' && allowed.includes(value)
+            ? value
+            : undefined;
+        const item = isRecord(message['item']) ? message['item'] : undefined;
+        const response = isRecord(message['response'])
+          ? message['response']
+          : undefined;
+        const details = isRecord(response?.['status_details'])
+          ? response['status_details']
+          : undefined;
+        const itemId = optionalString(
+          type === 'conversation.item.created'
+            ? item?.['id']
+            : message['item_id'],
+        );
+        const responseId = optionalString(
+          response?.['id'] ?? message['response_id'],
+        );
+        const contentKinds = Array.isArray(item?.['content'])
+          ? [
+              ...new Set(
+                item['content'].flatMap((part) => {
+                  const kind = isRecord(part)
+                    ? enumeration(part['type'], [
+                        'input_audio',
+                        'input_text',
+                        'input_image',
+                        'audio',
+                        'text',
+                      ])
+                    : undefined;
+                  return kind ? [kind] : [];
+                }),
+              ),
+            ]
+          : undefined;
+        callbacks.onProtocolDebug({
+          type,
+          eventId: identifier(message.event_id),
+          itemId: identifier(itemId),
+          responseId: identifier(responseId),
+          activeResponseId: identifier(activeResponseId),
+          activeResponseAuthority,
+          responseCancelled:
+            responseId !== undefined && cancelledResponseIds.has(responseId),
+          cancellationReason:
+            responseId === undefined
+              ? undefined
+              : cancelledResponseReasons.get(responseId),
+          itemType: enumeration(item?.['type'], [
+            'message',
+            'function_call',
+            'function_call_output',
+          ]),
+          role: enumeration(item?.['role'], ['user', 'assistant', 'system']),
+          contentKinds,
+          responseStatus: enumeration(response?.['status'], [
+            'in_progress',
+            'completed',
+            'cancelled',
+            'failed',
+            'incomplete',
+          ]),
+          statusType: enumeration(details?.['type'], [
+            'completed',
+            'cancelled',
+            'failed',
+            'incomplete',
+          ]),
+          statusReason: enumeration(details?.['reason'], [
+            'turn_detected',
+            'client_cancelled',
+            'user_interrupted',
+            'superseded',
+            'max_output_tokens',
+            'content_filter',
+          ]),
+          pendingSpeechItems: pendingSpeechItemIds.size,
+          committedInputItems: committedInputItemIds.size,
+          completedInputTranscripts: completedInputTranscripts.size,
+          consumedInputItems: consumedInputItemIds.size,
+          hasPendingSpeechItem:
+            itemId !== undefined && pendingSpeechItemIds.has(itemId),
+          hasCommittedInputItem:
+            itemId !== undefined && committedInputItemIds.has(itemId),
+          hasCompletedInputTranscript:
+            itemId !== undefined && completedInputTranscripts.has(itemId),
+          hasConsumedInputItem:
+            itemId !== undefined && consumedInputItemIds.has(itemId),
+          hasPendingResponseCreate: pendingResponseCreate !== undefined,
+          queuedResponseCreates: responseCreateQueue.length,
+          hasSentInputAudio,
+          speechInputInProgress,
+          speechCommitPending,
+          directResponsePending,
+        });
+      } catch {
+        // Diagnostics must not change the call's protocol or lifecycle.
+      }
+    };
 
     const callback = (fn: (() => void) | undefined): boolean => {
       if (!fn) return true;
@@ -582,6 +894,23 @@ export function openQwenRealtimeSession(
       if (!connectTimer) return;
       clearTimeout(connectTimer);
       connectTimer = undefined;
+    };
+
+    const clearResponseCreatedTimer = () => {
+      if (!responseCreatedTimer) return;
+      clearTimeout(responseCreatedTimer);
+      responseCreatedTimer = undefined;
+    };
+
+    const clearResponseDoneTimer = () => {
+      if (!responseDoneTimer) return;
+      clearTimeout(responseDoneTimer);
+      responseDoneTimer = undefined;
+    };
+
+    const clearResponseTimers = () => {
+      clearResponseCreatedTimer();
+      clearResponseDoneTimer();
     };
 
     const removeAbortListener = () => {
@@ -629,9 +958,11 @@ export function openQwenRealtimeSession(
       if (terminal) return;
       const inputLossError = pendingInputLossError();
       const reportedError =
-        error.kind !== 'protocol' && inputLossError ? inputLossError : error;
+        error.kind === 'transient' && inputLossError ? inputLossError : error;
       terminal = true;
+      if (activeResponseId) collectDialogueResponse(activeResponseId, true);
       clearConnectTimer();
+      clearResponseTimers();
       removeAbortListener();
       closeSocket();
       if (!settled) {
@@ -666,14 +997,111 @@ export function openQwenRealtimeSession(
       }
     };
 
+    const reportResponseTimeout = (
+      request: ResponseCreateRequest,
+      responseId: string,
+      phase: 'created' | 'done',
+    ): void => {
+      callback(() =>
+        callbacks.onResponseDone?.({
+          callEpoch: config.callEpoch,
+          responseId,
+          status: 'failed',
+          authority: request.authority,
+          ...(request.cancellationReason
+            ? { cancellationReason: request.cancellationReason }
+            : {}),
+        }),
+      );
+      fail(
+        new QwenRealtimeError(
+          `Realtime ${request.authority} response timed out waiting for response.${phase}.`,
+          `response_${phase}_timeout`,
+          true,
+          { kind: 'transient' },
+        ),
+      );
+    };
+
+    const flushConfiguration = (): boolean => {
+      if (
+        !configurationDirty ||
+        !ready ||
+        activeResponseId ||
+        pendingResponseCreate ||
+        responseCreatedInProgress
+      )
+        return true;
+      if (
+        !sendJson({
+          type: 'session.update',
+          session: {
+            instructions: effectiveInstructions,
+            tools: effectiveTools.map((tool) => ({
+              type: tool.type,
+              function: tool.function,
+            })),
+          },
+        })
+      )
+        return false;
+      configurationDirty = false;
+      return true;
+    };
+
+    const armResponseCreatedTimer = (request: ResponseCreateRequest): void => {
+      clearResponseCreatedTimer();
+      if (request.authority === 'direct') return;
+      responseCreatedTimer = setTimeout(() => {
+        responseCreatedTimer = undefined;
+        if (pendingResponseCreate !== request || terminal || closedByClient) {
+          return;
+        }
+        pendingResponseCreate = undefined;
+        reportResponseTimeout(
+          request,
+          `unacknowledged-${request.requestId}`,
+          'created',
+        );
+      }, responseCreatedTimeoutMs);
+      responseCreatedTimer.unref?.();
+    };
+
+    const armResponseDoneTimer = (
+      request: ResponseCreateRequest,
+      responseId: string,
+    ): void => {
+      clearResponseDoneTimer();
+      if (request.authority === 'direct') return;
+      responseDoneTimer = setTimeout(() => {
+        responseDoneTimer = undefined;
+        if (activeResponseId !== responseId || terminal || closedByClient) {
+          return;
+        }
+        sendJson({ type: 'response.cancel' });
+        reportResponseTimeout(request, responseId, 'done');
+      }, responseDoneTimeoutMs);
+      responseDoneTimer.unref?.();
+    };
+
     const markResponseCancelled = (
       responseId: string,
       retainActive = false,
+      reason: RealtimeResponseCancellationReason = 'superseded',
     ): void => {
-      if (cancelledResponseIds.has(responseId)) return;
+      if (cancelledResponseIds.has(responseId)) {
+        if (!cancelledResponseReasons.has(responseId)) {
+          cancelledResponseReasons.set(responseId, reason);
+        }
+        return;
+      }
       cancelledResponseIds.add(responseId);
+      cancelledResponseReasons.set(responseId, reason);
       for (const [callId, call] of pendingCalls) {
-        if (call.responseId === responseId && !call.dispatched) {
+        if (
+          call.responseId === responseId &&
+          (!call.dispatched || call.repairDeferred)
+        ) {
           pendingCalls.delete(callId);
         }
       }
@@ -686,8 +1114,28 @@ export function openQwenRealtimeSession(
       }
       if (cancelledResponseIds.size > 16) {
         const oldest = cancelledResponseIds.values().next().value;
-        if (typeof oldest === 'string') cancelledResponseIds.delete(oldest);
+        if (typeof oldest === 'string') {
+          cancelledResponseIds.delete(oldest);
+          cancelledResponseReasons.delete(oldest);
+        }
       }
+    };
+
+    const reportDroppedImage = (
+      reason: RealtimeImageDroppedEvent['reason'],
+    ): void => {
+      callback(() =>
+        callbacks.onImageDropped?.({
+          callEpoch: config.callEpoch,
+          reason,
+          bufferedBytes: ws.bufferedAmount ?? 0,
+        }),
+      );
+    };
+
+    const dropImage = (reason: RealtimeImageDroppedEvent['reason']): false => {
+      reportDroppedImage(reason);
+      return false;
     };
 
     const sendFunctionCallOutput = (
@@ -717,11 +1165,15 @@ export function openQwenRealtimeSession(
       if (request.speechGeneration !== speechGeneration) {
         return true;
       }
+      if (!flushConfiguration()) return false;
       if (
         request.speechMessage !== undefined &&
         !sendBackendConversationItem(
           request.speechMessage,
-          REALTIME_SPEAK_TO_USER_PREFIX,
+          request.authority === 'proactive' ||
+            request.authority === 'proactive_repair'
+            ? ''
+            : REALTIME_SPEAK_TO_USER_PREFIX,
         )
       ) {
         return false;
@@ -730,12 +1182,22 @@ export function openQwenRealtimeSession(
       if (
         sendJson({
           type: 'response.create',
-          response: { modalities: ['text', 'audio'] },
+          response: {
+            ...(responseInstructions
+              ? { instructions: effectiveInstructions }
+              : {}),
+            modalities:
+              request.authority === 'proactive_repair'
+                ? ['text']
+                : ['text', 'audio'],
+          },
         })
       ) {
+        armResponseCreatedTimer(request);
         return true;
       }
       pendingResponseCreate = undefined;
+      clearResponseCreatedTimer();
       return false;
     };
 
@@ -743,6 +1205,11 @@ export function openQwenRealtimeSession(
       authority: RealtimeResponseAuthority,
       speechMessage?: string,
       inputItemId?: string,
+      repairAllowedToolNames?: ReadonlySet<string>,
+      toolCapability: RealtimeToolCapability = authority === 'direct' &&
+      inputItemId !== undefined
+        ? 'direct'
+        : 'none',
     ): boolean => {
       if (authority !== 'direct' && directResponsePending) {
         if (
@@ -764,23 +1231,31 @@ export function openQwenRealtimeSession(
         ) {
           const pendingDirect = pendingResponseCreate;
           pendingDirect.cancelled = true;
+          pendingDirect.cancellationReason = 'superseded';
           responseCreateQueue.unshift({
+            requestId: randomUUID(),
             authority: 'direct',
             ...(pendingDirect.inputItemId
               ? { inputItemId: pendingDirect.inputItemId }
               : {}),
             speechGeneration,
             cancelled: false,
+            toolCapability: pendingDirect.toolCapability,
           });
         }
         return true;
       }
       const request = {
+        requestId: randomUUID(),
         authority,
         ...(speechMessage !== undefined ? { speechMessage } : {}),
         ...(inputItemId !== undefined ? { inputItemId } : {}),
+        ...(repairAllowedToolNames !== undefined
+          ? { repairAllowedToolNames }
+          : {}),
         speechGeneration,
         cancelled: false,
+        toolCapability,
       };
       if (pendingResponseCreate || activeResponseId) {
         responseCreateQueue.push(request);
@@ -793,6 +1268,7 @@ export function openQwenRealtimeSession(
       if (pendingResponseCreate || activeResponseId) {
         return;
       }
+      if (!flushConfiguration()) return;
       const next = responseCreateQueue.shift();
       if (!next) return;
       if (next.cancelled) {
@@ -810,11 +1286,17 @@ export function openQwenRealtimeSession(
       ) {
         return;
       }
-      const generation = toolContinuationGenerations.get(responseId);
-      if (generation === undefined) return;
-      toolContinuationGenerations.delete(responseId);
-      if (generation !== speechGeneration) return;
-      requestResponseCreate('tool_continuation');
+      const continuation = toolContinuationStates.get(responseId);
+      if (!continuation) return;
+      toolContinuationStates.delete(responseId);
+      if (continuation.speechGeneration !== speechGeneration) return;
+      requestResponseCreate(
+        'tool_continuation',
+        undefined,
+        continuation.inputItemId,
+        undefined,
+        continuation.toolCapability,
+      );
     };
 
     const sendBackendConversationItem = (
@@ -853,19 +1335,29 @@ export function openQwenRealtimeSession(
       status: string | undefined,
     ): void => {
       if (status === 'failed' || status === 'cancelled') {
-        toolContinuationGenerations.delete(responseId);
+        toolContinuationStates.delete(responseId);
       }
       for (const [callId, call] of [...pendingCalls]) {
         if (call.responseId !== responseId) continue;
         call.responseCompleted = true;
-        if (status === 'failed' || !call.dispatched) {
+        if (status === 'failed' || !call.dispatched || call.repairDeferred) {
           pendingCalls.delete(callId);
           continue;
         }
         const pendingOutput = call.pendingOutput;
         if (!pendingOutput) continue;
         call.pendingOutput = undefined;
-        sendFunctionCallOutput(call, pendingOutput.output);
+        if (!sendFunctionCallOutput(call, pendingOutput.output) && !terminal) {
+          fail(
+            new QwenRealtimeError(
+              'Realtime function output could not be sent.',
+              'function_output_send_failed',
+              true,
+              { kind: 'transient' },
+            ),
+          );
+          return;
+        }
       }
       maybeRequestToolContinuation(responseId);
     };
@@ -910,6 +1402,8 @@ export function openQwenRealtimeSession(
     };
 
     const consumeResponseInput = (responseId: string): string | undefined => {
+      responseWithTools.delete(responseId);
+      dialoguePrefixes.delete(responseId);
       const itemId = responseInputItemIds.get(responseId);
       responseInputItemIds.delete(responseId);
       if (itemId) consumeInputItem(itemId);
@@ -1006,6 +1500,57 @@ export function openQwenRealtimeSession(
       deliverDirectTranscript(entries, responseId, inputItemId);
     };
 
+    const collectDialogueResponse = (
+      responseId: string,
+      interrupted = false,
+    ): void => {
+      if (
+        dialogueResponses.has(responseId) ||
+        responseToolCapabilities.get(responseId) !== 'direct'
+      )
+        return;
+      const inputItemId = responseInputItemIds.get(responseId);
+      const output = responseOutputText.get(responseId);
+      const text = [
+        dialoguePrefixes.get(responseId),
+        output?.audioTranscript || output?.text,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      if (!inputItemId || !text) return;
+      dialogueResponses.add(responseId);
+      if (dialogueResponses.size > MAX_TRACKED_INPUT_ITEMS)
+        dialogueResponses.delete(dialogueResponses.values().next().value!);
+      callback(() =>
+        callbacks.onDialogue?.({
+          callEpoch: config.callEpoch,
+          inputItemId,
+          role: 'assistant',
+          text,
+          source:
+            responseWithTools.has(responseId) && !interrupted
+              ? 'filler'
+              : 'normal',
+          interrupted,
+        }),
+      );
+    };
+
+    const collectDialogueInput = (itemId: string, text: string): void => {
+      if (dialogueInputs.has(itemId)) return;
+      dialogueInputs.add(itemId);
+      if (dialogueInputs.size > MAX_TRACKED_INPUT_ITEMS)
+        dialogueInputs.delete(dialogueInputs.values().next().value!);
+      callback(() =>
+        callbacks.onDialogue?.({
+          callEpoch: config.callEpoch,
+          inputItemId: itemId,
+          role: 'user',
+          text,
+        }),
+      );
+    };
+
     const takeTranscriptTail = (): readonly RealtimeTranscriptEntry[] => {
       for (const responseId of responseAuthorities.keys()) {
         collectDirectTranscript(responseId);
@@ -1096,10 +1641,19 @@ export function openQwenRealtimeSession(
     };
 
     const finalizeCancelledResponse = (responseId: string): void => {
+      if (activeResponseId === responseId) clearResponseDoneTimer();
       if (!cancelledResponseIds.has(responseId)) {
         markResponseCancelled(responseId);
       }
+      const authority =
+        responseAuthorities.get(responseId) ??
+        (activeResponseId === responseId
+          ? activeResponseAuthority
+          : undefined) ??
+        'direct';
+      const cancellationReason = cancelledResponseReasons.get(responseId);
       const responseInputItemId = responseInputItemIds.get(responseId);
+      collectDialogueResponse(responseId, true);
       collectDirectTranscript(responseId);
       completePendingCallsForResponse(responseId, 'cancelled');
       consumeResponseInput(responseId);
@@ -1118,9 +1672,14 @@ export function openQwenRealtimeSession(
           responseId,
           ...(responseInputItemId ? { inputItemId: responseInputItemId } : {}),
           status: 'cancelled',
+          authority,
+          ...(cancellationReason ? { cancellationReason } : {}),
         }),
       );
+      cancelledResponseReasons.delete(responseId);
       responseAuthorities.delete(responseId);
+      responseToolCapabilities.delete(responseId);
+      repairToolAllowlists.delete(responseId);
       delegatedResponseIds.delete(responseId);
       responseOutputText.delete(responseId);
       collectedDirectResponseIds.delete(responseId);
@@ -1174,6 +1733,9 @@ export function openQwenRealtimeSession(
       return true;
     };
 
+    const isProactiveRepairResponse = (responseId: string): boolean =>
+      responseAuthorities.get(responseId) === 'proactive_repair';
+
     const commitInputItem = (
       message: ProviderMessage,
       type: string,
@@ -1219,11 +1781,15 @@ export function openQwenRealtimeSession(
         callbacks.onInputCommitted?.({
           ...eventContext(message),
           itemId,
+          responsePending: !activeDirectResponse,
         }),
       );
       if (terminal) return;
       if (activeDirectResponse) {
         directResponsePending = false;
+        if (activeResponseId) {
+          responseToolCapabilities.set(activeResponseId, 'direct');
+        }
       } else if (directResponsePending) {
         requestResponseCreate('direct', undefined, itemId);
       }
@@ -1274,20 +1840,40 @@ export function openQwenRealtimeSession(
         }
         return;
       }
+      if (repairToolAllowlists.has(call.responseId)) {
+        call.arguments = rawArguments;
+        call.dispatched = true;
+        call.repairDeferred = true;
+        call.repairEventId = optionalString(message.event_id);
+        return;
+      }
       if (call.name === REMAIN_SILENT_TOOL_NAME) {
         call.arguments = rawArguments;
         call.dispatched = true;
         queueFunctionCallOutput(call, '');
         return;
       }
+      const toolCapability =
+        responseToolCapabilities.get(call.responseId) ?? 'none';
       const tool = call.name ? toolsByName.get(call.name) : undefined;
+      if (toolCapability !== 'direct') {
+        call.arguments = rawArguments;
+        call.dispatched = true;
+        queueFunctionCallOutput(call, RESPONSE_TOOL_REJECTION_OUTPUT);
+        return;
+      }
+      responseWithTools.add(call.responseId);
       if (!tool) {
         // A tool the config never declared: answer with an error receipt so
         // the model can recover aloud instead of waiting on a call that no
         // handler will ever complete.
         call.arguments = rawArguments;
         call.dispatched = true;
-        toolContinuationGenerations.set(call.responseId, call.speechGeneration);
+        toolContinuationStates.set(call.responseId, {
+          speechGeneration: call.speechGeneration,
+          toolCapability,
+          inputItemId: responseInputItemIds.get(call.responseId),
+        });
         queueFunctionCallOutput(
           call,
           JSON.stringify({
@@ -1300,7 +1886,11 @@ export function openQwenRealtimeSession(
       call.arguments = rawArguments;
       call.dispatched = true;
       if (tool.continuesResponse) {
-        toolContinuationGenerations.set(call.responseId, call.speechGeneration);
+        toolContinuationStates.set(call.responseId, {
+          speechGeneration: call.speechGeneration,
+          toolCapability,
+          inputItemId: responseInputItemIds.get(call.responseId),
+        });
       }
       let activeTranscript: readonly RealtimeTranscriptEntry[] = [];
       if (tool.capturesTranscript) {
@@ -1323,9 +1913,70 @@ export function openQwenRealtimeSession(
       );
     };
 
+    const dispatchCompletedRepairCalls = (responseId: string): void => {
+      const allowlist = repairToolAllowlists.get(responseId);
+      if (!allowlist) return;
+      let authorizedCallDispatched = false;
+      for (const call of pendingCalls.values()) {
+        if (call.responseId !== responseId || !call.repairDeferred) continue;
+        call.repairDeferred = false;
+        const name = call.name ?? '';
+        const authorized =
+          !authorizedCallDispatched &&
+          allowlist.has(name) &&
+          toolsByName.has(name);
+        if (!authorized) {
+          queueFunctionCallOutput(call, PROACTIVE_REPAIR_REJECTION_OUTPUT);
+          continue;
+        }
+        authorizedCallDispatched = true;
+        toolContinuationStates.set(responseId, {
+          speechGeneration: call.speechGeneration,
+          toolCapability: 'none',
+        });
+        callback(() =>
+          callbacks.onFunctionCall?.({
+            callEpoch: config.callEpoch,
+            ...(call.repairEventId ? { eventId: call.repairEventId } : {}),
+            responseId,
+            itemId: call.itemId,
+            callId: call.callId,
+            name,
+            arguments: call.arguments,
+            activeTranscript: [],
+          }),
+        );
+        if (terminal) return;
+      }
+    };
+
     const session: QwenRealtimeSession = {
       callEpoch: config.callEpoch,
       closed,
+      flushDialogue: () => {
+        if (activeResponseId) collectDialogueResponse(activeResponseId, true);
+      },
+      configure: (update) => {
+        if (terminal || closedByClient) return false;
+        if (
+          typeof update.instructions !== 'string' ||
+          update.instructions.length > 100_000
+        )
+          throw new RangeError(
+            'Realtime instructions exceed the supported size.',
+          );
+        const changed =
+          effectiveInstructions !== update.instructions ||
+          JSON.stringify(effectiveTools) !== JSON.stringify(update.tools);
+        effectiveInstructions = update.instructions;
+        effectiveTools = [...update.tools];
+        toolsByName.clear();
+        for (const tool of effectiveTools)
+          toolsByName.set(tool.function.name, tool);
+        configurationDirty ||= changed;
+        responseInstructions = true;
+        return flushConfiguration();
+      },
       pushAudio: (pcm16) => {
         if (pcm16.length === 0) return false;
         if (
@@ -1351,9 +2002,31 @@ export function openQwenRealtimeSession(
           return false;
         }
         backpressureWarned = false;
-        return sendJson({
+        const sent = sendJson({
           type: 'input_audio_buffer.append',
           audio: Buffer.from(pcm16).toString('base64'),
+        });
+        if (sent) hasSentInputAudio = true;
+        return sent;
+      },
+      pushImage: (jpegBase64) => {
+        if (!isBoundedJpegBase64(jpegBase64)) {
+          throw new RangeError(
+            'Realtime image input must be a bounded JPEG base64 frame.',
+          );
+        }
+        if (!hasSentInputAudio) return dropImage('audio_not_started');
+        if (terminal || closedByClient || ws.readyState !== ws.OPEN) {
+          return dropImage('connection_unavailable');
+        }
+        if (
+          (ws.bufferedAmount ?? 0) > QWEN_REALTIME_LIMITS.maxBufferedSocketBytes
+        ) {
+          return dropImage('socket_backpressure');
+        }
+        return sendJson({
+          type: 'input_image_buffer.append',
+          image: jpegBase64,
         });
       },
       commitInputAudio: () => sendJson({ type: 'input_audio_buffer.commit' }),
@@ -1373,7 +2046,8 @@ export function openQwenRealtimeSession(
           return false;
         }
         const responseId = activeResponseId;
-        markResponseCancelled(responseId);
+        clearResponseDoneTimer();
+        markResponseCancelled(responseId, false, 'client_cancelled');
         const sent = sendJson({ type: 'response.cancel' });
         finalizeCancelledResponse(responseId);
         return sent;
@@ -1434,6 +2108,79 @@ export function openQwenRealtimeSession(
         if (terminal || closedByClient) return false;
         return requestResponseCreate('backend_speech', message);
       },
+      respondToProactiveEvent: (event) => {
+        if (
+          typeof event !== 'string' ||
+          event.trim().length === 0 ||
+          event.length > QWEN_REALTIME_LIMITS.maxFunctionOutputChars
+        ) {
+          throw new RangeError(
+            'Realtime Proactive event exceeded the allowed size.',
+          );
+        }
+        if (terminal || closedByClient) return false;
+        // Injector owns Proactive retry/FIFO ordering. Never admit one into
+        // Realtime's private response queue: queued requests can be discarded
+        // by a later speech_started event without a response.done callback,
+        // which would leave Injector waiting forever for that delivery.
+        if (
+          responseCreatedInProgress ||
+          directResponsePending ||
+          pendingResponseCreate !== undefined ||
+          activeResponseId !== undefined ||
+          toolContinuationStates.size > 0 ||
+          responseCreateQueue.length > 0
+        ) {
+          return false;
+        }
+        return requestResponseCreate('proactive', event);
+      },
+      requestProactiveRepair: (instruction, allowedToolNames) => {
+        if (
+          typeof instruction !== 'string' ||
+          instruction.trim().length === 0 ||
+          instruction.length > QWEN_REALTIME_LIMITS.maxFunctionOutputChars
+        ) {
+          throw new RangeError(
+            'Realtime Proactive repair instruction exceeded the allowed size.',
+          );
+        }
+        const allowlist = new Set(allowedToolNames);
+        if (
+          allowlist.size === 0 ||
+          allowlist.size > QWEN_REALTIME_LIMITS.maxPendingFunctionCalls ||
+          [...allowlist].some(
+            (name) =>
+              typeof name !== 'string' ||
+              name.length === 0 ||
+              name.length > QWEN_REALTIME_LIMITS.maxIdentifierChars ||
+              !toolsByName.has(name),
+          )
+        ) {
+          throw new RangeError(
+            'Realtime Proactive repair tools must be a bounded allowlist of declared tools.',
+          );
+        }
+        if (
+          terminal ||
+          closedByClient ||
+          speechInputInProgress ||
+          speechCommitPending ||
+          directResponsePending ||
+          pendingResponseCreate !== undefined ||
+          activeResponseId !== undefined ||
+          toolContinuationStates.size > 0 ||
+          responseCreateQueue.length > 0
+        ) {
+          return false;
+        }
+        return requestResponseCreate(
+          'proactive_repair',
+          instruction,
+          undefined,
+          allowlist,
+        );
+      },
       takeTranscriptTail,
       close: (options) => {
         if (closedByClient || terminal) return;
@@ -1445,7 +2192,9 @@ export function openQwenRealtimeSession(
           }
         }
         closedByClient = true;
+        if (activeResponseId) collectDialogueResponse(activeResponseId, true);
         clearConnectTimer();
+        clearResponseTimers();
         removeAbortListener();
         closeSocket();
         settleClosed({ reason: 'client' });
@@ -1460,19 +2209,26 @@ export function openQwenRealtimeSession(
         session: {
           modalities: ['text', 'audio'],
           ...(config.voice ? { voice: config.voice } : {}),
-          input_audio_format: 'pcm',
-          output_audio_format: 'pcm',
+          ...(config.model === 'qwen3.5-omni-plus-realtime' ||
+          config.model === 'qwen3.5-omni-flash-realtime'
+            ? {
+                audio: {
+                  input: { format: { type: 'pcm', sample_rate: 16_000 } },
+                  output: { format: { type: 'pcm', sample_rate: 24_000 } },
+                },
+              }
+            : { input_audio_format: 'pcm', output_audio_format: 'pcm' }),
           input_audio_transcription: {
             model: 'qwen3-asr-flash-realtime',
           },
-          instructions: config.instructions,
+          instructions: effectiveInstructions,
           turn_detection: {
             type: 'semantic_vad',
             create_response: false,
             interrupt_response: true,
           },
-          // Strip the local-only `capturesTranscript` flag from the wire shape.
-          tools: config.tools.map((tool) => ({
+          // Strip local-only behavior flags from the wire shape.
+          tools: effectiveTools.map((tool) => ({
             type: tool.type,
             function: tool.function,
           })),
@@ -1539,6 +2295,7 @@ export function openQwenRealtimeSession(
         }
       }
 
+      protocolDebug(message, type);
       switch (type) {
         case 'session.created': {
           sendSessionUpdate();
@@ -1598,6 +2355,7 @@ export function openQwenRealtimeSession(
               supersededInputItemIds.add(pendingResponseCreate.inputItemId);
             }
             pendingResponseCreate.cancelled = true;
+            pendingResponseCreate.cancellationReason = 'user_interrupted';
           }
           for (const supersededInputItemId of supersededInputItemIds) {
             consumeInputItem(supersededInputItemId);
@@ -1615,13 +2373,18 @@ export function openQwenRealtimeSession(
           }
           if (activeResponseId && !cancelledResponseIds.has(activeResponseId)) {
             const interruptedResponseId = activeResponseId;
+            collectDialogueResponse(interruptedResponseId, true);
             callback(() =>
               callbacks.onBargeIn?.({
                 ...eventContext(message),
                 responseId: interruptedResponseId,
               }),
             );
-            markResponseCancelled(interruptedResponseId, true);
+            markResponseCancelled(
+              interruptedResponseId,
+              true,
+              'user_interrupted',
+            );
           }
           break;
         }
@@ -1712,6 +2475,12 @@ export function openQwenRealtimeSession(
         case 'conversation.item.input_audio_transcription.completed': {
           const itemId = optionalString(message['item_id']);
           if (itemId && consumedInputItemIds.has(itemId)) {
+            const transcript = optionalString(
+              message['transcript'],
+              QWEN_REALTIME_LIMITS.maxTranscriptChars,
+            );
+            if (transcript !== undefined)
+              collectDialogueInput(itemId, transcript);
             // A benign late final: barge-in or response.done already consumed
             // this input before the ASR stream delivered its transcript. Drop
             // it instead of treating a healthy call as a protocol violation.
@@ -1737,6 +2506,7 @@ export function openQwenRealtimeSession(
             break;
           }
           if (!rememberCompletedInputTranscript(itemId, transcript)) break;
+          collectDialogueInput(itemId, transcript);
           applyTranscriptDone('user', transcript, newInputEntry);
           newInputEntry = false;
           callback(() =>
@@ -1749,6 +2519,13 @@ export function openQwenRealtimeSession(
           break;
         }
         case 'conversation.item.input_audio_transcription.failed': {
+          const itemId = optionalString(message['item_id']);
+          if (
+            itemId &&
+            (committedInputItemIds.has(itemId) ||
+              consumedInputItemIds.has(itemId))
+          )
+            collectDialogueInput(itemId, '');
           const error = isRecord(message['error'])
             ? message['error']
             : undefined;
@@ -1780,50 +2557,143 @@ export function openQwenRealtimeSession(
             );
             break;
           }
-          if (activeResponseId && activeResponseId !== responseId) {
-            const supersededResponseId = activeResponseId;
-            markResponseCancelled(supersededResponseId);
-            finalizeCancelledResponse(supersededResponseId);
-          }
-          const responseRequest = pendingResponseCreate;
-          const responseAuthority: RealtimeResponseAuthority =
-            responseRequest?.authority ?? 'direct';
-          activeResponseId = responseId;
-          activeResponseAuthority = responseAuthority;
-          responseAuthorities.set(responseId, responseAuthority);
-          newOutputEntry = true;
-          pendingResponseCreate = undefined;
-          activeAudioResponseId = undefined;
-          if (responseRequest?.cancelled) {
-            markResponseCancelled(responseId, true);
-            sendJson({ type: 'response.cancel' });
-            break;
-          }
-          if (activeResponseAuthority === 'direct') {
-            if (responseRequest?.inputItemId) {
-              responseInputItemIds.set(responseId, responseRequest.inputItemId);
-            } else {
-              bindResponseInput(responseId);
+          responseCreatedInProgress = true;
+          try {
+            const responseRequest = pendingResponseCreate;
+            let splitResponseInputItemId: string | undefined;
+            let splitDialogueText: string | undefined;
+            let supersededResponseId: string | undefined;
+            if (activeResponseId && activeResponseId !== responseId) {
+              supersededResponseId = activeResponseId;
+              const supersededInputItemId =
+                responseInputItemIds.get(supersededResponseId);
+              if (
+                responseRequest === undefined &&
+                activeResponseAuthority === 'direct' &&
+                !cancelledResponseIds.has(supersededResponseId) &&
+                supersededInputItemId !== undefined &&
+                committedInputItemIds.has(supersededInputItemId)
+              ) {
+                const boundInputItemIds = new Set(
+                  responseInputItemIds.values(),
+                );
+                const hasNewUnboundInput = [...committedInputItemIds].some(
+                  (itemId) =>
+                    itemId !== supersededInputItemId &&
+                    !boundInputItemIds.has(itemId),
+                );
+                if (!hasNewUnboundInput) {
+                  // Some providers split one direct answer across consecutive
+                  // responses without issuing another response.create request.
+                  // Preserve the real microphone capability for that same turn
+                  // instead of consuming it with the superseded segment.
+                  splitResponseInputItemId = supersededInputItemId;
+                  const priorOutput =
+                    responseOutputText.get(supersededResponseId);
+                  splitDialogueText = [
+                    dialoguePrefixes.get(supersededResponseId),
+                    priorOutput?.audioTranscript || priorOutput?.text,
+                  ]
+                    .filter(Boolean)
+                    .join('\n');
+                  responseInputItemIds.delete(supersededResponseId);
+                }
+              }
+              clearResponseDoneTimer();
+              markResponseCancelled(supersededResponseId, false, 'superseded');
             }
-            if (terminal) break;
-          }
-          if (responseAuthority === 'direct') directResponsePending = false;
-          const response = isRecord(message['response'])
-            ? message['response']
-            : undefined;
-          const responseInputItemId = responseInputItemIds.get(responseId);
-          callback(() =>
-            callbacks.onResponseCreated?.({
-              ...eventContext(message),
+            clearResponseCreatedTimer();
+            const responseAuthority: RealtimeResponseAuthority =
+              responseRequest?.authority ?? 'direct';
+            activeResponseId = responseId;
+            activeResponseAuthority = responseAuthority;
+            responseAuthorities.set(responseId, responseAuthority);
+            if (splitDialogueText)
+              dialoguePrefixes.set(responseId, splitDialogueText);
+            newOutputEntry = true;
+            pendingResponseCreate = undefined;
+            activeAudioResponseId = undefined;
+            if (responseRequest) {
+              armResponseDoneTimer(responseRequest, responseId);
+            }
+            // Register the replacement before notifying observers that the
+            // prior response ended. Those callbacks may synchronously enqueue
+            // another response, which must queue behind this provider-created
+            // response instead of being mistaken for it.
+            if (supersededResponseId) {
+              finalizeCancelledResponse(supersededResponseId);
+              if (terminal || closedByClient) break;
+            }
+            if (responseRequest?.cancelled) {
+              markResponseCancelled(
+                responseId,
+                true,
+                responseRequest.cancellationReason ?? 'superseded',
+              );
+              sendJson({ type: 'response.cancel' });
+              break;
+            }
+            if (
+              responseAuthority === 'proactive_repair' &&
+              responseRequest?.repairAllowedToolNames
+            ) {
+              repairToolAllowlists.set(
+                responseId,
+                responseRequest.repairAllowedToolNames,
+              );
+            }
+            if (
+              responseAuthority === 'tool_continuation' &&
+              responseRequest?.toolCapability === 'direct' &&
+              responseRequest.inputItemId
+            ) {
+              responseInputItemIds.set(responseId, responseRequest.inputItemId);
+            } else if (activeResponseAuthority === 'direct') {
+              if (responseRequest?.inputItemId) {
+                responseInputItemIds.set(
+                  responseId,
+                  responseRequest.inputItemId,
+                );
+              } else if (splitResponseInputItemId) {
+                responseInputItemIds.set(responseId, splitResponseInputItemId);
+              } else {
+                bindResponseInput(responseId);
+              }
+              if (terminal) break;
+            }
+            const responseInputItemId = responseInputItemIds.get(responseId);
+            const hasDirectInput =
+              responseAuthority === 'direct' &&
+              responseInputItemId !== undefined &&
+              committedInputItemIds.has(responseInputItemId);
+            responseToolCapabilities.set(
               responseId,
-              ...(responseInputItemId
-                ? { inputItemId: responseInputItemId }
-                : {}),
-              authority: responseAuthority,
-              status: optionalString(response?.['status']),
-            }),
-          );
-          break;
+              hasDirectInput
+                ? 'direct'
+                : responseRequest?.toolCapability === 'direct' &&
+                    responseAuthority === 'tool_continuation'
+                  ? 'direct'
+                  : 'none',
+            );
+            if (responseAuthority === 'direct') directResponsePending = false;
+            const response = isRecord(message['response'])
+              ? message['response']
+              : undefined;
+            callback(() =>
+              callbacks.onResponseCreated?.({
+                ...eventContext(message),
+                responseId,
+                ...(responseInputItemId
+                  ? { inputItemId: responseInputItemId }
+                  : {}),
+                authority: responseAuthority,
+                status: optionalString(response?.['status']),
+              }),
+            );
+            break;
+          } finally {
+            responseCreatedInProgress = false;
+          }
         }
         case 'response.audio.delta':
         case 'response.output_audio.delta': {
@@ -1839,6 +2709,7 @@ export function openQwenRealtimeSession(
             );
             break;
           }
+          if (isProactiveRepairResponse(responseId)) break;
           activeAudioResponseId = responseId;
           callback(() =>
             callbacks.onOutputAudioDelta?.({
@@ -1859,6 +2730,7 @@ export function openQwenRealtimeSession(
           if (activeAudioResponseId === responseId) {
             activeAudioResponseId = undefined;
           }
+          if (isProactiveRepairResponse(responseId)) break;
           callback(() =>
             callbacks.onOutputAudioDone?.({
               ...eventContext(message),
@@ -1886,6 +2758,7 @@ export function openQwenRealtimeSession(
             );
             break;
           }
+          if (isProactiveRepairResponse(responseId)) break;
           appendTranscriptDelta('assistant', delta, newOutputEntry);
           newOutputEntry = false;
           updateResponseOutputText(
@@ -1925,6 +2798,7 @@ export function openQwenRealtimeSession(
             );
             break;
           }
+          if (isProactiveRepairResponse(responseId)) break;
           applyTranscriptDone('assistant', text, newOutputEntry);
           newOutputEntry = false;
           updateResponseOutputText(
@@ -2007,6 +2881,7 @@ export function openQwenRealtimeSession(
           }
           call.arguments += delta;
           pendingCalls.set(callId, call);
+          if (isProactiveRepairResponse(responseId)) break;
           callback(() =>
             callbacks.onFunctionArgumentsDelta?.({
               ...eventContext(message),
@@ -2145,7 +3020,14 @@ export function openQwenRealtimeSession(
             break;
           }
           if (cancelledResponseIds.has(responseId)) {
+            if (activeResponseId === responseId) clearResponseDoneTimer();
+            const authority =
+              responseAuthorities.get(responseId) ??
+              activeResponseAuthority ??
+              'direct';
+            const cancellationReason = cancelledResponseReasons.get(responseId);
             const responseInputItemId = responseInputItemIds.get(responseId);
+            collectDialogueResponse(responseId, true);
             collectDirectTranscript(responseId);
             cancelledResponseIds.delete(responseId);
             completePendingCallsForResponse(responseId, 'cancelled');
@@ -2166,27 +3048,45 @@ export function openQwenRealtimeSession(
                   ? { inputItemId: responseInputItemId }
                   : {}),
                 status: 'cancelled',
+                authority,
+                ...(cancellationReason ? { cancellationReason } : {}),
               }),
             );
+            cancelledResponseReasons.delete(responseId);
             queueMicrotask(flushResponseCreate);
             responseAuthorities.delete(responseId);
+            responseToolCapabilities.delete(responseId);
+            repairToolAllowlists.delete(responseId);
             delegatedResponseIds.delete(responseId);
             responseOutputText.delete(responseId);
             collectedDirectResponseIds.delete(responseId);
             break;
           }
           if (!isCurrentResponse(message, type, responseId)) break;
+          clearResponseDoneTimer();
           const response = isRecord(message['response'])
             ? message['response']
             : undefined;
           const status = optionalString(response?.['status']);
+          const responseAuthority =
+            responseAuthorities.get(responseId) ??
+            activeResponseAuthority ??
+            'direct';
           const responseInputItemId = responseInputItemIds.get(responseId);
           if (activeResponseAuthority === 'direct' && status === 'failed') {
             const inputLossError = pendingInputLossError();
             if (inputLossError) fail(inputLossError);
             if (terminal) break;
           }
+          if (status === 'completed') {
+            dispatchCompletedRepairCalls(responseId);
+            if (terminal) break;
+          }
           completePendingCallsForResponse(responseId, status);
+          collectDialogueResponse(
+            responseId,
+            status === 'cancelled' || status === 'failed',
+          );
           collectDirectTranscript(responseId);
           lastCompletedResponseId = responseId;
           activeResponseId = undefined;
@@ -2194,6 +3094,8 @@ export function openQwenRealtimeSession(
           activeAudioResponseId = undefined;
           consumeResponseInput(responseId);
           responseAuthorities.delete(responseId);
+          responseToolCapabilities.delete(responseId);
+          repairToolAllowlists.delete(responseId);
           delegatedResponseIds.delete(responseId);
           responseOutputText.delete(responseId);
           collectedDirectResponseIds.delete(responseId);
@@ -2205,16 +3107,11 @@ export function openQwenRealtimeSession(
                 ? { inputItemId: responseInputItemId }
                 : {}),
               status,
+              authority: responseAuthority,
             }),
           );
           if (status === 'failed') {
-            notifyError(
-              new QwenRealtimeError(
-                'Realtime response failed.',
-                'response_failed',
-                false,
-              ),
-            );
+            notifyError(responseFailureError(response, config.apiKey));
           }
           queueMicrotask(flushResponseCreate);
           break;
@@ -2258,17 +3155,41 @@ export function openQwenRealtimeSession(
     ws.on('unexpected-response', (...args: unknown[]) => {
       const response = isRecord(args[1]) ? args[1] : undefined;
       const status = optionalHttpStatus(response?.['statusCode']);
-      const code = status ? `http_${status}` : 'connection_failed';
-      const errorMessage = status
-        ? `Realtime provider rejected the WebSocket upgrade (${status}).`
-        : 'Realtime provider rejected the WebSocket upgrade.';
-      const kind = classifyRealtimeErrorKind(code, errorMessage, status);
-      fail(
-        new QwenRealtimeError(errorMessage, code, true, {
-          kind,
-          status,
-        }),
-      );
+      const on = response?.['on'];
+      if (typeof on !== 'function') {
+        fail(upgradeFailureError(status, '', config.apiKey));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      let complete = false;
+      const finish = () => {
+        if (complete) return;
+        complete = true;
+        fail(
+          upgradeFailureError(
+            status,
+            Buffer.concat(chunks).toString('utf8'),
+            config.apiKey,
+          ),
+        );
+      };
+      on.call(response, 'data', (chunk: unknown) => {
+        if (bytes >= MAX_ERROR_RESPONSE_BYTES) return;
+        const data =
+          typeof chunk === 'string'
+            ? Buffer.from(chunk)
+            : Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+              ? Buffer.from(chunk)
+              : undefined;
+        if (!data) return;
+        const bounded = data.subarray(0, MAX_ERROR_RESPONSE_BYTES - bytes);
+        chunks.push(bounded);
+        bytes += bounded.byteLength;
+      });
+      on.call(response, 'end', finish);
+      on.call(response, 'aborted', finish);
+      on.call(response, 'error', finish);
     });
 
     ws.on('error', (rawError: unknown) => {
@@ -2292,6 +3213,7 @@ export function openQwenRealtimeSession(
 
     ws.on('close', (...args: unknown[]) => {
       clearConnectTimer();
+      clearResponseTimers();
       removeAbortListener();
       if (closedByClient || terminal) return;
       const inputLossError = pendingInputLossError();
@@ -2300,6 +3222,8 @@ export function openQwenRealtimeSession(
         return;
       }
       const code = optionalFiniteNumber(args[0]);
+      terminal = true;
+      if (activeResponseId) collectDialogueResponse(activeResponseId, true);
       const reason = sanitizeErrorText(args[1], config.apiKey);
       const suffix = code ? ` (${code}${reason ? `: ${reason}` : ''})` : '';
       const reasonKind = classifyRealtimeErrorKind(undefined, reason);
@@ -2321,7 +3245,6 @@ export function openQwenRealtimeSession(
       } else {
         notifyError(error);
       }
-      terminal = true;
       settleClosed({ reason: 'remote', error });
     });
 

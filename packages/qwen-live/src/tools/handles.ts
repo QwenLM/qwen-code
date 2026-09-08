@@ -19,7 +19,13 @@ export interface JobRecord {
   backend: BackendHandle;
   /** Adaptor-side correlation id (qwen serve: promptId). */
   jobRef?: string;
-  state: 'accepted' | 'running' | 'done' | 'failed' | 'cancelled';
+  state:
+    | 'accepted'
+    | 'running'
+    | 'done'
+    | 'failed'
+    | 'cancelled'
+    | 'interrupted';
   task: string;
   createdAt: number;
 }
@@ -128,18 +134,21 @@ export class HandleRegistry {
   /**
    * Reconcile a session's non-terminal jobs against reality: the backend
    * reports idle, so any 'accepted'/'running' record left over from a
-   * missed terminal event (emitted while no pump was subscribed — pumps
-   * are per-call and aborted at call end) transitions to 'done'. Gated on
+   * terminal event lost on transport interruption becomes 'interrupted'. Gated on
    * the caller's isBusy check so a genuinely busy backend is never
    * touched.
    */
-  reconcileIdleSession(sessionHandle: string): void {
+  reconcileIdleSession(sessionHandle: string): JobRecord[] {
+    const interrupted: JobRecord[] = [];
     for (const job of this.jobs.values()) {
       if (job.sessionHandle !== sessionHandle) continue;
       if (job.state === 'done' || job.state === 'failed') continue;
       if (job.state === 'cancelled') continue;
-      job.state = 'done';
+      if (job.state === 'interrupted') continue;
+      job.state = 'interrupted';
+      interrupted.push(job);
     }
+    return interrupted;
   }
 
   /** The most recent non-terminal job for a session, if any. */
@@ -149,6 +158,7 @@ export class HandleRegistry {
       if (job.sessionHandle !== sessionHandle) continue;
       if (job.state === 'done' || job.state === 'failed') continue;
       if (job.state === 'cancelled') continue;
+      if (job.state === 'interrupted') continue;
       if (!candidate || job.createdAt > candidate.createdAt) candidate = job;
     }
     return candidate;

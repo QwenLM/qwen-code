@@ -15,10 +15,8 @@
  * The injection window is closed while any of these hold:
  *  1. the user is speaking (VAD),
  *  2. a realtime response is in flight,
- *  3. output audio is still estimated to be playing.
- * Protocol v6 has no playback acknowledgement from the Host, so (3) is a
- * conservative estimate: bytes sent ÷ 48,000 B/s (24 kHz mono PCM16) plus a
- * quiet gap. The v7 protocol upgrade replaces this with a real receipt.
+ *  3. Host playback has started but has not completed.
+ * The negotiated Host playback protocol supplies the receipts used for (3).
  */
 
 const QUIET_GAP_MS = 800;
@@ -32,7 +30,8 @@ export type InjectorItemKind =
   | 'progress'
   | 'permission'
   | 'error'
-  | 'speak';
+  | 'speak'
+  | 'proactive';
 
 export interface InjectorItem {
   kind: InjectorItemKind;
@@ -43,6 +42,8 @@ export interface InjectorItem {
   jobHandle?: string;
   /** For permission items: lets a remote resolution retract the ask. */
   requestId?: string;
+  /** Stable scheduler delivery id for a queued Proactive announcement. */
+  deliveryId?: string;
 }
 
 export interface InjectorSink {
@@ -50,6 +51,8 @@ export interface InjectorSink {
   injectContext(text: string): boolean;
   /** Verbatim speech request; false when the transport refused. */
   injectSpeech(text: string): boolean;
+  /** A model-authored Proactive response request; false when refused. */
+  injectProactive?(text: string): boolean;
   onInjected?(item: InjectorItem, spoken: boolean): void;
 }
 
@@ -77,8 +80,19 @@ export class Injector {
   private queue: InjectorItem[] = [];
   private speechInProgress = false;
   private responseInFlight = false;
+  private directResponsePending = false;
+  private responseRequestPending = false;
   private playbackInProgress = false;
   private playbackCompletedAt = 0;
+  private proactiveCycle:
+    | {
+        deliveryId?: string;
+        responseStarted: boolean;
+        responseDone: boolean;
+        playbackStarted: boolean;
+        playbackDone: boolean;
+      }
+    | undefined;
   private lastProgressAt = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
@@ -114,28 +128,45 @@ export class Injector {
     return outputWasPlaying;
   }
 
-  noteInputCommitted(): void {
+  noteInputCommitted(responsePending = false): void {
     this.speechInProgress = false;
+    this.directResponsePending = responsePending;
     this.poke();
   }
 
-  noteResponseCreated(): void {
+  noteResponseCreated(authority?: string): void {
+    this.directResponsePending = false;
+    this.responseRequestPending = false;
     this.responseInFlight = true;
+    if (authority === 'proactive' && this.proactiveCycle) {
+      this.proactiveCycle.responseStarted = true;
+    }
   }
 
-  noteResponseDone(): void {
+  noteResponseDone(authority?: string): void {
     this.responseInFlight = false;
+    if (authority === 'proactive' && this.proactiveCycle) {
+      this.proactiveCycle.responseDone = true;
+      this.finishProactiveCycleIfComplete();
+    }
     this.poke();
   }
 
   notePlaybackStarted(): void {
     this.playbackInProgress = true;
     this.playbackCompletedAt = 0;
+    if (this.proactiveCycle?.responseStarted) {
+      this.proactiveCycle.playbackStarted = true;
+    }
   }
 
   notePlaybackCompleted(): void {
     this.playbackInProgress = false;
     this.playbackCompletedAt = this.now();
+    if (this.proactiveCycle?.playbackStarted) {
+      this.proactiveCycle.playbackDone = true;
+      this.finishProactiveCycleIfComplete();
+    }
     this.poke();
   }
 
@@ -145,10 +176,26 @@ export class Injector {
     this.poke();
   }
 
+  /**
+   * Release playback suppressed by an explicit user mute. A Proactive cycle
+   * is completed only when the caller confirms that real response audio was
+   * present; muting before any audio must not turn a silent response into a
+   * successful delivery.
+   */
+  noteOutputSuppressed(completeProactive = false): void {
+    this.playbackInProgress = false;
+    this.playbackCompletedAt = 0;
+    if (completeProactive && this.proactiveCycle) {
+      this.proactiveCycle.playbackDone = true;
+      this.finishProactiveCycleIfComplete();
+    }
+    this.poke();
+  }
+
   // -- queue --------------------------------------------------------------
 
-  enqueue(item: InjectorItem): void {
-    if (this.disposed) return;
+  enqueue(item: InjectorItem): boolean {
+    if (this.disposed) return false;
     if (
       item.kind === 'permission' &&
       item.requestId !== undefined &&
@@ -157,7 +204,7 @@ export class Injector {
           queued.kind === 'permission' && queued.requestId === item.requestId,
       )
     ) {
-      return;
+      return true;
     }
     if (item.kind === 'progress') {
       // Throttle per job; jobless progress is keyed on its full context so
@@ -165,7 +212,7 @@ export class Injector {
       // collide on one throttle window.
       const key = progressKeyOf(item);
       const last = this.lastProgressAt.get(key) ?? 0;
-      if (this.now() - last < this.progressThrottleMs) return;
+      if (this.now() - last < this.progressThrottleMs) return true;
       this.lastProgressAt.set(key, this.now());
       // At most one queued progress item per key.
       this.queue = this.queue.filter(
@@ -175,6 +222,7 @@ export class Injector {
     }
     this.queue.push(item);
     this.poke();
+    return true;
   }
 
   /** Retract a queued permission ask that was resolved elsewhere. */
@@ -184,6 +232,49 @@ export class Injector {
       (item) => !(item.kind === 'permission' && item.requestId === requestId),
     );
     return this.queue.length !== before;
+  }
+
+  /** Retract a Proactive event that has not been submitted to Realtime yet. */
+  retractProactive(deliveryId: string): boolean {
+    const before = this.queue.length;
+    this.queue = this.queue.filter(
+      (item) => !(item.kind === 'proactive' && item.deliveryId === deliveryId),
+    );
+    return this.queue.length !== before;
+  }
+
+  /** Release an accepted Proactive cycle after cancellation or fatal failure. */
+  abortProactive(deliveryId: string): boolean {
+    if (this.proactiveCycle?.deliveryId !== deliveryId) return false;
+    this.proactiveCycle = undefined;
+    this.poke();
+    return true;
+  }
+
+  /**
+   * Atomically put an interrupted Proactive delivery back at the head of its
+   * lane. Resetting the active cycle and prepending must be one operation;
+   * otherwise aborting first could let the next queued delivery overtake it.
+   */
+  retryProactiveAtFront(item: InjectorItem): boolean {
+    if (
+      this.disposed ||
+      item.kind !== 'proactive' ||
+      !item.deliveryId ||
+      this.proactiveCycle?.deliveryId !== item.deliveryId
+    ) {
+      return false;
+    }
+    this.proactiveCycle = undefined;
+    this.queue = [
+      item,
+      ...this.queue.filter(
+        (queued) =>
+          queued.kind !== 'proactive' || queued.deliveryId !== item.deliveryId,
+      ),
+    ];
+    this.poke();
+    return true;
   }
 
   get pendingCount(): number {
@@ -200,7 +291,15 @@ export class Injector {
   // -- delivery -----------------------------------------------------------
 
   private windowClosedForMs(): number {
-    if (this.speechInProgress || this.responseInFlight) return -1;
+    if (this.speechInProgress || this.responseInFlight || this.proactiveCycle) {
+      return -1;
+    }
+    if (
+      this.queue[0]?.kind === 'proactive' &&
+      (this.directResponsePending || this.responseRequestPending)
+    ) {
+      return -1;
+    }
     if (this.playbackInProgress) return -1;
     if (this.playbackCompletedAt > 0) {
       const quietAt = this.playbackCompletedAt + this.quietGapMs;
@@ -231,14 +330,23 @@ export class Injector {
 
   private flush(): void {
     if (this.queue.length === 0) return;
+    const firstProactive = this.queue.findIndex(
+      (item) => item.kind === 'proactive',
+    );
+    if (firstProactive === 0) {
+      this.flushProactive();
+      return;
+    }
+    const batchEnd = firstProactive < 0 ? this.queue.length : firstProactive;
+    const pending = this.queue.slice(0, batchEnd);
     // Permission asks first: the context join is size-capped, and a
     // truncated [PERMISSION] entry would lose the handle the model needs
     // for respond_permission.
     const batch = [
-      ...this.queue.filter((item) => item.kind === 'permission'),
-      ...this.queue.filter((item) => item.kind !== 'permission'),
+      ...pending.filter((item) => item.kind === 'permission'),
+      ...pending.filter((item) => item.kind !== 'permission'),
     ];
-    this.queue = [];
+    this.queue = this.queue.slice(batchEnd);
 
     // One combined silent context injection for the whole batch.
     const context = batch
@@ -264,6 +372,7 @@ export class Injector {
     let spokenAccepted = false;
     if (spoken) {
       spokenAccepted = this.sink.injectSpeech(spoken);
+      if (spokenAccepted) this.responseRequestPending = true;
     }
 
     if (!contextAccepted && !spokenAccepted) {
@@ -280,5 +389,39 @@ export class Injector {
     for (const item of batch) {
       this.sink.onInjected?.(item, spokenLines.length > 0);
     }
+    this.poke();
+  }
+
+  private flushProactive(): void {
+    const item = this.queue[0];
+    if (!item || item.kind !== 'proactive') return;
+    this.proactiveCycle = {
+      ...(item.deliveryId ? { deliveryId: item.deliveryId } : {}),
+      responseStarted: false,
+      responseDone: false,
+      playbackStarted: false,
+      playbackDone: false,
+    };
+    const accepted = this.sink.injectProactive
+      ? this.sink.injectProactive(item.context)
+      : this.sink.injectSpeech(item.context);
+    if (!accepted) {
+      this.proactiveCycle = undefined;
+      if (this.timer !== undefined) clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.poke();
+      }, this.quietGapMs);
+      this.timer.unref?.();
+      return;
+    }
+    this.queue.shift();
+    this.sink.onInjected?.(item, true);
+  }
+
+  private finishProactiveCycleIfComplete(): void {
+    const cycle = this.proactiveCycle;
+    if (!cycle || !cycle.responseDone || !cycle.playbackDone) return;
+    this.proactiveCycle = undefined;
   }
 }

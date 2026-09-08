@@ -7,6 +7,16 @@ import { build as viteBuild } from 'vite';
 
 const appDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(appDir, 'dist');
+const liveTextAlias = {
+  '@qwen-code/qwen-live/subagents': join(
+    appDir,
+    '../qwen-live/src/subagents/types.ts',
+  ),
+  '@qwen-code/qwen-live/i18n': join(
+    appDir,
+    '../qwen-live/src/i18n/messages.ts',
+  ),
+};
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
 
@@ -67,6 +77,7 @@ execFileSync(
 
 await esbuild({
   entryPoints: [join(appDir, 'src', 'main', 'index.ts')],
+  alias: liveTextAlias,
   bundle: true,
   platform: 'node',
   target: 'node22',
@@ -78,6 +89,7 @@ await esbuild({
 
 await esbuild({
   entryPoints: [join(appDir, 'src', 'preload', 'index.ts')],
+  alias: liveTextAlias,
   bundle: true,
   platform: 'node',
   target: 'node22',
@@ -88,6 +100,16 @@ await esbuild({
 });
 
 await viteBuild({ configFile: join(appDir, 'vite.config.ts') });
+await esbuild({
+  entryPoints: [join(appDir, 'src', 'preload', 'subagents.ts')],
+  bundle: true,
+  platform: 'node',
+  target: 'node22',
+  format: 'cjs',
+  outfile: join(distDir, 'subagents-preload.cjs'),
+  external: ['electron'],
+  sourcemap: true,
+});
 
 const license = join(appDir, '..', '..', 'LICENSE');
 cpSync(license, join(distDir, 'LICENSE'));

@@ -28,9 +28,9 @@
  *   a crashed child recovers nothing: every session is closed, and the
  *   next createSession respawns under a new generation.
  *
- * Dropped update kinds (voice-noise policy, same as the serve adaptor's
- * projection): agent_thought_chunk, plan, tool_call_update. Unknown
- * discriminators are ignored silently — agents may emit their own.
+ * Public message, plan and tool updates also feed the read-only task UI;
+ * these activity events never enter the voice model. Thought chunks and
+ * unknown update kinds remain ignored.
  *
  * Ext-method name constants are duplicated from
  * packages/acp-bridge/src/status.ts by design: qwen-live must not depend
@@ -38,6 +38,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { publicActivity } from './public-activity.js';
+import { basename } from 'node:path';
 import { Writable } from 'node:stream';
 import { Readable } from 'node:stream';
 import {
@@ -73,7 +75,13 @@ import type {
 } from './types.js';
 import { AsyncEventQueue } from './async-event-queue.js';
 
-const INIT_TIMEOUT_MS = 10_000;
+export const ACP_INIT_TIMEOUT_MS = 10_000;
+// Adapter-backed agents are commonly launched through `npx`. On a cold cache,
+// a package runner may need to download and install the adapter (and its CLI
+// dependencies) before it can read the ACP initialize request from stdin.
+// Keep native binaries fail-fast while allowing that one-time bootstrap to
+// finish instead of killing npm midway and leaving its _npx cache incomplete.
+export const ACP_PACKAGE_RUNNER_INIT_TIMEOUT_MS = 5 * 60_000;
 const KILL_GRACE_MS = 2_000;
 const MAX_PENDING_PROMPTS = 8;
 const DRAIN_BATCH = 10;
@@ -152,6 +160,7 @@ export class AcpAdaptor implements BackendAdaptor {
   private imageInput = false;
   private proactiveSpeak = false;
   private closing = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(options: AcpAdaptorOptions) {
     this.name = options.name;
@@ -348,9 +357,18 @@ export class AcpAdaptor implements BackendAdaptor {
     return 'delivered';
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    this.closePromise ??= this.closeChild().catch((error: unknown) => {
+      this.closePromise = undefined;
+      throw error;
+    });
+    return this.closePromise;
+  }
+
+  private async closeChild(): Promise<void> {
     this.closing = true;
     for (const state of this.sessions.values()) {
+      if (state.closed) continue;
       this.closeSessionState(
         state,
         'the qwen-live daemon is shutting down',
@@ -359,21 +377,38 @@ export class AcpAdaptor implements BackendAdaptor {
     }
     const child = this.child;
     this.connection = undefined;
-    this.child = undefined;
-    if (child?.kill) {
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL');
-          resolve();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: unknown) => {
+          clearTimeout(escalate);
+          clearTimeout(deadline);
+          child.off('exit', onExit);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onExit = () => finish();
+        const escalate = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch (error) {
+            finish(error);
+          }
         }, KILL_GRACE_MS);
-        timer.unref?.();
-        child.once('exit', () => {
-          clearTimeout(timer);
-          resolve();
-        });
-        child.kill();
+        const deadline = setTimeout(
+          () => finish(new Error('ACP child did not exit.')),
+          KILL_GRACE_MS * 2,
+        );
+        escalate.unref?.();
+        deadline.unref?.();
+        child.once('exit', onExit);
+        try {
+          child.kill();
+        } catch (error) {
+          finish(error);
+        }
       });
     }
+    if (this.child === child) this.child = undefined;
   }
 
   // -- internals -----------------------------------------------------------
@@ -571,13 +606,19 @@ export class AcpAdaptor implements BackendAdaptor {
     }
     // Race the handshake against both a timeout and child exit — a
     // crash-on-boot must fail in milliseconds, not after 10s.
+    const initializeTimeoutMs = this.initializeTimeoutMs();
+    if (initializeTimeoutMs > ACP_INIT_TIMEOUT_MS) {
+      this.logger.info(
+        `[acp ${this.name}] starting through a package runner; a cold adapter install may take up to 5 minutes`,
+      );
+    }
     const racers: Array<Promise<unknown>> = [
       conn.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: { name: 'qwen-live', version: '0.1.0' },
       }),
-      this.handshakeDeadline(),
+      this.handshakeDeadline(initializeTimeoutMs),
     ];
     if (exited) racers.push(exited);
     let initialized: Record<string, unknown>;
@@ -589,7 +630,7 @@ export class AcpAdaptor implements BackendAdaptor {
       // later exit and tear down a healthy respawned connection (R1-5),
       // and so orphan agent processes do not accumulate per retry (R1-47).
       this.killChild();
-      throw error;
+      throw normalizeInitializeError(this.name, error);
     }
     const caps = isRecord(initialized['agentCapabilities'])
       ? initialized['agentCapabilities']
@@ -648,11 +689,17 @@ export class AcpAdaptor implements BackendAdaptor {
     this.child = undefined;
   }
 
-  private handshakeDeadline(): Promise<never> {
+  private initializeTimeoutMs(): number {
+    return isPackageRunner(this.options.command)
+      ? ACP_PACKAGE_RUNNER_INIT_TIMEOUT_MS
+      : ACP_INIT_TIMEOUT_MS;
+  }
+
+  private handshakeDeadline(timeoutMs: number): Promise<never> {
     return new Promise((_, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`acp backend '${this.name}' did not initialize`));
-      }, INIT_TIMEOUT_MS);
+      }, timeoutMs);
       timer.unref?.();
     });
   }
@@ -785,6 +832,8 @@ export class AcpAdaptor implements BackendAdaptor {
     if (!state || state.closed) return;
     const update = isRecord(params['update']) ? params['update'] : {};
     const kind = update['sessionUpdate'];
+    const activity = publicActivity(update, state.activeJobRef);
+    if (activity) state.queue.push(activity);
     if (kind === 'agent_message_chunk') {
       const content = isRecord(update['content']) ? update['content'] : {};
       const text = content['text'];
@@ -806,7 +855,7 @@ export class AcpAdaptor implements BackendAdaptor {
       });
       return;
     }
-    // agent_thought_chunk, plan, tool_call_update, a2ui, and anything else
+    // agent_thought_chunk, a2ui, and anything else
     // an agent dreams up: silently ignored (see header).
   }
 
@@ -897,6 +946,46 @@ export class AcpAdaptor implements BackendAdaptor {
       code: -32601,
     });
   }
+}
+
+function isPackageRunner(command: string): boolean {
+  const executable = basename(command).toLowerCase();
+  return new Set([
+    'bunx',
+    'bunx.exe',
+    'npm',
+    'npm.cmd',
+    'npx',
+    'npx.cmd',
+    'pnpm',
+    'pnpm.cmd',
+    'pnpx',
+    'pnpx.cmd',
+    'yarn',
+    'yarn.cmd',
+  ]).has(executable);
+}
+
+function normalizeInitializeError(name: string, error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (isRecord(error)) {
+    const message = error['message'];
+    const code = error['code'];
+    if (typeof message === 'string' && message.trim()) {
+      const codeSuffix =
+        typeof code === 'string' || typeof code === 'number'
+          ? ` (code ${String(code)})`
+          : '';
+      return new Error(
+        `acp backend '${name}' failed to initialize: ${message}${codeSuffix}`,
+        { cause: error },
+      );
+    }
+  }
+  return new Error(
+    `acp backend '${name}' failed to initialize: ${String(error)}`,
+    { cause: error },
+  );
 }
 
 function isAuthRequired(error: unknown): boolean {

@@ -28,6 +28,7 @@
  */
 
 import { DaemonClient } from '@qwen-code/sdk';
+import { publicActivity } from './public-activity.js';
 import type {
   BackendAdaptor,
   BackendCapabilities,
@@ -707,6 +708,10 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         const update = isRecord(data['update']) ? data['update'] : undefined;
         if (!update) return [];
         const kind = update['sessionUpdate'];
+        const activity = publicActivity(
+          update,
+          envelope.promptId ?? state.activeJobRef,
+        );
         if (kind === 'agent_message_chunk') {
           const content = isRecord(update['content'])
             ? update['content']
@@ -718,7 +723,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
               state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
             }
           }
-          return [];
+          return activity ? [activity] : [];
         }
         if (kind === 'tool_call') {
           const title = update['title'];
@@ -734,7 +739,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
             },
           ];
         }
-        return [];
+        return activity ? [activity] : [];
       }
       case 'turn_complete': {
         state.busy = false;
