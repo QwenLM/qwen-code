@@ -1178,13 +1178,6 @@
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionGitIcon,
-.sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
-.sessionRow:hover:not(.runningSession) .sessionAttention,
-.sessionRow:focus-within:not(.runningSession) .sessionAttention,
-.sessionMetaSlot:hover .sessionGitIcon,
-.sessionMetaSlot:hover .sessionLoading,
-.sessionMetaSlot:hover .sessionAttention,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
@@ -1194,13 +1187,6 @@
   opacity: 0;
 }
 
-.sessionRow:hover:not(.runningSession)
-  .sessionMetaSlot:has(.sessionActions)
-  .sessionSourceIcon,
-.sessionRow:focus-within:not(.runningSession)
-  .sessionMetaSlot:has(.sessionActions)
-  .sessionSourceIcon,
-.sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionSourceIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
   opacity: 0;
@@ -1217,13 +1203,30 @@
   pointer-events: none;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionActions,
-.sessionRow:focus-within:not(.runningSession) .sessionActions,
-.sessionMetaSlot:hover .sessionActions,
 .sessionActions:has(.sessionActionButton:focus-visible),
 .sessionActions:has([data-state='open']) {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (hover: hover) {
+  .sessionRow:hover:not(.runningSession) .sessionGitIcon,
+  .sessionRow:hover:not(.runningSession) .sessionAttention,
+  .sessionMetaSlot:hover .sessionGitIcon,
+  .sessionMetaSlot:hover .sessionLoading,
+  .sessionMetaSlot:hover .sessionAttention,
+  .sessionRow:hover:not(.runningSession)
+    .sessionMetaSlot:has(.sessionActions)
+    .sessionSourceIcon,
+  .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+    opacity: 0;
+  }
+
+  .sessionRow:hover:not(.runningSession) .sessionActions,
+  .sessionMetaSlot:hover .sessionActions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 @keyframes sidebarSpin {
