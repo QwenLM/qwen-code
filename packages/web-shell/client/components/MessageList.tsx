@@ -3410,6 +3410,7 @@ export const MessageList = memo(
     const scrollCooldownCount = useRef(0);
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
+    const scrollSettleTimer = useRef<number | undefined>(undefined);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
@@ -4491,6 +4492,10 @@ export const MessageList = memo(
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
         }
+        if (scrollSettleTimer.current !== undefined) {
+          window.clearTimeout(scrollSettleTimer.current);
+          scrollSettleTimer.current = undefined;
+        }
       },
       [],
     );
@@ -4549,8 +4554,11 @@ export const MessageList = memo(
             ?.scrollIntoView({ block: 'center' });
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
-        // a frame or two later after measuring the target row).
-        setTimeout(() => {
+        // a frame or two later after measuring the target row). Tracked so an
+        // unmount can cancel it — an untracked fire after teardown touches
+        // requestAnimationFrame, which no longer exists there.
+        scrollSettleTimer.current = window.setTimeout(() => {
+          scrollSettleTimer.current = undefined;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
