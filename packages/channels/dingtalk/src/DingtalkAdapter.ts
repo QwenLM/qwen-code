@@ -1196,6 +1196,9 @@ export class DingtalkChannel extends ChannelBase {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
+            : {}),
           ...(config.blockStreaming !== 'on'
             ? {
                 sendFallback: (

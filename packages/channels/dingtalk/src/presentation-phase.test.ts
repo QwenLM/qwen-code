@@ -61,6 +61,23 @@ describe('lifecyclePresentationPhase', () => {
     expect(presentationPhaseLabel('switching', 'en')).toBe('🔄 Switching mode');
   });
 
+  it.each([
+    ['thinking', '🤔 思考中'],
+    ['reading', '📖 读取中'],
+    ['searching', '🔎 搜索中'],
+    ['running', '🖥️ 执行中'],
+    ['editing', '🛠️ 编辑中'],
+    ['deleting', '🗑️ 删除中'],
+    ['moving', '📦 移动中'],
+    ['fetching', '🌐 获取中'],
+    ['switching', '🔄 切换模式中'],
+    ['working', '🛠️ 处理中'],
+    ['failed', '⚠️ 工具失败'],
+    ['replying', '✍️ 回复中'],
+  ] as const)('localizes %s to %s', (phase, label) => {
+    expect(presentationPhaseLabel(phase, 'zh')).toBe(label);
+  });
+
   it('labels a failed tool call without claiming a retry', () => {
     expect(presentationPhaseLabel('failed', 'en')).toBe('⚠️ Tool failed');
     expect(presentationPhaseLabel('failed', 'zh')).toBe('⚠️ 工具失败');

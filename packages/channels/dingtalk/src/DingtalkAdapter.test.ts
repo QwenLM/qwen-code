@@ -1281,6 +1281,17 @@ describe('DingtalkChannel prompt reactions', () => {
         { action: 'reply', name: '✅ Done' },
       ]);
     });
+
+    const terminalReply = fetchSpy.mock.calls
+      .filter(([input]) => String(input).endsWith('/emotion/reply'))
+      .at(-1);
+    const terminalBody = JSON.parse(
+      String((terminalReply![1] as RequestInit).body),
+    ) as { textEmotion: { emotionId: string; backgroundId: string } };
+    expect(terminalBody.textEmotion).toMatchObject({
+      emotionId: '54054',
+      backgroundId: 'im_bg_5',
+    });
   });
 
   it('localizes every lifecycle reaction tag from the Qwen display language', async () => {
@@ -2890,6 +2901,17 @@ describe('DingtalkChannel status cards', () => {
     ).toBe('qwen3.7-max');
   });
 
+  it('passes the display language to the card controllers and presenter', () => {
+    const channel = createChannel({}, { displayLanguage: 'zh-CN' });
+    const internals = channel as unknown as {
+      statusCardController?: { options: { language?: string } };
+      interactionPresenter?: { options: { language?: string } };
+    };
+
+    expect(internals.statusCardController?.options.language).toBe('zh-CN');
+    expect(internals.interactionPresenter?.options.language).toBe('zh-CN');
+  });
+
   it('keeps status cards disabled when block streaming is enabled', () => {
     const channel = createChannel({ blockStreaming: 'on' });
 
@@ -3031,6 +3053,8 @@ describe('DingtalkChannel status cards', () => {
       messageId: 'message-1',
       runId: 'run-1',
       owner: { kind: 'channel_user', id: 'owner-1' },
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
     } satisfies LifecycleBase;
     const lifecycle = getLifecycleHook(channel);
 
@@ -3043,7 +3067,7 @@ describe('DingtalkChannel status cards', () => {
       ['move', 5],
       ['think', 6],
       ['switch_mode', 7],
-    ]) {
+    ] as const) {
       lifecycle({
         ...base,
         type: 'tool_call',
@@ -3070,13 +3094,37 @@ describe('DingtalkChannel status cards', () => {
       ['run-1', 'switching'],
       ['run-1', 'replying'],
     ]);
-    expect(attachReaction.mock.calls.slice(2).map(([, , tag]) => tag)).toEqual([
-      { name: '🌐 获取中', emotionId: '34019', backgroundId: 'im_bg_6' },
-      { name: '🗑️ 删除中', emotionId: '34019', backgroundId: 'im_bg_6' },
-      { name: '📦 移动中', emotionId: '34019', backgroundId: 'im_bg_6' },
-      { name: '🤔 思考中', emotionId: '34019', backgroundId: 'im_bg_6' },
-      { name: '🔄 切换模式中', emotionId: '34019', backgroundId: 'im_bg_6' },
-      { name: '✍️ 回复中', emotionId: '34019', backgroundId: 'im_bg_6' },
+    expect(attachReaction.mock.calls.slice(2)).toEqual([
+      [
+        'message-1',
+        'cid-1',
+        { name: '🌐 获取中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
+      [
+        'message-1',
+        'cid-1',
+        { name: '🗑️ 删除中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
+      [
+        'message-1',
+        'cid-1',
+        { name: '📦 移动中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
+      [
+        'message-1',
+        'cid-1',
+        { name: '🤔 思考中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
+      [
+        'message-1',
+        'cid-1',
+        { name: '🔄 切换模式中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
+      [
+        'message-1',
+        'cid-1',
+        { name: '✍️ 回复中', emotionId: '34019', backgroundId: 'im_bg_6' },
+      ],
     ]);
   });
 

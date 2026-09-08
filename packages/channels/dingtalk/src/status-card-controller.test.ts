@@ -140,6 +140,41 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('localizes terminal status lines for a Chinese display language', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({ language: 'zh-CN' });
+
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(
+      controller.complete('segment-1', 'final answer'),
+    ).resolves.toBe(true);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          statusLine: '已完成 · 0s',
+        }),
+      }),
+    );
+
+    controller.replace(segment('segment-2'), target, 'retry');
+    await vi.advanceTimersByTimeAsync(0);
+    controller.fail('segment-2', 'boom');
+    await vi.runAllTimersAsync();
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          statusLine: '已失败 · 0s',
+        }),
+      }),
+    );
+  });
+
   it('includes replacement content in the initial card delivery', async () => {
     const { client, controller } = createHarness();
 

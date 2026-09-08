@@ -1205,8 +1205,21 @@ describe('AcpBridge', () => {
       },
     });
 
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-web-fetch',
+        title: 'WebFetch: weather',
+        status: 'in_progress',
+      },
+    });
+
+    // The refined kind is retained for later kindless frames, not just the
+    // refining one.
     expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual([
       'other',
+      'fetch',
       'fetch',
     ]);
     expect(responseBoundary).toHaveBeenCalledOnce();
@@ -1259,6 +1272,7 @@ describe('AcpBridge', () => {
       rawInput: undefined,
     });
     expect(responseBoundary).not.toHaveBeenCalled();
+    expect(bridge.toolCallKindsBySession.has('session-1')).toBe(false);
   });
 
   it('does not retain kinds from terminal initial tool calls', () => {

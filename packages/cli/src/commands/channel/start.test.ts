@@ -49,6 +49,7 @@ const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
 const mockChannelDispatchToolCall = vi.hoisted(() => vi.fn());
 const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
+const mockChannelOnBridgeDisconnected = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
 const mockBridgeStop = vi.hoisted(() => vi.fn());
@@ -200,6 +201,7 @@ const mockChannel = {
   onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
   dispatchToolCall: mockChannelDispatchToolCall,
+  onBridgeDisconnected: mockChannelOnBridgeDisconnected,
   setBridge: mockChannelSetBridge,
 };
 
@@ -1474,6 +1476,38 @@ describe('startCommand.handler', () => {
     }
   });
 
+  it('clears channel transient state when the standalone bridge disconnects', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      expect(mockChannelOnBridgeDisconnected).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      // Transient cleanup does not preempt crash recovery: the sessions
+      // still restore on the replacement bridge.
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not restart the bridge after shutdown begins', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -2059,6 +2093,38 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('passes the display language to every channel when starting all', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    mockLoadSettings.mockReturnValue({
+      merged: { channels, general: { language: 'auto' } },
+    });
+    vi.stubEnv('QWEN_CODE_LANG', '');
+    vi.stubEnv('LANG', 'zh_CN.UTF-8');
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+    }));
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    for (const call of mockCreateChannel.mock.calls) {
+      expect(call[3]).toEqual(
+        expect.objectContaining({ displayLanguage: 'zh' }),
+      );
+    }
+  });
+
   it('passes channel memory callbacks when starting a named channel', async () => {
     mockLoadSettings.mockReturnValue({
       merged: { channels: { telegram: { type: 'telegram' } } },
@@ -2210,6 +2276,7 @@ describe('startCommand.handler', () => {
       disconnect: vi.fn(),
       onSessionDied: vi.fn(),
       onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
       setBridge: vi.fn(),
     };
     const secondChannel = {
@@ -2217,6 +2284,7 @@ describe('startCommand.handler', () => {
       disconnect: vi.fn(),
       onSessionDied: vi.fn(),
       onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
       setBridge: vi.fn(),
     };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -2277,6 +2345,7 @@ describe('startCommand.handler', () => {
       disconnect: vi.fn(),
       onSessionDied: vi.fn(),
       onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
       setBridge: vi.fn(),
     };
     const secondChannel = {
@@ -2284,6 +2353,7 @@ describe('startCommand.handler', () => {
       disconnect: vi.fn(),
       onSessionDied: vi.fn(),
       onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
       setBridge: vi.fn(),
     };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -2319,6 +2389,64 @@ describe('startCommand.handler', () => {
       expect(firstChannel.disconnect).not.toHaveBeenCalled();
       expect(secondChannel.disconnect).not.toHaveBeenCalled();
       expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears every channel transient state when the shared bridge disconnects', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    const firstChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    const secondChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      onBridgeDisconnected: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+      sessionScope: 'user',
+    }));
+    mockCreateChannel
+      .mockReturnValueOnce(firstChannel)
+      .mockReturnValueOnce(secondChannel);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      expect(firstChannel.onBridgeDisconnected).toHaveBeenCalledOnce();
+      expect(secondChannel.onBridgeDisconnected).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
     } finally {
       processOnSpy.mockRestore();
       vi.useRealTimers();
