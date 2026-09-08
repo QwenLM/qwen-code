@@ -172,8 +172,12 @@ interface Candidate {
 const LIVE = new Set(['running', 'finishing', 'cancelling']);
 
 function pendingTriggerIds(run: ThreadRun): string[] {
-  const accepted = new Set(run.acceptedMessageIds);
-  return run.triggerMessageIds.filter((id) => !accepted.has(id));
+  const delivered = new Set(
+    run.status === 'finishing' || run.status === 'completed'
+      ? run.consumedMessageIds
+      : run.acceptedMessageIds,
+  );
+  return run.triggerMessageIds.filter((id) => !delivered.has(id));
 }
 
 function bodyCarriesRun(

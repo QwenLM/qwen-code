@@ -464,7 +464,7 @@ export async function finishRunInTransaction(
   const closedThrough =
     target.status === 'finishing'
       ? thread.messages
-          .filter((message) => target.acceptedMessageIds.includes(message.id))
+          .filter((message) => target.consumedMessageIds.includes(message.id))
           .reduce<
             number | undefined
           >((highest, message) => (highest === undefined ? message.sequence : Math.max(highest, message.sequence)), undefined)
@@ -494,15 +494,6 @@ export async function finishRunInTransaction(
             ...run,
             status: terminalStatus,
             endedAt: now,
-            consumedMessageIds:
-              run.status === 'finishing'
-                ? Array.from(
-                    new Set([
-                      ...run.consumedMessageIds,
-                      ...run.acceptedMessageIds,
-                    ]),
-                  )
-                : run.consumedMessageIds,
             // A run that stopped without calling a closing tool is recorded as
             // `unclosed`, never as an implicit success.
             closeKind:

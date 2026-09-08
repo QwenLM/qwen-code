@@ -4,6 +4,21 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Unread input at close
+
+Source inspection found that explicit close used to promote every accepted id
+to consumed, while successor booking considered only unaccepted triggers.
+That would silently acknowledge an input queued just before close without any
+consumption receipt. Terminal bookkeeping now preserves consumed ids, and
+finishing/completed runs rebook triggers without a consumption receipt.
+
+A direct source check in an isolated temporary store observed a finishing run
+with one accepted/unread correction become completed, retain zero consumed ids
+and a zero committed watermark, and start a successor carrying that correction
+in the same dispatch sweep. A single regression case was added to the existing
+dispatcher test file; the source check ran, not the local CI/test suite.
+This is storage/dispatcher evidence, not an ACP live-drain acceptance claim.
+
 #### Post-send routing visibility
 
 Thread details now expose each message's stored admission outcomes, and the

@@ -370,6 +370,42 @@ describe('dispatchOnce', () => {
     expect(prompt).toContain(thread.id);
   });
 
+  it('rebooks accepted but unread input after an explicit close', async () => {
+    const thread = await seedQueued({ assigneeAgentId: ALICE.id });
+    await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'unread correction',
+    });
+    const stored = (await readThread(PROJECT_ROOT, thread.id))!;
+    const messageId = stored.messages[0]!.id;
+    await writeThread(PROJECT_ROOT, {
+      ...stored,
+      runs: [
+        run({
+          status: 'finishing',
+          closeKind: 'review',
+          attempts: 1,
+          triggerMessageIds: [messageId],
+          acceptedMessageIds: [messageId],
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port({ state: { kind: 'completed' } }));
+
+    const after = (await readThread(PROJECT_ROOT, thread.id))!;
+    const finished = after.runs.find((entry) => entry.id === 'rn_1')!;
+    expect(finished.status).toBe('completed');
+    expect(finished.consumedMessageIds).toEqual([]);
+    expect(after.deliveryByAgent[ALICE.id]?.committedThroughSequence ?? 0).toBe(0);
+    expect(
+      after.runs.some(
+        (entry) =>
+          entry.id !== finished.id && entry.triggerMessageIds.includes(messageId),
+      ),
+    ).toBe(true);
+  });
+
   it('chooses the runtime entry point from the body state', async () => {
     await seedQueued();
     for (const [state, action] of [

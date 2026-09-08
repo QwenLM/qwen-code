@@ -419,6 +419,11 @@ daemon restart, reconciliation rebooks everything not consumed and committed.
 Delivery is therefore at-least-once: a duplicate is acceptable, silent loss is
 not.
 
+An explicit closing tool is not a consumption receipt. Finishing a run preserves
+its recorded consumed ids; it must not promote accepted ids to consumed. Once
+finishing/completed, accepted-but-unconsumed triggers are eligible for successor
+booking too. While running, accepted inputs remain owned by the active runtime.
+
 Run queue order is a separate workspace-wide monotonic `queueSequence`, issued
 while holding the workspace mutation lock. `queuedAt` remains useful for age and
 stall display but never participates in FIFO ordering because callers live in
