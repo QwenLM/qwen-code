@@ -1035,6 +1035,28 @@
   color: var(--success-color, #3fb950);
 }
 
+.sessionStatusUnknown {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.sessionSourceIcon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.sessionSourceIcon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
 .collapsedSessionStatusDot {
   position: absolute;
   top: 1px;
@@ -1158,13 +1180,18 @@
 
 .sessionRow:hover:not(.runningSession) .sessionGitIcon,
 .sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
+.sessionRow:hover:not(.runningSession) .sessionSourceIcon,
+.sessionRow:focus-within:not(.runningSession) .sessionSourceIcon,
 .sessionRow:hover:not(.runningSession) .sessionAttention,
 .sessionRow:focus-within:not(.runningSession) .sessionAttention,
 .sessionMetaSlot:hover .sessionGitIcon,
+.sessionMetaSlot:hover .sessionSourceIcon,
 .sessionMetaSlot:hover .sessionLoading,
 .sessionMetaSlot:hover .sessionAttention,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
 .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionSourceIcon,
+.sessionMetaSlot:has([data-state='open']) .sessionSourceIcon,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
 .sessionMetaSlot:has([data-state='open']) .sessionLoading,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
