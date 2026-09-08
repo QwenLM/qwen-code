@@ -62,7 +62,12 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
-import { runEpochMs } from './lib/prompt-record.js';
+import {
+  baseTreeTrustPath,
+  builtTreeRecord,
+  recordBuiltTree,
+  runNonce,
+} from './lib/base-tree-trust.js';
 
 export interface BaseTreeReport {
   /**
@@ -121,6 +126,19 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
+// The tree's untracked AND ignored path set, as `git status` collapses it (a
+// directory holding nothing tracked reports as one `path/` entry). Ignored is
+// included because that is exactly where a plant hides in a real repository —
+// `dist/` and `node_modules/` are gitignored here, so an untracked-only
+// listing is blind to the executable a host-side A/B would run.
+function untrackedPaths(tree: string): string[] {
+  return gitOut(tree, 'status', '--porcelain', '-z', '--ignored')
+    .split('\0')
+    .filter((e) => e.startsWith('?? ') || e.startsWith('!! '))
+    .map((e) => e.slice(3))
+    .sort();
+}
+
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const unavailable = (note: string): BaseTreeReport => ({
     available: false,
@@ -177,64 +195,106 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // rebase between runs — falls through to the rebuild below.)
   const marker = () => join(tree, '.qwen-review-base-ok');
   const failedMarker = () => join(tree, '.qwen-review-base-failed');
-  // The run's epoch, the fence the deadline stamps and the session ledger
-  // already key on. A run captures its plan once, so this is stable for the
-  // whole run and different between two.
-  const runEpoch = String(runEpochMs(args.plan));
+  // The run's stamp secret, persisted OUTSIDE the mount beside the worktree
+  // leases (see lib/base-tree-trust.ts). The fence used to key on the plan's
+  // mtime, and the plan lives inside the directory the sandbox mounts
+  // read-write — reviewed code could stat it, compute the epoch, and write
+  // it into a forged stamp, after which every reuse check passed on an
+  // attacker-shaped tree. A random per-run secret the mount can neither
+  // read nor write is what a stamp now vouches with. Without it no marker
+  // can be trusted or written, so its absence fails the command, not the
+  // fence.
+  const trustPath = baseTreeTrustPath(worktree, args.plan);
+  let nonce: string;
+  try {
+    nonce = runNonce(trustPath);
+  } catch (err) {
+    return unavailable(
+      `could not establish the run's trust artifact ${trustPath}: ` +
+        `${(err as Error).message}`,
+    );
+  }
   try {
     const stamp = readFileSync(marker(), 'utf8').trim().split('\n');
-    if (
-      existsSync(tree) &&
-      stamp[0] === baseSha &&
-      // ...and THIS run built it. `cleanStale` never releases `-base`, so an
-      // earlier round's tree stands into this one with a whole containerized
-      // build/test phase in between — long enough for the reviewed code to drop
-      // untracked executables in here, and `dist/cli.js` is what a host-side A/B
-      // runs. `--untracked-files=no` below cannot see them, and refusing any
-      // untracked file at all would disable every legitimate reuse; the stamp is
-      // the provenance that separates the two.
-      stamp[1] === runEpoch &&
-      // The reuse path RETURNS, so the gate below the rebuild never runs for
-      // it — and both facts it reuses on come from inside the mount: the
-      // marker is a file in the base tree, and `rev-parse HEAD` resolves
-      // through that tree's own `.git`. A planted repository answers the right
-      // sha for a working tree holding anything at all, and the A/B's BASE
-      // side is then the reviewed code's own — every "the base behaves
-      // differently" verdict the shard reports would be its author's.
-      //
-      // Not a refusal: an unusable leftover is what the rebuild exists for.
-      // Falling through discards the tree (removing the plant with it) and
-      // creates a fresh one through the review worktree's pointer, which the
-      // gate before `worktree add` checks. Same shape as `scratch-tree`'s
-      // reuse path, for the same reason.
-      untrustedGitfile(tree) === null &&
-      gitOut(tree, 'rev-parse', 'HEAD') === baseSha &&
-      // ...and its CONTENTS must still be the base's. `rev-parse HEAD` does not
-      // move when working files change, and this tree is a direct child of the
-      // directory the sandbox mounts read-write — which is why the pointer gate
-      // above speaks at all. So the reviewed PR's own build, which runs before
-      // the verifier shards get here, can overwrite the base checkout's tracked
-      // sources with a plain copy: every condition above still passes, and the
-      // A/B then compares the PR against a copy of itself. A test the PR breaks
-      // fails identically on both sides, `test-delta` classifies the regression
-      // as pre-existing, and a real finding against the PR is suppressed.
-      //
-      // `--untracked-files=no`: the pipeline's own build leaves `node_modules/`
-      // and `dist/` here, so an untracked-inclusive check would call every
-      // correctly-built tree dirty and disable reuse outright — reintroducing
-      // the concurrent-shard clobber this fast path exists to prevent. Tracked
-      // dirt is what a rewrite leaves, and `npm run build` in this repository
-      // modifies no tracked file, so a legitimate build still reuses.
-      gitOut(tree, 'status', '--porcelain', '--untracked-files=no') === ''
-    ) {
-      return {
-        available: true,
-        path: tree,
-        baseSha,
-        build: null,
-        note: `base tree already built at ${baseSha.slice(0, 9)} in ${tree} (reusing it — a concurrent or earlier probe built it)`,
-      };
+    if (existsSync(tree) && stamp[0] === baseSha && stamp[1] === nonce) {
+      // ...and THIS run built it — genuinely: the secret never enters the
+      // mount, so a mount-local writer cannot have refreshed or forged the
+      // stamp. `cleanStale` never releases `-base`, so an earlier round's
+      // tree stands into this one with a whole containerized build/test
+      // phase in between — long enough for the reviewed code to drop
+      // untracked executables in here, and `dist/cli.js` is what a host-side
+      // A/B runs.
+      if (
+        // The reuse path RETURNS, so the gate below the rebuild never runs
+        // for it — and both facts these arms establish come from inside the
+        // mount: `rev-parse HEAD` resolves through that tree's own `.git`,
+        // and its working files are a direct child of the directory the
+        // sandbox mounts read-write. A planted repository answers the right
+        // sha for a working tree holding anything at all; a plain copy
+        // overwrites the tracked sources while HEAD never moves — and the
+        // A/B's BASE side is then the reviewed code's own, so a test the PR
+        // breaks fails identically on both sides and reads as pre-existing.
+        //
+        // `--untracked-files=no`: the pipeline's own build leaves
+        // `node_modules/` and `dist/` here, so an untracked-inclusive check
+        // would call every correctly-built tree dirty and disable reuse
+        // outright. (The untracked surface is fenced separately, below.)
+        untrustedGitfile(tree) !== null ||
+        gitOut(tree, 'rev-parse', 'HEAD') !== baseSha ||
+        gitOut(tree, 'status', '--porcelain', '--untracked-files=no') !== ''
+      ) {
+        // A state arm failed on a tree THIS RUN built. Falling through would
+        // discard it — but this run's own build can legitimately leave
+        // tracked dirt (codegen, a lockfile rewrite), and a concurrent
+        // shard's A/B can write one tracked file mid-measurement (a snapshot
+        // `--update`). Sweeping that tree reintroduces the concurrent-shard
+        // clobber this fast path exists to prevent: shard B would rmSync the
+        // tree shard A is mid-A/B in, and A's base side reads as empty
+        // output — a fabricated difference with a deterministic source tag.
+        // So decline, the way the build lock's EEXIST arm does. (A stamp
+        // that does NOT match this run still falls through to the rebuild:
+        // an earlier run's leftover or a forge is nobody's live tree, and
+        // the discard is what removes the plant.)
+        return unavailable(
+          `the base tree at ${baseSha.slice(0, 9)} was built by this run ` +
+            'but no longer passes a reuse check (a concurrent probe may be ' +
+            'writing it mid-A/B); declining to reuse or discard it — retry ' +
+            'when the probe finishes, or settle the claim by reading',
+        );
+      }
+      // The untracked surface. The state arms above are blind to it by
+      // design, and the window to abuse it is guaranteed: the sandboxed
+      // build/test phase overlaps the verifier shards, so reviewed code can
+      // drop `dist/cli.js` or `node_modules/.bin/<x>` in here AFTER the
+      // stamp, and a host-side A/B would then execute the plant as the BASE
+      // side. The marker itself cannot vouch for the set the build left —
+      // it is a file inside the mount — so the set was recorded host-side
+      // when the marker was written, and anything beyond it is a plant:
+      // content, not concurrency, so this one DOES fall through to the
+      // rebuild whose discard sweeps it.
+      const recorded = builtTreeRecord(trustPath, tree);
+      const current = untrackedPaths(tree);
+      if (
+        recorded !== null &&
+        recorded.baseSha === baseSha &&
+        current.every((p) => recorded.untracked.includes(p))
+      ) {
+        return {
+          available: true,
+          path: tree,
+          baseSha,
+          build: null,
+          note: `base tree already built at ${baseSha.slice(0, 9)} in ${tree} (reusing it — a concurrent or earlier probe built it)`,
+        };
+      }
     }
+    // No marker, or a stamp that does not carry this run's secret — an
+    // earlier run's leftover, or a forge computed from the mount-visible
+    // inputs. Not a refusal: an unusable leftover is what the rebuild exists
+    // for. Falling through discards the tree (removing a plant with it) and
+    // creates a fresh one through the review worktree's pointer, which the
+    // gate before `worktree add` checks. Same shape as `scratch-tree`'s
+    // reuse path, for the same reason.
   } catch {
     // No marker, unreadable marker, or a tree git cannot answer for: rebuild.
   }
@@ -243,9 +303,16 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // the same "unavailable" — and the sweep destroys the evidence tree the
   // failure deliberately leaves standing.
   try {
+    const failed = readFileSync(failedMarker(), 'utf8').trim().split('\n');
     if (
       existsSync(tree) &&
-      readFileSync(failedMarker(), 'utf8').trim() === baseSha
+      failed[0] === baseSha &&
+      // The same fence the ok marker carries, on the path that needs it most:
+      // this branch settles the question with NO build at all, and the file
+      // lives inside the mount — a sha-only marker is one planted line away
+      // from suppressing the A/B lane for the whole round, reading as
+      // infrastructure rather than as an attack.
+      failed[1] === nonce
     ) {
       return {
         available: false,
@@ -372,9 +439,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
       // bad trade — `cleanup` sweeps it at the end of the review either way.
-      // The marker makes the failure a SETTLED answer for every later shard.
+      // The marker makes the failure a SETTLED answer for every later shard,
+      // and it carries the run secret for the same reason the ok marker does:
+      // a planted sha-only marker must settle nothing (the fence above).
       try {
-        writeFileSync(failedMarker(), `${baseSha}\n`);
+        writeFileSync(failedMarker(), `${baseSha}\n${nonce}\n`);
       } catch {
         // The tree may be too broken to hold a marker; the next shard repays.
       }
@@ -391,9 +460,14 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     }
 
     // The marker is what the fast path above trusts, so it is written only after
-    // a build that succeeded, and it records the SHA and the run it vouches for.
+    // a build that succeeded, and it records the SHA and the run it vouches for
+    // — the run secret, not the mount-visible epoch it replaced. With it goes
+    // the host-side record of the untracked set this build legitimately left,
+    // so the reuse fence can tell that residue from a plant dropped later
+    // (marker first, so the marker itself is part of the recorded set).
     try {
-      writeFileSync(marker(), `${baseSha}\n${runEpoch}\n`);
+      writeFileSync(marker(), `${baseSha}\n${nonce}\n`);
+      recordBuiltTree(trustPath, tree, baseSha, untrackedPaths(tree));
     } catch {
       // The tree may be too broken to hold a marker; the next shard rebuilds.
     }

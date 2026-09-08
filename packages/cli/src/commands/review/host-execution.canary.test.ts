@@ -56,7 +56,7 @@ import { loadCombined } from './load-rules.js';
 import { runRevertHunk } from './revert-hunk.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
-import { runEpochMs } from './lib/prompt-record.js';
+import { baseTreeTrustPath, runNonce } from './lib/base-tree-trust.js';
 
 // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
 // colon), so containment cannot exist there and the question this file asks has
@@ -290,12 +290,13 @@ describe('a planted repository reaches no host-side execution', () => {
       g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
       const plan = join(repo, 'plan.json');
       writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);
-      // Stamped with THIS run's epoch, so the reuse branch reaches the pointer
-      // gate this test is about instead of being turned away by the epoch fence
-      // that keeps an earlier run's tree from being reused at all.
+      // Stamped with THIS run's secret, so the reuse branch reaches the pointer
+      // gate this test is about instead of being turned away by the run fence
+      // that keeps an earlier run's tree — or a forged stamp — from being
+      // reused at all.
       writeFileSync(
         join(tree, '.qwen-review-base-ok'),
-        `${baseSha}\n${runEpochMs(plan)}\n`,
+        `${baseSha}\n${runNonce(baseTreeTrustPath(worktree, plan))}\n`,
       );
       const common = plantRepository(
         join(repo, '.qwen', 'tmp', '.evil-common'),

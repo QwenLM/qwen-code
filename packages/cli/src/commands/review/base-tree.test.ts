@@ -21,6 +21,7 @@ import {
   utimesSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
   existsSync,
@@ -29,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
+import { baseTreeTrustPath, runNonce } from './lib/base-tree-trust.js';
 import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
 import { runEpochMs } from './lib/prompt-record.js';
 import type { BuildTestReport } from './build-test.js';
@@ -113,41 +115,139 @@ describe('runBaseTree', () => {
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
   itWhereContainmentExists(
-    'does not REUSE a base tree whose tracked files were rewritten in the mount',
+    'reports BUSY and leaves the tree standing when a tree THIS RUN built fails a reuse check (tracked dirt)',
     () => {
       // `rev-parse HEAD` does not move when working files change, and this tree
-      // is a direct child of the directory the sandbox mounts read-write — so
-      // the reviewed PR's own build, which runs before the verifier shards get
-      // here, can overwrite the base checkout's tracked sources with a plain
-      // copy while every pointer and ref condition still passes. Reused, the
-      // A/B compares the PR against a copy of itself: a test the PR breaks
-      // fails identically on both sides, `test-delta` files the regression as
-      // pre-existing, and a real finding against the PR is suppressed.
+      // is a direct child of the directory the sandbox mounts read-write — but
+      // tracked dirt on a tree THIS run stamped is not necessarily a rewrite by
+      // the reviewed code: a build can modify tracked files (codegen, lockfile
+      // rewrites), and a concurrent shard's A/B writes one (a snapshot
+      // `--update`). Discarding on that signal sweeps a live tree another shard
+      // may be mid-A/B in — the concurrent-shard clobber the fast path exists
+      // to prevent — so the fence declines, the way the build lock's EEXIST arm
+      // does, and the dirtied tree stands for the shard that is using it.
       const tree = baseWorktreePath(worktree);
-      const firstBuilds: string[] = [];
-      expect(
-        run({}, (w) => {
-          firstBuilds.push(w);
-          return okBuild;
-        }).available,
-      ).toBe(true);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      // One tracked file rewritten, the plan untouched: same run, genuine stamp.
       writeFileSync(join(tree, 'a.txt'), 'after\n');
 
-      // Untracked output is what the pipeline's own build leaves here, and it
-      // must not disable reuse: that reintroduces the concurrent-shard clobber
-      // the fast path exists to prevent.
-      mkdirSync(join(tree, 'dist'), { recursive: true });
-      writeFileSync(join(tree, 'dist', 'cli.js'), 'built');
-
-      const rebuilds: string[] = [];
-      const second = run({}, (w) => {
-        rebuilds.push(w);
-        return okBuild;
-      });
-      expect(rebuilds).toEqual([tree]);
+      const second = run({}, build);
+      expect(second.available).toBe(false);
+      expect(second.note).toContain('no longer passes a reuse check');
       expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree]); // declined — no sweep, no rebuild
+      // The dirtied file is still on disk: discarding it is what was refused.
+      expect(readFileSync(join(tree, 'a.txt'), 'utf8')).toBe('after\n');
     },
   );
+
+  itWhereContainmentExists(
+    "does not REUSE when an untracked path appears that THIS RUN's build did not leave",
+    () => {
+      // The epoch fence excludes only trees a DIFFERENT run built: reviewed
+      // code holding the read-write mount can drop an untracked executable
+      // into a tree this run stamped, after the stamp — and
+      // `--untracked-files=no` cannot see it, while refusing all untracked
+      // files would disable every legitimate reuse (the pipeline's own build
+      // leaves `node_modules/` and `dist/` here). So the set the build left is
+      // recorded host-side at marker write, and anything beyond it is a
+      // plant: content, not concurrency, so the rebuild's discard sweeps it.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      // Same run: the plan — and with it the run's identity — is untouched.
+      mkdirSync(join(tree, 'dist'), { recursive: true });
+      writeFileSync(
+        join(tree, 'dist', 'cli.js'),
+        'planted by the reviewed build',
+      );
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]); // the rebuild fired again
+      // The plant went with the tree it was standing in.
+      expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
+      expect(second.available).toBe(true);
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a stamp forged from the mount-visible epoch formula (production geometry)',
+    () => {
+      // The plan lives at `.qwen/tmp/qwen-review-pr-<n>-fetch.json`, INSIDE
+      // the directory the sandbox mounts read-write, so reviewed code can
+      // stat it and compute the epoch the stamp used to carry — then rewrite
+      // the marker and overwrite an executable beside the build's own
+      // residue, where the untracked-set fence cannot tell it from what the
+      // build left. The stamp now carries a run secret that never enters the
+      // mount: the forge below produces exactly what the old fence compared
+      // against, and it matches nothing.
+      const tree = baseWorktreePath(worktree);
+      planPath = join(repo, '.qwen', 'tmp', 'qwen-review-pr-1-fetch.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify({ mergeBaseSha: baseSha, files: [] }),
+      );
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        if (builds.length === 1) {
+          // The residue a real build leaves, recorded host-side as legitimate.
+          mkdirSync(join(w, 'dist'), { recursive: true });
+          writeFileSync(join(w, 'dist', 'cli.js'), 'built by round 1');
+        }
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+
+      // The reviewed code's move: plant over the executable the A/B will run,
+      // and refresh the stamp to the epoch formula the mount exposes.
+      writeFileSync(
+        join(tree, 'dist', 'cli.js'),
+        'planted by the reviewed code',
+      );
+      writeFileSync(
+        join(tree, '.qwen-review-base-ok'),
+        `${baseSha}\n${runEpochMs(planPath)}\n`,
+      );
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]); // rebuilt, not reused
+      // The plant went with the tree it was standing in.
+      expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
+    },
+  );
+
+  it('does not settle on a planted FAILED marker that carries no run secret', () => {
+    // The failed-marker fast path settles the question with NO build at all —
+    // "infrastructure, never a finding against the PR" — and the file lives
+    // inside the mount, so a sha-only marker is one planted line away from
+    // suppressing the A/B lane for the whole round, reading as infrastructure
+    // rather than as an attack. Only a marker stamped with this run's secret
+    // settles it.
+    const tree = baseWorktreePath(worktree);
+    git(repo, 'worktree', 'add', '--detach', '-q', tree, baseSha);
+    writeFileSync(join(tree, '.qwen-review-base-failed'), `${baseSha}\n`);
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+    expect(r.note).not.toContain('already failed');
+    expect(builds).toEqual([tree]); // the rebuild was attempted
+    expect(r.available).toBe(true);
+  });
 
   itWhereContainmentExists(
     'does not REUSE a base tree an EARLIER RUN built, whose untracked plants the dirt check cannot see',
@@ -256,11 +356,11 @@ describe('runBaseTree', () => {
     expect(second.note).toContain('reusing');
     expect(builds).toHaveLength(1); // one install+build, not two
     // A marker for a DIFFERENT sha (rebase between runs) does not shortcut —
-    // stamped with this run's epoch, so the sha arm is what answers and not the
-    // epoch fence standing in front of it.
+    // stamped with this run's secret, so the sha arm is what answers and not
+    // the run fence standing in front of it.
     writeFileSync(
       join(first.path!, '.qwen-review-base-ok'),
-      `${'f'.repeat(40)}\n${runEpochMs(planPath)}\n`,
+      `${'f'.repeat(40)}\n${runNonce(baseTreeTrustPath(worktree, planPath))}\n`,
     );
     expect(run({}, build).note).not.toContain('reusing');
   });
