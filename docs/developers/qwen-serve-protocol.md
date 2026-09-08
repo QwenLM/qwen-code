@@ -2,7 +2,7 @@
 
 Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/issues/3803). All routes live under the daemon's base URL (default `http://127.0.0.1:4170`).
 
-> **Building an external integration?** Start with the [REST API integration guide](./rest-api-integration.md) and the machine-readable [`qwen-serve-openapi.yaml`](./qwen-serve-openapi.yaml). This document covers the **whole** surface, most of which exists to drive the Web Shell and carries no stability promise for outside callers. See [API profiles](#api-profiles) below.
+> For an API-only deployment, run `qwen serve --no-web`. This disables the Web Shell assets only; it does not reduce the authenticated API or WebSocket surface. See the [operations quickstart](./daemon/20-quickstart-operations.md) and [client example](./examples/daemon-client-quickstart.md).
 
 ## Authentication
 
@@ -49,25 +49,6 @@ Origins that don't match the allowlist still get `403 {"error":"Request denied b
 The configured pattern list is intentionally NOT echoed in `/capabilities` — a browser client already knows its own origin (it called the daemon, after all), and surfacing the list would let an unauthenticated reader of `/capabilities` enumerate every trusted origin (useful recon for a misconfigured deployment). SDK clients gate on the `caps.features.allow_origin` tag for "this daemon honors cross-origin browser hits" without needing to know which specific origins.
 
 Loopback self-origin requests (e.g. the Web Shell calling the daemon at the same `127.0.0.1:port`) are handled by a **separate** Origin-strip shim that runs BEFORE the CORS middleware and removes the `Origin` header for `127.0.0.1:port` / `localhost:port` / `[::1]:port` / `host.docker.internal:port` or the exact bound loopback address and port. It also accepts the scheme-matched port-less forms that browsers send for default ports: `http://host` on port 80 and `https://host` on port 443. These requests pass through regardless of `--allow-origin` configuration — operators don't need to list the daemon's own port to make the Web Shell work.
-
-## API profiles
-
-`--api-profile` selects how much of the surface below actually exists:
-
-| Profile          | Surface                                                                                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `full` (default) | Every route in this document. Byte-identical to the behavior before the flag existed — no gate is installed at all.                                                             |
-| `minimal`        | Only the partner-facing subset in [`qwen-serve-openapi.yaml`](./qwen-serve-openapi.yaml): session lifecycle, prompting, SSE, permission responses, read-only workspace context. |
-
-Under `minimal`, everything else answers `404 {"error":"Not found","code":"api_profile_disabled","apiProfile":"minimal"}`.
-
-The gate runs **after** the `authenticate` middleware, so an unauthenticated caller still gets the uniform `401` and cannot map which routes a deployment enabled by diffing 401 against 404. On a plain loopback bind `/health` is registered ahead of authentication and so bypasses the gate; it is in the minimal subset anyway, so the reachable set is the same either way.
-
-Matching is by path, not by method: `/file` and `/file/write` are already distinct paths, so path granularity expresses "read-only file access" without a method × path matrix. A path whose GET is safe but whose PATCH is not (`/workspace/settings`) is excluded wholesale.
-
-`GET /capabilities` reports the active profile as `apiProfile`. Note the invariant carve-out in [capabilities versioning](./daemon/11-capabilities-versioning.md): under `minimal`, `features` over-reports what is routable.
-
-The route list and the OpenAPI spec are kept in lockstep by a drift guard (`packages/cli/src/serve/api-profile.test.ts`) that fails if either side gains a path the other lacks.
 
 ## Common error shape
 
@@ -3575,8 +3556,6 @@ The connection then closes.
 | `packages/cli/src/serve/server.ts`                   | Express app assembly, middleware ordering, and remaining direct routes                                     |
 | `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
-| `packages/cli/src/serve/api-profile.ts`              | `--api-profile` surface gate + the `minimal` path allowlist                                                |
-| `docs/developers/qwen-serve-openapi.yaml`            | OpenAPI 3.1 contract for the `minimal` profile                                                             |
 | `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
 | `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
 | `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |

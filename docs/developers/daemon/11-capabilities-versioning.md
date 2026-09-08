@@ -8,7 +8,6 @@
 - **Each tag has a `since` version.** Future v2 daemons can advertise both v1 and v2 tags.
 - **Some tags are conditional.** Tags listed in `CONDITIONAL_SERVE_FEATURES` are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
 - **Capability tag = behavior contract.** Adding new behavior under an existing tag can silently break clients that preflighted the old tag. New behavior needs a new tag.
-- **Carve-out: `apiProfile: 'minimal'`.** When the daemon runs with `--api-profile=minimal` the envelope's `apiProfile` field reports it, and the "tag present means behavior present" rule above **does not hold**. `features` still lists every tag the build supports, but routes outside the partner-facing subset answer `404 { code: 'api_profile_disabled' }`. Under that profile [`qwen-serve-openapi.yaml`](../qwen-serve-openapi.yaml) is the authority on reachability; tag preflighting stays meaningful only for routes inside the subset. Deliberately not modelled per-tag: mapping all 125 tags to routes would be a few hundred lines of bookkeeping to make one field more precise. See [the REST integration guide](../rest-api-integration.md).
 
 The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
 
@@ -30,7 +29,6 @@ The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
   v: 1,                    // CAPABILITIES_SCHEMA_VERSION
   mode: 'http-bridge',
   features: ServeFeature[],
-  apiProfile?: 'full' | 'minimal',   // absent on daemons predating the option; read as 'full'
   workspaceCwd: string,
   workspaces?: Array<{ id: string, cwd: string, primary: boolean, trusted: boolean }>,
   protocol?: { current: 'v1', supported: ['v1'] },

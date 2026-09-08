@@ -481,18 +481,6 @@ export interface DaemonCapabilities {
    */
   features: string[];
   /**
-   * How much of the HTTP surface the daemon exposes (`qwen serve
-   * --api-profile`). Optional because this is additive to v=1; older v=1
-   * daemons omit it, which means `'full'`.
-   *
-   * **Under `'minimal'`, do not treat `features` as a reachability map.** The
-   * array still lists every tag the daemon's build supports, but routes
-   * outside the partner-facing subset answer
-   * `404 { code: 'api_profile_disabled' }`. The subset is specified by
-   * `docs/developers/qwen-serve-openapi.yaml`.
-   */
-  apiProfile?: 'full' | 'minimal';
-  /**
    * Numeric daemon limits. `null` means the daemon advertises the limit as
    * disabled; absence means an older daemon did not advertise it.
    */
