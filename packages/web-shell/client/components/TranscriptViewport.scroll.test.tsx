@@ -179,6 +179,18 @@ async function setup(
   options: { degraded?: boolean; collapseRows?: boolean } = {},
 ) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const resizeCallbacks = new Set<ResizeObserverCallback>();
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 1;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -276,6 +288,12 @@ async function setup(
     list,
     row,
     settleFrames,
+    triggerResize: () =>
+      act(() => {
+        resizeCallbacks.forEach((callback) =>
+          callback([], {} as ResizeObserver),
+        );
+      }),
     render,
   };
 }
@@ -343,6 +361,26 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     await click('history.loadEarlier');
     settleFrames();
     expect(row(key).getBoundingClientRect().top).toBe(before);
+  });
+
+  it('restores the reading row after a delayed virtualizer measurement', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, triggerResize } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 170;
+    const targetKey = `msg:${observed.props!.messages[2]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+
+    list().scrollTop += 40;
+    triggerResize();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
   });
 
   it('preserves the legacy loader when the turn index is degraded', async () => {
