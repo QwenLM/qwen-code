@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
   InvalidGoalCheckpointError,
@@ -23,7 +24,7 @@ import {
 } from './goal-protocol.js';
 
 /**
- * How long one checkpoint verifier call may run before it is abandoned.
+ * How long one checkpoint verifier check may run before it is abandoned.
  *
  * Sized from the output the call is asked to produce, not from a typical
  * side query: up to GOAL_CHECKPOINT_CLAIM_LIMIT claims of up to
@@ -36,7 +37,9 @@ import {
  * `model.goalCheckpointTimeoutSeconds`.
  */
 export const GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS = 180_000;
-const GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
+export const GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
+
+const debugLogger = createDebugLogger('GOAL_CHECKPOINT_VERIFIER');
 
 const GOAL_CHECKPOINT_VERIFIER_SCHEMA = {
   type: 'object',
@@ -85,7 +88,7 @@ const GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Evid
 
 Each output claim must cite one or more input IDs in sourceRefs. Preserve evidence semantics exactly: never change a source proofKind, and do not combine sources with different proofKind values into one claim. "delivered_output" proves only that content was delivered, "external_fact" supports external facts, and "user_input" supports what the user actually said or authorized.
 
-previousClaims are already verified checkpoint claims; to carry one forward, cite its id in sourceRefs. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, so compress the sources into dense claims. Do not make a terminal decision.
+previousClaims are already verified checkpoint claims; to carry one forward, cite its id in sourceRefs. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, and every individual claim must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters, so compress the sources into dense claims. Do not make a terminal decision.
 
 Return exactly one JSON object with a non-empty claims array. Each claim must contain exactly proofKind, claim, and sourceRefs. Include no markdown fence, preamble, extra key, or commentary.`;
 
@@ -203,7 +206,7 @@ export function parseGoalCheckpointVerifierText(
  * `temperature: 0`; without it the same window produces the same answer.
  */
 function claimBudgetRetryNote(byteLength: number): string {
-  return `Your previous answer was rejected: its claim strings totalled ${byteLength} UTF-8 bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget. Return the same coverage within the budget. Merge claims that share a source and state each fact once, cutting restatement rather than facts. Reply with the JSON object only.`;
+  return `Your previous answer was rejected: its claim strings totalled ${byteLength} UTF-8 bytes, over the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte budget. Return the same coverage within the budget, keeping every individual claim at or under ${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters. Merge claims that share a source and state each fact once, cutting restatement rather than facts. Reply with the JSON object only.`;
 }
 
 export function createGoalCheckpointVerifier(
@@ -264,6 +267,13 @@ export function createGoalCheckpointVerifier(
           ) {
             throw error;
           }
+          debugLogger.debug(
+            'Retrying goal checkpoint verifier after claim budget overrun',
+            {
+              byteLength: error.byteLength,
+              budgetBytes: GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+            },
+          );
           overrunBytes = error.byteLength;
         }
       }

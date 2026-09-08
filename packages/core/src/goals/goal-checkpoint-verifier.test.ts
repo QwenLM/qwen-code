@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import {
@@ -19,9 +19,34 @@ import {
   createGoalCheckpointVerifier,
   GoalCheckpointClaimBudgetError,
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+  GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalCheckpointVerifierInputTooLargeError,
   parseGoalCheckpointVerifierText,
 } from './goal-checkpoint-verifier.js';
+
+const verifierDebug = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      if (tag !== 'GOAL_CHECKPOINT_VERIFIER') return logger;
+      return {
+        ...logger,
+        debug: (...args: unknown[]) => {
+          verifierDebug(...args);
+          logger.debug(...args);
+        },
+      };
+    },
+  };
+});
+
+beforeEach(() => {
+  verifierDebug.mockClear();
+});
 
 function input(): GoalCheckpointVerifierInput {
   return {
@@ -52,7 +77,16 @@ function input(): GoalCheckpointVerifierInput {
 }
 
 function configForReplies(...replies: string[]) {
-  const generateText = vi.fn();
+  const generateText = vi.fn(
+    (): Promise<{
+      text: string;
+      usage: undefined;
+    }> => {
+      throw new Error(
+        `No reply queued for checkpoint verifier attempt ${generateText.mock.calls.length}`,
+      );
+    },
+  );
   for (const reply of replies) {
     generateText.mockResolvedValueOnce({ text: reply, usage: undefined });
   }
@@ -78,6 +112,16 @@ function claimsOfBytes(bytes: number): string {
     });
   }
   return JSON.stringify({ claims });
+}
+
+function claimsOfTexts(claims: string[]): string {
+  return JSON.stringify({
+    claims: claims.map((claim) => ({
+      proofKind: 'external_fact',
+      claim,
+      sourceRefs: ['tool-1'],
+    })),
+  });
 }
 
 function configFor(reply: string) {
@@ -188,6 +232,9 @@ describe('createGoalCheckpointVerifier', () => {
       `${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes`,
     );
     expect(request.systemInstruction).toContain(
+      `${GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS} characters`,
+    );
+    expect(request.systemInstruction).toContain(
       'to carry one forward, cite its id in sourceRefs',
     );
   });
@@ -254,6 +301,18 @@ describe('createGoalCheckpointVerifier', () => {
     const note = second.contents[0]?.parts?.[1]?.text ?? '';
     expect(note).toContain(String(over));
     expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_BYTES));
+    expect(note).toContain(String(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS));
+    expect(second.abortSignal).toBe(first.abortSignal);
+    expect(verifierDebug).toHaveBeenCalledWith(
+      'Retrying goal checkpoint verifier after claim budget overrun',
+      {
+        byteLength: over,
+        budgetBytes: GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+      },
+    );
+    expect(verifierDebug.mock.invocationCallOrder[0]).toBeLessThan(
+      generateText.mock.invocationCallOrder[1]!,
+    );
   });
 
   it('gives up when the retry overruns the budget again', async () => {
@@ -285,12 +344,23 @@ describe('createGoalCheckpointVerifier', () => {
 
   it('reports the overrun rather than a request-too-large when the note does not fit', async () => {
     const over = GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 7;
+    // Measure the real first request, then fill its remaining allowance. Any
+    // non-empty retry note must overflow regardless of fixture or note drift.
+    const calibration = input();
+    const { config: calibrationConfig, generateText: calibrationGenerateText } =
+      configForReplies(claimsOfBytes(120));
+    await createGoalCheckpointVerifier(calibrationConfig)(calibration);
+    const calibrationRequest = calibrationGenerateText.mock.calls[0]![0] as
+      | Parameters<BaseLlmClient['generateText']>[0]
+      | undefined;
+    const payload = calibrationRequest?.contents[0]?.parts?.[0]?.text ?? '';
+    const remainingBytes =
+      GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT -
+      Buffer.byteLength(payload, 'utf8');
+
     const { config, generateText } = configForReplies(claimsOfBytes(over));
     const nearLimit = input();
-    // Sized so the payload fits on its own and the corrective note pushes it
-    // past the request limit. A recoverable overrun must not be converted
-    // into the Goal-stopping checkpoint_request failure.
-    nearLimit.evidence[0]!.content = 'a'.repeat(255_600);
+    nearLimit.evidence[0]!.content += 'a'.repeat(remainingBytes);
 
     let thrown: unknown;
     try {
@@ -444,12 +514,36 @@ describe('createGoalCheckpointVerifier', () => {
     expect((thrown as GoalCheckpointClaimBudgetError).byteLength).toBe(over);
     expect((thrown as Error).message).toContain(String(over));
 
+    const cjkClaim = '中'.repeat(600);
+    const cjkOver = claimsOfTexts(Array.from({ length: 9 }, () => cjkClaim));
+    thrown = undefined;
+    try {
+      parseGoalCheckpointVerifierText(cjkOver);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(GoalCheckpointClaimBudgetError);
+    expect((thrown as GoalCheckpointClaimBudgetError).byteLength).toBe(16_200);
+
     // The budget itself is accepted.
     const atBudget = parseGoalCheckpointVerifierText(
       claimsOfBytes(GOAL_CHECKPOINT_CLAIM_MAX_BYTES),
     ).claims;
     expect(
       atBudget.reduce(
+        (total, claim) => total + Buffer.byteLength(claim.claim, 'utf8'),
+        0,
+      ),
+    ).toBe(GOAL_CHECKPOINT_CLAIM_MAX_BYTES);
+
+    const cjkAtBudget = parseGoalCheckpointVerifierText(
+      claimsOfTexts([
+        ...Array.from({ length: 8 }, () => cjkClaim),
+        'a'.repeat(1_600),
+      ]),
+    ).claims;
+    expect(
+      cjkAtBudget.reduce(
         (total, claim) => total + Buffer.byteLength(claim.claim, 'utf8'),
         0,
       ),
