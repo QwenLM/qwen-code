@@ -30,6 +30,7 @@ import {
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
+  pendingCardMaxRows,
   tailWindow,
   tailWindowPhysical,
   thinkingMeta,
@@ -165,6 +166,20 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(maxHistoryItemRows(24)).toBe(100);
     expect(maxHistoryItemRows(25)).toBe(100);
     expect(maxHistoryItemRows(50)).toBe(200);
+  });
+
+  it('budgets a pending card below the confirmation dialog footprint', () => {
+    // At 80 rows the ink-parity cap is 320 — 4x past the viewport; the
+    // pending budget must leave room for the dialog rendered beneath the
+    // transcript (mem0 e2e regression).
+    expect(maxHistoryItemRows(80)).toBe(320);
+    expect(pendingCardMaxRows(80)).toBe(34);
+    expect(pendingCardMaxRows(100)).toBe(54);
+  });
+
+  it('falls back to the settled cap on short terminals', () => {
+    expect(pendingCardMaxRows(24)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(46)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
   });
 
   it('keeps everything when the content fits', () => {

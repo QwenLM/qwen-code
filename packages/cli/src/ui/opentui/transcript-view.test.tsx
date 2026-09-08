@@ -94,11 +94,14 @@ describe('OpenTuiTranscriptView', () => {
     // user is being asked to approve, so a pending card budgets its own
     // (bounded) rows; the cap applies again once the call settles. Two
     // separate renders: siblings in one render would share the container and
-    // defeat the absent assertion.
+    // defeat the absent assertion. Rendered at an 80-row viewport — the
+    // pending budget shrinks with the terminal, and at the 24-row default it
+    // degenerates to the settled cap.
     const description =
       '{"path":"/x","content":"' + 'x'.repeat(600) + 'TAIL_MARKER"}';
     const pending = render(
       <OpenTuiTranscriptView
+        availableTerminalHeight={80}
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -114,6 +117,7 @@ describe('OpenTuiTranscriptView', () => {
 
     const settled = render(
       <OpenTuiTranscriptView
+        availableTerminalHeight={80}
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -125,6 +129,32 @@ describe('OpenTuiTranscriptView', () => {
     );
     expect(settled.container.textContent).not.toContain('TAIL_MARKER');
     expect(settled.container.textContent).toContain('... last');
+  });
+
+  it('caps a huge pending payload so the dialog below fits the viewport', () => {
+    // The confirmation dialog renders in flow beneath the transcript on a
+    // fixed alt-screen viewport: a pending card left at the ink-parity
+    // history cap (320 rows at h=80) pushed the dialog's hidden-lines label
+    // and ctrl-s hint off screen (mem0 e2e regression). The pending budget
+    // must engage and summarize the payload's tail.
+    const description =
+      '{"path":"/x","content":"' + 'y'.repeat(4000) + 'PAYLOAD_TAIL"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... last');
+    expect(text).not.toContain('PAYLOAD_TAIL');
+    expect(text).toContain('awaiting approval');
   });
 
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {

@@ -29,6 +29,7 @@ import {
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
+  pendingCardMaxRows,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
   tailWindow,
@@ -81,6 +82,7 @@ export function OpenTuiTranscriptView({
   availableTerminalHeight = 24,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const pendingMaxRows = pendingCardMaxRows(availableTerminalHeight);
   return (
     <box flexDirection="column">
       {items.map((item) => (
@@ -88,6 +90,7 @@ export function OpenTuiTranscriptView({
           key={item.id}
           item={item}
           maxRows={maxRows}
+          pendingMaxRows={pendingMaxRows}
           width={availableWidth}
         />
       ))}
@@ -98,10 +101,12 @@ export function OpenTuiTranscriptView({
 function TranscriptItem({
   item,
   maxRows,
+  pendingMaxRows,
   width,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
+  pendingMaxRows: number;
   width: number;
 }) {
   switch (item.kind) {
@@ -112,7 +117,14 @@ function TranscriptItem({
     case 'thinking':
       return <ThinkingRow text={item.text} done={item.done} />;
     case 'tool':
-      return <ToolCard item={item} maxRows={maxRows} width={width} />;
+      return (
+        <ToolCard
+          item={item}
+          maxRows={maxRows}
+          pendingMaxRows={pendingMaxRows}
+          width={width}
+        />
+      );
     case 'task':
       return <TaskCard item={item} />;
     case 'image':
@@ -236,10 +248,12 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
 function ToolCard({
   item,
   maxRows,
+  pendingMaxRows,
   width,
 }: {
   item: LiveToolItem;
   maxRows: number;
+  pendingMaxRows: number;
   width: number;
 }) {
   const status = toolStatusMeta(item);
@@ -250,8 +264,9 @@ function ToolCard({
   // the arguments nowhere on screen). A pending card therefore keeps the
   // card's own row budget instead of the settled 5-row cap — that cap would
   // hide the tail of exactly the payload being approved (R5-9). The budget
-  // stays finite (maxHistoryItemRows), so the pending card still cannot
-  // flood the column and push the dialog off-screen.
+  // is viewport-aware (pendingCardMaxRows): the dialog renders in flow below
+  // the transcript on a fixed viewport, so a card sized to
+  // maxHistoryItemRows pushed the dialog's hint rows off screen.
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
   // Measure on the same basis the render uses: a live description (e.g. a
@@ -263,7 +278,7 @@ function ToolCard({
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? maxRows
+      ? pendingMaxRows
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);

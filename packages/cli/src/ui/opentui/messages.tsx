@@ -239,6 +239,33 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
+ * Rows reserved below a pending tool card so the confirmation dialog fits
+ * the viewport. The dialog renders in flow under the transcript on a fixed
+ * alt-screen viewport (ink scrolls overflow into scrollback; OpenTUI cannot),
+ * so a pending card left at maxHistoryItemRows (terminalHeight * 4) pushes
+ * the dialog's tail — outcome list, hidden-lines label, ctrl-s hint — off
+ * screen. The reserve covers the dialog itself (frame + title/question +
+ * 20-row body + outcome list + footer ≈ 36 rows), the transcript rows above
+ * the card, and the card's own chrome, with margin.
+ */
+export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
+
+/**
+ * Description budget for a pending tool card: never past the ink-parity
+ * history cap, never so tall that the confirmation dialog below it
+ * overflows the viewport. Short terminals fall back to the settled cap.
+ */
+export function pendingCardMaxRows(terminalHeight: number): number {
+  return Math.max(
+    TOOL_CARD_DESCRIPTION_ROWS,
+    Math.min(
+      maxHistoryItemRows(terminalHeight),
+      Math.floor(terminalHeight) - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+    ),
+  );
+}
+
+/**
  * Keeps the head of a description that would wrap past `maxRows` at the
  * given width; the hidden tail is summarized by hiddenTailLinesLabel. Rows
  * are measured in terminal display columns (not UTF-16 code units) so
