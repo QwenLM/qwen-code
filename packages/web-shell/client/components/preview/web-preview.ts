@@ -10,6 +10,8 @@ function protectedOrigin(url: URL): string {
     normalized.hostname === 'localhost' ||
     normalized.hostname === '[::1]' ||
     normalized.hostname === '0.0.0.0' ||
+    normalized.hostname === 'host.docker.internal' ||
+    normalized.hostname.endsWith('.localhost') ||
     /^127\./.test(normalized.hostname)
   ) {
     normalized.hostname = 'localhost';

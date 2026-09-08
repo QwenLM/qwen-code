@@ -43,6 +43,12 @@ from this increment because CSP host sources do not reliably support them; use
 a hostname instead. URLs are validated again when rendering persisted state.
 No daemon credentials are forwarded and preview requests omit the referrer.
 
+Creation and restoration use the same workspace-context and host-opt-in gate.
+Cards in Live or standalone sessions retain the existing artifact-panel behavior,
+including its workspace availability restrictions.
+The shell's frame policy also permits blob URLs for existing PDF attachments;
+the preview wrappers continue to enforce their own narrower child policies.
+
 A trusted, script-free `srcDoc` wrapper contains the application iframe. Its own
 CSP pins `frame-src` to the validated development origin, blocking application
 direct child redirects and navigations into the shell or a different origin.

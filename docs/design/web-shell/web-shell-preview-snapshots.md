@@ -49,6 +49,11 @@ removes only viewing state. Reopening from the original message fetches that
 same version. Latest publication cards are omitted from a turn when that same
 publication has its saved-version card, avoiding two indistinguishable outputs.
 
+Refresh rebuilds an already loaded snapshot from its in-memory HTML, so it can
+recover a blank navigated frame without another daemon request. An initial load
+failure still retries the content route. Closing and reopening fetches the
+version again; no snapshot bytes are persisted in browser storage.
+
 ## Boundaries and retention
 
 This saves self-contained Artifact deliveries, not arbitrary live websites or

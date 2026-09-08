@@ -62,8 +62,8 @@ export function buildWebShellCsp(
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  // Live previews use a script-free wrapper that pins its child frame source.
-  const frameSrc = 'frame-src http: https:';
+  // PDF attachments use blob URLs; live previews pin their own child source.
+  const frameSrc = 'frame-src http: https: blob:';
   return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 

@@ -90,6 +90,8 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
+    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
+    // dev intentionally permits same-origin ancestors instead of denying all.
     headers: {
       'Content-Security-Policy': [
         "default-src 'self'",
@@ -101,7 +103,7 @@ export default defineConfig(({ command }) => ({
         "connect-src 'self'",
         "worker-src 'self' blob:",
         "base-uri 'none'",
-        'frame-src http: https:',
+        'frame-src http: https: blob:',
         "frame-ancestors 'self'",
       ].join('; '),
       'Referrer-Policy': 'no-referrer',

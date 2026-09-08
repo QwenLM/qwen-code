@@ -11,9 +11,9 @@ import {
 } from './web-shell-static.js';
 
 describe('Web Shell sandbox framing', () => {
-  it('allows live HTTP/HTTPS previews while retaining shell isolation', () => {
+  it('allows live previews and PDF blobs while retaining shell isolation', () => {
     const csp = buildWebShellCsp();
-    expect(csp).toContain('frame-src http: https:');
+    expect(csp).toContain('frame-src http: https: blob:;');
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("media-src 'self' data:");
@@ -27,7 +27,7 @@ describe('Web Shell sandbox framing', () => {
   it('retains the explicit embedding ancestor allowlist', () => {
     const csp = buildWebShellCsp(['chrome-extension://test-extension']);
     expect(csp).toContain('frame-ancestors chrome-extension://test-extension');
-    expect(csp).toContain('frame-src http: https:');
+    expect(csp).toContain('frame-src http: https: blob:;');
   });
 
   it('keeps camera, microphone, and geolocation host-blocked', () => {

@@ -95,6 +95,9 @@ test.afterAll(async () => {
 });
 
 test.beforeEach(async ({ page }, testInfo) => {
+  // Fulfilled document responses lose their loopback address-space metadata.
+  await page.context().grantPermissions(['local-network-access']);
+  fixtureReferrers.length = 0;
   await page.setViewportSize({ width: 1440, height: 1000 });
   const scenario = createWebShellDaemonScenario({
     capabilities: { features: ['session_events', 'session_artifacts'] },
@@ -153,6 +156,17 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route(`**/session/${scenario.sessionId}?*`, async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    const response = await route.fetch();
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), 'referrer-policy': 'unsafe-url' },
+    });
   });
   await page.goto(`/session/${scenario.sessionId}?language=en`);
   await expect(
@@ -300,23 +314,17 @@ test('@smoke blocks direct redirects and script navigation, and protects host de
     expect(targetRequests).toHaveLength(0);
   }
   violations.length = 0;
-  const protectedTarget = `${fixtureUrl}/unframeable`;
-  const protection = await page.request.get(protectedTarget);
-  expect(protection.headers()['content-security-policy']).toBe(
-    "frame-ancestors 'none'",
-  );
   await openPreview(
     page,
-    `${fixtureUrl}/nested?target=${encodeURIComponent(protectedTarget)}`,
+    `${fixtureUrl}/nested?target=${encodeURIComponent(target)}`,
   );
   await expect
     .poll(() =>
       violations.some((message) => message.includes('frame-ancestors')),
     )
     .toBe(true);
-  expect(page.frames().some((frame) => frame.url() === protectedTarget)).toBe(
-    false,
-  );
+  expect(targetRequests).toContain(target);
+  expect(page.frames().some((frame) => frame.url() === target)).toBe(false);
 });
 
 test('keeps the external fallback available for frame-blocked applications', async ({

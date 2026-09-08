@@ -132,6 +132,24 @@ describe('SavedWebPreview', () => {
     expect(parse).toHaveBeenCalledTimes(1);
   });
 
+  it('refreshes loaded HTML from memory without another server read', async () => {
+    container = document.createElement('div');
+    root = createRoot(container);
+    readContent
+      .mockResolvedValueOnce('<h1>Version one</h1>')
+      .mockRejectedValue(new DaemonHttpError(503, {}, 'busy'));
+    await act(async () => root.render(view('one')));
+    const originalFrame = container.querySelector('iframe')!;
+    const originalDocument = originalFrame.srcdoc;
+    await act(async () => container.querySelector('button')!.click());
+    const refreshedFrame = container.querySelector('iframe')!;
+    expect(refreshedFrame).not.toBe(originalFrame);
+    expect(refreshedFrame.srcdoc).toBe(originalDocument);
+    expect(refreshedFrame.srcdoc).toContain('Version one');
+    expect(readContent).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it.each([
     new DaemonHttpError(503, {}, 'busy'),
     new DaemonHttpError(

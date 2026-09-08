@@ -60,6 +60,9 @@ test('@smoke offline HTML remains interactive but cannot navigate out of its par
     expect(response?.headers()['content-security-policy']).toContain(
       "media-src 'self' data:",
     );
+    expect(response?.headers()['content-security-policy']).toContain(
+      'frame-src http: https: blob:;',
+    );
     await page.setContent(
       '<iframe title="Offline preview" sandbox="allow-scripts"></iframe>',
     );
@@ -162,7 +165,7 @@ test('opens each saved delivery after closing and reloading, with inline interac
     }
     await route.fulfill({
       contentType: 'text/html',
-      body: `<!doctype html><style>body{font:20px system-ui;padding:30px;background:#f5f5f5}</style><h1>Version ${match![1]}</h1><button id="count">Count: 0</button><script>let n=0;document.querySelector('#count').onclick=()=>document.querySelector('#count').textContent='Count: '+(++n)</script>`,
+      body: `<!doctype html><style>body{font:20px system-ui;padding:30px;background:#f5f5f5}</style><h1>Version ${match![1]}</h1><button id="count">Count: 0</button><button id="navigate">Navigate</button><script>let n=0;document.querySelector('#count').onclick=()=>document.querySelector('#count').textContent='Count: '+(++n);document.querySelector('#navigate').onclick=()=>location.href='https://example.invalid/blocked'</script>`,
     });
   });
   const liveRequests: string[] = [];
@@ -180,14 +183,31 @@ test('opens each saved delivery after closing and reloading, with inline interac
       .click();
     await expect(frame.getByRole('heading')).toHaveText(`Version ${version}`);
     await frame.getByRole('button', { name: 'Count: 0' }).click();
-    await expect(frame.getByRole('button')).toHaveText('Count: 1');
+    await expect(frame.getByRole('button', { name: 'Count: 1' })).toBeVisible();
     await expect(page.locator('[data-web-shell-saved-preview]')).toContainText(
       'Saved version',
     );
     if (version === 2) {
+      const readCount = reads.length;
+      await frame
+        .getByRole('button', { name: 'Navigate', exact: true })
+        .click();
+      await expect(frame.getByRole('heading')).toHaveCount(0);
+      missing = true;
+      await page
+        .getByRole('button', { name: 'Refresh preview', exact: true })
+        .click();
+      await expect(frame.getByRole('heading')).toHaveText('Version 2');
+      await expect(
+        frame.getByRole('button', { name: 'Count: 0' }),
+      ).toBeVisible();
+      expect(reads).toHaveLength(readCount);
+      missing = false;
       await page.reload();
       await expect(frame.getByRole('heading')).toHaveText('Version 2');
-      await expect(frame.getByRole('button')).toHaveText('Count: 0');
+      await expect(
+        frame.getByRole('button', { name: 'Count: 0' }),
+      ).toBeVisible();
     }
     await page
       .getByRole('button', {

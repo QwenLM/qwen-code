@@ -655,6 +655,8 @@ const EN: Messages = {
     'Resolve the pending standalone conversation state before continuing.',
   'session.checkStatus': 'Check status',
   'session.retryCreation': 'Start a fresh conversation',
+  'session.writerBlocked':
+    'Another Qwen process or an unresolved writer lock may be blocking this conversation. Close it in other processes and try again. If it still fails, check local daemon diagnostics before recovery.',
   'session.directoryRecreated':
     'The transcript was recovered, but files from the previous private directory were not available.',
   'session.directoryMissing':
@@ -1119,6 +1121,15 @@ const EN: Messages = {
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'history.loadingEarlier': 'Loading earlier messages…',
+  'history.openEarlier': 'Open earlier history',
+  'history.loadEarlier': 'Load earlier',
+  'history.loadNewer': 'Load newer',
+  'history.returnLatest': 'Return to latest',
+  'history.viewUnavailable':
+    'History is temporarily unavailable while the session reconnects or repairs its transcript.',
+  'history.snapshotView': 'Historical snapshot · read-only',
+  'history.viewError':
+    'This section could not be loaded. Move the reading position and retry, or return to latest.',
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
@@ -2728,6 +2739,10 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'contextUsage.refresh': 'Refresh',
+  'contextUsage.retry': 'Retry',
+  'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -4238,6 +4253,8 @@ const ZH: Messages = {
     '请先处理待确认的 Standalone 会话状态，再继续操作。',
   'session.checkStatus': '检查状态',
   'session.retryCreation': '开始新会话',
+  'session.writerBlocked':
+    '其他 Qwen 进程或未解决的写入锁可能阻止该会话访问。请在其他进程中关闭它后重试；若仍失败，请先查看本地 daemon 诊断日志再进行恢复。',
   'session.directoryRecreated':
     '会话记录已恢复，但之前私有目录中的文件未能恢复。',
   'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
@@ -4672,6 +4689,14 @@ const ZH: Messages = {
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'history.loadingEarlier': '正在加载更早消息…',
+  'history.openEarlier': '打开更早历史',
+  'history.loadEarlier': '加载更早记录',
+  'history.loadNewer': '加载较新记录',
+  'history.returnLatest': '返回最新',
+  'history.viewUnavailable': '会话正在重连或修复记录，历史暂时不可用。',
+  'history.snapshotView': '历史快照 · 只读',
+  'history.viewError':
+    '暂时无法加载此段记录。请移动阅读位置后重试，或返回最新。',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
   'history.retry': '重试',
@@ -6149,6 +6174,10 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'contextUsage.refresh': '刷新',
+  'contextUsage.retry': '重试',
+  'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',

@@ -25,6 +25,7 @@ export function SavedWebPreview({
   const clientId =
     sessionId === connection.sessionId ? connection.clientId : undefined;
   const [attempt, setAttempt] = useState(0);
+  const [frameRevision, setFrameRevision] = useState(0);
   const [result, setResult] = useState<{
     key: string;
     html?: string;
@@ -89,7 +90,13 @@ export function SavedWebPreview({
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setAttempt((value) => value + 1)}
+          onClick={() => {
+            if (current?.html !== undefined) {
+              setFrameRevision((value) => value + 1);
+            } else {
+              setAttempt((value) => value + 1);
+            }
+          }}
         >
           {t(current?.failed ? 'common.retry' : 'webPreview.refresh')}
         </Button>
@@ -104,6 +111,7 @@ export function SavedWebPreview({
         </p>
       ) : current?.html !== undefined ? (
         <iframe
+          key={frameRevision}
           className="min-h-0 w-full flex-1 rounded-lg border border-border bg-white"
           title={t('webPreview.savedFrame')}
           referrerPolicy="no-referrer"
