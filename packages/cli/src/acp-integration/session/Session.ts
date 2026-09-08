@@ -10484,10 +10484,15 @@ export class Session implements SessionContext {
       );
     }
     const previousApprovalMode = this.config.getApprovalMode();
-    const previousPrePlanMode =
-      previousApprovalMode === ApprovalMode.PLAN
-        ? this.config.getPrePlanMode()
-        : undefined;
+    const rollbackApprovalModeState =
+      this.config.getDurableSessionApprovalModeState?.() ?? {
+        mode: previousApprovalMode,
+        ...(previousApprovalMode === ApprovalMode.PLAN
+          ? { prePlanMode: this.config.getPrePlanMode() }
+          : {}),
+      };
+    const previousManualPlanExitNoticeEventState =
+      this.config.snapshotManualPlanExitNoticeEventState?.();
     const previousAutoModeDenialState = {
       ...this.config.getAutoModeDenialState(),
     };
@@ -10502,15 +10507,15 @@ export class Session implements SessionContext {
         this.config.getApprovalModeRevision() === transitionRevision
       ) {
         try {
-          this.config.restoreApprovalModeState(
-            {
-              mode: previousApprovalMode,
-              ...(previousPrePlanMode === undefined
-                ? {}
-                : { prePlanMode: previousPrePlanMode }),
-            },
-            { preserveManualPlanExitNotice: true },
-          );
+          this.config.restoreApprovalModeState(rollbackApprovalModeState, {
+            preserveManualPlanExitNotice: true,
+            ...(previousManualPlanExitNoticeEventState
+              ? {
+                  manualPlanExitNoticeEventState:
+                    previousManualPlanExitNoticeEventState,
+                }
+              : {}),
+          });
           this.config.setAutoModeDenialState(previousAutoModeDenialState);
         } catch (rollbackError) {
           debugLogger.warn('session/set_mode rollback failed', rollbackError);
@@ -10542,9 +10547,6 @@ export class Session implements SessionContext {
       }
       this.clearTodoStopGuardTrust();
     }
-    if (this.config.getApprovalModeRevision() !== transitionRevision) {
-      return;
-    }
     // Only plan-involving transitions touch the revision: entering PLAN starts
     // a fresh approval cycle and leaving PLAN abandons the draft, but an
     // approved workflow plan keeps executing in a non-plan mode — switching
@@ -10554,9 +10556,12 @@ export class Session implements SessionContext {
     // retains the revision.
     if (
       previousApprovalMode === ApprovalMode.PLAN &&
-      approvalMode !== ApprovalMode.PLAN
+      this.config.getApprovalMode() !== ApprovalMode.PLAN
     ) {
       this.clearActiveTodoPlanRevision();
+    }
+    if (this.config.getApprovalModeRevision() !== transitionRevision) {
+      return;
     }
 
     // A2 (#4511): notify attached clients of an in-session mode switch.
@@ -12987,10 +12992,15 @@ export class Session implements SessionContext {
 
               if (shouldSwitchToDefault) {
                 const previousMode = this.config.getApprovalMode();
-                const previousPrePlanMode =
-                  previousMode === ApprovalMode.PLAN
-                    ? this.config.getPrePlanMode()
-                    : undefined;
+                const rollbackApprovalModeState =
+                  this.config.getDurableSessionApprovalModeState?.() ?? {
+                    mode: previousMode,
+                    ...(previousMode === ApprovalMode.PLAN
+                      ? { prePlanMode: this.config.getPrePlanMode() }
+                      : {}),
+                  };
+                const previousManualPlanExitNoticeEventState =
+                  this.config.snapshotManualPlanExitNoticeEventState?.();
                 const previousAutoModeDenialState = {
                   ...this.config.getAutoModeDenialState(),
                 };
@@ -13006,13 +13016,16 @@ export class Session implements SessionContext {
                   ) {
                     try {
                       this.config.restoreApprovalModeState(
+                        rollbackApprovalModeState,
                         {
-                          mode: previousMode,
-                          ...(previousPrePlanMode === undefined
-                            ? {}
-                            : { prePlanMode: previousPrePlanMode }),
+                          preserveManualPlanExitNotice: true,
+                          ...(previousManualPlanExitNoticeEventState
+                            ? {
+                                manualPlanExitNoticeEventState:
+                                  previousManualPlanExitNoticeEventState,
+                              }
+                            : {}),
                         },
-                        { preserveManualPlanExitNotice: true },
                       );
                     } catch (rollbackError) {
                       debugLogger.warn(
@@ -13347,10 +13360,15 @@ export class Session implements SessionContext {
           let settledArtifacts: ToolArtifact[] | undefined;
           let settledPersistedOutputFiles: string[] | undefined;
           const preExecutionApprovalMode = this.config.getApprovalMode();
-          const preExecutionPrePlanMode =
-            preExecutionApprovalMode === ApprovalMode.PLAN
-              ? this.config.getPrePlanMode()
-              : undefined;
+          const rollbackApprovalModeState =
+            this.config.getDurableSessionApprovalModeState?.() ?? {
+              mode: preExecutionApprovalMode,
+              ...(preExecutionApprovalMode === ApprovalMode.PLAN
+                ? { prePlanMode: this.config.getPrePlanMode() }
+                : {}),
+            };
+          const preExecutionManualPlanExitNoticeEventState =
+            this.config.snapshotManualPlanExitNoticeEventState?.();
           const preExecutionAutoModeDenialState = {
             ...this.config.getAutoModeDenialState(),
           };
@@ -13517,13 +13535,16 @@ export class Session implements SessionContext {
               ) {
                 try {
                   this.config.restoreApprovalModeState(
+                    rollbackApprovalModeState,
                     {
-                      mode: preExecutionApprovalMode,
-                      ...(preExecutionPrePlanMode === undefined
-                        ? {}
-                        : { prePlanMode: preExecutionPrePlanMode }),
+                      preserveManualPlanExitNotice: true,
+                      ...(preExecutionManualPlanExitNoticeEventState
+                        ? {
+                            manualPlanExitNoticeEventState:
+                              preExecutionManualPlanExitNoticeEventState,
+                          }
+                        : {}),
                     },
-                    { preserveManualPlanExitNotice: true },
                   );
                   if (isExitPlanModeTool) {
                     // The executed exit stamped the workflow-plan revision

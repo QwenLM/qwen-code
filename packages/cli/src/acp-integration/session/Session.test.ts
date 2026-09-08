@@ -5937,8 +5937,15 @@ describe('Session', () => {
 
     it('does not clear the active plan revision when a switch into plan fails to persist', async () => {
       let approvalMode = ApprovalMode.DEFAULT;
+      const manualPlanExitNoticeEventState = {
+        version: 7,
+        kind: 'manual-exit' as const,
+      };
       const clearSessionWorkflowPlanRevision = vi.fn();
       mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+      mockConfig.snapshotManualPlanExitNoticeEventState = vi
+        .fn()
+        .mockReturnValue(manualPlanExitNoticeEventState);
       mockConfig.setApprovalMode = vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       });
@@ -5971,7 +5978,10 @@ describe('Session', () => {
       expect(clearSessionWorkflowPlanRevision).not.toHaveBeenCalled();
       expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
         { mode: ApprovalMode.DEFAULT },
-        { preserveManualPlanExitNotice: true },
+        {
+          preserveManualPlanExitNotice: true,
+          manualPlanExitNoticeEventState,
+        },
       );
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
@@ -6022,6 +6032,9 @@ describe('Session', () => {
         rejectPersistence = reject;
       });
       mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+      mockConfig.getDurableSessionApprovalModeState = vi
+        .fn()
+        .mockReturnValue({ mode: ApprovalMode.DEFAULT });
       mockConfig.getApprovalModeRevision = vi.fn(() => revision);
       mockConfig.setApprovalMode = vi.fn((mode: ApprovalMode) => {
         if (approvalMode !== mode) revision++;
@@ -6058,10 +6071,10 @@ describe('Session', () => {
 
       await expect(first).rejects.toThrow('shared persistence failed');
       await expect(second).rejects.toThrow('shared persistence failed');
-      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
       expect(mockClient.extNotification).toHaveBeenLastCalledWith(
         'qwen/notify/session/mode-update',
-        expect.objectContaining({ currentModeId: ApprovalMode.YOLO }),
+        expect.objectContaining({ currentModeId: ApprovalMode.DEFAULT }),
       );
     });
 
@@ -6165,6 +6178,48 @@ describe('Session', () => {
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('clears a PLAN exit after a superseded persistence wait settles', async () => {
+      let approvalMode = ApprovalMode.PLAN;
+      let revision = 0;
+      let releaseFirst!: () => void;
+      const firstPersistence = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.setApprovalMode = vi.fn((mode: ApprovalMode) => {
+        if (approvalMode !== mode) revision++;
+        approvalMode = mode;
+      });
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockReturnValueOnce(firstPersistence);
+      const clearSessionWorkflowPlanRevision = vi.fn();
+      mockConfig.clearSessionWorkflowPlanRevision =
+        clearSessionWorkflowPlanRevision;
+      const clearActiveTodoPlanRevision = vi.spyOn(
+        session,
+        'clearActiveTodoPlanRevision',
+      );
+
+      const leavePlan = session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'default',
+      });
+      await Promise.resolve();
+      mockConfig.setApprovalMode(ApprovalMode.YOLO);
+      releaseFirst();
+      await leavePlan;
+
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+      expect(clearSessionWorkflowPlanRevision).toHaveBeenCalledOnce();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({ currentModeId: ApprovalMode.DEFAULT }),
+      );
     });
 
     it('rejects an unknown modeId and does NOT touch approval mode (A2)', async () => {
@@ -6311,7 +6366,11 @@ describe('Session', () => {
       enableSessionWorkflowRevisionContext();
       // Capture requires PLAN mode: bind the revision while the session is
       // still in PLAN, then leave PLAN before any approval happens.
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      let approvalMode = ApprovalMode.PLAN;
+      mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+      mockConfig.setApprovalMode = vi.fn((mode: ApprovalMode) => {
+        approvalMode = mode;
+      });
       await session.sendUpdate({
         sessionUpdate: 'plan',
         entries: [
@@ -6331,9 +6390,8 @@ describe('Session', () => {
 
       // Leaving PLAN abandons the draft approval cycle: the bound revision
       // must be dropped so a later exit_plan_mode approval cannot reuse it.
-      // getApprovalMode still reports PLAN here, so this exercises the
-      // PLAN → DEFAULT exit side of the transition (the entry side is
-      // covered by the 'when changing mode' case above).
+      // This exercises the PLAN → DEFAULT exit side of the transition (the
+      // entry side is covered by the 'when changing mode' case above).
       await session.setMode({
         sessionId: 'test-session-id',
         modeId: 'default',

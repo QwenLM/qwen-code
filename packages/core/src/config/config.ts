@@ -372,7 +372,7 @@ export interface ApprovalModeInfo {
 
 type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
 
-interface ManualPlanExitNoticeEventState {
+export interface ManualPlanExitNoticeEventState {
   version: number;
   kind: ManualPlanExitNoticeEventKind;
 }
@@ -2270,6 +2270,9 @@ export class Config {
   private approvalModeRevision = 0;
   private sessionApprovalModePersistenceEnabled = false;
   private sessionApprovalModePersistenceTail: Promise<void> = Promise.resolve();
+  private sessionApprovalModePersistenceSequence = 0;
+  private durableSessionApprovalModeSequence = 0;
+  private durableSessionApprovalModeState: SessionApprovalModeRecordPayload;
   private approvalModePersistenceSuppressed = false;
   /**
    * Supplies the raw workspace `tools.approvalMode` value stamped onto every
@@ -2601,6 +2604,7 @@ export class Config {
       params.memoryFileCount ?? params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
+    this.durableSessionApprovalModeState = this.sessionApprovalModeSnapshot();
     this.accessibility = params.accessibility ?? {};
     this.showResponseTokensPerSecond =
       params.showResponseTokensPerSecond ?? false;
@@ -7101,17 +7105,20 @@ export class Config {
        * setApprovalMode would stamp on a PLAN crossing.
        */
       preserveManualPlanExitNotice?: boolean;
+      manualPlanExitNoticeEventState?: ManualPlanExitNoticeEventState;
     },
   ): void {
     // Snapshot once, from the final state: `setApprovalMode` would otherwise
     // queue an intermediate PLAN record whose prePlanMode is the live mode
     // the session was never restored from.
     this.approvalModePersistenceSuppressed = true;
-    const preservedNotice = options?.preserveManualPlanExitNotice
-      ? {
-          ...Config.prototype.getManualPlanExitNoticeEventState.call(this),
-        }
-      : undefined;
+    const preservedNotice =
+      options?.manualPlanExitNoticeEventState ??
+      (options?.preserveManualPlanExitNotice
+        ? {
+            ...Config.prototype.getManualPlanExitNoticeEventState.call(this),
+          }
+        : undefined);
     try {
       this.setApprovalMode(payload.mode);
     } finally {
@@ -7141,6 +7148,33 @@ export class Config {
 
   getApprovalModeRevision(): number {
     return this.approvalModeRevision;
+  }
+
+  snapshotManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    return {
+      ...Config.prototype.getManualPlanExitNoticeEventState.call(this),
+    };
+  }
+
+  getDurableSessionApprovalModeState(): SessionApprovalModeRecordPayload {
+    return { ...this.durableSessionApprovalModeState };
+  }
+
+  /**
+   * Uses a successfully loaded settings value as the rollback baseline when
+   * the matching transcript write fails. The settings file remains durable
+   * across restart, and a settings-derived PLAN always exits to DEFAULT.
+   */
+  adoptSettingsApprovalModeAsDurableState(mode: ApprovalMode): void {
+    this.durableSessionApprovalModeState =
+      mode === ApprovalMode.PLAN
+        ? { mode, prePlanMode: ApprovalMode.DEFAULT }
+        : { mode };
+    if (mode === ApprovalMode.PLAN && this.approvalMode === ApprovalMode.PLAN) {
+      this.prePlanMode = ApprovalMode.DEFAULT;
+    }
+    this.durableSessionApprovalModeSequence =
+      this.sessionApprovalModePersistenceSequence + 1;
   }
 
   private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
@@ -7185,6 +7219,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** A settings-derived PLAN starts with the same DEFAULT exit as boot. */
+      settingsDerived?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -7228,7 +7264,9 @@ export class Config {
       this.manualPlanExitNoticeEventState = noticeEvent;
     }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
-      this.prePlanMode = fromMode;
+      this.prePlanMode = options?.settingsDerived
+        ? ApprovalMode.DEFAULT
+        : fromMode;
       noticeEvent.version++;
       noticeEvent.kind = 'clear';
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
@@ -8759,12 +8797,17 @@ export class Config {
       return;
     }
     const payload = this.sessionApprovalModeSnapshot();
+    const sequence = ++this.sessionApprovalModePersistenceSequence;
     const persist = async () => {
       const persisted = await recorder.recordSessionApprovalMode(payload);
       if (!persisted) {
         throw (
           recorder.getWriteFailure?.() ?? new SessionWriterUnavailableError()
         );
+      }
+      if (sequence >= this.durableSessionApprovalModeSequence) {
+        this.durableSessionApprovalModeState = payload;
+        this.durableSessionApprovalModeSequence = sequence;
       }
     };
     const pending = this.sessionApprovalModePersistenceTail.then(
@@ -8792,6 +8835,10 @@ export class Config {
     recorder.enableSessionApprovalModeRecording?.();
     if (persistCurrentMode) {
       this.queueSessionApprovalModePersistence();
+    } else {
+      this.durableSessionApprovalModeState = this.sessionApprovalModeSnapshot();
+      this.durableSessionApprovalModeSequence =
+        this.sessionApprovalModePersistenceSequence;
     }
     await this.waitForSessionApprovalModePersistence();
   }

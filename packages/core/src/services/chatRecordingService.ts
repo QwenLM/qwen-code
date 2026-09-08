@@ -2632,14 +2632,9 @@ export class ChatRecordingService {
             prePlanMode: this.config.getPrePlanMode(),
           },
         );
-        this.currentSessionApprovalMode = liveSessionApprovalMode;
         if (liveSessionApprovalMode) {
-          this.appendRecord({
-            ...this.createBaseRecord('system'),
-            type: 'system',
-            subtype: 'session_approval_mode',
-            systemPayload: liveSessionApprovalMode,
-          });
+          this.currentSessionApprovalMode = undefined;
+          void this.recordSessionApprovalMode(liveSessionApprovalMode);
         }
       }
 

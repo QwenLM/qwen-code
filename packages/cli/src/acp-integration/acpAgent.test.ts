@@ -24041,6 +24041,59 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   );
 
   it.each(['load', 'resume'] as const)(
+    'cold %s keeps a revoked recorded mode out of an explicit plan exit target',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'mode-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: { mode: 'yolo', settingsApprovalMode: 'yolo' },
+            },
+          ],
+        },
+      });
+      let approvalMode = 'auto';
+      innerConfig.getApprovalMode = vi.fn(() => approvalMode);
+      innerConfig.restoreApprovalModeState = vi.fn(
+        (payload: { mode: string }) => {
+          approvalMode = payload.mode;
+        },
+      );
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { [SESSION_APPROVAL_MODE_META_KEY]: 'plan' },
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(request);
+      } else {
+        await agent.unstable_resumeSession(request);
+      }
+
+      expect(innerConfig.restoreApprovalModeState).toHaveBeenCalledWith({
+        mode: 'plan',
+        prePlanMode: 'auto',
+      });
+      expect(innerConfig.restoreApprovalModeState).not.toHaveBeenCalledWith(
+        expect.objectContaining({ prePlanMode: 'yolo' }),
+      );
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(true);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
     'cold %s applies an explicit approval mode before session publication',
     async (action) => {
       const innerConfig = bindRestoreMocks({
@@ -27984,6 +28037,101 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('binds approval-mode provenance to each session settings instance', async () => {
+    let mergedA: Record<string, unknown> = {
+      tools: { approvalMode: 'yolo' },
+      mcpServers: {},
+    };
+    const settingsA = {
+      get merged() {
+        return mergedA;
+      },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const settingsB = {
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    let providerA: (() => string | null) | undefined;
+    let providerB: (() => string | null) | undefined;
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      setSessionApprovalModeProvenanceProvider: vi.fn(
+        (provider: () => string | null) => {
+          providerA = provider;
+        },
+      ),
+      enableSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      setSessionApprovalModeProvenanceProvider: vi.fn(
+        (provider: () => string | null) => {
+          providerB = provider;
+        },
+      ),
+      enableSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
+    });
+    const sessionConfigs = [cfgA, cfgB];
+    let sessionIdx = 0;
+
+    vi.mocked(loadSettings)
+      .mockReturnValueOnce(settingsA)
+      .mockReturnValueOnce(settingsB);
+    vi.mocked(loadCliConfig).mockImplementation(
+      async () => sessionConfigs[sessionIdx]! as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx]!;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      sessionIdx++;
+      return {
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+
+    expect(providerA?.()).toBe('yolo');
+    expect(providerB?.()).toBeNull();
+    mergedA = { tools: { approvalMode: 'default' }, mcpServers: {} };
+    expect(providerA?.()).toBe('default');
+    expect(providerB?.()).toBeNull();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('preserves auto output language when syncing across sessions', async () => {
     const cfgA = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-a'),
@@ -28476,7 +28624,7 @@ describe('sessionLanguage multi-session propagation', () => {
       expect(
         (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
           .setApprovalMode,
-      ).toHaveBeenCalledWith('plan');
+      ).toHaveBeenCalledWith('plan', { settingsDerived: true });
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
 
@@ -28906,7 +29054,9 @@ describe('sessionLanguage multi-session propagation', () => {
       // entirely.
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
 
-      expect(setApprovalMode).toHaveBeenCalledWith('plan');
+      expect(setApprovalMode).toHaveBeenCalledWith('plan', {
+        settingsDerived: true,
+      });
       expect(approvalMode).toBe('plan');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
       expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
@@ -29066,7 +29216,7 @@ describe('sessionLanguage multi-session propagation', () => {
       await reload;
       expect(setApprovalMode).toHaveBeenCalledWith('auto');
       expect(approvalMode).toBe('yolo');
-      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
 
       // The reload still records which file value it observed. Otherwise the
@@ -29173,7 +29323,9 @@ describe('sessionLanguage multi-session propagation', () => {
     // impossible if the skipped reload had advanced the baseline.
     idle = true;
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-    expect(setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(setApprovalMode).toHaveBeenCalledWith('plan', {
+      settingsDerived: true,
+    });
     expect(approvalMode).toBe('plan');
     expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
     expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
@@ -29328,7 +29480,185 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('defers PLAN-entry side effects until reload persistence succeeds', async () => {
+  it.each([
+    { reloadedMode: 'default', entersPlan: false },
+    { reloadedMode: 'plan', entersPlan: true },
+  ] as const)(
+    'keeps a safer reloaded $reloadedMode mode when persistence fails',
+    async ({ reloadedMode, entersPlan }) => {
+      let mergedSettings: Record<string, unknown> = {
+        tools: { approvalMode: 'yolo' },
+      };
+      const settings = {
+        get merged() {
+          return mergedSettings;
+        },
+        reloadScopeFromDisk: vi.fn(),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings;
+
+      let approvalMode = 'yolo';
+      let prePlanMode = 'default';
+      let durableApprovalModeState: {
+        mode: string;
+        prePlanMode?: string;
+      } = { mode: 'yolo' };
+      let approvalModeRevision = 0;
+      const setApprovalMode = vi.fn(
+        (mode: string, options?: { settingsDerived?: boolean }) => {
+          if (mode === 'plan' && approvalMode !== 'plan') {
+            prePlanMode = options?.settingsDerived ? 'default' : approvalMode;
+          } else if (mode !== 'plan' && approvalMode === 'plan') {
+            prePlanMode = 'default';
+          }
+          if (approvalMode !== mode) approvalModeRevision++;
+          approvalMode = mode;
+        },
+      );
+      const restoreApprovalModeState = vi.fn(
+        (payload: { mode: string; prePlanMode?: string }) => {
+          approvalMode = payload.mode;
+          prePlanMode = payload.prePlanMode ?? 'default';
+        },
+      );
+      const adoptSettingsApprovalModeAsDurableState = vi.fn((mode: string) => {
+        durableApprovalModeState =
+          mode === 'plan' ? { mode, prePlanMode: 'default' } : { mode };
+        if (mode === 'plan') prePlanMode = 'default';
+      });
+      const cfg = makeConfig({
+        getSessionId: vi.fn().mockReturnValue('s-reload-tightening'),
+        getApprovalMode: vi.fn(() => approvalMode),
+        getPrePlanMode: vi.fn(() => prePlanMode),
+        getApprovalModeRevision: vi.fn(() => approvalModeRevision),
+        getDurableSessionApprovalModeState: vi.fn(
+          () => durableApprovalModeState,
+        ),
+        adoptSettingsApprovalModeAsDurableState,
+        setApprovalMode,
+        restoreApprovalModeState,
+        waitForSessionApprovalModePersistence: vi.fn(() => persistence),
+        setDisabledTools: vi.fn(),
+        isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+      });
+      const clearActiveTodoPlanRevision = vi.fn();
+      let rejectPersistence!: (error: Error) => void;
+      const persistence = new Promise<void>((_resolve, reject) => {
+        rejectPersistence = reject;
+      });
+
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+      vi.mocked(Session).mockImplementation(
+        () =>
+          ({
+            getId: vi.fn().mockReturnValue('s-reload-tightening'),
+            getConfig: vi.fn().mockReturnValue(cfg),
+            isIdle: vi.fn().mockReturnValue(true),
+            clearActiveTodoPlanRevision,
+            clearTodoStopGuardTrust: vi.fn(),
+            sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+            installRewriter: vi.fn(),
+            installGoalTerminalObserver: vi.fn(),
+            startCronScheduler: vi.fn(),
+            dispose: vi.fn(),
+          }) as unknown as InstanceType<typeof Session>,
+      );
+      vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+        availableCommands: [],
+        availableSkills: [],
+      });
+
+      const agentPromise = runAcpAgent(
+        makeConfig() as unknown as Config,
+        settings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+
+      await agent.newSession({ cwd: '/reload', mcpServers: [] });
+      const approvalModes = APPROVAL_MODES as unknown as string[];
+      const originalApprovalModes = [...approvalModes];
+      approvalModes.splice(
+        0,
+        approvalModes.length,
+        'default',
+        'auto-edit',
+        'plan',
+        'yolo',
+      );
+      try {
+        mergedSettings = { tools: { approvalMode: reloadedMode } };
+        const reload = agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          {},
+        );
+
+        await vi.waitFor(() =>
+          expect(setApprovalMode).toHaveBeenCalledWith(
+            reloadedMode,
+            ...(reloadedMode === 'plan' ? [{ settingsDerived: true }] : []),
+          ),
+        );
+        expect(restoreApprovalModeState).not.toHaveBeenCalled();
+        expect(approvalMode).toBe(reloadedMode);
+        expect(adoptSettingsApprovalModeAsDurableState).toHaveBeenCalledWith(
+          reloadedMode,
+        );
+        expect(durableApprovalModeState).toEqual(
+          reloadedMode === 'plan'
+            ? { mode: 'plan', prePlanMode: 'default' }
+            : { mode: 'default' },
+        );
+        if (reloadedMode === 'plan') {
+          expect(prePlanMode).toBe('default');
+        }
+        if (entersPlan) {
+          expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+        } else {
+          expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+        }
+
+        const concurrentSwitch = agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          {
+            sessionId: 's-reload-tightening',
+            mode: 'auto-edit',
+          },
+        );
+        void concurrentSwitch.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(setApprovalMode).toHaveBeenCalledWith('auto-edit'),
+        );
+        rejectPersistence(new Error('snapshot failed'));
+
+        const result = await reload;
+        await expect(concurrentSwitch).rejects.toThrow('snapshot failed');
+        expect(result).toMatchObject({
+          sessionsRefreshed: [],
+          sessionsSkipped: ['s-reload-tightening'],
+        });
+        expect(restoreApprovalModeState).toHaveBeenCalledWith(
+          durableApprovalModeState,
+          { preserveManualPlanExitNotice: true },
+        );
+        expect(approvalMode).toBe(reloadedMode);
+      } finally {
+        approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+      }
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('keeps PLAN-entry side effects when a safer reload fails to persist', async () => {
     const mergedSettings: Record<string, unknown> = {
       tools: { approvalMode: 'plan' },
     };
@@ -29400,22 +29730,29 @@ describe('sessionLanguage multi-session propagation', () => {
 
     await agent.newSession({ cwd: '/reload', mcpServers: [] });
 
-    // First reload: default -> plan fails to persist and is rolled back;
-    // the PLAN-entry clears must not fire for a transition that never
-    // became durable, or an in-flight approved plan would be disarmed.
-    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-    expect(setApprovalMode).toHaveBeenCalledWith('plan');
-    expect(restoreApprovalModeState).toHaveBeenCalledWith(
-      { mode: 'default' },
-      { preserveManualPlanExitNotice: true },
+    // PLAN is safer than DEFAULT, so a failed transcript write must not
+    // re-escalate the live session. The entry guards still need to apply to
+    // the retained PLAN state.
+    const firstResult = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
     );
-    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
-    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    expect(setApprovalMode).toHaveBeenCalledWith('plan', {
+      settingsDerived: true,
+    });
+    expect(restoreApprovalModeState).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('plan');
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+    expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+    expect(firstResult).toMatchObject({
+      sessionsRefreshed: [],
+      sessionsSkipped: ['s-reload-plan-entry'],
+    });
 
-    // Second reload: durable this time, so the entry clears fire exactly
-    // once.
+    // The next reload observes that the live mode already matches disk and
+    // advances convergence without re-running PLAN-entry guards.
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-    expect(waitForSessionApprovalModePersistence).toHaveBeenCalledTimes(2);
+    expect(waitForSessionApprovalModePersistence).toHaveBeenCalledOnce();
     expect(approvalMode).toBe('plan');
     expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
     expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
@@ -29619,7 +29956,9 @@ describe('sessionLanguage multi-session propagation', () => {
     // session — the invalid value did not pin or advance the baseline.
     mergedSettings = { tools: { approvalMode: 'plan' } };
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-    expect(setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(setApprovalMode).toHaveBeenCalledWith('plan', {
+      settingsDerived: true,
+    });
     expect(approvalMode).toBe('plan');
 
     mockConnectionState.resolve();
@@ -30218,6 +30557,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const registryCancel = vi.fn();
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
+      getApprovalMode: vi.fn().mockReturnValue('auto'),
       isWorkflowsEnabled: vi.fn(() => workflowsEnabled),
       setWorkflowsEnabled: vi.fn((enabled: boolean) => {
         workflowsEnabled = enabled;

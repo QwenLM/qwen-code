@@ -10917,6 +10917,30 @@ describe('setApprovalMode with folder trust', () => {
       });
     });
 
+    it('restores the pre-transition manual plan-exit notice after rollback', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      const manualPlanExitNoticeEventState =
+        config.snapshotManualPlanExitNoticeEventState();
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.restoreApprovalModeState(
+        { mode: ApprovalMode.DEFAULT },
+        {
+          preserveManualPlanExitNotice: true,
+          manualPlanExitNoticeEventState,
+        },
+      );
+
+      expect(config.takePendingManualPlanExitNotice()).toEqual({
+        version: 1,
+        currentMode: ApprovalMode.DEFAULT,
+      });
+    });
+
     it('does not fabricate a manual plan-exit notice when a rollback re-exits PLAN', () => {
       const config = new Config({
         ...baseParams,
@@ -11399,6 +11423,108 @@ describe('setApprovalMode with folder trust', () => {
       expect(recordSessionApprovalMode).toHaveBeenNthCalledWith(2, {
         mode: ApprovalMode.PLAN,
         prePlanMode: ApprovalMode.AUTO_EDIT,
+      });
+    });
+
+    it('tracks the last durable approval state across a failed write', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const recordSessionApprovalMode = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const internal = config as unknown as {
+        chatRecordingService: {
+          recordSessionApprovalMode: typeof recordSessionApprovalMode;
+          assertCanStartTurn: () => Promise<void>;
+        };
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = {
+        recordSessionApprovalMode,
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      };
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      await config.waitForSessionApprovalModePersistence();
+      expect(config.getDurableSessionApprovalModeState()).toEqual({
+        mode: ApprovalMode.AUTO_EDIT,
+      });
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      await expect(
+        config.waitForSessionApprovalModePersistence(),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(config.getDurableSessionApprovalModeState()).toEqual({
+        mode: ApprovalMode.AUTO_EDIT,
+      });
+    });
+
+    it('adopts a safer settings mode as the durable rollback baseline', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.YOLO,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+
+      config.adoptSettingsApprovalModeAsDurableState(ApprovalMode.PLAN);
+
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+      expect(config.getDurableSessionApprovalModeState()).toEqual({
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.DEFAULT,
+      });
+
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.adoptSettingsApprovalModeAsDurableState(ApprovalMode.DEFAULT);
+      expect(config.getDurableSessionApprovalModeState()).toEqual({
+        mode: ApprovalMode.DEFAULT,
+      });
+    });
+
+    it('does not let an older queued write replace a settings rollback baseline', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      let releaseOlderWrite!: () => void;
+      const recordSessionApprovalMode = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              releaseOlderWrite = () => resolve(true);
+            }),
+        )
+        .mockResolvedValueOnce(false);
+      const internal = config as unknown as {
+        chatRecordingService: {
+          recordSessionApprovalMode: typeof recordSessionApprovalMode;
+          assertCanStartTurn: () => Promise<void>;
+        };
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = {
+        recordSessionApprovalMode,
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      };
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.adoptSettingsApprovalModeAsDurableState(ApprovalMode.DEFAULT);
+      await vi.waitFor(() =>
+        expect(recordSessionApprovalMode).toHaveBeenCalledOnce(),
+      );
+      releaseOlderWrite();
+
+      await expect(
+        config.waitForSessionApprovalModePersistence(),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(config.getDurableSessionApprovalModeState()).toEqual({
+        mode: ApprovalMode.DEFAULT,
       });
     });
 

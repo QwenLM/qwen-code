@@ -3111,6 +3111,34 @@ describe('ChatRecordingService', () => {
       });
     });
 
+    it('retries a rewind approval re-anchor after its append fails', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      await chatRecordingService.flush();
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+      const internal = chatRecordingService as unknown as {
+        appendRecordStrict: (record: ChatRecord) => Promise<void>;
+      };
+      const appendRecordStrict = vi
+        .spyOn(internal, 'appendRecordStrict')
+        .mockRejectedValueOnce(new Error('re-anchor failed'))
+        .mockResolvedValue(undefined);
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 1 });
+      await vi.waitFor(() => expect(appendRecordStrict).toHaveBeenCalledOnce());
+
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.DEFAULT,
+        }),
+      ).resolves.toBe(true);
+      expect(appendRecordStrict).toHaveBeenCalledTimes(2);
+    });
+
     it('re-anchors a pending approval change when rewind lands mid-write', async () => {
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       await chatRecordingService.recordSessionApprovalMode({

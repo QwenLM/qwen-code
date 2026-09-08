@@ -10,6 +10,7 @@ import {
   type Config,
   type SessionRestoreProjection,
 } from '@qwen-code/qwen-code-core';
+import { parseApprovalModeValue } from '../config/config.js';
 
 const debugLogger = createDebugLogger('SESSION_APPROVAL_MODE');
 
@@ -32,6 +33,33 @@ export function rawSettingsApprovalMode(merged: {
 }): string | null {
   const raw = merged.tools?.approvalMode;
   return typeof raw === 'string' ? raw : null;
+}
+
+function settingsApprovalModesEqual(
+  recorded: string | null,
+  current: string | null,
+): boolean {
+  if (recorded === null || current === null) return recorded === current;
+  try {
+    return parseApprovalModeValue(recorded) === parseApprovalModeValue(current);
+  } catch {
+    return recorded === current;
+  }
+}
+
+export function shouldHoldBackRestoredSessionApprovalMode(
+  projection: SessionRestoreProjection | undefined,
+  options?: { settingsApprovalMode?: string | null },
+): boolean {
+  const restored = projection?.runtime.recording.sessionApprovalMode;
+  return (
+    restored?.kind === 'valid' &&
+    restored.payload.settingsApprovalMode !== undefined &&
+    !settingsApprovalModesEqual(
+      restored.payload.settingsApprovalMode,
+      options?.settingsApprovalMode ?? null,
+    )
+  );
 }
 
 /**
@@ -69,11 +97,7 @@ export function applyRestoredSessionApprovalMode(
   // The record outranks the workspace setting only while the setting still
   // holds the raw value observed when the record was written. Records that
   // predate provenance carry no settingsApprovalMode and win as before.
-  if (
-    restored.payload.settingsApprovalMode !== undefined &&
-    restored.payload.settingsApprovalMode !==
-      (options?.settingsApprovalMode ?? null)
-  ) {
+  if (shouldHoldBackRestoredSessionApprovalMode(projection, options)) {
     debugLogger.warn(
       'Ignoring restored approval mode because the workspace approvalMode setting changed since it was recorded.',
     );
@@ -83,10 +107,10 @@ export function applyRestoredSessionApprovalMode(
   try {
     config.restoreApprovalModeState(restored.payload);
   } catch (error) {
-    config.restoreApprovalModeState({ mode: ApprovalMode.DEFAULT });
     debugLogger.warn(
-      `Restored approval mode was rejected by current policy; using default mode: ${error}`,
+      `Restored approval mode was rejected by current policy; keeping the settings-derived boot mode: ${error}`,
     );
+    return true;
   }
   return false;
 }

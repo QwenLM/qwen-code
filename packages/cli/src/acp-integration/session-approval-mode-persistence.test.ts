@@ -75,17 +75,17 @@ describe('applyRestoredSessionApprovalMode', () => {
     expect(target.setApprovalMode).not.toHaveBeenCalled();
   });
 
-  it('falls back to default when current policy rejects restored state', () => {
+  it('keeps the settings-derived boot mode when policy rejects restored state', () => {
     const rejected = new Error('privileged mode rejected');
-    const restoreApprovalModeState = vi
-      .fn()
-      .mockImplementationOnce(() => {
-        throw rejected;
-      })
-      .mockImplementationOnce(() => undefined);
-    const target = config({ restoreApprovalModeState });
+    const restoreApprovalModeState = vi.fn().mockImplementation(() => {
+      throw rejected;
+    });
+    const target = config({
+      restoreApprovalModeState,
+      getApprovalMode: vi.fn(() => ApprovalMode.PLAN),
+    });
 
-    applyRestoredSessionApprovalMode(
+    const shouldRepair = applyRestoredSessionApprovalMode(
       target,
       projection({
         kind: 'valid',
@@ -93,12 +93,12 @@ describe('applyRestoredSessionApprovalMode', () => {
       }),
     );
 
-    expect(restoreApprovalModeState).toHaveBeenNthCalledWith(1, {
+    expect(restoreApprovalModeState).toHaveBeenCalledOnce();
+    expect(restoreApprovalModeState).toHaveBeenCalledWith({
       mode: ApprovalMode.YOLO,
     });
-    expect(restoreApprovalModeState).toHaveBeenNthCalledWith(2, {
-      mode: ApprovalMode.DEFAULT,
-    });
+    expect(shouldRepair).toBe(true);
+    expect(target.getApprovalMode()).toBe(ApprovalMode.PLAN);
   });
 
   it.each([
@@ -138,6 +138,49 @@ describe('applyRestoredSessionApprovalMode', () => {
 
     expect(rejected).toBe(false);
     expect(target.restoreApprovalModeState).toHaveBeenCalledWith(payload);
+  });
+
+  it.each([
+    ['yolo', 'YOLO'],
+    ['yolo', ' yolo '],
+    ['autoedit', 'auto_edit'],
+    ['auto_edit', 'AUTO_EDIT'],
+  ] as const)(
+    'applies a record whose settings provenance is boot-equivalent: %s / %s',
+    (recorded, current) => {
+      const target = config();
+      const payload = {
+        mode: ApprovalMode.DEFAULT,
+        settingsApprovalMode: recorded,
+      };
+
+      const rejected = applyRestoredSessionApprovalMode(
+        target,
+        projection({ kind: 'valid', payload }),
+        { settingsApprovalMode: current },
+      );
+
+      expect(rejected).toBe(false);
+      expect(target.restoreApprovalModeState).toHaveBeenCalledWith(payload);
+    },
+  );
+
+  it('does not throw while comparing invalid provenance spellings', () => {
+    const target = config();
+
+    expect(() =>
+      applyRestoredSessionApprovalMode(
+        target,
+        projection({
+          kind: 'valid',
+          payload: {
+            mode: ApprovalMode.DEFAULT,
+            settingsApprovalMode: 'invalid',
+          },
+        }),
+        { settingsApprovalMode: 'INVALID' },
+      ),
+    ).not.toThrow();
   });
 
   it('applies a provenance-free record without consulting the settings value', () => {

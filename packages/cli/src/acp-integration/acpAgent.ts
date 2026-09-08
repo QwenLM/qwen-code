@@ -272,6 +272,7 @@ import {
   applyRestoredSessionApprovalMode,
   isRestrictedApprovalModeConfig,
   rawSettingsApprovalMode,
+  shouldHoldBackRestoredSessionApprovalMode,
 } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -1888,6 +1889,18 @@ function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
   return undefined;
 }
 
+const APPROVAL_MODE_AUTONOMY: Record<ApprovalMode, number> = {
+  [ApprovalMode.PLAN]: 0,
+  [ApprovalMode.DEFAULT]: 1,
+  [ApprovalMode.AUTO_EDIT]: 2,
+  [ApprovalMode.AUTO]: 3,
+  [ApprovalMode.YOLO]: 4,
+};
+
+function tightensApprovalMode(from: ApprovalMode, to: ApprovalMode): boolean {
+  return APPROVAL_MODE_AUTONOMY[to] < APPROVAL_MODE_AUTONOMY[from];
+}
+
 function requestedSessionApprovalMode(request: {
   _meta?: Record<string, unknown> | null;
 }): ApprovalMode | undefined {
@@ -1915,20 +1928,25 @@ function setRequestedSessionApprovalMode(
   config: Config,
   mode: ApprovalMode,
   projection?: SessionRestoreProjection,
+  settingsApprovalMode?: string | null,
 ): boolean {
   if (isRestrictedApprovalModeConfig(config)) return false;
   try {
     const restored = projection?.runtime.recording.sessionApprovalMode;
+    const restoredModeCanSeedPlan =
+      restored?.kind === 'valid' &&
+      !shouldHoldBackRestoredSessionApprovalMode(projection, {
+        settingsApprovalMode,
+      });
     config.restoreApprovalModeState({
       mode,
       ...(mode === ApprovalMode.PLAN
         ? {
-            prePlanMode:
-              restored?.kind === 'valid'
-                ? restored.payload.mode === ApprovalMode.PLAN
-                  ? restored.payload.prePlanMode
-                  : restored.payload.mode
-                : config.getApprovalMode(),
+            prePlanMode: restoredModeCanSeedPlan
+              ? restored.payload.mode === ApprovalMode.PLAN
+                ? restored.payload.prePlanMode
+                : restored.payload.mode
+              : config.getApprovalMode(),
           }
         : {}),
     });
@@ -5399,6 +5417,7 @@ class QwenAgent implements Agent {
             config,
             requestedApprovalMode,
             projection,
+            rawSettingsApprovalMode(settings.merged),
           );
         let restoredApprovalModeRejectedBySettings = false;
         if (!requestedApprovalModeApplied) {
@@ -5782,6 +5801,7 @@ class QwenAgent implements Agent {
             config,
             requestedApprovalMode,
             projection,
+            rawSettingsApprovalMode(settings.merged),
           );
         let restoredApprovalModeRejectedBySettings = false;
         if (!requestedApprovalModeApplied) {
@@ -11240,8 +11260,15 @@ class QwenAgent implements Agent {
         if (isRestrictedApprovalModeConfig(config)) {
           return { previous, current: previous };
         }
-        const previousPrePlanMode =
-          previous === ApprovalMode.PLAN ? config.getPrePlanMode() : undefined;
+        const rollbackApprovalModeState =
+          config.getDurableSessionApprovalModeState?.() ?? {
+            mode: previous,
+            ...(previous === ApprovalMode.PLAN
+              ? { prePlanMode: config.getPrePlanMode() }
+              : {}),
+          };
+        const previousManualPlanExitNoticeEventState =
+          config.snapshotManualPlanExitNoticeEventState?.();
         const previousAutoModeDenialState = {
           ...config.getAutoModeDenialState(),
         };
@@ -11257,15 +11284,15 @@ class QwenAgent implements Agent {
             config.getApprovalModeRevision() === transitionRevision
           ) {
             try {
-              config.restoreApprovalModeState(
-                {
-                  mode: previous,
-                  ...(previousPrePlanMode === undefined
-                    ? {}
-                    : { prePlanMode: previousPrePlanMode }),
-                },
-                { preserveManualPlanExitNotice: true },
-              );
+              config.restoreApprovalModeState(rollbackApprovalModeState, {
+                preserveManualPlanExitNotice: true,
+                ...(previousManualPlanExitNoticeEventState
+                  ? {
+                      manualPlanExitNoticeEventState:
+                        previousManualPlanExitNoticeEventState,
+                    }
+                  : {}),
+              });
               config.setAutoModeDenialState(previousAutoModeDenialState);
             } catch (rollbackError) {
               debugLogger.warn(
@@ -13451,6 +13478,7 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
+            let approvalModeReloadFailed = false;
 
             // Long-lived ACP sessions never restart, so honor providerProtocol
             // changes here too (its requiresRestart only gates the TUI path) and
@@ -13551,10 +13579,15 @@ class QwenAgent implements Agent {
               ? ApprovalMode.DEFAULT
               : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
-            const previousPrePlanMode =
-              previousMode === ApprovalMode.PLAN
-                ? config.getPrePlanMode()
-                : undefined;
+            const rollbackApprovalModeState =
+              config.getDurableSessionApprovalModeState?.() ?? {
+                mode: previousMode,
+                ...(previousMode === ApprovalMode.PLAN
+                  ? { prePlanMode: config.getPrePlanMode() }
+                  : {}),
+              };
+            const previousManualPlanExitNoticeEventState =
+              config.snapshotManualPlanExitNoticeEventState?.();
             const previousAutoModeDenialState = {
               ...config.getAutoModeDenialState(),
             };
@@ -13563,11 +13596,39 @@ class QwenAgent implements Agent {
               reloadedSessionMode !== undefined &&
               reloadedSessionMode !== convergedMode
             ) {
+              const settingsTightensRollbackBaseline = tightensApprovalMode(
+                rollbackApprovalModeState.mode,
+                reloadedSessionMode,
+              );
               if (reloadedSessionMode !== previousMode) {
                 let transitionRevision: number | undefined;
+                let planEntryGuardsApplied = false;
                 try {
-                  config.setApprovalMode(reloadedSessionMode);
+                  if (reloadedSessionMode === ApprovalMode.PLAN) {
+                    config.setApprovalMode(reloadedSessionMode, {
+                      settingsDerived: true,
+                    });
+                  } else {
+                    config.setApprovalMode(reloadedSessionMode);
+                  }
                   transitionRevision = config.getApprovalModeRevision();
+                  if (settingsTightensRollbackBaseline) {
+                    // The settings file is itself durable and outranks the
+                    // stale transcript through provenance on cold restore.
+                    // Install it synchronously so a concurrent failed switch
+                    // cannot capture the stale, more permissive baseline.
+                    config.adoptSettingsApprovalModeAsDurableState?.(
+                      reloadedSessionMode,
+                    );
+                    if (
+                      reloadedSessionMode === ApprovalMode.PLAN &&
+                      previousMode !== ApprovalMode.PLAN
+                    ) {
+                      session.clearActiveTodoPlanRevision();
+                      session.clearTodoStopGuardTrust();
+                      planEntryGuardsApplied = true;
+                    }
+                  }
                   await config.waitForSessionApprovalModePersistence?.();
                   // PLAN-entry side effects run only once the transition is
                   // durable, so a failed and rolled-back entry cannot disarm
@@ -13576,40 +13637,43 @@ class QwenAgent implements Agent {
                   // one.
                   if (
                     reloadedSessionMode === ApprovalMode.PLAN &&
-                    previousMode !== ApprovalMode.PLAN
+                    previousMode !== ApprovalMode.PLAN &&
+                    !planEntryGuardsApplied
                   ) {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
-                  const transitionStillCurrent =
-                    config.getApprovalModeRevision() === transitionRevision;
-                  if (transitionStillCurrent) {
-                    if (
-                      reloadedSessionMode !== ApprovalMode.PLAN &&
-                      previousMode === ApprovalMode.PLAN
-                    ) {
-                      session.clearActiveTodoPlanRevision();
-                    }
+                  if (
+                    config.getApprovalMode() !== ApprovalMode.PLAN &&
+                    previousMode === ApprovalMode.PLAN
+                  ) {
+                    session.clearActiveTodoPlanRevision();
                   }
                   this.sessionApprovalModeConverged.set(
                     id,
                     reloadedSessionMode,
                   );
                 } catch (err) {
-                  if (
+                  approvalModeReloadFailed = true;
+                  const transitionStillCurrent =
                     transitionRevision !== undefined &&
                     config.getApprovalMode() === reloadedSessionMode &&
-                    config.getApprovalModeRevision() === transitionRevision
-                  ) {
+                    config.getApprovalModeRevision() === transitionRevision;
+                  const keptSaferMode =
+                    transitionStillCurrent && settingsTightensRollbackBaseline;
+                  if (transitionStillCurrent && !keptSaferMode) {
                     try {
                       config.restoreApprovalModeState(
+                        rollbackApprovalModeState,
                         {
-                          mode: previousMode,
-                          ...(previousPrePlanMode === undefined
-                            ? {}
-                            : { prePlanMode: previousPrePlanMode }),
+                          preserveManualPlanExitNotice: true,
+                          ...(previousManualPlanExitNoticeEventState
+                            ? {
+                                manualPlanExitNoticeEventState:
+                                  previousManualPlanExitNoticeEventState,
+                              }
+                            : {}),
                         },
-                        { preserveManualPlanExitNotice: true },
                       );
                       config.setAutoModeDenialState(
                         previousAutoModeDenialState,
@@ -13625,6 +13689,11 @@ class QwenAgent implements Agent {
                   );
                 }
               } else {
+                if (settingsTightensRollbackBaseline) {
+                  config.adoptSettingsApprovalModeAsDurableState?.(
+                    reloadedSessionMode,
+                  );
+                }
                 this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
               }
             }
@@ -13644,7 +13713,11 @@ class QwenAgent implements Agent {
               );
             }
 
-            refreshed.push(id);
+            if (approvalModeReloadFailed) {
+              skipped.push(id);
+            } else {
+              refreshed.push(id);
+            }
           }),
         );
         for (let i = 0; i < results.length; i++) {
@@ -14617,7 +14690,7 @@ class QwenAgent implements Agent {
         forceAuthenticationRefresh = true;
       }
       config.setSessionApprovalModeProvenanceProvider?.(() =>
-        rawSettingsApprovalMode(this.settings.merged),
+        rawSettingsApprovalMode(settings.merged),
       );
       await config.enableSessionApprovalModePersistence?.(
         options.persistInitialApprovalMode,
