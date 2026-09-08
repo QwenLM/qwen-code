@@ -5,21 +5,15 @@
  */
 
 import type { Part } from '@google/genai';
-import type { GoalTurnPermit } from './goal-protocol.js';
+import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
 
-/**
- * The prompt a host sends when `runtime.finishTurn` schedules another Goal
- * turn. Every host renders it from here so that a new line lands in one place
- * instead of drifting across the hosts that assemble it.
- */
+export type GoalContinuationUsage = Pick<
+  GoalRecord,
+  'tokensUsed' | 'tokenBudget' | 'turnCount'
+>;
 
-export interface GoalContinuationPromptInput {
-  /** Goal identity from the runtime permit that admitted this turn. */
-  goalId: string;
-  revision: number;
-  /** The authoritative objective the runtime holds right now. */
-  objective: string;
+interface GoalContinuationHints {
   /**
    * True on the first continuation carrying an objective the model has not
    * been handed before. See `OBJECTIVE_UPDATED_LINE` for why this is
@@ -32,7 +26,30 @@ export interface GoalContinuationPromptInput {
    * instead of more work.
    */
   windDown?: boolean;
+  /**
+   * What the Goal has spent and how many turns it has finished, read off the
+   * record when the turn was scheduled. Absent on a host that has no runtime
+   * figures to pass, which is also how every test that predates them reads.
+   */
+  usage?: GoalContinuationUsage;
   verifierFeedback?: string;
+}
+
+export interface GoalContinuationTurn extends GoalContinuationHints {
+  continuationContext: string;
+}
+
+/**
+ * The prompt a host sends when `runtime.finishTurn` schedules another Goal
+ * turn. Every host renders it from here so that a new line lands in one place
+ * instead of drifting across the hosts that assemble it.
+ */
+export interface GoalContinuationPromptInput extends GoalContinuationHints {
+  /** Goal identity from the runtime permit that admitted this turn. */
+  goalId: string;
+  revision: number;
+  /** The authoritative objective the runtime holds right now. */
+  objective: string;
 }
 
 /** Delimiters of the untrusted Goal data block. */
@@ -77,6 +94,51 @@ const OBJECTIVE_UPDATED_LINE =
   'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.';
 
 /**
+ * Figures the model would otherwise have to spend a `get_goal` call to learn,
+ * and which it cannot act on if it learns them too late.
+ *
+ * Kept out of the data block on purpose: these are trusted runtime figures,
+ * while that block is explicitly framed as untrusted task data.
+ */
+function renderBudgetLine(usage: GoalContinuationUsage): string {
+  const used = usage.tokensUsed.toLocaleString('en-US');
+  const spend =
+    usage.tokenBudget === undefined
+      ? `${used} tokens used, with no budget on this Goal`
+      : `${used} of ${usage.tokenBudget.toLocaleString('en-US')} tokens used, ${Math.max(
+          0,
+          usage.tokenBudget - usage.tokensUsed,
+        ).toLocaleString('en-US')} remaining`;
+  const turns = `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`;
+  return `Token budget: ${spend}; ${turns}.`;
+}
+
+/**
+ * What the runtime cannot check for itself.
+ *
+ * The verifier only ever sees a terminal proposal, so a turn that proposes
+ * nothing is judged by nobody -- and a turn spent restating status is exactly
+ * the turn that proposes nothing. These lines ask the model to make that
+ * judgement itself, before it spends the turn.
+ */
+const EVIDENCE_LINE =
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.";
+
+const FIDELITY_LINE =
+  'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';
+
+/**
+ * Held back on the Goal's first turn. `create` schedules a continuation
+ * before any Goal turn has finished, and asking a model to judge a previous
+ * turn that does not exist invites it to describe one.
+ */
+const NO_PROGRESS_LINE =
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.';
+
+const COMPLETION_AUDIT_LINE =
+  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.';
+
+/**
  * Sent once per spend window, on the continuation the budget gate grants
  * after the window is spent. The Goal stops when this turn ends, so the
  * hand-off is the last thing the model delivers autonomously.
@@ -115,6 +177,23 @@ export function renderGoalContinuationPrompt(
     AUTHORITATIVE_OBJECTIVE_LINE,
   ];
 
+  if (input.usage) {
+    lines.push(renderBudgetLine(input.usage));
+  }
+
+  // The hand-off turn is told not to start new work, which is the opposite of
+  // what these lines ask for; the budget line above still belongs there,
+  // since a hand-off reports the numbers it stopped at.
+  if (!input.windDown) {
+    lines.push(EVIDENCE_LINE, FIDELITY_LINE);
+    // A host that reports no figures says nothing about which turn this is,
+    // so the line stands: silence is not evidence of a first turn.
+    if (input.usage === undefined || input.usage.turnCount > 0) {
+      lines.push(NO_PROGRESS_LINE);
+    }
+    lines.push(COMPLETION_AUDIT_LINE);
+  }
+
   if (input.objectiveUpdated) {
     lines.push(OBJECTIVE_UPDATED_LINE);
   }
@@ -130,24 +209,22 @@ export function renderGoalContinuationPrompt(
   return lines.join('\n');
 }
 
+/** Renders a runtime-scheduled Goal continuation turn. */
+export function renderGoalContinuationTurn(
+  turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+): string {
+  const { permit, continuationContext, ...hints } = turn;
+  return renderGoalContinuationPrompt({
+    goalId: permit.goalId,
+    revision: permit.revision,
+    objective: continuationContext,
+    ...hints,
+  });
+}
+
 /** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
-export function buildGoalContinuationParts(turn: {
-  permit: GoalTurnPermit;
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
-}): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        goalId: turn.permit.goalId,
-        revision: turn.permit.revision,
-        objective: turn.continuationContext,
-        objectiveUpdated: turn.objectiveUpdated,
-        windDown: turn.windDown,
-        verifierFeedback: turn.verifierFeedback,
-      }),
-    },
-  ];
+export function buildGoalContinuationParts(
+  turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+): Part[] {
+  return [{ text: renderGoalContinuationTurn(turn) }];
 }

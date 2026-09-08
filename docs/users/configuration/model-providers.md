@@ -568,12 +568,58 @@ The configuration resolution follows a strict layering model with one crucial ru
 | 3        | `settings.model.generationConfig`             | Only used for **Runtime Models** (when no provider model is selected)                                    |
 | 4        | Content-generator defaults                    | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
 
+### Dynamic values in `customHeaders`
+
+A `customHeaders` value may contain the placeholder `${session_id}`, which is
+expanded per request with the current Qwen Code session ID. Use it for gateways
+that require a stable per-conversation identifier — OpenCode Go, for example,
+rejects requests without `x-opencode-session`:
+
+```json
+{
+  "generationConfig": {
+    "customHeaders": {
+      "x-opencode-session": "${session_id}"
+    }
+  }
+}
+```
+
+Because the value is resolved per request rather than baked into the SDK client,
+`/new` and `/resume` rotate it without a restart.
+
+⚠️ **Two steps are required.** The provider entry above is only half of it — a
+placeholder is inert until you also switch on
+[`outboundCorrelation.allowDynamicHeaderValues`](settings.md#outboundcorrelation):
+
+```json
+{
+  "outboundCorrelation": {
+    "allowDynamicHeaderValues": true
+  }
+}
+```
+
+Until you do, a value containing a placeholder is **dropped** rather than sent,
+and Qwen Code prints a warning at startup naming the header and this setting.
+The header is never sent with a literal `${session_id}` in it.
+
+The switch is global because it is a consent decision, separate from _where_ the
+value goes: an expanded value carries live session state to whoever receives it,
+and the switch controls only whether `${session_id}` may be expanded. It does not
+identify which settings source supplied the header.
+
+**Privacy note:** the session ID is a stable identifier for the life of a
+conversation, so any host you send it to can group every request of that
+conversation. Which hosts those are is decided by which provider entries carry
+the header — there is no separate host list to keep in sync with your `baseUrl`.
+
 ### Atomic field treatment
 
 The following fields are treated as atomic objects - provider values completely replace the entire object, no merging occurs:
 
 - `samplingParams` - Temperature, top_p, max_tokens, etc.
-- `customHeaders` - Custom HTTP headers
+- `customHeaders` - Custom HTTP headers (may contain `${session_id}`; see [Dynamic values](#dynamic-values-in-customheaders))
 - `extra_body` - Extra request body parameters
 
 ### Example

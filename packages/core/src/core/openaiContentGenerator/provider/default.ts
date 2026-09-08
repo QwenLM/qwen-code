@@ -128,7 +128,11 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
