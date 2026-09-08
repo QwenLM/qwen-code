@@ -919,10 +919,54 @@ describe('WorkflowOrchestrator', () => {
     ).rejects.toThrow(/exceeded the token budget/);
 
     expect(dispatchCalls).toBe(3);
-    expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
-      10,
-    );
+    expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(3);
     expect(respawns).toHaveLength(3);
+  });
+
+  it('does not invent prior attempts across repeated budget-limited resumes', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const { buildReplay } = await import('./workflow-journal.js');
+    const { journal, entries } = memoryJournal();
+    const script = `return await parallel(Array.from({length: 10}, (_, i) => () => agent('slot' + i)));`;
+    for (let round = 0; round < 4; round++) {
+      const budget = new WorkflowBudgetImpl(100);
+      const dispatched: string[] = [];
+      const respawns: string[] = [];
+      const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+        dispatched.push(prompt);
+        budget.recordSpent(40);
+        return prompt;
+      });
+      const run = orchestrator.run({
+        script,
+        args: undefined,
+        budget,
+        scheduler: new WorkflowDispatchScheduler(1),
+        journal,
+        resumeReplay: buildReplay(entries),
+        emitter: { resumeRespawn: (line) => respawns.push(line) },
+      });
+      if (round < 3) {
+        await expect(run).rejects.toThrow(/exceeded the token budget/);
+      } else {
+        await expect(run).resolves.toMatchObject({
+          result: Array.from({ length: 10 }, (_, i) => `slot${i}`),
+        });
+      }
+      expect(dispatched).toEqual(
+        Array.from(
+          { length: Math.min(3, 10 - round * 3) },
+          (_, i) => `slot${round * 3 + i}`,
+        ),
+      );
+      expect(respawns).toEqual([]);
+      const starts = entries.filter((entry) => entry.type === 'started');
+      expect(starts).toHaveLength(Math.min(10, (round + 1) * 3));
+      expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(
+        starts.length,
+      );
+      expect(entries.filter((entry) => entry.type === 'failed')).toEqual([]);
+    }
   });
 
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
@@ -1817,7 +1861,7 @@ describe('WorkflowOrchestrator', () => {
     }
   });
 
-  it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
+  it('preserves call-order journal ids without recording paused calls as started', async () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       append: (entry: import('./workflow-journal.js').JournalEntry) => {
@@ -1828,6 +1872,7 @@ describe('WorkflowOrchestrator', () => {
     const scheduler = new WorkflowDispatchScheduler(1);
     scheduler.pause();
     let dispatchCalls = 0;
+    let queued = 0;
     const orchestrator = new WorkflowOrchestrator(async (prompt) => {
       dispatchCalls++;
       return prompt;
@@ -1842,19 +1887,25 @@ describe('WorkflowOrchestrator', () => {
       args: undefined,
       journal,
       scheduler,
+      emitter: { dispatchQueued: () => queued++ },
     });
-    await vi.waitFor(() =>
-      expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
-        3,
-      ),
-    );
-    const started = entries.filter((entry) => entry.type === 'started');
-    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
-    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    await vi.waitFor(() => expect(queued).toBe(3));
+    expect(entries).toEqual([]);
     expect(dispatchCalls).toBe(0);
 
     scheduler.resume();
     await expect(run).resolves.toMatchObject({ result: ['a', 'b', 'c'] });
+    const started = entries.filter((entry) => entry.type === 'started');
+    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
+    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    const results = entries.filter((entry) => entry.type === 'result');
+    expect(results).toEqual(
+      started.map((entry, i) => ({
+        ...entry,
+        type: 'result',
+        result: ['a', 'b', 'c'][i],
+      })),
+    );
   });
 
   it('appends an in-flight result before the paused result gate opens', async () => {

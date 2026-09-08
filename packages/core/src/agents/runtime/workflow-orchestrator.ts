@@ -1902,11 +1902,6 @@ export class WorkflowOrchestrator {
       agentCount += 1;
       if (journal && journalKey !== undefined) {
         journalEntryId = String((journalAgentId += 1));
-        journal
-          .append({ type: 'started', key: journalKey, agentId: journalEntryId })
-          .catch((e) =>
-            debugLogger.warn(`journal started-append failed: ${e}`),
-          );
       }
       // P4b: emit dispatch-start outside the scheduler so the registry
       // sees "queued" the moment the script issued the call, not after
@@ -1964,6 +1959,21 @@ export class WorkflowOrchestrator {
                 budget.total,
                 budget.spent(),
               );
+            }
+            if (
+              journal &&
+              journalKey !== undefined &&
+              journalEntryId !== undefined
+            ) {
+              journal
+                .append({
+                  type: 'started',
+                  key: journalKey,
+                  agentId: journalEntryId,
+                })
+                .catch((e) =>
+                  debugLogger.warn(`journal started-append failed: ${e}`),
+                );
             }
             if (respawnLine) {
               parentSandboxRef.current?.appendLog(respawnLine);
