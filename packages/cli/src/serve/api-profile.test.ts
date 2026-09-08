@@ -7,7 +7,8 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { apiProfileGate } from './api-profile.js';
+import { MINIMAL_FEATURES, apiProfileGate } from './api-profile.js';
+import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 
 describe('API profile gate', () => {
   it('leaves full routing unchanged', () => {
@@ -31,5 +32,15 @@ describe('API profile gate', () => {
       const res = await request(app).post(path).expect(403);
       expect(res.body.code).toBe('api_profile_disabled');
     }
+  });
+
+  it('advertises only tags the capability registry still defines', () => {
+    // The filter matches by string, so a tag renamed upstream simply stops
+    // matching: the capability disappears from `/capabilities` under minimal
+    // while its route keeps working, and nothing else fails. Fail here instead.
+    const registered = new Set<string>(Object.keys(SERVE_CAPABILITY_REGISTRY));
+    expect(
+      [...MINIMAL_FEATURES].filter((tag) => !registered.has(tag)).sort(),
+    ).toEqual([]);
   });
 });

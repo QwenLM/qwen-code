@@ -11,7 +11,10 @@ export type ApiProfile = (typeof API_PROFILES)[number];
 export const DEFAULT_API_PROFILE: ApiProfile = 'full';
 
 // Exact paths: allowing a session must not allow its administrative subroutes.
-const MINIMAL_PROFILE_PATHS = [
+// Exported so `server.test.ts` can assert every entry still resolves to a route
+// a real app registers: a path renamed upstream would otherwise sit here as a
+// dead entry, silently narrowing the profile with nothing failing.
+export const MINIMAL_PROFILE_PATHS = [
   '/health',
   '/capabilities',
   '/session',
@@ -37,10 +40,17 @@ const MINIMAL_PROFILE_PATHS = [
   '/stat',
   '/list',
   '/glob',
-].map((path) => new RegExp(`^${path.replace(/:[^/]+/g, '[^/]+')}/?$`, 'i'));
+];
+
+const MINIMAL_PROFILE_MATCHERS = MINIMAL_PROFILE_PATHS.map(
+  (path) => new RegExp(`^${path.replace(/:[^/]+/g, '[^/]+')}/?$`, 'i'),
+);
 
 // Advertise only capabilities whose complete route surface remains available.
-const MINIMAL_FEATURES = new Set([
+// Exported so `api-profile.test.ts` can assert every tag still exists in
+// SERVE_CAPABILITY_REGISTRY: a tag renamed upstream would fall out of this set
+// silently, dropping a working capability from `/capabilities` under minimal.
+export const MINIMAL_FEATURES = new Set([
   'health',
   'capabilities',
   'session_create',
@@ -89,7 +99,7 @@ export function apiProfileGate(
 ): RequestHandler | undefined {
   if (profile === 'full') return undefined;
   return (req, res, next) => {
-    if (MINIMAL_PROFILE_PATHS.some((matcher) => matcher.test(req.path))) {
+    if (MINIMAL_PROFILE_MATCHERS.some((matcher) => matcher.test(req.path))) {
       next();
       return;
     }
