@@ -16,7 +16,6 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
-  InvalidGoalCheckpointError,
   isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
@@ -63,6 +62,13 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+import type {
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GOAL_RUNTIME');
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -128,23 +134,9 @@ export class GoalPersistenceUnavailableError extends Error {
 }
 
 export interface GoalTurnHost {
-  startGoalTurn(input: {
-    permit: GoalTurnPermit;
-    continuationContext: string;
-    /**
-     * Set on the first continuation carrying an objective the model has not
-     * been handed before, when it had been handed an earlier one. Hosts pass
-     * it straight to `renderGoalContinuationPrompt`.
-     */
-    objectiveUpdated?: boolean;
-    /**
-     * Set on the one continuation a spent budget still grants: the model is
-     * to hand off, not to keep working. Hosts pass it straight to
-     * `renderGoalContinuationPrompt`.
-     */
-    windDown?: boolean;
-    verifierFeedback?: string;
-  }): Promise<void>;
+  startGoalTurn(
+    input: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  ): Promise<void>;
   preemptGoalTurn(reason: string): void;
 }
 
@@ -582,6 +574,15 @@ export function createGoalRuntime(
     continuationQueued = false;
     const scheduledHost = host;
     const continuationContext = snapshot.goal.objective;
+    // Read here, before the broadcast below hands listeners a snapshot they
+    // may act on: these figures describe the turn being scheduled.
+    const usage: GoalContinuationUsage = {
+      tokensUsed: snapshot.goal.tokensUsed,
+      ...(snapshot.goal.tokenBudget === undefined
+        ? {}
+        : { tokenBudget: snapshot.goal.tokenBudget }),
+      turnCount: snapshot.goal.turnCount,
+    };
     const verifierFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
     currentTurnFeedback = verifierFeedback;
@@ -651,6 +652,7 @@ export function createGoalRuntime(
         continuationContext,
         ...(objectiveUpdated ? { objectiveUpdated } : {}),
         ...(windDown ? { windDown } : {}),
+        usage,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {
@@ -1034,9 +1036,11 @@ export function createGoalRuntime(
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
       // Only a check that found room ends a stall streak. A check that
-      // never ran or failed transiently proved nothing about the window;
-      // resetting there would launder the count. An unusable verifier
-      // result while the window overflowed counts like a stalled checkpoint.
+      // produced nothing while the window overflowed -- an unusable
+      // result, a provider failure, or a verifier timeout -- counts like
+      // a stalled checkpoint. Any other check (never ran, or failed while
+      // the window had room) proved nothing about the window, so it
+      // preserves the streak; resetting there would launder the count.
       const checkpointStalls =
         outcome === 'room'
           ? 0
@@ -1191,6 +1195,7 @@ export function createGoalRuntime(
   const runCheckpoint = async (
     attempt: CheckpointAttempt,
     preparedWindow?: GoalEvidenceCheckpointWindow,
+    replay = false,
   ): Promise<void> => {
     const evidenceSource = options.evidenceSource;
     const checkpointVerifier = options.checkpointVerifier;
@@ -1263,17 +1268,32 @@ export function createGoalRuntime(
           );
           return;
         }
-        if (error instanceof InvalidGoalCheckpointError && window.truncated) {
-          // An unusable result while the window overflows is a compaction
-          // that produced nothing: like a full claim list, it counts toward
-          // the stall limit.
+        debugLogger.debug(
+          'Checkpoint check failed; counted as a stall only if the window overflowed and the check was not a restore replay.',
+          `windowTruncated=${window.truncated}`,
+          error,
+          `replay=${replay}`,
+        );
+        // A restore replay is exempt: it runs no turn of its own, so a
+        // transient failure at startup must not spend a streak the restored
+        // session never re-earned. The replay mints a continuation whose own
+        // checks count on this arm as live turns.
+        if (window.truncated && !replay) {
+          // A check that produced nothing while the window overflows is a
+          // compaction that gave no relief, whatever stopped it: a result
+          // that could not be folded into claims, a provider failure, or a
+          // verifier that never answered before its timeout. Like a full
+          // claim list, it counts toward the stall limit. Counting only the
+          // unusable-result shape let a verifier that timed out on every
+          // overflowing window run a Goal in circles: each turn paid the
+          // call, kept the same cursor, and was told to retry, with nothing
+          // but the token budget left to stop it.
           await finishCheckpointCheck(attempt, 'stalled');
           return;
         }
-        // A transient failure, or an unusable result while the window still
-        // has room, must not abort a healthy Goal: settle the attempt as
-        // bookkeeping so the evidence stays citable and a later turn retries
-        // the checkpoint.
+        // A failure while the window still has room must not abort a
+        // healthy Goal: settle the attempt as bookkeeping so the evidence
+        // stays citable and a later turn retries the checkpoint.
         await finishCheckpointCheck(attempt);
         return;
       }
@@ -1448,7 +1468,7 @@ export function createGoalRuntime(
           return;
         }
         try {
-          await runCheckpoint(attempt, preparedCheckpointWindow);
+          await runCheckpoint(attempt, preparedCheckpointWindow, true);
         } catch {
           // Recovery committed before the replay began, so a failed replay
           // degrades instead of bricking the runtime: drop the pending
