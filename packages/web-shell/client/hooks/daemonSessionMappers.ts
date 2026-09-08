@@ -11,6 +11,8 @@ export function mergeCommands(...groups: CommandInfo[][]): CommandInfo[] {
           ...command,
           description: command.description || existing.description,
           argumentHint: command.argumentHint ?? existing.argumentHint,
+          autoSubmit: command.autoSubmit ?? existing.autoSubmit,
+          subcommands: command.subcommands ?? existing.subcommands,
         });
       } else {
         byName.set(command.name, command);

@@ -6,6 +6,7 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
@@ -83,6 +84,7 @@ interface HostLease {
 }
 
 export interface LiveCallHandlers {
+  beforeStart?: () => Promise<void>;
   onHostReady?: () => void | Promise<void>;
   onStart?: (call: {
     epoch: number;
@@ -292,6 +294,18 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
       };
     }
   }
+  if (
+    value['type'] === 'host.playback_started' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_started', epoch: value['epoch'] };
+  }
+  if (
+    value['type'] === 'host.playback_completed' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_completed', epoch: value['epoch'] };
+  }
   return undefined;
 }
 
@@ -350,6 +364,7 @@ export class LiveHostCoordinator {
   };
   private call?: LiveCall;
   private pendingStartMode?: 'new';
+  private actionGeneration = 0;
   private nextEpoch = 0;
   private inputMuted = false;
   private outputMuted = false;
@@ -391,6 +406,7 @@ export class LiveHostCoordinator {
   }
 
   async deactivate(): Promise<void> {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) {
       const stopped = new Promise<void>((resolve) => {
@@ -553,6 +569,19 @@ export class LiveHostCoordinator {
     };
   }
 
+  async requestStart(mode: 'resume' | 'new'): Promise<LiveStatus> {
+    const generation = ++this.actionGeneration;
+    this.pendingStartMode = undefined;
+    try {
+      await this.handlers.beforeStart?.();
+    } catch (error) {
+      if (generation !== this.actionGeneration) return this.getStatus();
+      throw error;
+    }
+    if (generation !== this.actionGeneration) return this.getStatus();
+    return this.start(mode).status;
+  }
+
   start(mode: 'resume' | 'new'): {
     epoch: number;
     callId: string;
@@ -614,6 +643,7 @@ export class LiveHostCoordinator {
   }
 
   stop(): LiveStatus {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) this.beginCallStop(this.call);
     return this.getStatus();
@@ -848,6 +878,7 @@ export class LiveHostCoordinator {
   }
 
   dispose(): void {
+    ++this.actionGeneration;
     this.pendingStartMode = undefined;
     if (this.call) this.finishCall(this.call);
     if (this.host) {
@@ -983,6 +1014,15 @@ export class LiveHostCoordinator {
       this.handleShortcutResult(message);
       return;
     }
+    // v7 playback receipts: accepted but not forwarded to the built-in
+    // Live session coordinator (which uses byte estimation). The
+    // standalone qwen-live daemon wires these to its injector.
+    if (
+      message.type === 'host.playback_started' ||
+      message.type === 'host.playback_completed'
+    ) {
+      return;
+    }
     this.handleAction(message);
   }
 
@@ -1108,19 +1148,17 @@ export class LiveHostCoordinator {
   }
 
   private startFromHost(mode: 'resume' | 'new'): void {
-    try {
-      this.start(mode);
-    } catch (error) {
+    void this.requestStart(mode).catch((error: unknown) => {
       if (error instanceof LiveUnavailableError) {
         this.sendState(error.status);
         return;
       }
-      this.sendState({
-        ...this.getStatus(),
-        state: 'error',
-        message: 'Live Voice failed to start.',
-      });
-    }
+      this.lastCallError =
+        error instanceof ConversationRuntimeOwnershipError
+          ? error.message
+          : 'Live Voice failed to start.';
+      this.sendState(this.buildStatus(false));
+    });
   }
 
   private handleAudioFrame(lease: HostLease, data: RawData): void {
@@ -1270,9 +1308,10 @@ export class LiveHostCoordinator {
   }
 
   private stopForReadinessLoss(): void {
+    ++this.actionGeneration;
+    this.pendingStartMode = undefined;
     const call = this.call;
     if (!call) return;
-    this.pendingStartMode = undefined;
     this.beginCallStop(call);
   }
 

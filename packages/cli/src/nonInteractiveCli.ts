@@ -26,7 +26,7 @@ import {
   executeToolCall,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
-  GeminiEventType,
+  LlmEventType,
   FatalInputError,
   promptIdContext,
   OutputFormat,
@@ -69,6 +69,10 @@ import {
   shouldRunVisionBridge,
   splitImageParts,
   GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForHeadlessFailure,
+  goalPauseReasonForRunBudget,
   addAgentOutputMessageAttributes,
   endInteractionSpan,
   getErrorType,
@@ -253,7 +257,14 @@ function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
   };
 }
 
-function formatGoalState(
+/**
+ * The TEXT rendering of a Goal control's outcome.
+ *
+ * Exported so its shape can be pinned directly: the states worth checking --
+ * a Goal mid-run, one with no budget, one that has billed nothing -- are far
+ * cheaper to construct as snapshots than to drive a headless run into.
+ */
+export function formatGoalState(
   snapshot: GoalSnapshotV2,
   operation: 'status' | 'set' | 'edit' | 'pause' | 'resume' | 'clear',
 ): string {
@@ -264,10 +275,28 @@ function formatGoalState(
   const status =
     goal.status === 'usage_limited' ? 'usage limited' : goal.status;
   const summary = `Goal ${status}: ${goal.objective}`;
-  return (goal.status === 'blocked' || goal.status === 'usage_limited') &&
-    goal.lastReason
-    ? `${summary}\nReason: ${goal.lastReason}`
-    : summary;
+  // Spelled out rather than abbreviated: this output is read in a terminal
+  // scrollback and piped into scripts, neither of which is helped by `1.2k`.
+  const usage: string[] = [];
+  if (goal.turnCount > 0) {
+    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+  }
+  if (goal.tokensUsed > 0) {
+    const used = goal.tokensUsed.toLocaleString('en-US');
+    usage.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
+    );
+  }
+  const withUsage =
+    usage.length > 0 ? `${summary}\nUsage: ${usage.join(' · ')}` : summary;
+  // Every non-active status now carries a reason, so gating on two of them
+  // drops a paused Goal's reason from TEXT output while STREAM_JSON still
+  // ships it -- and the user doc promises every pause states why.
+  return goal.status !== 'active' && goal.lastReason
+    ? `${withUsage}\nReason: ${goal.lastReason}`
+    : withUsage;
 }
 
 async function claimUserGoalTurn(
@@ -389,7 +418,7 @@ async function emitNonInteractiveFinalMessage(params: {
   // (systemMessage should already be emitted by caller)
   adapter.startAssistantMessage();
   adapter.processEvent({
-    type: GeminiEventType.Content,
+    type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
   adapter.finalizeAssistantMessage();
@@ -585,18 +614,18 @@ export async function runNonInteractive(
       });
     };
 
-    const geminiClient = config.getGeminiClient();
+    const llmClient = config.getLlmClient();
     const abortController = options.abortController ?? new AbortController();
     const queuedGoalTurns: HeadlessGoalTurn[] = [];
     let activeGoalTurn: HeadlessGoalTurn | undefined;
     let goalRuntimeUnsubscribe: (() => void) | undefined;
     const emitGoalSnapshot = (snapshot: GoalSnapshotV2) => {
       adapter.processEvent({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: snapshot,
       });
       adapter.processEvent({
-        type: GeminiEventType.ActiveGoal,
+        type: LlmEventType.ActiveGoal,
         value: projectLegacyActiveGoal(snapshot),
       });
     };
@@ -662,7 +691,10 @@ export async function runNonInteractive(
     };
     let settlingGoalTurn: HeadlessGoalTurn | undefined;
     let goalTurnSettlement: Promise<void> | undefined;
-    const failClosedActiveGoalTurn = (reason: string): Promise<void> => {
+    const failClosedActiveGoalTurn = (
+      reason: string,
+      pauseReason?: string,
+    ): Promise<void> => {
       const turn = activeGoalTurn;
       if (!turn) return Promise.resolve();
       if (settlingGoalTurn === turn && goalTurnSettlement) {
@@ -689,6 +721,8 @@ export async function runNonInteractive(
                 action: 'pause',
                 expectedGoalId: turn.permit.goalId,
                 expectedRevision: turn.permit.revision,
+                reason:
+                  pauseReason ?? goalPauseReasonForHeadlessFailure(reason),
               });
             } catch (error) {
               debugLogger.warn('Failed to pause terminal headless Goal', error);
@@ -728,11 +762,23 @@ export async function runNonInteractive(
 
       let abortSettlement: Promise<void> | undefined;
       const pauseOnAbort = () => {
+        // Read the enforcer here rather than above: `budgetEnforcer` is
+        // declared after `finishGoalTurn`, and this listener only ever runs
+        // from call sites that follow its `start()`.
+        const exceeded = budgetEnforcer.getExceeded();
         abortSettlement ??= runtime
           .dispatch({
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            // The only thing that aborts this controller without tripping a
+            // budget is a signal or the embedder cancelling the run, which
+            // `routeAbort` names a user interrupt. Naming it anything else
+            // here would make the recorded reason depend on which side of
+            // `finishTurn`'s persistence window the same Ctrl+C landed on.
+            reason: exceeded
+              ? goalPauseReasonForRunBudget(exceeded.kind)
+              : GOAL_PAUSE_REASON_USER_INTERRUPT,
           })
           .then(() => undefined)
           .catch((error) => {
@@ -801,6 +847,9 @@ export async function runNonInteractive(
       });
       await failClosedActiveGoalTurn(
         exceeded?.message ?? 'Headless Goal execution was cancelled',
+        exceeded
+          ? goalPauseReasonForRunBudget(exceeded.kind)
+          : GOAL_PAUSE_REASON_USER_INTERRUPT,
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
@@ -997,9 +1046,13 @@ export async function runNonInteractive(
             pendingTeammateMessages.push(
               `<team_notice>\n${reason}\n</team_notice>`,
             );
-            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
-              debugLogger.warn('Teammate approval Cancel failed:', err);
-            });
+            event
+              .respond(ToolConfirmationOutcome.Cancel, {
+                cancelMessage: reason,
+              })
+              .catch((err) => {
+                debugLogger.warn('Teammate approval Cancel failed:', err);
+              });
           };
         }
         manager
@@ -1086,7 +1139,7 @@ export async function runNonInteractive(
         // runs once per (rare) continue request, so the full clone is fine.
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: geminiClient.getChat().getHistory(),
+          apiHistory: llmClient.getChat().getHistory(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -1283,7 +1336,7 @@ export async function runNonInteractive(
       }
 
       // Inject a worktree context notice into the model's first prompt.
-      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // Two sources: the `--worktree` startup flag (set by llm.tsx
       // before loadCliConfig) takes precedence over the Phase C resume
       // restore. TUI does this via historyManager.addItem(INFO); here in
       // headless we prepend a `<system-reminder>` block since there is
@@ -1546,7 +1599,7 @@ export async function runNonInteractive(
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
-      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // submitted prompt to the session model mid-turn. Unlike useLlmStream's
       // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
       // run-scoped const — non-interactive mode is single-turn, so there is no
       // retry-clearing or skill-tool takeover to guard against, just the
@@ -1607,6 +1660,7 @@ export async function runNonInteractive(
         }
         await failClosedActiveGoalTurn(
           'Headless Goal ended with structured output',
+          GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
         registry.abortAll();
         // `abortAll()` marks each task `cancelled` synchronously, but
@@ -1701,7 +1755,7 @@ export async function runNonInteractive(
       // Fresh map per call today; copy so a future cached accessor cannot
       // turn this run's cross-turn recording into shared-state mutation.
       const handledToolCallFingerprints = new Map(
-        geminiClient.getHistoryToolCallFingerprints(),
+        llmClient.getHistoryToolCallFingerprints(),
       );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
@@ -2002,7 +2056,7 @@ export async function runNonInteractive(
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
-            .getGeminiClient()
+            .getLlmClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
@@ -2352,7 +2406,7 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
-        const responseStream = geminiClient.sendMessageStream(
+        const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
           currentPromptId,
@@ -2373,6 +2427,27 @@ export async function runNonInteractive(
                   goalTurnKey: goalTurn.turnKey,
                   goalSignal: goalTurn.controller.signal,
                   goalOrigin: goalTurn.origin,
+                  getInterruptedGoalPauseReason: (interruption) => {
+                    const exceeded = budgetEnforcer.getExceeded();
+                    if (exceeded) {
+                      return goalPauseReasonForRunBudget(exceeded.kind);
+                    }
+                    if (abortController.signal.aborted) {
+                      return GOAL_PAUSE_REASON_USER_INTERRUPT;
+                    }
+                    if (interruption?.cause === 'stop-hook-cap') {
+                      return goalPauseReasonForHeadlessFailure(
+                        'a Stop hook blocked this session too many times in a row',
+                      );
+                    }
+                    // A turn that died with an error did not end cleanly, so
+                    // it must not read as the run simply finishing first --
+                    // but it stays in the headless register, which never
+                    // tells the reader to run a slash command.
+                    return interruption?.failure
+                      ? goalPauseReasonForHeadlessFailure(interruption.failure)
+                      : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+                  },
                 }
               : {}),
           },
@@ -2395,21 +2470,21 @@ export async function runNonInteractive(
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (event.type === GeminiEventType.ModelFallback) {
+          if (event.type === LlmEventType.ModelFallback) {
             toolCallRequests.length = 0;
           }
           if (
-            event.type === GeminiEventType.Content &&
+            event.type === LlmEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
           ) {
             const remaining =
               PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
             plainTextPreview += String(event.value).slice(0, remaining);
           }
-          if (event.type === GeminiEventType.LoopDetected) {
+          if (event.type === LlmEventType.LoopDetected) {
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
@@ -2420,7 +2495,7 @@ export async function runNonInteractive(
           }
           if (
             outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
+            event.type === LlmEventType.Error
           ) {
             const errorText = parseAndFormatApiError(
               event.value.error,
@@ -2496,7 +2571,7 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
-            geminiClient.addHistory({
+            llmClient.addHistory({
               role: 'user',
               parts: toolResponseParts,
             });
@@ -2680,7 +2755,7 @@ export async function runNonInteractive(
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
-              const itemStream = geminiClient.sendMessageStream(
+              const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
@@ -2722,10 +2797,10 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 adapter.processEvent(event);
-                if (event.type === GeminiEventType.ToolCallRequest) {
+                if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
-                if (event.type === GeminiEventType.LoopDetected) {
+                if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
@@ -2736,7 +2811,7 @@ export async function runNonInteractive(
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
+                  event.type === LlmEventType.Error
                 ) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
@@ -2976,7 +3051,7 @@ export async function runNonInteractive(
           }
 
           const memoryTaskPromises = config
-            .getGeminiClient()
+            .getLlmClient()
             .consumePendingMemoryTaskPromises();
           if (memoryTaskPromises.length > 0) {
             await Promise.allSettled(memoryTaskPromises);
@@ -3075,6 +3150,9 @@ export async function runNonInteractive(
         error instanceof Error
           ? error.message
           : 'Headless Goal execution failed',
+        budgetExceeded
+          ? goalPauseReasonForRunBudget(budgetExceeded.kind)
+          : undefined,
       );
       // Ensure message_start / message_stop (and content_block events) are
       // properly paired even when an error aborts the turn mid-stream.

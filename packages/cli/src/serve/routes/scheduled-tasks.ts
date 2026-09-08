@@ -37,6 +37,7 @@ import {
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   parseCron,
   nextFireTime,
@@ -45,6 +46,7 @@ import {
   Storage,
   stripTerminalControlSequences,
   MAX_JOBS,
+  type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
@@ -69,6 +71,12 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
+import {
+  buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
+  scheduledTaskRunSourceId,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from '../../runtime/scheduled-task-run.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -87,9 +95,19 @@ export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
+  sendPrompt?(
+    sessionId: string,
+    req: {
+      sessionId: string;
+      prompt: Array<{ type: 'text'; text: string }>;
+    },
+    signal?: AbortSignal,
+    context?: { onPromptAdmitted?: () => void },
+  ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Persist a restorable transcript anchor for an eligible default session. */
   ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
@@ -102,7 +120,10 @@ export interface ScheduledTasksSessionBridge {
    * session list (rather than a bare id). Best-effort. */
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
   ): unknown;
   getSessionSummary(sessionId: string): {
     workspaceCwd: string;
@@ -118,9 +139,8 @@ export interface ScheduledTasksSessionBridge {
 // prompt (which can be up to MAX_PROMPT_LENGTH).
 const MAX_SESSION_NAME_LENGTH = 60;
 
-/** Builds a readable session name for a task from its name (or prompt), marked
- * with a clock so scheduled-task sessions are recognizable in the list. Strips
- * terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
+/** Builds a readable session name for a task — or one of its per-run child
+ * sessions — from its name (or prompt). Strips terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
  * them, so an unsanitized control char would silently drop the whole rename and
  * leave a bare-id session — plus Unicode Bidi_Control marks (ALM/LRM/RLM,
  * embedding/override, isolates) as a Trojan-Source-style reordering defense for
@@ -144,7 +164,7 @@ export function scheduledTaskSessionName(label: string): string {
     if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
     short = `${cleaned.slice(0, cut)}…`;
   }
-  return `⏰ ${short}`;
+  return short;
 }
 
 /**
@@ -169,6 +189,7 @@ export interface ExistingSessionScheduledTaskCreateInput {
   prompt: string;
   recurring: boolean;
   enabled?: boolean;
+  sessionMode?: 'persistent' | 'per_run';
   name?: string;
   delivery?: CronTaskDelivery;
 }
@@ -377,6 +398,7 @@ export async function createScheduledTaskWithExistingSession(
     enabled: input.enabled !== false,
     sessionId: input.sessionId,
     sessionOwnedByTask: false,
+    sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
     ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
   };
@@ -455,6 +477,40 @@ async function rollbackCronMutation(
   });
 }
 
+/**
+ * Puts a one-shot task back after its manual run failed to dispatch.
+ *
+ * Unlike {@link rollbackCronMutation} this is keyed by task id, not by
+ * whole-file equality: the dispatch window is wide enough for an unrelated
+ * write to land on the same workspace file (a recurring task's tick persist, a
+ * keepalive binding a task, another client's PATCH), and an equality-gated
+ * undo would silently decline — permanently destroying a schedule that never
+ * executed. Restores at the task's original position and no-ops when the task
+ * is somehow still present.
+ */
+async function restoreConsumedOneShot(
+  target: ScheduledTaskTarget,
+  before: DurableCronTask[] | undefined,
+  id: string,
+  route: string,
+): Promise<void> {
+  const index = before?.findIndex((t) => t.id === id) ?? -1;
+  const original = index === -1 ? undefined : before![index];
+  if (!original) return;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(target.workspaceCwd, (tasks) => {
+      if (tasks.some((t) => t.id === id)) return tasks; // never consumed → no write
+      const restored = [...tasks];
+      restored.splice(Math.min(index, restored.length), 0, original);
+      return restored;
+    }),
+  ).catch((error) => {
+    writeStderrLine(
+      `qwen serve: ${route} failed to restore the consumed one-shot task: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+}
+
 async function teardownBoundSession(
   target: ScheduledTaskTarget,
   sessionId: string,
@@ -470,6 +526,83 @@ async function teardownBoundSession(
       .catch(() => false);
     if (removed) target.bridge.markSessionCatalogChanged?.();
   }
+}
+
+async function dispatchTaskToFreshSession(
+  target: ScheduledTaskTarget,
+  task: DurableCronTask,
+): Promise<string> {
+  const { bridge } = target;
+  const sendPrompt = bridge?.sendPrompt?.bind(bridge);
+  if (!bridge || !sendPrompt || !task.sessionId) {
+    throw new Error('Fresh-session dispatch is unavailable for this task');
+  }
+  const triggeredAt = task.lastFiredAt ?? Date.now();
+  const child = await runWithScheduledTaskTarget(target, () =>
+    bridge.spawnOrAttach({
+      workspaceCwd: target.workspaceCwd,
+      sessionScope: 'thread',
+      parentSessionId: task.sessionId,
+      sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+      sourceId: scheduledTaskRunSourceId(task.id),
+    }),
+  );
+  try {
+    bridge.updateSessionMetadata(child.sessionId, {
+      displayName: scheduledTaskRunSessionName(
+        task.name ?? task.prompt,
+        triggeredAt,
+      ),
+      titleSource: 'auto',
+    });
+  } catch {
+    // The prompt can still run with the generated session id as its label.
+  }
+  try {
+    let markPromptAdmitted!: () => void;
+    const promptAdmitted = new Promise<void>((resolve) => {
+      markPromptAdmitted = resolve;
+    });
+    const turn = sendPrompt(
+      child.sessionId,
+      {
+        sessionId: child.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: buildScheduledTaskRunPrompt({
+              id: task.id,
+              name: task.name,
+              cron: task.cron,
+              prompt: task.prompt,
+              triggeredAt,
+              trigger: 'manual',
+            }),
+          },
+        ],
+      },
+      undefined,
+      {
+        onPromptAdmitted: markPromptAdmitted,
+      },
+    );
+    await Promise.race([
+      promptAdmitted,
+      turn.then(
+        () => undefined,
+        (error) => Promise.reject(error),
+      ),
+    ]);
+    void turn.catch((error) => {
+      writeStderrLine(
+        `qwen serve: scheduled-task session ${child.sessionId} prompt failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  } catch (error) {
+    await teardownBoundSession(target, child.sessionId);
+    throw error;
+  }
+  return child.sessionId;
 }
 
 /**
@@ -570,6 +703,7 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  sessionMode: 'persistent' | 'per_run';
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
 }
@@ -611,6 +745,7 @@ function toView(task: DurableCronTask): ScheduledTaskView {
       typeof task.sessionId === 'string' && task.sessionId.length > 0
         ? task.sessionId
         : null,
+    sessionMode: task.sessionMode === 'per_run' ? 'per_run' : 'persistent',
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -798,6 +933,15 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      const sessionMode =
+        body['sessionMode'] === undefined ? 'persistent' : body['sessionMode'];
+      if (sessionMode !== 'persistent' && sessionMode !== 'per_run') {
+        res.status(400).json({
+          error: '`sessionMode` must be "persistent" or "per_run"',
+          code: 'invalid_session_mode',
+        });
+        return;
+      }
       const parsedSessionId = parseCallerSuppliedSessionId(body['sessionId']);
       if (parsedSessionId.kind === 'invalid') {
         res.status(400).json({
@@ -821,6 +965,13 @@ function registerScheduledTaskCrudRoutes(
           return;
         }
       }
+      if (sessionMode === 'per_run' && delivery !== undefined) {
+        res.status(400).json({
+          error: 'Per-run sessions do not support channel delivery',
+          code: 'session_mode_delivery_unsupported',
+        });
+        return;
+      }
       const removedField = findRemovedTaskField(body);
       if (removedField) {
         res.status(400).json(removedFieldError(removedField));
@@ -829,6 +980,14 @@ function registerScheduledTaskCrudRoutes(
       const recurring = body['recurring'] !== false;
       const enabled = body['enabled'] !== false;
       const taskId = generateCronTaskId();
+
+      if (sessionMode === 'per_run' && (!bridge || !bridge.sendPrompt)) {
+        res.status(409).json({
+          error: 'Fresh-session dispatch is not available for this workspace',
+          code: 'session_mode_unavailable',
+        });
+        return;
+      }
 
       if (providedSessionId !== undefined) {
         try {
@@ -840,6 +999,7 @@ function registerScheduledTaskCrudRoutes(
               prompt,
               recurring,
               enabled,
+              sessionMode,
               ...(delivery !== undefined ? { delivery } : {}),
               ...(nameResult.value !== undefined
                 ? { name: nameResult.value }
@@ -920,6 +1080,7 @@ function registerScheduledTaskCrudRoutes(
                 displayName: scheduledTaskSessionName(
                   nameResult.value ?? prompt,
                 ),
+                titleSource: 'auto',
               }),
             );
           } catch {
@@ -950,6 +1111,7 @@ function registerScheduledTaskCrudRoutes(
         // minute the task was created — same guard cronScheduler.create uses.
         lastFiredAt: now - (now % 60_000),
         enabled,
+        sessionMode,
         ...(delivery !== undefined ? { delivery } : {}),
         ...(boundSessionId !== undefined
           ? {
@@ -964,7 +1126,7 @@ function registerScheduledTaskCrudRoutes(
       // deletes the persisted transcript/title record — both are needed, or a
       // rejected create (the loser of a concurrent create at the cap boundary,
       // which passes the pre-check but loses the authoritative write) would leave
-      // a named "⏰ …" session in the list with no owning task.
+      // a named session in the list with no owning task.
       const rollbackSession = async () => {
         if (boundSessionId !== undefined && sessionMintedHere) {
           await teardownBoundSession(target, boundSessionId);
@@ -1134,6 +1296,24 @@ function registerScheduledTaskCrudRoutes(
         }
         patch.enabled = body['enabled'];
       }
+      if ('sessionMode' in body) {
+        if (
+          body['sessionMode'] !== 'persistent' &&
+          body['sessionMode'] !== 'per_run'
+        ) {
+          res.status(400).json({
+            error: '`sessionMode` must be "persistent" or "per_run"',
+            code: 'invalid_session_mode',
+          });
+          return;
+        }
+        // The per-run admission checks live inside the mutation below, where the
+        // task's CURRENT mode is known: the edit dialog re-sends the task's own
+        // sessionMode on every PATCH, so gating on the raw value here would make
+        // a prompt-only edit of an existing per_run task unsavable wherever
+        // fresh-session dispatch is unavailable.
+        patch.sessionMode = body['sessionMode'];
+      }
       if ('delivery' in body) {
         if (body['delivery'] === null) {
           clearDelivery = true;
@@ -1159,6 +1339,9 @@ function registerScheduledTaskCrudRoutes(
       let updated: DurableCronTask | undefined;
       let blockedByArchive = false;
       let blockedLegacy = false;
+      let blockedSessionModeDelivery = false;
+      let blockedSessionModeUnavailable = false;
+      let blockedSessionModeUnbound = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -1170,6 +1353,25 @@ function registerScheduledTaskCrudRoutes(
               if (idx === -1) return tasks; // not found → no write
               found = true;
               const current = tasks[idx]!;
+              // Both per-run admission checks apply to an actual CONVERSION.
+              // Re-sending the mode the task already has changes nothing, so it
+              // must not be refused (see the note on `patch.sessionMode` above).
+              const convertingToPerRun =
+                patch.sessionMode === 'per_run' &&
+                current.sessionMode !== 'per_run';
+              if (convertingToPerRun && (!bridge || !bridge.sendPrompt)) {
+                blockedSessionModeUnavailable = true;
+                return tasks; // no write
+              }
+              // `dispatchTaskToFreshSession` needs a bound session to attribute
+              // the child to and throws without one. Tool-created durable tasks
+              // start unbound (`cron_create` omits sessionId), so accepting the
+              // conversion here would leave a task whose every manual run 500s
+              // with a phantom failed-run record until keepalive binds it.
+              if (convertingToPerRun && !current.sessionId) {
+                blockedSessionModeUnbound = true;
+                return tasks; // no write
+              }
               // A legacy guarded task (isolated + precondition, both removed) can't be
               // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
               // sends for it is the Enable toggle — which would 200 here and then read
@@ -1199,6 +1401,10 @@ function registerScheduledTaskCrudRoutes(
               // so toView reports it as unnamed and isValidTask never sees a "".
               if (clearName) delete next.name;
               if (clearDelivery) delete next.delivery;
+              if (next.sessionMode === 'per_run' && next.delivery) {
+                blockedSessionModeDelivery = true;
+                return tasks;
+              }
               // Re-seat the task's schedule anchor to "now" whenever an edit would
               // otherwise let the scheduler retroactively fire an already-past slot.
               const justReEnabled =
@@ -1294,6 +1500,28 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      if (blockedSessionModeUnavailable) {
+        res.status(409).json({
+          error: 'Fresh-session dispatch is not available for this workspace',
+          code: 'session_mode_unavailable',
+        });
+        return;
+      }
+      if (blockedSessionModeUnbound) {
+        res.status(409).json({
+          error:
+            'This task is not bound to a session yet, so it cannot run in a new session every run. Try again once it has run or been opened at least once.',
+          code: 'session_mode_requires_bound_session',
+        });
+        return;
+      }
+      if (blockedSessionModeDelivery) {
+        res.status(409).json({
+          error: 'Per-run sessions do not support channel delivery',
+          code: 'session_mode_delivery_unsupported',
+        });
+        return;
+      }
       if (!found || !updated) {
         res
           .status(404)
@@ -1321,6 +1549,7 @@ function registerScheduledTaskCrudRoutes(
             displayName: scheduledTaskSessionName(
               updated.name ?? updated.prompt,
             ),
+            titleSource: 'auto',
           });
         } catch {
           // non-critical — the schedule change already persisted
@@ -1441,12 +1670,10 @@ function registerScheduledTaskCrudRoutes(
     }),
   );
 
-  // ── Record a manual run ───────────────────────────────────────────
-  // Marks the task as run *now* (updates lastFiredAt + appends a 'manual' run
-  // record) so the management UI's "last run" reflects a manual trigger. The
-  // prompt itself is executed by the client in the task's bound session; this
-  // route only records that a run happened, keeping manual and scheduled runs
-  // consistent in the history.
+  // ── Manual run ────────────────────────────────────────────────────
+  // Persistent tasks are recorded here and executed by the client in their
+  // bound session. Per-run tasks are dispatched here because only the daemon
+  // can create the fresh child session and attribute it to this run.
   app.post(
     `${base}/:id/run`,
     mutate(),
@@ -1505,7 +1732,7 @@ function registerScheduledTaskCrudRoutes(
                 runs: appendCronRun(current.runs, {
                   at: now,
                   kind: 'manual',
-                  ...(current.sessionId
+                  ...(current.sessionMode !== 'per_run' && current.sessionId
                     ? { sessionId: current.sessionId }
                     : {}),
                 }),
@@ -1572,6 +1799,71 @@ function registerScheduledTaskCrudRoutes(
           .status(404)
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
+      }
+      if (updated.sessionMode === 'per_run') {
+        const persistOutcome = async (outcome: CronRunSessionOutcome) => {
+          if (!updated!.recurring) return;
+          await runWithScheduledTaskTarget(target, () =>
+            updateCronTasks(
+              workspaceCwd,
+              (tasks) =>
+                tasks.map((task) =>
+                  task.id === id
+                    ? annotateCronRunSession(task, now, outcome)
+                    : task,
+                ),
+              { assertCanCommit: target.assertGenerationOpen },
+            ),
+          );
+        };
+        let childSessionId: string;
+        try {
+          childSessionId = await dispatchTaskToFreshSession(target, updated);
+        } catch (error) {
+          updated = annotateCronRunSession(updated, now, {
+            dispatchFailed: true,
+          });
+          if (updated.recurring) {
+            await persistOutcome({ dispatchFailed: true }).catch(
+              (persistError) => {
+                // Matches the success path and rollbackCronMutation: a lost
+                // marker leaves a run record indistinguishable from an
+                // un-attributed run, so say so rather than swallowing it.
+                writeStderrLine(
+                  `qwen serve: POST ${base}/${id}/run could not record the failed dispatch: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+                );
+              },
+            );
+          } else {
+            // The mutation above consumed this one-shot before dispatch so it
+            // could not race its scheduled slot. A synchronous admission
+            // failure means nothing ran, so put it back unconditionally — the
+            // 500 below invites a retry, and a declined undo would answer that
+            // retry with 404 for a schedule that never executed.
+            await restoreConsumedOneShot(
+              target,
+              rollbackBefore,
+              id,
+              `POST ${base}/${id}/run fresh-session dispatch`,
+            );
+          }
+          writeStderrLine(
+            `qwen serve: POST ${base}/${id}/run could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          res.status(500).json({
+            error: 'Failed to create a fresh session for the scheduled task',
+            code: 'scheduled_task_session_dispatch_failed',
+          });
+          return;
+        }
+        updated = annotateCronRunSession(updated, now, {
+          sessionId: childSessionId,
+        });
+        await persistOutcome({ sessionId: childSessionId }).catch((error) => {
+          writeStderrLine(
+            `qwen serve: POST ${base}/${id}/run could not attribute fresh session ${childSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }
       if (!updated.recurring && updated.sessionId) {
         channelDeliveryAuthorizations?.revokeScheduledTask(

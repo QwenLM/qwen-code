@@ -42,6 +42,35 @@
   overflow-y: auto;
 }
 
+.explainRow {
+  margin: 16px 0 0 24px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.explainButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.explainButton:hover,
+.explainButton:focus-visible {
+  color: var(--primary);
+}
+
+.explainButton svg {
+  width: 14px;
+  height: 14px;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -180,8 +209,8 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 28px;
-  padding: 0 12px;
+  min-height: 36px;
+  padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;

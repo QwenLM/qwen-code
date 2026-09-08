@@ -20,7 +20,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -72,6 +75,11 @@ import {
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import {
+  isScheduledTaskRunSource,
+  parseSessionSource,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from './session-source.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
 // typing lets the bridge factory pass the full mediator instance
@@ -98,6 +106,13 @@ import {
 
 const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
 const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
+/**
+ * A per-run scheduled task prompt is the task's own prompt (already capped at
+ * the same ceiling by the scheduled-task REST route) plus a short execution
+ * context header. Allow that header on top of the ceiling so a task written at
+ * the limit still dispatches.
+ */
+const SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS = 1024;
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -1868,14 +1883,30 @@ export class BridgeClient implements Client {
         '`prompt` must be a non-empty string',
       );
     }
+    const source = parseSessionSource(params['sourceType'], params['sourceId']);
+    if ('error' in source) {
+      throw RequestError.invalidParams(undefined, source.error);
+    }
+    if (
+      source.sourceType !== undefined &&
+      source.sourceType !== SCHEDULED_TASK_RUN_SOURCE_TYPE
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sourceType` is not settable on a sub-session',
+      );
+    }
+    const promptLimit = isScheduledTaskRunSource(source)
+      ? MAX_SUB_SESSION_PROMPT_CHARS + SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS
+      : MAX_SUB_SESSION_PROMPT_CHARS;
     // The child is a separate process; this is a trust boundary. Without a cap
     // it can hand the daemon a multi-MB string to deserialize, copy for the
     // display name, and dispatch into a new session. Same ceiling the
     // scheduled-task REST route applies to the prompts it accepts.
-    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+    if (prompt.length > promptLimit) {
       throw RequestError.invalidParams(
         undefined,
-        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+        `\`prompt\` exceeds the ${promptLimit}-character limit`,
       );
     }
     const completion = params['completion'];
@@ -1918,6 +1949,7 @@ export class BridgeClient implements Client {
         ? { model }
         : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...source,
       callerSessionId,
     });
     return {
@@ -2156,7 +2188,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
-   * `qwen/notify/session/terminal-sequence`, and
+   * `qwen/notify/session/terminal-sequence`,
+   * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
+   * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
@@ -2404,6 +2438,50 @@ export class BridgeClient implements Client {
       } catch {
         /* bus already closed */
       }
+      return;
+    }
+    if (method === 'qwen/notify/session/pr-binding') {
+      // The child persists the PR sidecar itself (the daemon never sees the
+      // write); this notification only carries the catalog-clock mark so
+      // version-watching clients refetch the catalog that now includes the
+      // binding — the same propagation automatic title updates use. Validate
+      // the payload anyway: sessionId becomes a log/lookup key and the url a
+      // rendered link target on other consumers of this channel.
+      const sessionId = params['sessionId'];
+      const pr = params['pr'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        pr === null ||
+        typeof pr !== 'object' ||
+        Array.isArray(pr)
+      ) {
+        return;
+      }
+      const record = pr as Record<string, unknown>;
+      const number = record['number'];
+      const url = record['url'];
+      if (
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length === 0 ||
+        url.length > SESSION_PR_URL_MAX_LENGTH ||
+        !/^https?:\/\//i.test(url) ||
+        // Mirrors the bridge's hasControlCharacter: the url lands in an
+        // audit line, so control characters would forge log lines.
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
       return;
     }
     if (method === 'qwen/notify/session/recording-degraded') {

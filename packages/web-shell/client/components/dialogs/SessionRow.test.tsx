@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionSummary } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionSummary } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { dp } from './dialogStyles';
 import { SessionRow } from './SessionRow';

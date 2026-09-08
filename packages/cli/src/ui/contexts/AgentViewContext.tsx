@@ -25,12 +25,15 @@ import {
   useState,
 } from 'react';
 import {
+  AgentStatus,
   type AgentInteractive,
   type ApprovalMode,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
+import { useAgentStreamingState } from '../hooks/useAgentStreamingState.js';
 import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
+import { StreamingState } from '../types.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -56,6 +59,15 @@ export interface AgentViewState {
   agentTabBarFocused: boolean;
   /** Per-agent approval modes (keyed by agentId). */
   agentApprovalModes: ReadonlyMap<string, ApprovalMode>;
+  /**
+   * Queued follow-up messages per agent (keyed by agentId). Held here —
+   * not in the composer — because the layout keys AgentComposer by the
+   * active view, so switching teammate tabs unmounts the composer and any
+   * component-local queue would be silently discarded (#10069). Delivery
+   * also lives here (AgentQueueFlusher) so queues flush even while the
+   * agent's tab is unfocused (#10148).
+   */
+  agentMessageQueues: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface AgentViewActions {
@@ -75,6 +87,10 @@ export interface AgentViewActions {
   setAgentInputBufferText(text: string): void;
   setAgentTabBarFocused(focused: boolean): void;
   setAgentApprovalMode(agentId: string, mode: ApprovalMode): void;
+  /** Replace the queued follow-up messages for an agent (see state docs). */
+  setAgentMessageQueue(agentId: string, queue: readonly string[]): void;
+  /** Append one follow-up message without relying on a render-time snapshot. */
+  appendToAgentMessageQueue(agentId: string, message: string): void;
 }
 
 // ─── Context ────────────────────────────────────────────────
@@ -91,6 +107,7 @@ const DEFAULT_STATE: AgentViewState = {
   agentInputBufferText: '',
   agentTabBarFocused: false,
   agentApprovalModes: new Map(),
+  agentMessageQueues: new Map(),
 };
 
 const noop = () => {};
@@ -106,6 +123,8 @@ const DEFAULT_ACTIONS: AgentViewActions = {
   setAgentInputBufferText: noop,
   setAgentTabBarFocused: noop,
   setAgentApprovalMode: noop,
+  setAgentMessageQueue: noop,
+  appendToAgentMessageQueue: noop,
 };
 
 // ─── Hook: useAgentViewState ────────────────────────────────
@@ -118,6 +137,90 @@ export function useAgentViewState(): AgentViewState {
 
 export function useAgentViewActions(): AgentViewActions {
   return useContext(AgentViewActionsContext) ?? DEFAULT_ACTIONS;
+}
+
+// ─── Queue delivery ─────────────────────────────────────────
+
+// Shared empty queue identity so agents without queued messages don't
+// allocate on every render.
+const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
+
+/**
+ * Always-mounted delivery for one registered agent's queued follow-ups.
+ *
+ * AgentViewProvider mounts one flusher per registered agentId. Delivery
+ * cannot live in AgentComposer: the layout renders it keyed by the active
+ * view, so switching teammate tabs unmounts the composer while the queues
+ * persist — an agent that settles to idle (or a terminal status) while
+ * unfocused would otherwise keep accepted-but-undelivered messages forever
+ * (#10148).
+ */
+function AgentQueueFlusher({ agentId }: { agentId: string }) {
+  const { agents, agentMessageQueues } = useAgentViewState();
+  const { setAgentMessageQueue } = useAgentViewActions();
+  const registered = agents.get(agentId);
+  const interactiveAgent = registered?.interactiveAgent;
+  const { status, streamingState } = useAgentStreamingState(interactiveAgent);
+  const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
+
+  // Dedupe by queue identity: effects run twice per commit under
+  // StrictMode, and the clear below only lands on the next render — without
+  // this the same queue would be delivered twice.
+  const flushedQueueRef = useRef<readonly string[] | null>(null);
+
+  useEffect(() => {
+    // FAILED is undeliverable in every flavor. At the FAILED settle the
+    // backend's one-shot terminal watcher has already run
+    // releaseAgentResources (monitor notification routing removed, owned
+    // monitors cancelled) and fired the exit callback
+    // (core InProcessBackend.ts), and ArenaManager sanctions only
+    // COMPLETED → RUNNING revival — FAILED → RUNNING is discarded — so a
+    // delivered follow-up would restart the run loop (core's intentionally
+    // unguarded enqueueMessage) for an agent every record still counts as
+    // dead: the revived round burns tokens outside ArenaManager's books,
+    // monitor notifications have no route, and the second settle is never
+    // re-released or re-reported (the watcher is one-shot). The fatal
+    // flavor (core sets `error`, not `lastRoundError`) is worse: the chat
+    // was never created, so the restarted loop's runOneRound
+    // early-returns on `!this.chat`, silently consuming the message while
+    // settleRoundStatus flips FAILED → IDLE, erasing the failure state
+    // (core agent-interactive.ts). Team-managed teammates are likewise
+    // torn down synchronously by TeamManager on any terminal status.
+    if (
+      status === AgentStatus.COMPLETED ||
+      status === AgentStatus.CANCELLED ||
+      status === AgentStatus.FAILED
+    ) {
+      // These agents can never accept the queued messages (master abort
+      // tripped / agent shut down / failed / torn down), so drop them —
+      // otherwise the display shows undeliverable "queued" follow-ups
+      // forever.
+      if (messageQueue.length > 0) {
+        setAgentMessageQueue(agentId, []);
+      }
+      return;
+    }
+    if (
+      streamingState === StreamingState.Idle &&
+      messageQueue.length > 0 &&
+      status !== undefined
+    ) {
+      if (flushedQueueRef.current === messageQueue) return;
+      flushedQueueRef.current = messageQueue;
+      const combined = messageQueue.join('\n');
+      setAgentMessageQueue(agentId, []);
+      interactiveAgent?.enqueueMessage(combined);
+    }
+  }, [
+    streamingState,
+    messageQueue,
+    interactiveAgent,
+    status,
+    agentId,
+    setAgentMessageQueue,
+  ]);
+
+  return null;
 }
 
 // ─── Provider ───────────────────────────────────────────────
@@ -141,6 +244,15 @@ export function AgentViewProvider({
   const [agentApprovalModes, setAgentApprovalModes] = useState<
     Map<string, ApprovalMode>
   >(() => new Map());
+  const [agentMessageQueues, setAgentMessageQueues] = useState<
+    Map<string, readonly string[]>
+  >(() => new Map());
+  // Synchronous mirror of the registered agent ids. The `agents` state only
+  // reflects register/unregister after commit, so a same-batch append cannot
+  // consult it to learn that an agent is being unregistered right now; this
+  // ref is updated at action-call time so appendToAgentMessageQueue drops
+  // follow-ups for a departing agent instead of resurrecting its queue.
+  const registeredIdsRef = useRef<Set<string>>(new Set());
 
   // ── Navigation ──
 
@@ -196,6 +308,7 @@ export function AgentViewProvider({
       color: string,
       modelName?: string,
     ) => {
+      registeredIdsRef.current.add(agentId);
       setAgents((prev) => {
         const next = new Map(prev);
         next.set(agentId, {
@@ -218,6 +331,7 @@ export function AgentViewProvider({
   );
 
   const unregisterAgent = useCallback((agentId: string) => {
+    registeredIdsRef.current.delete(agentId);
     setAgents((prev) => {
       if (!prev.has(agentId)) return prev;
       const next = new Map(prev);
@@ -230,12 +344,20 @@ export function AgentViewProvider({
       next.delete(agentId);
       return next;
     });
+    setAgentMessageQueues((prev) => {
+      if (!prev.has(agentId)) return prev;
+      const next = new Map(prev);
+      next.delete(agentId);
+      return next;
+    });
     setActiveView((current) => (current === agentId ? 'main' : current));
   }, []);
 
   const unregisterAll = useCallback(() => {
+    registeredIdsRef.current.clear();
     setAgents(new Map());
     setAgentApprovalModes(new Map());
+    setAgentMessageQueues(new Map());
     setActiveView('main');
     setAgentTabBarFocused(false);
   }, []);
@@ -257,6 +379,37 @@ export function AgentViewProvider({
     [agents],
   );
 
+  const setAgentMessageQueue = useCallback(
+    (agentId: string, queue: readonly string[]) => {
+      setAgentMessageQueues((prev) => {
+        const next = new Map(prev);
+        if (queue.length === 0) {
+          next.delete(agentId);
+        } else {
+          next.set(agentId, queue);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const appendToAgentMessageQueue = useCallback(
+    (agentId: string, message: string) => {
+      // Membership is checked against the registered-agents mirror, not the
+      // queues map: empty queues hold no map entry (a `prev.has` guard would
+      // drop the first message), and the mirror already reflects an
+      // unregisterAgent that ran earlier in the same React batch.
+      if (!registeredIdsRef.current.has(agentId)) return;
+      setAgentMessageQueues((prev) => {
+        const next = new Map(prev);
+        next.set(agentId, [...(next.get(agentId) ?? []), message]);
+        return next;
+      });
+    },
+    [],
+  );
+
   // ── Memoized values ──
 
   const state: AgentViewState = useMemo(
@@ -267,6 +420,7 @@ export function AgentViewProvider({
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
+      agentMessageQueues,
     }),
     [
       activeView,
@@ -275,6 +429,7 @@ export function AgentViewProvider({
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
+      agentMessageQueues,
     ],
   );
 
@@ -290,6 +445,8 @@ export function AgentViewProvider({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue,
+      appendToAgentMessageQueue,
     }),
     [
       switchToAgent,
@@ -302,6 +459,8 @@ export function AgentViewProvider({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue,
+      appendToAgentMessageQueue,
     ],
   );
 
@@ -315,6 +474,12 @@ export function AgentViewProvider({
   return (
     <AgentViewStateContext.Provider value={state}>
       <AgentViewActionsContext.Provider value={actions}>
+        {/* Always-mounted queue delivery, one flusher per registered agent
+            — delivery must not depend on the keyed composer being mounted
+            (#10148). */}
+        {[...agents.keys()].map((agentId) => (
+          <AgentQueueFlusher key={agentId} agentId={agentId} />
+        ))}
         {children}
       </AgentViewActionsContext.Provider>
     </AgentViewStateContext.Provider>

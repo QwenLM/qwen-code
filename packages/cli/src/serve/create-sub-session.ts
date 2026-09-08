@@ -52,7 +52,10 @@ import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  isReservedStandaloneSessionSourceType,
+  isScheduledTaskRunSource,
+} from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 
@@ -175,7 +178,7 @@ const BIDI_CONTROL_MARKS = new RegExp(
   'g',
 );
 
-function subSessionName(label: string): string {
+function subSessionName(label: string, includeThreadGlyph = true): string {
   const cleaned = stripTerminalControlSequences(label)
     .replace(BIDI_CONTROL_MARKS, '')
     .trim()
@@ -187,7 +190,7 @@ function subSessionName(label: string): string {
     if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
     short = `${cleaned.slice(0, cut)}…`;
   }
-  return `🧵 ${short}`;
+  return includeThreadGlyph ? `🧵 ${short}` : short;
 }
 
 function sentCompletionStatus(
@@ -279,6 +282,12 @@ function buildSentCompletionNotification(
     taskId: sessionId,
     status,
     kind: 'agent' as const,
+    // `subSessionName` strips bidi and control marks and trims, so a name that
+    // was only those characters leaves an empty label -- which the receiving
+    // gate rejects as invalid params. The acceptance wait treats that as
+    // retryable and gives up 30 minutes later, so the parent's completion turn
+    // never runs. An absent label is valid; an empty one is not.
+    ...(modelLabel.trim() ? { label: modelLabel } : {}),
   };
 }
 
@@ -854,6 +863,7 @@ export function createSubSessionLauncher(
       const promptId = randomUUID();
       let lastEventId!: number;
       let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
+      let promptAdmission: Promise<void> | undefined;
       let sub: BridgeSession;
       if (standalone) {
         const created = await standaloneService!.createChildWithInitialPrompt(
@@ -876,6 +886,8 @@ export function createSubSessionLauncher(
           // Record the caller as the sub-session's parent so the UI can link it
           // back. Persisted into the sub-session's transcript at spawn time.
           parentSessionId: info.callerSessionId,
+          ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+          ...(info.sourceId ? { sourceId: info.sourceId } : {}),
           ...(info.model ? { modelServiceId: info.model } : {}),
         });
       }
@@ -899,7 +911,13 @@ export function createSubSessionLauncher(
 
       try {
         bridge.updateSessionMetadata(sessionId, {
-          displayName: subSessionName(info.name ?? info.prompt),
+          // A per-run scheduled task child is titled like its manual-run
+          // sibling (see the scheduled-task route): flat, no thread glyph.
+          displayName: subSessionName(
+            info.name ?? info.prompt,
+            !isScheduledTaskRunSource(info),
+          ),
+          titleSource: 'auto',
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
@@ -907,6 +925,10 @@ export function createSubSessionLauncher(
 
       if (!standalone) {
         lastEventId = bridge.getSessionLastEventId(sessionId);
+        let markPromptAdmitted!: () => void;
+        promptAdmission = new Promise<void>((resolve) => {
+          markPromptAdmitted = resolve;
+        });
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -914,7 +936,7 @@ export function createSubSessionLauncher(
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
           undefined,
-          { promptId },
+          { promptId, onPromptAdmitted: markPromptAdmitted },
         );
         promptDispatched = true;
       }
@@ -927,6 +949,20 @@ export function createSubSessionLauncher(
       });
 
       if (info.completion === 'sent') {
+        if (isScheduledTaskRunSource(info) && promptAdmission) {
+          await Promise.race([
+            promptAdmission,
+            turn.then(
+              () => undefined,
+              (err) =>
+                Promise.reject(
+                  new Error(
+                    `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                  ),
+                ),
+            ),
+          ]);
+        }
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -972,7 +1008,7 @@ export function createSubSessionLauncher(
               if (notifySentCompletion) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  subSessionName(info.name ?? info.prompt),
+                  subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
                 );
@@ -983,7 +1019,7 @@ export function createSubSessionLauncher(
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
-                subSessionName(info.name ?? info.prompt),
+                subSessionName(info.name ?? info.prompt, false),
                 message,
                 'error',
               );

@@ -14,14 +14,17 @@ import {
   sessionsPath,
 } from './runtime.js';
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
-  APPROVAL_MODES: (
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
-  ).APPROVAL_MODES,
-  Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
-  hashDaemonWorkspace: (workspace: string) =>
-    workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    APPROVAL_MODES: actual.APPROVAL_MODES,
+    isInternalSecretEnvVar: actual.isInternalSecretEnvVar,
+    Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+    hashDaemonWorkspace: (workspace: string) =>
+      workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
+  };
+});
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: () => ({ merged: {} }),
@@ -375,12 +378,24 @@ describe('registerBackgroundResponseRelay', () => {
       router as never,
       new Map([['telegram', channel as never]]),
     );
-    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+    const context = {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+    };
+    bridge.emit(
+      'backgroundResponse',
+      'session-1',
+      'Background final answer.',
+      context,
+    );
 
     await vi.waitFor(() => {
       expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
         'session-1',
         'Background final answer.',
+        context,
       );
     });
   });

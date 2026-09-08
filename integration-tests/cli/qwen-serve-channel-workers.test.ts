@@ -28,6 +28,10 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const CLI_BIN =
   process.env['TEST_CLI_PATH'] ?? path.join(REPO_ROOT, 'dist', 'cli.js');
 const TOKEN = 'multi-workspace-channel-test-token';
+// The 10s production handshake budget is a desktop budget, not a shared-runner
+// one: macOS E2E shards died on it in #11030 and reddened again in #11034.
+// Match qwen-serve-routes.test.ts.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 let daemon: ChildProcess | undefined;
 let primaryServer: MockServerHandle | undefined;
@@ -271,6 +275,7 @@ describe('qwen serve multi-workspace channel workers', () => {
       QWEN_HOME: qwenHome,
       QWEN_RUNTIME_DIR: runtimeDir,
       QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      SANDBOX_MOUNTS: REPO_ROOT,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
       OPENAI_MODEL: 'fake-model',
@@ -291,6 +296,8 @@ describe('qwen serve multi-workspace channel workers', () => {
           TOKEN,
           '--workspace',
           workspace,
+          '--initialize-timeout-ms',
+          String(ACP_INITIALIZE_TIMEOUT_MS),
         ],
         { stdio: ['ignore', 'pipe', 'pipe'], env },
       );
@@ -471,6 +478,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         TOKEN,
         '--workspace',
         workspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -599,6 +608,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         TOKEN,
         '--workspace',
         workspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -734,6 +745,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         'primary',
         '--channel',
         'secondary',
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],

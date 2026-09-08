@@ -10,12 +10,12 @@ import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
-import { getGoalActiveTimeMs } from '../GoalStatusStrip';
+import { getGoalActiveTimeMs, getGoalTokenLabel } from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -369,6 +369,7 @@ export function GoalsDialog({
           const canPause = goal.status === 'active';
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
+          const tokenLabel = getGoalTokenLabel(goal, t);
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -452,6 +453,11 @@ export function GoalsDialog({
                       })
                     : t('goals.notYetEvaluated')}
                 </span>
+                {tokenLabel ? (
+                  <span className={styles.meta} data-testid="goal-tokens">
+                    {tokenLabel}
+                  </span>
+                ) : null}
                 <span className={styles.meta} data-testid="goal-elapsed">
                   {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
                 </span>

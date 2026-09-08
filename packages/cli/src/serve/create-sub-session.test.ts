@@ -81,7 +81,11 @@ function makeFakeBridge(opts?: {
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
-  const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const names: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const closes: string[] = [];
   const relocations: Array<{
     sessionId: string;
@@ -131,9 +135,12 @@ function makeFakeBridge(opts?: {
     },
     updateSessionMetadata: (
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      },
     ) => {
-      names.push({ sessionId, displayName: metadata.displayName });
+      names.push({ sessionId, ...metadata });
       return metadata;
     },
     getSessionLastEventId: () => 0,
@@ -199,7 +206,7 @@ function makeFakeBridge(opts?: {
       sessionId: string,
       req: { prompt: Array<{ type: string; text?: string }> },
       _signal: unknown,
-      ctx?: { promptId?: string },
+      ctx?: { promptId?: string; onPromptAdmitted?: () => void },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
       prompts.push({
@@ -210,6 +217,7 @@ function makeFakeBridge(opts?: {
       if (opts?.sendPromptRejects) {
         return Promise.reject(new Error(opts.sendPromptRejects));
       }
+      ctx?.onPromptAdmitted?.();
       // Never resolves — the first-turn result comes from the event stream.
       return new Promise(() => {});
     },
@@ -338,6 +346,7 @@ describe('sub-session launcher', () => {
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
+    expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
     // stays meaningful). The subscription is fire-and-forget — the launch
@@ -362,6 +371,51 @@ describe('sub-session launcher', () => {
     });
 
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
+  });
+
+  it('keeps scheduled-task run titles flat and persists their attribution', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      name: 'Hourly review',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    expect(fake.names[0]?.displayName).toBe('Hourly review');
+    expect(fake.names[0]?.titleSource).toBe('auto');
+  });
+
+  it('rejects a scheduled-task run when prompt admission fails', async () => {
+    const fake = makeFakeBridge({
+      sendPromptRejects: 'child disappeared during init',
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+    expect(fake.closes).toEqual(['sub-1']);
   });
 
   it('routes a standalone caller through the managed standalone child service', async () => {
@@ -964,6 +1018,7 @@ describe('sub-session launcher', () => {
         taskId: launched.sessionId,
         status: 'completed',
         kind: 'agent',
+        label: 'research worker',
       },
     });
     expect(fake.notifications[0]!.notification.displayText).toContain(
@@ -975,6 +1030,32 @@ describe('sub-session launcher', () => {
     expect(fake.notifications[0]!.notification.modelText).not.toContain(
       '</task-notification><status>forged',
     );
+    launcher.stop();
+  });
+
+  it('sent mode: omits the label when the name leaves nothing behind', async () => {
+    // `subSessionName` strips bidi and control marks and trims, so a name made
+    // only of those yields an empty label -- which the receiving gate rejects
+    // as invalid params. The acceptance wait treats that as retryable and
+    // gives up 30 minutes later, so the parent's completion turn never runs.
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('Result.'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+
+    await launcher.launch({
+      prompt: 'research it',
+      completion: 'sent',
+      name: '   ',
+      callerSessionId: 'parent-1',
+    });
+
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect('label' in fake.notifications[0]!.notification).toBe(false);
     launcher.stop();
   });
 

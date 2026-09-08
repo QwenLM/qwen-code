@@ -409,6 +409,7 @@ export default {
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
   'Hide Tips': 'Tipps ausblenden',
+  'Show Tool Call Arguments': 'Tool-Aufrufargumente anzeigen',
   'Show Line Numbers in Code': 'Zeilennummern im Code anzeigen',
   'Show Citations': 'Quellenangaben anzeigen',
   'Custom Witty Phrases': 'Benutzerdefinierte Witzige Sprüche',
@@ -1057,6 +1058,12 @@ export default {
     'Chatverlauf-Komprimierung hat die Größe nicht reduziert. Dies kann auf Probleme mit dem Komprimierungs-Prompt hindeuten.',
   'Could not compress chat history due to a token counting error.':
     'Chatverlauf konnte aufgrund eines Token-Zählfehlers nicht komprimiert werden.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung leer war.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
+  'Could not compress chat history due to an API error.':
+    'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

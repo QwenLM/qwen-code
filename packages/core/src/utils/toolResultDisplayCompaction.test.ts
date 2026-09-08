@@ -384,11 +384,15 @@ describe('toolResultDisplayCompaction', () => {
           failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
           outcome: 'skipped',
           outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          direction: 'fails-closed',
+          baseline: 'new-surface',
         },
       ],
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
+    expect(compacted.findings[0].direction).toBe('fails-closed');
+    expect(compacted.findings[0].baseline).toBe('new-surface');
 
     expect(compacted.findings[0].summary).toContain('truncated from');
     expect(compacted.findings[0].failureScenario).toContain('truncated from');

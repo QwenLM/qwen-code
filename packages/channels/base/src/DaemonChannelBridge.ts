@@ -7,10 +7,12 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -37,6 +39,8 @@ export interface DaemonChannelEvent {
 export interface DaemonChannelSessionClient {
   readonly sessionId: string;
   readonly workspaceCwd: string;
+  readonly worktree?: { slug: string; path: string; branch: string };
+  readonly worktreeState?: 'persisted-v1';
   readonly lastEventId?: number;
   prompt(
     req: {
@@ -45,6 +49,10 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  btw?(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ChannelBtwResult>;
   uploadAttachment?(
     data: Blob,
     name: string,
@@ -64,6 +72,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  respondToSessionPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     command: string,
     signal?: AbortSignal,
@@ -76,8 +88,14 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
-  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
+  worktree?: Record<string, never>;
+  /**
+   * Worktree ownership transfer: replace this session with a fresh session
+   * that takes over its worktree (daemon `session_worktree_reset_v1`).
+   */
+  worktreeReset?: { sessionId: string };
 }
 
 export type DaemonChannelSessionFactory = (
@@ -106,6 +124,19 @@ export interface DaemonChannelBridgeOptions {
    * instead, as before the upload path existed.
    */
   sessionAttachments?: boolean;
+  /**
+   * The daemon advertises the `session_permission_vote` capability.
+   *
+   * Unconditional in `SERVE_CAPABILITY_REGISTRY` since the session-scoped route
+   * landed, and older than the channel worker itself, so the daemon-managed
+   * worker never takes the legacy branch below. Retained for parity with
+   * `sessionAttachments`, and for hosts that construct this bridge themselves.
+   */
+  sessionPermissionVote?: boolean;
+  /** Daemon guarantees durable worktree create/restore attestation. */
+  sessionWorktreePersistence?: boolean;
+  /** Daemon supports worktree ownership transfer (`session_worktree_reset_v1`). */
+  sessionWorktreeReset?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -368,6 +399,10 @@ export class DaemonChannelBridge
         sessionId: session.sessionId,
         workspaceCwd: session.workspaceCwd,
         hasActivePrompt: this.activePrompts.has(session.sessionId),
+        ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
+        ...(session.worktreeState
+          ? { worktreeState: session.worktreeState }
+          : {}),
       });
     }
     return result;
@@ -382,6 +417,11 @@ export class DaemonChannelBridge
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
+    if (options?.worktree && !this.options.sessionWorktreePersistence) {
+      throw new Error(
+        'The daemon does not support durable Channel worktree sessions.',
+      );
+    }
     const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
@@ -389,6 +429,7 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
       ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      ...(options?.worktree ? { worktree: options.worktree } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -416,6 +457,7 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -427,6 +469,46 @@ export class DaemonChannelBridge
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
       );
+    }
+    this.attachSession(session, bindingToken);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
+    return session.sessionId;
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session (daemon `session_worktree_reset_v1`). The returned id is the
+   * replacement's; the superseded session's clients stay bound to it (and
+   * are forgotten by the caller). Gated on the capability flag so a daemon
+   * without reset support fails before any session is created.
+   */
+  async resetWorktreeSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
+    if (!this.options.sessionWorktreeReset) {
+      throw new Error(
+        'The daemon does not support worktree reset for Channel tasks.',
+      );
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const session = await this.options.sessionFactory({
+      workspaceCwd: cwd || this.options.cwd,
+      modelServiceId: this.options.modelServiceId,
+      sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      worktreeReset: { sessionId },
+    });
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
     }
     this.attachSession(session, bindingToken);
     if (options?.enableChannelLoops === false) {
@@ -520,7 +602,7 @@ export class DaemonChannelBridge
         removeAttachment
       ) {
         try {
-          // Fan the uploads out like the webui's attachment path: names are
+          // Fan the uploads out like the browser attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
           // so nothing serializes the uploads themselves.
           const uploads = await Promise.allSettled(
@@ -702,6 +784,18 @@ export class DaemonChannelBridge
     }
   }
 
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    const session = this.ensureSession(sessionId);
+    if (!session.btw) {
+      throw new Error('BTW is not supported by this daemon session');
+    }
+    return session.btw(question, signal ? { signal } : undefined);
+  }
+
   async shellCommand(
     sessionId: string,
     command: string,
@@ -773,7 +867,11 @@ export class DaemonChannelBridge
       return false;
     }
     try {
-      const accepted = await session.respondToPermission(requestId, response);
+      const accepted =
+        this.options.sessionPermissionVote &&
+        typeof session.respondToSessionPermission === 'function'
+          ? await session.respondToSessionPermission(requestId, response)
+          : await session.respondToPermission(requestId, response);
       this.requestToSession.delete(requestId);
       if (accepted) {
         this.rememberRespondedPermissionRequest(requestId, sessionId);
@@ -962,10 +1060,14 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (text || context?.turnComplete) {
+              this.emit('backgroundResponse', sessionId, text ?? '', context);
+            }
           } else if (meta['source'] === 'vision_bridge_notice' && text) {
             this.emit('textChunk', sessionId, text);
           }
@@ -998,15 +1100,17 @@ export class DaemonChannelBridge
           !kind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
         ) {
-          // Silent-shell liveness heartbeat: a kind-less in_progress frame
-          // carrying only the id, status, and _meta.shellProgress stats.
-          // Channels have no use for it — drop it without flagging the
-          // session as malformed. Gate on shellProgress (matching the
-          // qwen-agent and web-shell normalizer guards) so a genuinely
-          // malformed kind-less tool_call still reaches emitProtocolError
-          // below instead of being silently swallowed.
+          // Silent-shell liveness heartbeat OR subagent progress update.
+          // A kind-less in_progress frame carrying only the id, status, and
+          // _meta.shellProgress stats OR _meta.subagentProgress. Drop without
+          // flagging the session as malformed. Gate on kind-absent + in_progress
+          // (matching the qwen-agent and web-shell normalizer guards) so a
+          // kind-bearing or terminal frame — including the compacted parent
+          // Agent slot, which inherits subagentProgress additively — still
+          // reaches the normal flow below instead of being silently swallowed.
           break;
         }
         if (!toolCallId || !kind) {

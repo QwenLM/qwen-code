@@ -137,9 +137,8 @@ console.log(updated.hash);
 
 `expectedHash` is SHA-256 over the raw on-disk bytes. `mode: "replace"` and
 `editWorkspaceFile()` require it so stale clients do not overwrite a file they
-did not just read. Write/edit require bearer-token configuration even on
-loopback; start the daemon with `--token` or `QWEN_SERVER_TOKEN` before using
-them.
+did not just read. Write/edit accept the token-less trusted-loopback primary
+listener; non-trusted deployments require bearer or pairing credentials.
 
 ## Reconnect with `Last-Event-ID`
 
@@ -248,7 +247,7 @@ const client = new DaemonClient({
 const client = new DaemonClient({ baseUrl: 'https://your-host:4170' });
 ```
 
-The fallback strips leading/trailing whitespace (handy for `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat` adds a newline) and treats empty / whitespace-only values as unset (a stale `export QWEN_SERVER_TOKEN=""` won't accidentally send `Authorization: Bearer ` with no token). The fallback runs once at construction; later `process.env` mutations don't affect already-built clients. Browser bundles (e.g. via `@qwen-code/webui`) get `undefined` cleanly because `globalThis.process` doesn't exist there.
+The fallback strips leading/trailing whitespace (handy for `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat` adds a newline) and treats empty / whitespace-only values as unset (a stale `export QWEN_SERVER_TOKEN=""` won't accidentally send `Authorization: Bearer ` with no token). The fallback runs once at construction; later `process.env` mutations don't affect already-built clients. Browser bundles (e.g. via `@qwen-code/web-shell`) get `undefined` cleanly because `globalThis.process` doesn't exist there.
 
 Wrong / missing tokens return `401` with a uniform body — the SDK throws `DaemonHttpError` on any 4xx/5xx from a route handler.
 

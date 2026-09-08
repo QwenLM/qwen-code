@@ -82,7 +82,7 @@ export interface GenerateTextOptions {
   model: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
-   * content generator without the geminiClient main-prompt fallback or
+   * content generator without the llmClient main-prompt fallback or
    * user-memory wrapping that `getCustomSystemPrompt` applies.
    */
   systemInstruction?: GenerateContentConfig['systemInstruction'];
@@ -365,7 +365,7 @@ export class BaseLlmClient {
   /**
    * Free-form text generation primitive used by `runSideQuery` text mode.
    *
-   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * Distinct from `LlmClient.generateContent`: this calls the underlying
    * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
    * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
    * user memory) and no main-session-prompt fallback when omitted. Side queries

@@ -9,13 +9,17 @@ export {
   normalizeDaemonEvent,
   getSessionUpdatePayload,
 } from './normalizer.js';
-export { createDaemonToolPreview } from './toolPreview.js';
+export {
+  createDaemonToolPreview,
+  createDaemonToolResultPreview,
+} from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTaskExecutionMode,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
@@ -82,6 +86,9 @@ export type {
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
+  DaemonToolResultPreview,
+  DaemonTodoListPreview,
+  DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptBlockChangeSummary,

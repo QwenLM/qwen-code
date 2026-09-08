@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -12,19 +11,32 @@ import type { Application, RequestHandler } from 'express';
 import {
   SESSION_PR_LIST_LIMIT,
   canonicalSessionPrUrl,
+  fetchAttributionRepoKeys,
   fetchGitHubPullRequests,
-  getDefaultBranch,
-  gitEnv,
+  fetchRemoteWebUrl,
+  isValidSessionPrUrl,
   readSessionPrs,
   readWorktreeSession,
   replaceSessionPrs,
+  repoKeyFromWebUrl,
+  sessionPrSourceAuthority,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionPr,
+  type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import {
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  defaultAoneMrBackend,
+  isAoneDetailUrlForRepo,
+  resolveAoneWorkspaceRepo,
+  type AoneMrBackend,
+} from '../server/aone-mrs.js';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { invalidateWorkspaceSessionListCache } from '../server/session-list.js';
 import type { SessionPrArchiveLane } from '../server/session-pr-refresh.js';
+import { isValidSessionId } from '../../config/session-id.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import {
   WorkspaceGenerationClosedError,
@@ -39,13 +51,21 @@ export interface SessionPrBackfillOptions {
    * app-wide coordinator; only tests omit it.
    */
   archiveCoordinator?: SessionPrArchiveLane;
+  /**
+   * The a1 read backend for Aone workspaces. Tests substitute fakes; the
+   * daemon uses {@link defaultAoneMrBackend}.
+   */
+  aoneBackend?: AoneMrBackend;
 }
 
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
 // `worktree-pr-<N>` (see worktreeStartup / worktreeBranchForSlug); the
 // sidecars survive restarts, so they are the zero-network backfill source.
-const SLUG_PR_PATTERN = /^pr-(\d{1,9})$/;
-const BRANCH_PR_PATTERN = /^worktree-pr-(\d{1,9})$/;
+// `[1-9]` mirrors parsePRReference's n > 0 invariant: `pr-0` is a legal
+// user-chosen slug but PR 0 does not exist, and a persisted number 0 poisons
+// the whole sidecar read; leading zeros stay out for unambiguous round-trips.
+const SLUG_PR_PATTERN = /^pr-([1-9]\d{0,8})$/;
+const BRANCH_PR_PATTERN = /^worktree-pr-([1-9]\d{0,8})$/;
 
 /**
  * Extracts the PR number a worktree sidecar's slug/branch convention names.
@@ -57,68 +77,10 @@ export function parsePrNumberFromWorktree(
   branch?: string,
 ): number | undefined {
   const slugMatch = SLUG_PR_PATTERN.exec(slug ?? '');
-  if (slugMatch) {
-    const number = Number(slugMatch[1]);
-    // `pr-0` is a legal user slug, but 0 is not a PR number — binding it
-    // would invalidate the whole sidecar (isValidSessionPr rejects it).
-    return number > 0 ? number : undefined;
-  }
+  if (slugMatch) return Number(slugMatch[1]);
   const branchMatch = BRANCH_PR_PATTERN.exec(branch ?? '');
-  if (branchMatch) {
-    const number = Number(branchMatch[1]);
-    return number > 0 ? number : undefined;
-  }
+  if (branchMatch) return Number(branchMatch[1]);
   return undefined;
-}
-
-/**
- * Converts a git remote URL (https / ssh / scp-style) to the repository's
- * web URL, used to build `<repo>/pull/<N>` when `gh` is unavailable.
- */
-export function normalizeRemoteToWebUrl(remote: string): string | undefined {
-  const trimmed = remote.trim();
-  if (!trimmed) return undefined;
-  let input = trimmed;
-  // An ssh:// remote's explicit port is the SSH port, almost never the web
-  // port — ssh-derived URLs drop it (scp-style remotes cannot carry one).
-  // An https remote's port IS the web port and must survive.
-  let sshDerived = false;
-  if (input.startsWith('git@')) {
-    input = `https://${input.slice('git@'.length).replace(':', '/')}`;
-    sshDerived = true;
-  } else if (input.startsWith('ssh://')) {
-    input = `https://${input.slice('ssh://'.length)}`;
-    sshDerived = true;
-  }
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
-  const pathname = url.pathname.replace(/\.git\/?$/, '');
-  if (!pathname || pathname === '/') return undefined;
-  const host = sshDerived ? url.hostname : url.host;
-  return `${url.protocol}//${host}${pathname}`.replace(/\/$/, '');
-}
-
-function getRemoteWebUrl(cwd: string): string | undefined {
-  try {
-    const remote = execSync('git remote get-url origin', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Sanitize like every sibling git/gh call in this path: without an
-      // env option the spawn inherits the daemon's raw process.env, and an
-      // inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_* would resolve origin
-      // against a different repository despite the cwd.
-      env: gitEnv(),
-    }).trim();
-    return normalizeRemoteToWebUrl(remote);
-  } catch {
-    return undefined;
-  }
 }
 
 export interface SessionPrBackfillWorkspaceResult {
@@ -133,14 +95,22 @@ export interface SessionPrBackfillWorkspaceResult {
   alreadyBound: number;
   /** Resolved numbers skipped because they exceed the sidecar cap. */
   overLimit: number;
-  /** Convention numbers whose URL could not be resolved. */
+  /**
+   * Planned numbers whose URL could not be resolved this run. On GitHub a
+   * number with no gh page entry, no `/review <url>` form and no
+   * resolvable remote; on Aone any planned number, since every URL comes
+   * from a capped `mr view` and can fail or lose the view-budget race.
+   */
   unresolved: number;
   /**
-   * Whether the workspace's `gh pr list` succeeded. False means transcript-
-   * branch mappings were skipped this run, so a zero `bound` count is a
-   * degraded run, not a genuinely empty one.
+   * GitHub only: whether the workspace's `gh pr list` succeeded. False
+   * means URL/state resolution degraded to the `/review <url>` forms and
+   * the remote-web-URL fallback, so a zero `bound` count is a degraded
+   * run, not an empty one.
    */
   ghAvailable?: boolean;
+  /** The detected PR platform for this workspace's origin. */
+  platform?: 'github' | 'aone';
   /** Sidecar writes that failed; the affected session keeps its bindings. */
   writeErrors?: number;
   error?: string;
@@ -149,62 +119,142 @@ export interface SessionPrBackfillWorkspaceResult {
 interface BackfillCandidate {
   sessionId: string;
   archiveState: SessionArchiveState;
-  /** Transcript path the candidate was scanned from, in this archive state. */
+  /** Transcript path, used to never resurrect a removed session's sidecar. */
   transcriptPath: string;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** Worktree branch plus every `gitBranch` seen in the transcript. */
-  branches: readonly string[];
+  /**
+   * `/review <N|#N|url>` numbers in TRANSCRIPT ORDER (first mention wins,
+   * bare and url forms interleaved as typed): the cap trim tie-breaks
+   * same-rank plan members by plan position as an age proxy, so appending
+   * one form after the other would evict the wrong (younger) review.
+   * `bare` is true when ANY mention was bare or `#N` — those name THIS
+   * repo's PR N.
+   */
+  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
+  /** `/review <url>` forms, repo-gated once the page key is known. */
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
 }
 
-// Transcript records carry the branch the session was on; the set is small
-// per session and only ever compared against PR head branches.
-const MAX_DISTINCT_BRANCHES = 64;
+// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
+// only at COMMAND position — the very start of the prompt the user typed.
+// User records lead with that prompt; @-imported file content is appended
+// as later text parts, and shipped docs contain line-leading `/review N`
+// examples, so nothing after the first part may seed a binding. `[ \t]+`
+// (not `\s+`) keeps the number on the command's own line and isolates the
+// command token — `/review-skill …` is another command and must not forge
+// a binding. The bare-number alternative closes its token against filename
+// characters (`(?!\w)`-class): `/review <file-path>` is another documented
+// invocation form, so `/review 001_init.sql` must not forge PR 1. The URL
+// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
+// truncating them to a 9-digit prefix. The bare-number alternative comes
+// first: `/review 42 and fix #7` names 42. Bare session git branches are
+// NOT a source: they bind the workspace's current branch PR onto every
+// session — measured pure noise, removed with cleanup.
+const REVIEW_COMMAND_PATTERN =
+  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
-async function collectTranscriptBranches(
-  filePath: string,
-): Promise<readonly string[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, 'utf8');
-  } catch {
-    return [];
-  }
-  const branches = new Set<string>();
-  // Structured per-line parse: a `gitBranch` key nested anywhere inside a
-  // record (tool-call arguments/results, MCP payloads) must not be taken
-  // for the record's own top-level branch — a text regex cannot tell them
-  // apart once the record is JSON-stringified.
+// Only the prompt the user typed counts: assistant prose, tool calls, and
+// tool results (read_file echoes of fixtures/docs) quote `/review <N>`
+// without requesting one, and the parts after the first carry @-imported
+// file content whose line-leading examples would forge bindings. The TUI
+// expands bundled skills BEFORE recording: the user record's first part is
+// the skill body with the typed command appended at its END, so the typed
+// `/review <N>` survives only in the `slash_command` system record's
+// `rawCommand` — read that when present, falling back to the user record's
+// first text part (the daemon-provided prompt path carries no payload).
+// The URL form names the repo it reviewed; it is repo-gated once gh's page
+// key is known (see backfillWorkspaceSessionPrs) rather than here.
+function collectReviewedPrNumbers(raw: string): {
+  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+} {
+  const mentions: Array<{ number: number; bare: boolean }> = [];
+  const mentionByNumber = new Map<number, { number: number; bare: boolean }>();
+  const noteMention = (number: number, bare: boolean): void => {
+    const known = mentionByNumber.get(number);
+    if (known) {
+      // A later bare mention still marks the number as naming THIS repo's
+      // PR; the position stays with the first mention.
+      if (bare) known.bare = true;
+      return;
+    }
+    const mention = { number, bare };
+    mentionByNumber.set(number, mention);
+    mentions.push(mention);
+  };
+  const urlForms: Array<{ number: number; url: string }> = [];
   for (const line of raw.split('\n')) {
-    if (!line) continue;
-    let record: unknown;
+    if (!line.includes('/review')) continue;
+    let record: {
+      type?: string;
+      subtype?: string;
+      systemPayload?: { phase?: string; rawCommand?: string };
+      message?: {
+        parts?: Array<{ text?: string; functionResponse?: unknown }>;
+      };
+    };
     try {
       record = JSON.parse(line);
     } catch {
       continue;
     }
-    if (record === null || typeof record !== 'object') continue;
-    const branch = (record as Record<string, unknown>)['gitBranch'];
-    if (typeof branch === 'string' && branch.length > 0) {
-      branches.add(branch);
-      if (branches.size >= MAX_DISTINCT_BRANCHES) break;
+    let prompt: string | undefined;
+    if (
+      record.type === 'system' &&
+      record.subtype === 'slash_command' &&
+      record.systemPayload?.phase === 'invocation' &&
+      typeof record.systemPayload.rawCommand === 'string'
+    ) {
+      prompt = record.systemPayload.rawCommand;
+    } else if (record.type === 'user') {
+      const firstPart = record.message?.parts?.[0];
+      if (typeof firstPart?.text === 'string' && !firstPart.functionResponse) {
+        prompt = firstPart.text;
+      }
+    }
+    if (prompt === undefined) continue;
+    const match = REVIEW_COMMAND_PATTERN.exec(prompt);
+    if (!match) continue;
+    const bareNumber = match[1];
+    if (bareNumber !== undefined) {
+      // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
+      // declines it, so it must never count as a binding.
+      if (Number(bareNumber) > 0) noteMention(Number(bareNumber), true);
+      continue;
+    }
+    const url = match[2];
+    const urlNumber = match[3];
+    if (url === undefined || urlNumber === undefined) continue;
+    if (Number(urlNumber) > 0) {
+      noteMention(Number(urlNumber), false);
+      urlForms.push({ number: Number(urlNumber), url });
     }
   }
-  return [...branches];
+  return { mentions, reviewedUrlForms: urlForms };
 }
 
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * priority order: the worktree slug/branch convention (names the number
- * without any network); and one batched `gh pr list --state all` per
- * workspace mapping head branches — the worktree branch and every
- * `gitBranch` recorded in the session's transcript — to PR numbers and URLs.
- * The URL comes from `gh` when available, else from the git remote web URL
- * (convention numbers only). A session may bind several PRs.
+ * ascending authority order: `/review <N|#N|url>` commands the user typed
+ * (the session merely looked at that PR), and the worktree slug/branch
+ * convention last (the session exists FOR that PR, so it must never be
+ * evicted by weaker numbers). Transcript `gh pr create` traces and bare
+ * session git branches are deliberately NOT sources: text alone carries no
+ * gh-side attribution (a forged binding vector), and the branch source
+ * bound the workspace's current-branch PR onto every session (measured
+ * pure noise) — on every platform. GitHub workspaces resolve numbers to
+ * URLs via one batched `gh pr list --state all` per workspace (repo-gated),
+ * else `/review <url>` forms, else the workspace's git remote web URL.
+ * Aone workspaces view each planned number through `a1 repo mr view`
+ * (capped per run) — Aone links are never assembled from the remote — and
+ * repair the fabricated `<origin>/pull/<N>` bindings the pre-Aone backfill
+ * persisted.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  fetchRepoKeys: typeof fetchAttributionRepoKeys = fetchAttributionRepoKeys,
   options: SessionPrBackfillOptions = {},
 ): Promise<SessionPrBackfillWorkspaceResult> {
   // The route snapshots this runtime from the registry and then awaits
@@ -224,6 +274,20 @@ export async function backfillWorkspaceSessionPrs(
     unresolved: 0,
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
+  // One remote lookup per run, before scanning so the /review URL form can
+  // repo-gate against it; async so the daemon event loop is never blocked.
+  const remote = await fetchRemoteWebUrl(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
+  const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
+  // Origin-based platform detection, before the scan: on Aone a session
+  // holding a sidecar is a candidate even without a source, so the legacy
+  // repair below reaches bindings whose worktree sidecar is gone.
+  const aoneRepo = await resolveAoneWorkspaceRepo(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
     // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
@@ -232,6 +296,11 @@ export async function backfillWorkspaceSessionPrs(
     const sessionIds =
       await sessionService.listAllProjectSessionIds(archiveState);
     for (const sessionId of sessionIds) {
+      // The id comes verbatim from the transcript's first record, and every
+      // sidecar path below embeds it — a traversal id must be rejected
+      // before path construction, the same way the sibling sidecar routes
+      // gate.
+      if (!isValidSessionId(sessionId)) continue;
       result.scanned += 1;
       const dir = path.dirname(
         sessionService.getWorktreeSessionPathForArchiveState(
@@ -247,106 +316,276 @@ export async function backfillWorkspaceSessionPrs(
       } catch {
         worktree = null;
       }
-      const transcriptPath = path.join(dir, `${sessionId}.jsonl`);
-      const branches = [
-        ...(worktree ? [worktree.worktreeBranch] : []),
-        ...(await collectTranscriptBranches(transcriptPath)),
-      ];
+      let transcriptRaw: string;
+      try {
+        transcriptRaw = await fs.readFile(
+          path.join(dir, `${sessionId}.jsonl`),
+          'utf8',
+        );
+      } catch {
+        transcriptRaw = '';
+      }
+      const reviewed = collectReviewedPrNumbers(transcriptRaw);
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
-      if (branches.length === 0 && conventionNumber === undefined) {
+      const hasSidecar =
+        aoneRepo !== undefined &&
+        existsSync(
+          sessionService.getPrSessionPathForArchiveState(
+            sessionId,
+            archiveState,
+          ),
+        );
+      if (
+        conventionNumber === undefined &&
+        reviewed.mentions.length === 0 &&
+        !hasSidecar
+      ) {
         continue;
       }
       candidates.push({
         sessionId,
         archiveState,
-        transcriptPath,
+        transcriptPath: path.join(dir, `${sessionId}.jsonl`),
         conventionNumber,
-        branches,
+        mentions: reviewed.mentions,
+        reviewedUrlForms: reviewed.reviewedUrlForms,
       });
     }
   }
   if (candidates.length === 0) return result;
 
   assertGenerationOpen();
+  // gh's page is authoritative for everything it lists: `pageUrlByNumber`
+  // records every entry BEFORE the repo gate so a fork layout — where gh
+  // resolves the PARENT repo for list queries — still attributes a
+  // convention number to the parent PR the session exists for. The gated
+  // map holds only same-repo entries.
   const numberToUrl = new Map<number, string>();
-  const numberToState = new Map<number, 'open' | 'merged' | 'closed'>();
-  const branchToNumber = new Map<string, number>();
-  const prs = await fetchPullRequests(
-    runtime.workspaceCwd,
-    runtime.env.effectiveEnv,
-    { state: 'all', limit: 500, slim: true },
-  );
-  result.ghAvailable = prs.kind === 'ok';
-  if (prs.kind === 'ok') {
-    // A session run on the repository's default branch cannot be attributed
-    // to a PR by branch name: fork PRs opened from the fork's default branch
-    // carry that same bare name as their headRefName (gh does not qualify it
-    // by owner), so mapping it would bind every such session to an unrelated
-    // contributor's PR — the highest-numbered one.
-    let defaultBranch: string | undefined;
-    // Fail closed: when the default branch is undeterminable (no
-    // refs/remotes/origin/HEAD — git init + remote add without a clone, or
-    // `git remote set-head origin -d`), the exclusion below degenerates to
-    // `headRefName !== undefined` and fork PRs carrying the bare default-
-    // branch name would map again — the misattribution this guard exists
-    // to prevent. Skip head-branch mapping for the whole run instead;
-    // convention/slug bindings do not read branchToNumber and survive.
-    let headBranchMapping = false;
-    if (candidates.some((candidate) => candidate.branches.length > 0)) {
-      // Local ref read only — no credentials needed; getDefaultBranch
-      // sanitizes the ambient env through gitEnv internally, the same
-      // stripping getRemoteWebUrl applies to its git spawn.
-      const defaultRef = await getDefaultBranch(runtime.workspaceCwd);
-      if (defaultRef) {
-        defaultBranch = defaultRef.slice(defaultRef.indexOf('/') + 1);
-        headBranchMapping = true;
+  const pageUrlByNumber = new Map<number, string>();
+  const pageStateByNumber = new Map<number, 'open' | 'merged' | 'closed'>();
+  // gh lists one repo per page — the PARENT's in the fork layout. Record
+  // its key once: PR URLs always point there in that layout, so
+  // `/review <url>` forms naming it are legitimate even though the
+  // workspace origin's key is the fork's.
+  let pageRepoKey: string | undefined;
+  // gh's page may only feed bindings when it lists the workspace's OWN
+  // repo or a CONFIRMED fork parent: gh's repo resolution is git-config
+  // driven (`gh repo set-default`, remaining remotes), so it can diverge
+  // from the workspace repo entirely, and bare numbers resolving through a
+  // divergent page would bind a stranger's same-numbered PR. Fail CLOSED
+  // when the workspace key is unknown (no resolvable origin): the remote
+  // fallback is already disabled in that state.
+  let pageMapTrusted = false;
+  // Aone only: resolves a planned number's URL through one capped, cached
+  // `mr view` — the sole sanctioned source of an Aone MR URL. The view is
+  // this repo's own attested read, so its entries feed the trusted page
+  // maps (URL, state) and the same-PR identity guard directly.
+  let resolveAoneUrl:
+    | ((number: number) => Promise<string | undefined>)
+    | undefined;
+  // Aone only: recognises the fabricated `<origin>/pull/<N>` URLs the
+  // pre-Aone backfill persisted, so the plan can repair them in place.
+  let isLegacyFabricated:
+    | ((url: string, number: number) => boolean)
+    | undefined;
+  if (aoneRepo) {
+    result.platform = 'aone';
+    const aoneBackend = options.aoneBackend ?? defaultAoneMrBackend;
+    const viewCache = new Map<number, string | undefined>();
+    let viewCalls = 0;
+    resolveAoneUrl = async (number) => {
+      if (viewCache.has(number)) return viewCache.get(number);
+      let url: string | undefined;
+      if (viewCalls < AONE_MAX_MR_VIEW_CALLS_PER_RUN) {
+        viewCalls += 1;
+        try {
+          const view = await aoneBackend.view(aoneRepo.repoPath, number);
+          url = view.url;
+          numberToUrl.set(number, url);
+          pageUrlByNumber.set(number, url);
+          pageStateByNumber.set(number, view.state);
+        } catch {
+          url = undefined;
+        }
       }
-    }
+      viewCache.set(number, url);
+      return url;
+    };
+    pageMapTrusted = true;
+    // Such an entry can never match a real detailUrl — its state would
+    // stay frozen, and it would spend one view call per refresh sweep,
+    // forever. Detect exactly that shape; any other URL keeps its
+    // foreign-repo protection.
+    isLegacyFabricated = (url, number) =>
+      remote !== undefined &&
+      canonicalSessionPrUrl(url) ===
+        canonicalSessionPrUrl(`${remote}/pull/${number}`);
+  } else {
+    result.platform = 'github';
+  }
+  const prs = aoneRepo
+    ? undefined
+    : await fetchPullRequests(runtime.workspaceCwd, runtime.env.effectiveEnv, {
+        state: 'all',
+        limit: 500,
+        slim: true,
+      });
+  if (prs) result.ghAvailable = prs.kind === 'ok';
+  if (prs?.kind === 'ok') {
     for (const pr of prs.pullRequests) {
-      numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
-      numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-      if (!headBranchMapping) continue;
-      // Highest-number-wins a reused head branch: PR numbers are assigned
-      // monotonically, so this picks the newest PR regardless of arrival
-      // order — the slim field set omits updatedAt, so no sort order is
-      // guaranteed to survive parsing.
-      const mapped = branchToNumber.get(pr.headRefName);
+      const state = pr.state === 'draft' ? 'open' : pr.state;
+      pageUrlByNumber.set(pr.number, pr.url);
+      pageStateByNumber.set(pr.number, state);
+      pageRepoKey ??= repoKeyFromWebUrl(pr.url);
       if (
-        pr.headRefName &&
-        pr.headRefName !== defaultBranch &&
-        (mapped === undefined || pr.number > mapped)
+        workspaceRepoKey === undefined ||
+        repoKeyFromWebUrl(pr.url) !== workspaceRepoKey
       ) {
-        branchToNumber.set(pr.headRefName, pr.number);
+        continue;
+      }
+      numberToUrl.set(pr.number, pr.url);
+    }
+    if (pageRepoKey !== undefined) {
+      if (workspaceRepoKey !== undefined && pageRepoKey === workspaceRepoKey) {
+        pageMapTrusted = true;
+      } else {
+        // Fork layout: gh lists the PARENT repo's PRs from a fork checkout.
+        // Trust the page only when gh's OWN resolution names the workspace
+        // repo AND the page is that repo's fork parent — a resolution
+        // diverged elsewhere (`gh repo set-default`) would otherwise feed a
+        // stranger's PRs into bindings; an unrelated page fails closed.
+        const { resolved, parent } = await fetchRepoKeys(
+          runtime.workspaceCwd,
+          runtime.env.effectiveEnv,
+        );
+        pageMapTrusted =
+          workspaceRepoKey !== undefined &&
+          resolved === workspaceRepoKey &&
+          parent === pageRepoKey;
       }
     }
   }
 
-  let remoteWebUrl: string | undefined;
-  let remoteResolved = false;
+  // `/review <url>` names the repo it reviewed: accept the workspace's own
+  // key OR the repo gh's page actually resolved to (the fork layout's
+  // parent); a third repo's PR must never bind into this workspace.
+  const allowedRepoKeys = new Set<string>();
+  if (workspaceRepoKey !== undefined) allowedRepoKeys.add(workspaceRepoKey);
+  if (pageRepoKey !== undefined) allowedRepoKeys.add(pageRepoKey);
+  // The keys under which a form names THE SAME PR as a bare `/review N` or
+  // the `pr-<N>` convention — this repo's PR N: the workspace itself, and
+  // the page only while it is trusted (the confirmed fork parent). A form
+  // from a divergent page's repo passes the gate for its OWN binding (the
+  // user reviewed that PR), but its URL must never be lent to a bare or
+  // convention number: that would bind a stranger's same-numbered PR onto
+  // the session that exists for this repo's PR N.
+  const sameRepoKeys = new Set<string>();
+  if (workspaceRepoKey !== undefined) sameRepoKeys.add(workspaceRepoKey);
+  if (pageMapTrusted && pageRepoKey !== undefined) {
+    sameRepoKeys.add(pageRepoKey);
+  }
+
   for (const candidate of candidates) {
-    let numbers: number[] = [];
-    if (candidate.conventionNumber !== undefined) {
-      numbers.push(candidate.conventionNumber);
-    }
-    for (const branch of candidate.branches) {
-      const mapped = branchToNumber.get(branch);
-      if (mapped !== undefined && !numbers.includes(mapped)) {
-        numbers.push(mapped);
+    // Insert in ASCENDING authority so the strongest bindings survive the
+    // sidecar's tail cap: reviewed first (the session merely looked at that
+    // PR), and the worktree convention last (the session exists FOR that
+    // PR, so it must never be evicted by weaker numbers). Reviewed numbers
+    // keep TRANSCRIPT order across bare and url forms: the trim tie-breaks
+    // same-rank plan members by plan position as the age proxy, mirroring
+    // the sidecar cap's list-order tie-break.
+    // `/review <url>` forms name their PR's URL explicitly — bind the named
+    // URL itself instead of re-resolving the bare number, which could land
+    // another repo's same-numbered PR. Only forms that PASS the repo gate
+    // AND the sidecar's url shape check may supply a number at all: the
+    // transcript is user-controlled text, the capture is unbounded, and
+    // the reader fails the WHOLE sidecar closed on one over-long or
+    // control-character url — persisting it would wipe every binding and
+    // re-poison on each run.
+    // On Aone the capture (`/pull/<N>`) can only ever match the fabricated
+    // `<origin>/pull/<N>` shape the pre-Aone backfill persisted (real MR
+    // links are `…/codereview/<id>`), so a form is admitted only when it
+    // is exactly this workspace's own fabricated shape — a FULL-path
+    // comparison, because the two-segment repo key collapses nested groups
+    // and would let a sibling project's form through — and it supplies
+    // the NUMBER only: the URL always comes from `mr view`.
+    const formUrlByNumber = new Map<number, string>(
+      candidate.reviewedUrlForms
+        .filter((form) => {
+          if (!isValidSessionPrUrl(form.url)) return false;
+          if (isLegacyFabricated) {
+            return isLegacyFabricated(form.url, form.number);
+          }
+          const repoKey = repoKeyFromWebUrl(form.url);
+          return repoKey !== undefined && allowedRepoKeys.has(repoKey);
+        })
+        .map((form) => [form.number, form.url]),
+    );
+    const numbers: number[] = [];
+    for (const mention of candidate.mentions) {
+      // A number mentioned ONLY through url forms is planned only when a
+      // form passed the gate; a bare mention names this repo's PR N and
+      // plans regardless.
+      if (mention.bare || formUrlByNumber.has(mention.number)) {
+        numbers.push(mention.number);
       }
     }
-    if (numbers.length === 0) continue;
-    // The convention number is planned last so a fresh write makes it the
-    // sidecar's newest entry: capped lists evict from the oldest end, which
-    // must stay branch mappings, not the session's own PR.
+    // Numbers named as THIS repo's PR N (bare or convention): a form may
+    // lend such a number its URL only when it names the same PR.
+    const namedAsOwn = new Set<number>(
+      candidate.mentions
+        .filter((mention) => mention.bare)
+        .map((mention) => mention.number),
+    );
     if (candidate.conventionNumber !== undefined) {
-      numbers = [...numbers.slice(1), candidate.conventionNumber];
+      namedAsOwn.add(candidate.conventionNumber);
+    }
+    const lendableFormUrl = (number: number): string | undefined => {
+      // Aone links are never assembled: a form never supplies a URL there.
+      if (resolveAoneUrl) return undefined;
+      const url = formUrlByNumber.get(number);
+      if (url === undefined || !namedAsOwn.has(number)) return url;
+      const key = repoKeyFromWebUrl(url);
+      return key !== undefined && sameRepoKeys.has(key) ? url : undefined;
+    };
+    if (candidate.conventionNumber !== undefined) {
+      const conventionNumber = candidate.conventionNumber;
+      const rest = numbers.filter((n) => n !== conventionNumber);
+      numbers.length = 0;
+      numbers.push(...rest, conventionNumber);
+    }
+    // The legacy-repair pass below must stay reachable for a session with
+    // nothing planned this run, so only the GitHub path — which has no
+    // repairs — skips on empty numbers before reading the sidecar.
+    if (numbers.length === 0 && !isLegacyFabricated) continue;
+    // Re-resolve the session's CURRENT archive state immediately before the
+    // snapshot read and locked write: an archive/restore transition landing
+    // during the scan and gh window above must not strand the new bindings
+    // in the wrong state's chats dir. A location that cannot be determined
+    // keeps the enumerated state.
+    let archiveState = candidate.archiveState;
+    try {
+      const location = await sessionService.getSessionLocation(
+        candidate.sessionId,
+      );
+      if (location === 'active' || location === 'archived') {
+        archiveState = location;
+      }
+    } catch {
+      // Best-effort backfill: keep the enumerated state.
     }
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
-      candidate.archiveState,
+      archiveState,
+    );
+    // The transcript moves with an archive transition; the write-time
+    // existence guard must check the re-resolved location, not the
+    // enumerated one.
+    const transcriptPath = path.join(
+      path.dirname(prPath),
+      `${candidate.sessionId}.jsonl`,
     );
     // Captured before the snapshot read: an entry committed while this run
     // is in flight is newer than the plan and must not be trimmed by it.
@@ -357,27 +596,67 @@ export async function backfillWorkspaceSessionPrs(
     } catch {
       existing = null;
     }
+    // Repair legacy fabricated bindings (Aone only): re-resolve their
+    // numbers through the same capped view path. Successfully viewed ones
+    // are rewritten in the commit below (keeping their createdAt and
+    // provenance); failed ones stay as they are and the next run retries.
+    const repairs = new Map<
+      number,
+      { url: string; state: SessionPr['state'] | undefined }
+    >();
+    if (isLegacyFabricated && resolveAoneUrl && existing) {
+      for (const entry of existing) {
+        if (!isLegacyFabricated(entry.url, entry.number)) continue;
+        const url = await resolveAoneUrl(entry.number);
+        if (url === undefined) continue;
+        repairs.set(entry.number, {
+          url,
+          state: pageStateByNumber.get(entry.number),
+        });
+      }
+    }
+    if (numbers.length === 0 && repairs.size === 0) continue;
     const existingNumbers = new Set((existing ?? []).map((pr) => pr.number));
     const urls = new Map<number, string>();
     const states = new Map<number, SessionPr['state']>();
     for (const number of numbers) {
       if (existingNumbers.has(number)) continue;
       let url = numberToUrl.get(number);
-      if (url === undefined && number === candidate.conventionNumber) {
-        // Cache the miss too: an unresolvable remote must cost one
-        // blocking git spawn per workspace, not one per candidate.
-        if (!remoteResolved) {
-          remoteWebUrl = getRemoteWebUrl(runtime.workspaceCwd);
-          remoteResolved = true;
-        }
-        if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;
+      if (url === undefined) url = lendableFormUrl(number);
+      if (url === undefined && pageMapTrusted) {
+        url = pageUrlByNumber.get(number);
       }
       if (url === undefined) {
+        if (resolveAoneUrl) {
+          // Aone links are never assembled: a number the view budget or
+          // the platform declines stays unresolved for the next run.
+          url = await resolveAoneUrl(number);
+        } else if (remote !== undefined) {
+          // Fork layout: the RELATED page (confirmed fork parent) is
+          // preferred over a synthesized fork URL (forks host no PRs; the
+          // link would 404). Only a number the page lacks entirely falls
+          // back to the workspace remote (gh unavailable, divergent page,
+          // or outside the list window) — a bare reviewed number names
+          // this repo's PR N.
+          url = `${remote}/pull/${number}`;
+        }
+      }
+      // Every url source is checked once here: a remote-derived url can
+      // exceed the bound too (an absurd origin), and the sidecar writer
+      // declines what the reader would reject.
+      if (url === undefined || !isValidSessionPrUrl(url)) {
         result.unresolved += 1;
         continue;
       }
       urls.set(number, url);
-      const state = numberToState.get(number);
+      // The page's state belongs to the page's OWN url for the number: a
+      // `/review <url>` form that resolved another repo's URL (the fork
+      // layout) must not pair with the page repo's same-numbered PR — a
+      // DIFFERENT PR whose terminal state would poison this binding.
+      const state =
+        pageMapTrusted && pageUrlByNumber.get(number) === url
+          ? pageStateByNumber.get(number)
+          : undefined;
       if (state !== undefined) states.set(number, state);
     }
     // The cap is shared with entries this run did not resolve and cannot
@@ -406,22 +685,56 @@ export async function backfillWorkspaceSessionPrs(
         // with this write; the existence check still covers a transcript
         // removed by a path that takes no lane, so the plan never
         // resurrects a sidecar for a session gone from this archive state.
-        if (!existsSync(candidate.transcriptPath)) return null;
-        const freshNumbers = new Set(fresh.map((entry) => entry.number));
+        if (!existsSync(transcriptPath)) return null;
+        // Repair legacy fabricated URLs first (Aone only), so the repaired
+        // entries plan under their real identity and their state unblocks
+        // the refresh sweep. The re-check keeps a concurrently landed
+        // non-legacy rewrite of the same number untouched.
+        const base =
+          repairs.size === 0
+            ? fresh
+            : fresh.map((entry) => {
+                const repair = repairs.get(entry.number);
+                return repair && isLegacyFabricated?.(entry.url, entry.number)
+                  ? {
+                      ...entry,
+                      url: repair.url,
+                      ...(repair.state !== undefined
+                        ? { state: repair.state }
+                        : {}),
+                    }
+                  : entry;
+              });
+        const freshNumbers = new Set(base.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
-        // ones are bindings this run never planned for and must keep. A
-        // re-bind of a snapshot-held number commits with a fresh createdAt,
-        // so it is no longer the entry this run planned for.
+        // ones are bindings this run never planned for and must keep.
+        // Snapshot-held numbers this run re-offers are occupants, not
+        // additions (heldInFresh below) — a same-PR re-bind preserves
+        // createdAt, so identity here is snapshot membership, not age.
         const plannedFor = (entry: SessionPr): boolean => {
           // Same-PR identity is number + canonical url, as in
           // upsertSessionPr: a binding to another repository's
           // same-numbered PR is foreign to this plan and keeps its slot;
           // trimming it would let a later run flip it to this repo's PR.
-          const resolved = numberToUrl.get(entry.number);
-          const samePr =
-            resolved === undefined ||
-            canonicalSessionPrUrl(entry.url) ===
-              canonicalSessionPrUrl(resolved);
+          const resolved =
+            numberToUrl.get(entry.number) ?? urls.get(entry.number);
+          // Aone fails CLOSED unless the entry is provably one of this
+          // repo's own MRs — either view-attested this run, or matching
+          // the exact detailUrl shape for this repoPath (the shape a
+          // previous successful bind or repair persisted). The shape check
+          // is what keeps a full sidecar's re-planned entries trimmable
+          // WITHOUT spending the view budget re-attesting them every run;
+          // anything else stays foreign and kept. GitHub keeps the
+          // fail-open default: an unlisted convention binding stays
+          // re-plannable.
+          const samePr = aoneRepo
+            ? (resolved !== undefined &&
+                canonicalSessionPrUrl(entry.url) ===
+                  canonicalSessionPrUrl(resolved)) ||
+              isAoneDetailUrlForRepo(aoneRepo.repoPath, entry.number, entry.url)
+            : resolved === undefined ||
+              canonicalSessionPrUrl(entry.url) ===
+                canonicalSessionPrUrl(resolved);
           return (
             droppable.has(entry.number) &&
             existingNumbers.has(entry.number) &&
@@ -429,7 +742,7 @@ export async function backfillWorkspaceSessionPrs(
             samePr
           );
         };
-        const foreignEntries = fresh.filter((entry) => !plannedFor(entry));
+        const foreignEntries = base.filter((entry) => !plannedFor(entry));
         // Fresh-foreign numbers already hold their slots; billing them
         // again as plan members trims a snapshot binding even though the
         // cap is never exceeded.
@@ -442,32 +755,107 @@ export async function backfillWorkspaceSessionPrs(
           (number) => droppable.has(number) && !foreignNumbers.has(number),
         );
         if (plan.length > slots) {
+          // Trim by provenance authority — the sidecar's own cap rule —
+          // oldest plan position within the same rank. Every plan member
+          // ranks as what this run would stamp it (the convention number
+          // as the session's own PR, everything else as a review), and a
+          // re-offered occupant additionally keeps the rank its persisted
+          // entry carries on the sidecar's ladder: a session's created PR
+          // re-mentioned as `/review 100` must not be demoted to a review
+          // and displaced by newer reviews — and an occupant persisted
+          // WITHOUT provenance (every binding from before source was
+          // recorded, GitDialog creates included) sits above reviews on
+          // that ladder for the same reason, so a weak candidate never
+          // displaces it either.
           result.overLimit += plan.length - slots;
-          const convention = candidate.conventionNumber;
-          if (slots === 0) {
-            plan = [];
-          } else if (
-            convention !== undefined &&
-            plan[plan.length - 1] === convention
-          ) {
-            // Keep the pr-<N> slug's PR and displace the oldest branch-
-            // mapped numbers instead.
-            const branchSlots = slots - 1;
-            plan = [
-              ...(branchSlots > 0 ? plan.slice(0, -1).slice(-branchSlots) : []),
-              convention,
-            ];
-          } else {
-            plan = plan.slice(-slots);
-          }
+          const heldSource = new Map(
+            base.map((entry) => [entry.number, entry.source] as const),
+          );
+          const rank = (number: number): number => {
+            const stamp = sessionPrSourceAuthority(
+              number === candidate.conventionNumber ? 'worktree' : 'review',
+            );
+            return heldSource.has(number)
+              ? Math.max(
+                  stamp,
+                  sessionPrSourceAuthority(heldSource.get(number)),
+                )
+              : stamp;
+          };
+          const evicted = new Set(
+            plan
+              .map((_, index) => index)
+              .sort((a, b) => rank(plan[a]) - rank(plan[b]) || a - b)
+              .slice(0, plan.length - slots),
+          );
+          plan = plan.filter((_, index) => !evicted.has(index));
         }
         const planSet = new Set(plan);
         result.alreadyBound += plan.filter((number) =>
           freshNumbers.has(number),
         ).length;
-        const kept = fresh.filter(
-          (entry) => planSet.has(entry.number) || !plannedFor(entry),
-        );
+        // A re-offered occupant this run ranks higher than its persisted
+        // provenance (a `/review`-bound number the session now exists for
+        // via the `pr-<N>` convention) is promoted in place — url,
+        // createdAt and position untouched, never downgraded — the way
+        // upsertSessionPrs upgrades a same-URL re-offer. Otherwise the
+        // trim above protects the entry only in this planner while every
+        // other capped writer still sees the weaker persisted rank and
+        // evicts the session's own PR first. A new object, so the no-op
+        // check below commits the promotion.
+        //
+        // Plan membership is NOT enough for the stamp: plannedFor fails
+        // open on GitHub when the number cannot be resolved this run, which
+        // is fine for trimmability (reversible) but not for provenance
+        // (permanent) — a foreign same-numbered occupant at the convention
+        // number would become the session's highest-authority binding.
+        // The stamp needs ATTESTED identity, the bar upsertSessionPrs sets
+        // for its upgrade: the entry's canonical url is the one gh resolved
+        // for the number, or this workspace's own `<remote>/pull/<N>` shape
+        // (a url names its repository by path), or on Aone the exact
+        // detailUrl shape for this repoPath. Anything else stays as it is
+        // until a later run can attest it.
+        const attested = (entry: SessionPr): boolean => {
+          if (aoneRepo) {
+            return isAoneDetailUrlForRepo(
+              aoneRepo.repoPath,
+              entry.number,
+              entry.url,
+            );
+          }
+          const canonical = canonicalSessionPrUrl(entry.url);
+          const resolved = numberToUrl.get(entry.number);
+          // In the fork layout the workspace's own numbers live on the
+          // CONFIRMED parent page: numberToUrl is gated to the fork's key
+          // and the remote shape is the fork's url, so without this
+          // disjunct a parent-bound convention occupant could never be
+          // attested — and never promoted — in that layout. Gated on
+          // pageMapTrusted: a divergent page must not attest anything.
+          const pageUrl = pageUrlByNumber.get(entry.number);
+          return (
+            (resolved !== undefined &&
+              canonical === canonicalSessionPrUrl(resolved)) ||
+            (pageMapTrusted &&
+              pageUrl !== undefined &&
+              canonical === canonicalSessionPrUrl(pageUrl)) ||
+            (remote !== undefined &&
+              canonical ===
+                canonicalSessionPrUrl(`${remote}/pull/${entry.number}`))
+          );
+        };
+        const kept = base
+          .filter((entry) => planSet.has(entry.number) || !plannedFor(entry))
+          .map((entry) => {
+            if (!planSet.has(entry.number) || !attested(entry)) return entry;
+            const stamp: SessionPrSource =
+              entry.number === candidate.conventionNumber
+                ? 'worktree'
+                : 'review';
+            return sessionPrSourceAuthority(stamp) >
+              sessionPrSourceAuthority(entry.source)
+              ? { ...entry, source: stamp }
+              : entry;
+          });
         const additions: SessionPr[] = [];
         for (const number of plan) {
           if (freshNumbers.has(number)) continue;
@@ -478,15 +866,21 @@ export async function backfillWorkspaceSessionPrs(
           // it and let the next run re-bind it.
           if (url === undefined) continue;
           const state = states.get(number);
+          const source: SessionPrSource =
+            number === candidate.conventionNumber ? 'worktree' : 'review';
           additions.push({
             number,
             url,
             createdAt,
             ...(state !== undefined ? { state } : {}),
+            source,
           });
         }
         added = additions.length;
         const next = [...kept, ...additions];
+        // Compare against the PERSISTED list, not the repaired one: when a
+        // repair rewrote an entry in `base`, `next` matching `base` is the
+        // change that must commit, not a no-op.
         return next.length === fresh.length &&
           next.every((entry, index) => entry === fresh[index])
           ? null
@@ -507,11 +901,7 @@ export async function backfillWorkspaceSessionPrs(
           assertGenerationOpen();
           runtime.bridge.setSessionPrs?.(
             candidate.sessionId,
-            fresh.map(({ number, url, state }) => ({
-              number,
-              url,
-              ...(state ? { state } : {}),
-            })),
+            fresh.map(toSessionPrInfo),
           );
           return null;
         });
@@ -572,9 +962,14 @@ export function registerSessionPrBackfillRoutes(
           continue;
         }
         try {
-          const result = await backfillWorkspaceSessionPrs(runtime, undefined, {
-            archiveCoordinator: deps.archiveCoordinator,
-          });
+          const result = await backfillWorkspaceSessionPrs(
+            runtime,
+            undefined,
+            undefined,
+            {
+              archiveCoordinator: deps.archiveCoordinator,
+            },
+          );
           // Same pairing as every other catalog mutation in this feature:
           // the sidebar refetch is catalog-version-gated, so a persisted
           // rewrite — new bindings or an eviction-only plan — stays

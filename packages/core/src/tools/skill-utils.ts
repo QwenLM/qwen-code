@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { ToolRegistry } from './tool-registry.js';
+import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -142,14 +143,13 @@ async function collectAvailableSkillEntriesUncached(
   // matching file path this session. Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
-  const disabledNames = config.getDisabledSkillNames();
-  const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
+  const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
     (s) =>
       !s.disableModelInvocation &&
       skillManager.isSkillActive(s) &&
-      !isDisabled(s.name),
+      isEnabled(s),
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -166,7 +166,7 @@ async function collectAvailableSkillEntriesUncached(
           s.paths &&
           s.paths.length > 0 &&
           !skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
+          isEnabled(s),
       )
       .map((s) => s.name),
   );
@@ -182,7 +182,7 @@ async function collectAvailableSkillEntriesUncached(
   const allCommands = provider ? provider() : [];
   const fileBasedSkillNames = new Set(
     allSkills
-      .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+      .filter((s) => !s.disableModelInvocation && isEnabled(s))
       .map((s) => s.name),
   );
   const modelInvocableCommands = allCommands.filter(
@@ -267,6 +267,22 @@ ${escapeXml(entry.description)}
 }
 
 /**
+ * Whether a skill's side effects — `allowedTools` session allow rules and
+ * frontmatter hooks — may be applied. A project skill is discovered from
+ * `<repo>/.qwen/skills/` regardless of folder trust because its body only
+ * influences the model, but its side effects grant tool approvals or run
+ * repo-supplied commands, so they need a trusted folder: the same gate
+ * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * and bundled skills are not repo-controlled and are unaffected.
+ */
+export function canApplySkillSideEffects(
+  skill: Pick<SkillConfig, 'level'>,
+  config: Pick<Config, 'isTrustedFolder'>,
+): boolean {
+  return skill.level !== 'project' || config.isTrustedFolder();
+}
+
+/**
  * Grants a skill's `allowedTools` as session-scoped permission allow rules.
  *
  * Each entry is a permission rule string in the same syntax as `settings.json`
@@ -275,26 +291,141 @@ ${escapeXml(entry.description)}
  * auto-approved for the rest of the session instead of prompting. This is an
  * additive grant only — it never hides or restricts the tools the model sees.
  *
- * Caveat under an active `permissions.allow` registry allowlist (#9827): the
- * grant flips the runtime permission predicate, but it can never REGISTER a
- * tool that the startup allowlist skipped at registration — the registry is
- * built once in `Config.initialize`, so such a tool still fails
- * TOOL_NOT_REGISTERED until the rule is added to settings `permissions.allow`
- * and the session restarts. `PermissionManager.addSessionAllowRule` logs this
- * caveat on the first such grant.
+ * Caveat under an active `settings.tools.eager` allowlist (#9827): the grant
+ * flips the runtime permission predicate, but it can never promote a deferred
+ * tool into the eager model request — the registry is built once in
+ * `Config.initialize`, so such a tool stays deferred (still registered and
+ * loadable via `tool_search`). An eager-by-default tool omitted by
+ * `tools.eager` needs its name added plus a restart; a tool deferred by
+ * default needs `tools.visible` instead. `permissions.allow` itself never
+ * gates registration (#10075).
  *
  * No-ops when there is no permission manager or nothing to grant.
+ *
+ * `trustGated` marks the grants as repository-controlled: a project skill's
+ * rules are honoured only while the folder is trusted, re-checked at every
+ * permission decision. Whether that re-check can change mid-session depends
+ * on where trust comes from — see `applySkillHooks`, which is gated the same
+ * way. Pass `skill.level === 'project'`.
  */
 export function applySkillAllowedTools(
   permissionManager: PermissionManager | null | undefined,
   allowedTools: string[] | undefined,
+  options?: { trustGated?: boolean },
 ): void {
   if (!permissionManager || !allowedTools?.length) {
     return;
   }
   for (const rule of allowedTools) {
-    permissionManager.addSessionAllowRule(rule);
+    permissionManager.addSessionAllowRule(rule, {
+      trustGated: options?.trustGated === true,
+    });
   }
+}
+
+/**
+ * Registers a skill's frontmatter `hooks:` as session-scoped hooks.
+ *
+ * Mirrors `applySkillAllowedTools`: the caller is responsible for the
+ * folder-trust gate (`canApplySkillSideEffects`), and the registration itself
+ * is idempotent — `registerSkillHooks` dedups entries this skill already
+ * added, so re-invoking a skill never stacks duplicate hooks.
+ *
+ * A project skill's hooks are marked trust-gated by `registerSkillHooks`, so
+ * the event handler re-reads folder trust at fire time. `isTrustedFolder()`
+ * reads the IDE context store first and only falls back to the `Config`'s
+ * own readonly field, so with an IDE companion connected that value is live
+ * and revoking trust silences an already-registered gate at the next event,
+ * without a restart. With no IDE connection it is fixed for the life of the
+ * `Config`, and a change made through the CLI's trust dialog takes effect on
+ * restart. Granting trust never retro-registers either way — the skill has
+ * to be invoked again, which is safe because registration dedups.
+ *
+ * No-ops when the session has no hook system or no session id.
+ */
+export function applySkillHooks(
+  config: Pick<Config, 'getHookSystem' | 'getSessionId'>,
+  skill: SkillConfig,
+): void {
+  // `{}` is truthy, and `parseSkillContent` assigns an empty object for an
+  // explicit `hooks: {}` as well as for a block whose event names are all
+  // unknown (a typo'd `PreTooluse:` is parsed, warned about once, and
+  // dropped). Such a skill declares no gate, so it must not reach the warn
+  // below.
+  if (!skill.hooks || Object.keys(skill.hooks).length === 0) {
+    return;
+  }
+  const hookSystem = config.getHookSystem();
+  const sessionId = config.getSessionId();
+  if (!hookSystem || !sessionId) {
+    // Sessions that disable hooks (`disableAllHooks`, safe mode, bare mode,
+    // the ACP agent's `skipHooks`) never build a hook system. The skill body
+    // and its allowedTools still land, so without this line a skill whose
+    // frontmatter promises an enforcement gate would go silently ungated.
+    //
+    // `warn`, not `debug`: control only reaches here for a skill that
+    // actually declares at least one hook (the early return above rejects
+    // both a missing and an empty `hooks:`), so this cannot become a
+    // steady-state warning — it fires exactly when a promised gate is being
+    // dropped.
+    debugLogger.warn(
+      `Skipping hook registration for skill "${skill.name}": no hook system or session id (hooks disabled?)`,
+    );
+    return;
+  }
+  const count = registerSkillHooks(
+    hookSystem.getSessionHooksManager(),
+    sessionId,
+    skill,
+  );
+  if (count > 0) {
+    debugLogger.info(`Registered ${count} hooks from skill "${skill.name}"`);
+  } else {
+    // Zero is the expected outcome of every re-invocation: the hooks are
+    // already registered and `registerSkillHooks` dedups them.
+    debugLogger.debug(
+      `No new hooks registered from skill "${skill.name}" (already registered or none registrable)`,
+    );
+  }
+}
+
+/**
+ * Applies every side effect a skill declares — `allowedTools` session allow
+ * rules and frontmatter `hooks:` — behind the single folder-trust gate.
+ *
+ * Every path that loads a skill body must call this, whether the model invoked
+ * the skill through the Skill tool or the user invoked it through its
+ * `/<skill-name>` slash command. Applying only part of it is what let a skill's
+ * `PreToolUse` gate silently fail open on the slash-command path (#11067): the
+ * skill's instructions reached the model while the hook that was supposed to
+ * enforce them was never registered.
+ *
+ * Both underlying registrations dedup, so calling this repeatedly for the same
+ * skill is safe — and necessary, since folder trust can be granted mid-session.
+ */
+export function applySkillSideEffects(
+  config:
+    | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
+        Pick<Config, 'isTrustedFolder'>)
+    | null
+    | undefined,
+  skill: SkillConfig,
+): void {
+  if (!config) {
+    return;
+  }
+  if (!canApplySkillSideEffects(skill, config)) {
+    if (skill.allowedTools?.length || skill.hooks) {
+      debugLogger.warn(
+        `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+      );
+    }
+    return;
+  }
+  applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools, {
+    trustGated: skill.level === 'project',
+  });
+  applySkillHooks(config, skill);
 }
 
 /**

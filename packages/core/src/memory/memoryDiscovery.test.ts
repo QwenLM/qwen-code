@@ -13,7 +13,7 @@ import {
   formatContextFileDisplayPath,
 } from './memoryDiscovery.js';
 import {
-  setGeminiMdFilename,
+  setMemoryFilename,
   DEFAULT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
@@ -76,7 +76,7 @@ describe('loadServerHierarchicalMemory', () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     // Some tests set this to a different value.
-    setGeminiMdFilename(DEFAULT_CONTEXT_FILENAME);
+    setMemoryFilename(DEFAULT_CONTEXT_FILENAME);
     // Clean up the temporary directory to prevent resource leaks.
     // Use maxRetries option for robust cleanup without race conditions
     await fsPromises.rm(testRootDir, {
@@ -259,7 +259,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load only the global custom context file if present and filename is changed', async () => {
     const customFilename = 'CUSTOM_AGENTS.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     const customContextFile = await createTestFile(
       path.join(homedir, QWEN_DIR, customFilename),
@@ -288,7 +288,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load context files by upward traversal with custom filename', async () => {
     const customFilename = 'PROJECT_CONTEXT.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     const projectContextFile = await createTestFile(
       path.join(projectRoot, customFilename),
@@ -322,7 +322,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load context files from CWD with custom filename (not subdirectories)', async () => {
     const customFilename = 'LOCAL_CONTEXT.md';
-    setGeminiMdFilename(customFilename);
+    setMemoryFilename(customFilename);
 
     await createTestFile(
       path.join(cwd, 'subdir', customFilename),
@@ -349,12 +349,12 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
-  it('should load ORIGINAL_GEMINI_MD_FILENAME files by upward traversal from CWD to project root', async () => {
-    const projectRootGeminiFile = await createTestFile(
+  it('should load context files by upward traversal with default filename', async () => {
+    const projectRootMemoryFile = await createTestFile(
       path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
       'Project root memory',
     );
-    const srcGeminiFile = await createTestFile(
+    const srcMemoryFile = await createTestFile(
       path.join(cwd, DEFAULT_CONTEXT_FILENAME),
       'Src directory memory',
     );
@@ -368,11 +368,11 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
-      memoryContent: `--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, srcGeminiFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcGeminiFile)} ---`,
+      memoryContent: `--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, srcMemoryFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcMemoryFile)} ---`,
       fileCount: 2,
       contextFilePaths: [
-        path.relative(cwd, projectRootGeminiFile),
-        path.relative(cwd, srcGeminiFile),
+        path.relative(cwd, projectRootMemoryFile),
+        path.relative(cwd, srcMemoryFile),
       ],
       ruleCount: 0,
       conditionalRules: [],
@@ -414,15 +414,15 @@ describe('loadServerHierarchicalMemory', () => {
       path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
       'default context content',
     );
-    const rootGeminiFile = await createTestFile(
+    const rootMemoryFile = await createTestFile(
       path.join(testRootDir, DEFAULT_CONTEXT_FILENAME),
       'Project parent memory',
     );
-    const projectRootGeminiFile = await createTestFile(
+    const projectRootMemoryFile = await createTestFile(
       path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
       'Project root memory',
     );
-    const cwdGeminiFile = await createTestFile(
+    const cwdMemoryFile = await createTestFile(
       path.join(cwd, DEFAULT_CONTEXT_FILENAME),
       'CWD memory',
     );
@@ -441,13 +441,13 @@ describe('loadServerHierarchicalMemory', () => {
 
     // Subdirectory files are not loaded, only global and upward from CWD
     expect(result).toEqual({
-      memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootGeminiFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdGeminiFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdGeminiFile)} ---`,
+      memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootMemoryFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdMemoryFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdMemoryFile)} ---`,
       fileCount: 4,
       contextFilePaths: [
         path.join('~', path.relative(homedir, defaultContextFile)),
-        path.relative(cwd, rootGeminiFile),
-        path.relative(cwd, projectRootGeminiFile),
-        path.relative(cwd, cwdGeminiFile),
+        path.relative(cwd, rootMemoryFile),
+        path.relative(cwd, projectRootMemoryFile),
+        path.relative(cwd, cwdMemoryFile),
       ],
       ruleCount: 0,
       conditionalRules: [],
@@ -1323,7 +1323,7 @@ describe('loadServerHierarchicalMemory', () => {
     });
 
     it('dedupes when an extension registers the local slot path explicitly', async () => {
-      // The hierarchical scan iterates `getAllGeminiMdFilenames()`
+      // The hierarchical scan iterates `getAllMemoryFilenames()`
       // (QWEN.md / AGENTS.md) and never produces a `QWEN.local.md` path,
       // so the dedup guard in the slot loader looks unreachable in
       // production paths. It IS reachable, though, via

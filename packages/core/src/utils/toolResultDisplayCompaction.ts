@@ -410,6 +410,8 @@ function findingRetainedSize(finding: ReportedFinding): number {
     finding.shortSummary.length +
     finding.failureScenario.length +
     (finding.category?.length ?? 0) +
+    (finding.direction?.length ?? 0) +
+    (finding.baseline?.length ?? 0) +
     (finding.outcome?.length ?? 0) +
     (finding.outcomeNote?.length ?? 0) +
     20

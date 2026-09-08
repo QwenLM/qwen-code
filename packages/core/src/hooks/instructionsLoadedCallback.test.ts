@@ -11,12 +11,14 @@ import type { HookSystem } from './hookSystem.js';
 describe('createInstructionsLoadedCallback', () => {
   it('forwards instruction load metadata to the hook system', async () => {
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    const signal = new AbortController().signal;
     const callback = createInstructionsLoadedCallback(
       () =>
         ({
           hasHooksForEvent: vi.fn().mockReturnValue(true),
           fireInstructionsLoadedEvent,
         }) as unknown as HookSystem,
+      signal,
     );
 
     await callback({
@@ -35,6 +37,7 @@ describe('createInstructionsLoadedCallback', () => {
         triggerFilePath: '/repo/src/app.ts',
         parentFilePath: '/repo/AGENTS.md',
       },
+      signal,
     );
   });
 

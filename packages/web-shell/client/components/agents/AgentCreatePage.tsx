@@ -8,7 +8,7 @@ import {
   useTools,
   type DaemonWorkspaceAgentDetail,
   type DaemonWorkspaceMcpToolStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';

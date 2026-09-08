@@ -18,6 +18,7 @@ const {
   ensureAuthenticatedMock,
   setGhHostMock,
   writeFileSyncMock,
+  renameSyncMock,
   rmSyncMock,
   mkdirSyncMock,
   getPlatformReaderMock,
@@ -30,6 +31,7 @@ const {
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  renameSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
@@ -87,6 +89,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: mkdirSyncMock,
     writeFileSync: writeFileSyncMock,
+    renameSync: renameSyncMock,
     rmSync: rmSyncMock,
   };
   return { ...mock, default: mock };
@@ -792,6 +795,57 @@ describe('extractCodeRefs', () => {
 });
 
 describe('carriesBlockerSignal', () => {
+  it('strips every GFM quoting form, in renderer precedence, before scanning (R14-4)', () => {
+    // ~~~ fences, a 4-backtick fence CONTAINING ```, inline code spans and
+    // indented code are all quoted text; a mid-line ``` run is not a fence;
+    // whichever of a fence / an HTML comment opens first owns the text.
+    expect(
+      carriesBlockerSignal('note\n~~~\n[critical] in tilde fence\n~~~\n'),
+    ).toBe(false);
+    expect(
+      carriesBlockerSignal('note\n````\n```\n[critical] nested\n```\n````\n'),
+    ).toBe(false);
+    expect(carriesBlockerSignal('see `[critical]` in the log')).toBe(false);
+    expect(carriesBlockerSignal('para\n\n    [critical] indented code\n')).toBe(
+      false,
+    );
+    // A mid-line ``` run is text, not a delimiter: the blocker claim before
+    // it and after it are both still the comment's own words.
+    expect(carriesBlockerSignal('this is blocking ``` still ``` yes')).toBe(
+      true,
+    );
+    // A `<!--` INSIDE a fence is fence content — it must not pair with a
+    // `-->` outside and delete a visible claim across the boundary.
+    expect(
+      carriesBlockerSignal('```\n<!--\n```\nthis is a blocker --> for real'),
+    ).toBe(true);
+    // A fence opener INSIDE an open comment is comment text: the comment
+    // still closes where it closes.
+    expect(carriesBlockerSignal('<!-- ``` -->\nmust-fix before merge')).toBe(
+      true,
+    );
+  });
+
+  it('ignores blocker tokens inside a fenced code block — quoted output is not a claim (R14-4)', () => {
+    // The posting contract mandates a fenced witness under every finding, and
+    // program output routinely prints literal markers ("[Critical]", "still
+    // fails"). Scanning inside the fence would self-promote a non-blocking
+    // Suggestion into the blocker section every round.
+    const fenced =
+      'Suggestion: tidy the helper.\n\nWitness:\n```\n[Critical] printed by the suite\nstill fails here\nblocking: test log\n```\n';
+    expect(carriesBlockerSignal(fenced)).toBe(false);
+    // The identical tokens OUTSIDE a fence still promote.
+    expect(carriesBlockerSignal('[Critical] printed by the suite')).toBe(true);
+    // An unclosed fence swallows the rest, as GitHub renders it.
+    expect(carriesBlockerSignal('note\n```\n[critical] never closed')).toBe(
+      false,
+    );
+    // A blocker claim BEFORE the fence is still seen.
+    expect(carriesBlockerSignal('This is a blocker.\n```\nlog\n```')).toBe(
+      true,
+    );
+  });
+
   it('recognises a blocker that never uses the [Critical] marker', () => {
     // The real PR #6486 heading. Only /review emits `[Critical]`; a human
     // types whatever they type, and the old literal-marker gate saw none of it.
@@ -3375,6 +3429,92 @@ describe('buildMarkdown host baking', () => {
   });
 });
 
+describe('runPrContext stale context-file removal (handler level)', () => {
+  // The same-repo context-unavailable flow (SKILL.md) launches Agent 0 and
+  // 6d against "a context file that is not on disk". An interrupted earlier
+  // round breaks that premise: it WROTE the file, and nothing else removes
+  // the path between rounds (fetch-pr's stale-clean sweeps the worktree and
+  // branch only). A failed re-run must therefore leave NO file behind — the
+  // documented missing-file returns are the only shape the launched agents
+  // can meet. The `-prev-ledger.json` side file is the deliberate exception:
+  // compose-review reads it for the round counter, and
+  // persistRecoveredLedger owns its deletion licensing — a run that failed
+  // before recovery never re-vouched it and must not reset it.
+  const sideFile = '/tmp/qwen-review-pr-6711-prev-ledger.json';
+
+  const run = () =>
+    (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    process.exitCode = undefined;
+  });
+
+  it('removes a prior context file when the fetch fails', async () => {
+    // The R4-1 shape on #9717: round 1 wrote the context file and was
+    // interrupted before cleanup; round 2's pr-context fails on a rate
+    // limit. Without the removal the stale file survives the failure and
+    // the launched agents read the context the run just lost, against the
+    // paragraph's own closing invariant.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limited');
+    });
+    await expect(run()).rejects.toThrow(/rate limited/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+    expect(rmSyncMock.mock.calls.some((c) => String(c[0]) === sideFile)).toBe(
+      false,
+    );
+  });
+
+  it('removes the prior file BEFORE authenticating — an auth failure is still a failed run', async () => {
+    ensureAuthenticatedMock.mockImplementation(() => {
+      throw new Error('not logged in');
+    });
+    await expect(run()).rejects.toThrow(/not logged in/);
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/ctx.md', { force: true });
+  });
+
+  it('removes nothing over an invalid invocation', async () => {
+    // Usage errors precede every side effect: a pr_number this predicate
+    // rejects must not delete a file the run was never committed to write.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '0',
+        owner_repo: 'o/r',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/positive integer/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('removes nothing over a malformed owner_repo either', async () => {
+    // The owner_repo shield sits above the removal too: a malformed invocation
+    // must not delete the previous round's context file before rejecting, or the
+    // corrected re-run fetches against nothing and the round proceeds down the
+    // context-unavailable path over a typo. Moving the `indexOf('/')` check below
+    // `rmSync` must fail here.
+    await expect(
+      (prContextCommand.handler as (a: unknown) => Promise<void>)({
+        _: [],
+        $0: 'qwen',
+        pr_number: '6711',
+        owner_repo: 'malformed',
+        out: '/tmp/ctx.md',
+      }),
+    ).rejects.toThrow(/must look like/);
+    expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('runPrContext identity failure (handler level)', () => {
   const metaJson = JSON.stringify({
     title: 't',
@@ -3427,7 +3567,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('never deletes the side file over an EMPTY login — exit 0 is not identity', async () => {
@@ -3445,7 +3592,14 @@ describe('runPrContext identity failure (handler level)', () => {
       owner_repo: 'o/r',
       out: '/tmp/ctx.md',
     });
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   const run = async () =>
@@ -3458,8 +3612,90 @@ describe('runPrContext identity failure (handler level)', () => {
     });
   const contextWrite = () =>
     (writeFileSyncMock.mock.calls.find(
-      (c) => c[0] === '/tmp/ctx.md',
+      // The context is written temp-then-renamed to --out.
+      (c) => String(c[0]).startsWith('/tmp/ctx.md'),
     )?.[1] as string) ?? '';
+
+  it('writes the context temp-then-rename — the rename is the commit point', async () => {
+    // The up-front removal of a STALE file already ran by the time the final
+    // write starts, so a direct writeFileSync that threw mid-write (ENOSPC
+    // creates the file then throws) would leave a truncated-but-readable
+    // context at --out — the one shape the missing-context branches the
+    // launch flow keys on cannot see. This pins the SHAPE — a tmp write, a
+    // rename onto --out, never a direct write; a reverted direct write
+    // leaves no tmp path and never calls rename. The failure itself is the
+    // next test's.
+    currentUserMock.mockReturnValue('someone');
+    await run();
+    const tmpWrite = writeFileSyncMock.mock.calls.find(
+      (c) =>
+        String(c[0]).startsWith('/tmp/ctx.md.') &&
+        String(c[0]).endsWith('.tmp'),
+    );
+    expect(tmpWrite).toBeDefined();
+    // The temp name embeds this process's pid, so two concurrent runs at
+    // the same --out cannot rename each other's half-written file.
+    expect(String(tmpWrite?.[0])).toBe(`/tmp/ctx.md.${process.pid}.tmp`);
+    expect(renameSyncMock).toHaveBeenCalledWith(tmpWrite?.[0], '/tmp/ctx.md');
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a failed rename removes the tmp debris and re-throws', async () => {
+    // The other half of the same catch: the temp write succeeded and the
+    // commit point failed (EXDEV, EACCES on --out's directory). The debris
+    // is removed and the failure propagates; --out was never written.
+    currentUserMock.mockReturnValue('someone');
+    renameSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+    await expect(run()).rejects.toThrow('EACCES');
+    expect(rmSyncMock).toHaveBeenCalledWith(`/tmp/ctx.md.${process.pid}.tmp`, {
+      force: true,
+    });
+    expect(
+      writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+    ).toBe(false);
+  });
+
+  it('a mid-write failure leaves nothing at --out, and takes its tmp debris with it', async () => {
+    // ENOSPC creates the file then throws. With the temp write inside the
+    // same try, the catch removes the tmp path and re-throws: nothing was
+    // ever written at --out and the rename never ran, so the launch flow's
+    // missing-context branches see exactly a missing context. Deleting the
+    // catch ships green without this test — the throw still propagates, but
+    // the `.tmp` stays beside the missing context.
+    currentUserMock.mockReturnValue('someone');
+    const enospc = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    });
+    writeFileSyncMock.mockImplementation((target: unknown) => {
+      const path = String(target);
+      if (path.startsWith('/tmp/ctx.md.') && path.endsWith('.tmp')) {
+        throw enospc;
+      }
+    });
+    try {
+      await expect(run()).rejects.toThrow('ENOSPC');
+      const tmp = writeFileSyncMock.mock.calls.find(
+        (c) =>
+          String(c[0]).startsWith('/tmp/ctx.md.') &&
+          String(c[0]).endsWith('.tmp'),
+      )?.[0];
+      expect(tmp).toBeDefined();
+      expect(rmSyncMock).toHaveBeenCalledWith(tmp, { force: true });
+      expect(renameSyncMock).not.toHaveBeenCalled();
+      expect(
+        writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+      ).toBe(false);
+    } finally {
+      // `beforeEach` clears calls, not implementations.
+      writeFileSyncMock.mockReset();
+    }
+  });
 
   it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {
     // The marker-less fixture above cannot tell the two arms apart: with the
@@ -3504,7 +3740,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // licence — deletion fires:
     currentUserMock.mockReturnValue('bot');
     await run();
-    expect(rmSyncMock).toHaveBeenCalled();
+    // Narrowed to the side file: the up-front --out removal fires on
+    // every committed run, so "rmSync was called" no longer discriminates
+    // the licensed side-file deletion this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(true);
   });
 
   it('a marker-less OWN review is a persistent state, not proven absence', async () => {
@@ -3514,7 +3757,14 @@ describe('runPrContext identity failure (handler level)', () => {
     // exists to prevent.
     currentUserMock.mockReturnValue('someone');
     await run();
-    expect(rmSyncMock).not.toHaveBeenCalled();
+    // Narrowed to the side file: the run's up-front removal of its own
+    // --out legitimately rm's the context path; the side file's deletion
+    // licensing is what this test pins.
+    expect(
+      rmSyncMock.mock.calls.some((c) =>
+        String(c[0]).endsWith('prev-ledger.json'),
+      ),
+    ).toBe(false);
   });
 
   it('wires the foreign marker through to the rendered context and the side file', async () => {
@@ -3961,9 +4211,10 @@ describe('prContextCommand handler — Aone routing', () => {
       ...extra,
     });
     // The ledger side file is written BEFORE the context file — find the
-    // context by path, not by call order.
+    // context by path, not by call order. The context itself lands at a
+    // `.<pid>.tmp` path first, renamed to --out.
     const call = writeFileSyncMock.mock.calls.find((c) =>
-      String(c[0]).endsWith('ctx-aone.md'),
+      String(c[0]).startsWith('/tmp/ctx-aone.md'),
     );
     return call?.[1] as string;
   }
@@ -4090,5 +4341,37 @@ describe('prContextCommand handler — Aone routing', () => {
     expect(written).not.toContain('--host ghe.example.com');
     // The refetches still carry --pr (per-MR addressing is host-agnostic).
     expect(written).toContain('--pr 7');
+  });
+});
+
+describe("the work-list table carries a Critical's axes (#10291)", () => {
+  it('spells the recorded axes beside the severity, and nothing beside an unclassified entry', () => {
+    const md = renderLedgerSection(
+      {
+        v: 1,
+        round: 7,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            d: 'f',
+            b: 'n',
+            file: 'src/sparse.ts',
+            line: 12,
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', d: 'c', file: 'src/stop.ts', title: 'lie' },
+          { id: 'R6-3', sev: 'C', file: 'src/x.ts', title: 'unclassified' },
+        ],
+      },
+      'm',
+    );
+    expect(md).toContain(
+      '| R6-1 | Critical (fails-closed, new-surface) | `src/sparse.ts:12` | sparse wedge |',
+    );
+    expect(md).toContain(
+      '| R6-2 | Critical (certifies-falsely) | `src/stop.ts` | lie |',
+    );
+    expect(md).toContain('| R6-3 | Critical | `src/x.ts` | unclassified |');
   });
 });

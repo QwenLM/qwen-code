@@ -18,7 +18,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 // Keep StreamingStatus active (it renders null when idle) and give the real
 // useStreamingLoadingMetrics an empty transcript so it reports zero tokens.
 const mocks = vi.hoisted(() => ({ streamingState: 'responding' as string }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStreamingState: () => mocks.streamingState,
   useTranscriptBlocks: () => [],
 }));

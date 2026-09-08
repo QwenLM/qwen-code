@@ -12,7 +12,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -23,15 +23,17 @@ import {
   useTranscriptStore,
   useWorkspace,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
   type DaemonWorkspaceCapability,
+  type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -41,6 +43,7 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
@@ -61,6 +64,10 @@ import {
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
+import {
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
@@ -84,9 +91,10 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
-import { MessageList } from './MessageList';
+import type { MessageListHandle } from './MessageList';
+import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
@@ -95,6 +103,7 @@ import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -110,12 +119,12 @@ import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
-// Split-view panes get the same interactive composer controls as the main chat,
-// each scoped to the pane's own session: the approval-mode and model pickers,
-// plus voice dictation. The width toggle is omitted (panes size themselves); the
-// slash menu is populated from the session's own command list (see below).
+// Split-view panes get the same session-scoped composer controls as the main
+// chat. The width toggle is omitted because panes size themselves.
 const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'addMenu',
   'approvalMode',
+  'contextUsage',
   'model',
   'voice',
 ];
@@ -251,7 +260,7 @@ export function ChatPane({
   sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter } =
+  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
@@ -263,7 +272,9 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
+  // live prompt state into its own provider (#9487).
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
@@ -272,6 +283,27 @@ export function ChatPane({
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const taskActivityKey = useMemo(
+    () => getTaskActivityKey(messages),
+    [messages],
+  );
+  const workflowsEnabled =
+    connection.supportedCommands?.workflowsEnabled === true;
+  // The activity fact travels beside the key, derived structurally — the
+  // key itself is not parseable back (callId is unconstrained text) — and
+  // gated on the endpoint the hook will actually poll.
+  const taskActivityActive = useMemo(
+    () => hasActiveTaskActivity(messages, { workflowsEnabled }),
+    [messages, workflowsEnabled],
+  );
+  const sessionTasks = useBackgroundTasks(
+    connection.sessionId,
+    taskActivityKey,
+    taskActivityActive,
+    connection.status === 'connected',
+    0,
+    workflowsEnabled,
+  );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
@@ -481,6 +513,7 @@ export function ChatPane({
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
+  const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,
     onAcceptFollowup,
@@ -719,6 +752,7 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
       // main composer — otherwise an override works on one surface only.
@@ -901,11 +935,13 @@ export function ChatPane({
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      actions
+      return actions
         .submitPermission(id, selectedOption, answers)
-        .catch((error: unknown) =>
-          reportError(error, 'Failed to submit permission choice'),
-        );
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to submit permission choice');
+          throw error;
+        });
     },
     [actions, reportError],
   );
@@ -938,7 +974,11 @@ export function ChatPane({
   previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
-    (src: string, alt?: string) => {
+    (
+      src: string,
+      alt?: string,
+      source?: { kind: 'attachment'; attachmentId: string },
+    ) => {
       if (!connection.sessionId) return;
       handleRightPanelOpen({
         id: 'image',
@@ -947,6 +987,7 @@ export function ChatPane({
         turnId: connection.sessionId,
         src,
         ...(alt ? { alt } : {}),
+        ...(source ? { attachmentId: source.attachmentId } : {}),
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
@@ -965,6 +1006,9 @@ export function ChatPane({
           ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
           ...(resolvedFile.text !== undefined
             ? { text: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
             : {}),
           ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
           ...(resolvedFile.workspacePath
@@ -1022,6 +1066,60 @@ export function ChatPane({
       };
     });
   }, [connection.commands, t]);
+  const skills = useMemo(() => {
+    const commandsByName = new Map(
+      commands.map((command) => [command.name.toLowerCase(), command]),
+    );
+    return (connection.skills ?? [])
+      .map((name) => {
+        const command = commandsByName.get(name.toLowerCase());
+        return {
+          name,
+          description: command?.description ?? '',
+          ...(command?.argumentHint
+            ? { argumentHint: command.argumentHint }
+            : {}),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [commands, connection.skills]);
+  const handleShowContextUsage = useCallback(() => {
+    if (
+      shouldBlockComposerSubmit({
+        connectionStatus: connection.status,
+        hasSession: Boolean(connection.sessionId),
+      })
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture();
+    if (streamingStateRef.current === 'idle') {
+      store.appendLocalUserMessage('/context');
+    }
+    actions
+      .getContextUsage({ detail: false })
+      .then((result) => {
+        if (!owner.isCurrent()) return;
+        store.dispatch([
+          {
+            type: 'status',
+            text: serializeContextUsageMessage(result),
+            clearActiveText: false,
+          },
+        ]);
+      })
+      .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to load context usage');
+      });
+  }, [
+    actions,
+    connection.sessionId,
+    connection.status,
+    reportError,
+    sessionOwnerGuard,
+    store,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1081,13 +1179,15 @@ export function ChatPane({
     [actions, reportError],
   );
   const handleSelectReasoningEffort = useCallback(
-    (value: string) =>
+    (value: ReasoningSelection) =>
       actions
-        .setReasoningEffort(value)
+        .setReasoningEffort(value, {
+          persist: connection.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         ),
-    [actions, reportError, t],
+    [actions, connection.sessionContext?.kind, reportError, t],
   );
 
   const headerLabel =
@@ -1199,11 +1299,10 @@ export function ChatPane({
                           : 'splitView.maximizePane',
                       )}
                     >
-                      {/* Same icon vocabulary as the dialog fullscreen toggle. */}
                       {isMaximized ? (
-                        <Minimize2Icon size={16} aria-hidden />
+                        <ShrinkIcon size={16} aria-hidden />
                       ) : (
-                        <Maximize2Icon size={16} aria-hidden />
+                        <ExpandIcon size={16} aria-hidden />
                       )}
                     </button>
                   )}
@@ -1255,49 +1354,54 @@ export function ChatPane({
           onOpen={openMonitorDetails}
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
-            <MessageList
-              messages={messages}
-              pendingApproval={pendingToolApproval}
-              loadingTranscript={connection.loadingTranscript}
-              catchingUp={connection.catchingUp}
-              hasOlderHistory={transcriptHistory.hasMore}
-              loadingOlderHistory={transcriptHistory.loading}
-              historyCapacityReached={transcriptHistory.capacityReached}
-              historyPaginationError={transcriptHistory.paginationError}
-              onLoadOlderHistory={transcriptHistory.loadMore}
-              transcriptBlockCount={blocks.length}
-              transcriptActivity={store}
-              onReloadTranscript={
-                transcriptReloadSupported ? reloadTranscript : undefined
-              }
-              isResponding={isResponding}
-              workspaceCwd={connection.workspaceCwd || ''}
-              hideSessionTimeline
-              turnFileChanges={
-                visibleTurnOutputKinds.has('file')
-                  ? fileChangesByTurn
-                  : undefined
-              }
-              turnArtifacts={
-                visibleTurnOutputKinds.has('artifact')
-                  ? artifactsByTurn
-                  : undefined
-              }
-              turnScheduledTasks={
-                visibleTurnOutputKinds.has('scheduled_task')
-                  ? scheduledTasksByTurn
-                  : undefined
-              }
-              onTurnOutputOpen={handleRightPanelOpen}
-              onImagePreview={handleImagePreview}
-              onAttachmentPreview={handleAttachmentPreview}
-              onError={reportError}
-              generateContent={
-                connection.capabilities?.features.includes('session_generation')
-                  ? actions.generateSessionContent
-                  : undefined
-              }
-            />
+            <WorkflowDetailsProvider tasks={sessionTasks}>
+              <TranscriptViewport
+                ref={transcriptViewportRef}
+                messages={messages}
+                pendingApproval={pendingToolApproval}
+                loadingTranscript={connection.loadingTranscript}
+                catchingUp={connection.catchingUp}
+                hasOlderHistory={transcriptHistory.hasMore}
+                loadingOlderHistory={transcriptHistory.loading}
+                historyCapacityReached={transcriptHistory.capacityReached}
+                historyPaginationError={transcriptHistory.paginationError}
+                onLoadOlderHistory={transcriptHistory.loadMore}
+                transcriptBlockCount={blocks.length}
+                transcriptActivity={store}
+                onReloadTranscript={
+                  transcriptReloadSupported ? reloadTranscript : undefined
+                }
+                isResponding={isResponding}
+                workspaceCwd={connection.workspaceCwd || ''}
+                hideSessionTimeline
+                turnFileChanges={
+                  visibleTurnOutputKinds.has('file')
+                    ? fileChangesByTurn
+                    : undefined
+                }
+                turnArtifacts={
+                  visibleTurnOutputKinds.has('artifact')
+                    ? artifactsByTurn
+                    : undefined
+                }
+                turnScheduledTasks={
+                  visibleTurnOutputKinds.has('scheduled_task')
+                    ? scheduledTasksByTurn
+                    : undefined
+                }
+                onTurnOutputOpen={handleRightPanelOpen}
+                onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
+                onError={reportError}
+                generateContent={
+                  connection.capabilities?.features.includes(
+                    'session_generation',
+                  )
+                    ? actions.generateSessionContent
+                    : undefined
+                }
+              />
+            </WorkflowDetailsProvider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>
@@ -1310,6 +1414,11 @@ export function ChatPane({
               onConfirm={handleConfirm}
               variant="floating"
               planTodos={planTodos}
+              generateContent={
+                connection.capabilities?.features.includes('session_generation')
+                  ? actions.generateSessionContent
+                  : undefined
+              }
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval
@@ -1326,6 +1435,7 @@ export function ChatPane({
               onError={reportError}
               variant="floating"
               keyboardActive={false}
+              customInputLabel={askUserFreeTextLabel}
             />
           </div>
         )}
@@ -1400,10 +1510,14 @@ export function ChatPane({
             onCancel={handleCancel}
             isRunning={isResponding || sessionHasActivePrompt}
             commands={commands}
+            skills={skills}
             queuedMessages={queuedTexts}
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
+            tokenCount={connection.tokenCount ?? 0}
+            contextWindow={connection.contextWindow ?? 0}
+            onShowContextUsage={handleShowContextUsage}
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}

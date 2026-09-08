@@ -6,14 +6,14 @@
 
 /**
  * Client-level contract tests for the session-swap telemetry transaction
- * (#9833). These exercise GeminiClient.beginTelemetrySwap /
+ * (#9833). These exercise LlmClient.beginTelemetrySwap /
  * commitTelemetrySwap / abortTelemetrySwap against the REAL
  * UiTelemetryService singleton — client.test.ts mocks the service, so it
  * cannot observe the aggregate these methods exist to protect.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GeminiClient } from './client.js';
+import { LlmClient } from './client.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
@@ -22,7 +22,7 @@ import {
 import type { Config } from '../config/config.js';
 import type { ResumedSessionData } from '../services/sessionService.js';
 import { SessionStartSource } from '../hooks/types.js';
-import type { GeminiChat } from './geminiChat.js';
+import type { LlmChat } from './llm-chat.js';
 
 const SESSION_A = 'session-A';
 const SESSION_B = 'session-B';
@@ -99,14 +99,14 @@ function makeEnv() {
     // no-op) rather than let the call throw `getToolRegistry is not a function`.
     getToolRegistry: () => ({ getTool: () => undefined }),
   };
-  const client = new GeminiClient(config as Config);
+  const client = new LlmClient(config as Config);
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
-  } as unknown as GeminiChat;
+  } as unknown as LlmChat;
   const startChat = vi
     .spyOn(client, 'startChat')
-    .mockImplementation(async function (this: GeminiClient) {
+    .mockImplementation(async function (this: LlmClient) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this as any).chat = fakeChat;
       return fakeChat;
@@ -114,7 +114,7 @@ function makeEnv() {
   return { config, client, startChat };
 }
 
-describe('GeminiClient telemetry swap transaction (#9833)', () => {
+describe('LlmClient telemetry swap transaction (#9833)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();

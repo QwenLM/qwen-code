@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
@@ -205,7 +205,7 @@ export class DualOutputBridge {
     }
   }
 
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
     if (!this.active) return;

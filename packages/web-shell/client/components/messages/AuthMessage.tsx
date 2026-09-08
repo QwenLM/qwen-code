@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  useDaemonSessionOwnerGuard,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
   type DaemonAuthProviderDescriptor,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import styles from './AuthMessage.module.css';
@@ -114,6 +115,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const ownerRef = useRef(sessionOwnerGuard.capture());
+  const ownerChanged = !ownerRef.current.isCurrent();
+  if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
+  const saveOperationRef = useRef(0);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
@@ -188,6 +194,13 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const [optionIndex, setOptionIndex] = useState(0);
 
+  useEffect(() => {
+    if (!ownerChanged) return;
+    saveOperationRef.current += 1;
+    setSaving(false);
+    setError(null);
+  }, [ownerChanged]);
+
   const startProvider = useCallback(
     (
       nextProvider: DaemonAuthProviderDescriptor,
@@ -251,6 +264,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const save = useCallback(() => {
     if (!provider || saving) return;
+    const owner = ownerRef.current;
+    const operation = ++saveOperationRef.current;
+    const isCurrent = () =>
+      saveOperationRef.current === operation && owner.isCurrent();
     setSaving(true);
     setError(null);
     const ctxSize = Number(contextWindow);
@@ -282,15 +299,23 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             : undefined,
       })
       .then((result) => {
-        onMessage(result.message);
+        if (!isCurrent()) return;
+        onMessage(
+          result.runtimeSync?.status === 'failed'
+            ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
+            : result.message,
+        );
         onClose();
       })
       .catch((err: unknown) => {
+        if (!isCurrent()) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         onMessage(message, 'error');
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        if (isCurrent()) setSaving(false);
+      });
   }, [
     apiKey,
     baseUrl,
@@ -306,6 +331,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     protocol,
     provider,
     saving,
+    t,
     thinking,
     workspaceActions,
   ]);

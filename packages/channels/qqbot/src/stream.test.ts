@@ -55,6 +55,19 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(_sessionId: string): string | undefined {
       return undefined;
     }
+    protected getResponseSourceLabel(_sessionId: string): undefined {
+      return undefined;
+    }
+    protected formatMarkdownAttributedText(
+      text: string,
+      sourceLabel?: string,
+    ): string {
+      const label = sourceLabel?.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+      return label ? `${label}\n${text}` : text;
+    }
+    protected formatAttributedText(text: string, sourceLabel?: string): string {
+      return sourceLabel ? `${sourceLabel} ${text}` : text;
+    }
     protected async onResponseComplete(
       _chatId: string,
       fullText: string,
@@ -84,6 +97,8 @@ vi.mock('@qwen-code/channel-base', () => ({
     String(text).slice(0, 200),
   sanitizeSenderName: (name: string): string => name || 'QQ User',
   sanitizePromptText: (text: string): string => text,
+  truncateCodePoints: (text: string, max: number): string =>
+    [...text].slice(0, max).join(''),
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -133,6 +148,7 @@ function streamState(ch: QQChannelClass) {
       chatId: string;
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
+      sourceLabel?: string;
     }
   >;
 }
@@ -143,6 +159,7 @@ function onResponseChunk(
   chunk: string,
   sessionId: string,
   messageId?: string,
+  sourceLabel?: string,
 ) {
   return (
     ch as unknown as {
@@ -150,14 +167,14 @@ function onResponseChunk(
         c: string,
         h: string,
         s: string,
-        segment?: { messageId?: string },
+        segment?: { messageId?: string; sourceLabel?: string },
       ) => void;
     }
   ).onResponseChunk(
     chatId,
     chunk,
     sessionId,
-    messageId ? { messageId } : undefined,
+    messageId || sourceLabel ? { messageId, sourceLabel } : undefined,
   );
 }
 
@@ -231,6 +248,30 @@ describe('onResponseChunk', () => {
     expect(st.get('sess-1')!.buffer).toBe('hello');
     expect(st.get('sess-1')!.chatId).toBe('test-chat');
     expect(st.get('sess-1')!.timer).not.toBeNull();
+  });
+
+  it('keeps source metadata separate from the raw retry buffer and labels the flush once', async () => {
+    const ch = makeChannel();
+    onResponseChunk(
+      ch,
+      'test-chat',
+      'raw response',
+      'sess-1',
+      undefined,
+      '[review_*]',
+    );
+
+    expect(streamState(ch).get('sess-1')).toMatchObject({
+      buffer: 'raw response',
+      sourceLabel: '[review_*]',
+    });
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+    const body = mockSendQQMessage.mock.calls[0]?.[3] as {
+      markdown: { content: string };
+    };
+    expect(body.markdown.content).toBe('\\[review\\_\\*\\]\nraw response');
   });
 
   it('accumulates multiple chunks into the same session buffer', () => {

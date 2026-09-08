@@ -224,6 +224,46 @@ describe('ci.yml classify_pr runner routing', () => {
     );
   });
 
+  it('a push to main reaches ECS, and the kill-switch still wins', () => {
+    // The post-merge fast signal (Classify PR + Test on `main`) runs the same
+    // ten-plus-minute Test job a pull request does, in the most trusted
+    // context there is: the code is already merged and the YAML is main's
+    // own. Route it to the pool instead of spending a scarce hosted Linux
+    // runner on every merge. A push carries no author association, so this
+    // arm is necessarily event-based.
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      ECS,
+    );
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: true,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      HOSTED,
+      'kill-switch must revert post-merge runs to hosted',
+    );
+  });
+
+  it('keeps the push arm out of the classify runs-on expression', () => {
+    // classify_pr routes twice, and on a push the two halves deliberately
+    // disagree: the shell step sends downstream Linux jobs to ECS while this
+    // expression leaves classify_pr itself hosted. Pin the asymmetry so a
+    // future "drift fix" has to read why first — this expression is the
+    // canonical association-routing text that sdk-java.yml and serve-ab.yml
+    // mirror, a push has no association to route on, and classify_pr is a
+    // seconds-long job whose pool costs nothing either way. The drift guard
+    // above evaluates both halves on pull_request, where they must agree.
+    assert.doesNotMatch(classifyRunsOn, /github\.event_name == 'push'/);
+  });
+
   it('the runs-on expression keeps the trusted clause and kill-switch', () => {
     // Structural pins for the expression half of the drift guard — the
     // simulation above re-implements it, so pin the real text too.
@@ -534,15 +574,19 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     assert.match(job.steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
     assert.match(job.steps[heal].run, /chmod -R u\+rwX/);
     assert.ok(heal < checkout, 'the heal must precede the checkout');
-    // Dangling-only prune at the end: always(), docker leg, pool only —
-    // and never a form that could remove tagged images other jobs use.
+    // Cleanup at the end: always(), docker leg, pool only. Tagged cleanup is
+    // restricted to old workflow-owned images; the general cleanup remains
+    // dangling-only so it cannot remove images from unrelated jobs.
     assert.ok(prune !== -1, 'the dangling prune must exist');
     assert.match(job.steps[prune].if, /always\(\)/);
     assert.match(job.steps[prune].if, /sandbox:docker/);
     assert.match(job.steps[prune].if, /runner\.environment == 'self-hosted'/);
+    assert.match(
+      job.steps[prune].run,
+      /docker image prune --all --force --filter 'label=org\.qwen-code\.ci\.sandbox=true' --filter 'until=24h'/,
+    );
     assert.match(job.steps[prune].run, /docker image prune --force/);
     assert.match(job.steps[prune].run, /until=24h/);
-    assert.doesNotMatch(job.steps[prune].run, /--all|-a\b/);
     // A failing prune must stay diagnosable: surface a warning instead of a
     // silent `|| true`, and keep the daemon's error out of /dev/null.
     assert.match(job.steps[prune].run, /\|\| echo "::warning::/);

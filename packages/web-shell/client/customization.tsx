@@ -13,9 +13,10 @@ import type {
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionArtifact,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -122,14 +123,15 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
-  | 'tokenUsage';
+  | 'tokenUsage'
+  | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Token usage is opt-in. */
+  /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to all actions. */
@@ -139,7 +141,9 @@ export interface WebShellRightPanelOptions {
 export type WebShellEnvironmentPanelItem =
   | 'environment'
   | 'subagents'
-  | 'backgroundTasks';
+  | 'backgroundTasks'
+  | 'attachments'
+  | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
   /** Sections to show. Defaults to all sections. */
@@ -166,6 +170,10 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens context usage for the current session, when available. */
+  onOpenContextUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
@@ -225,9 +233,28 @@ export interface WebShellAssistantTurnFooterRenderInfo {
   message: WebShellAssistantMessageInfo;
 }
 
+export type WebShellSessionArtifactsChangeReason = 'restore' | 'change';
+
+export interface WebShellSessionArtifactsChange {
+  reason: WebShellSessionArtifactsChangeReason;
+  sessionId: string;
+  sequence: number;
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+}
+
 export type AssistantTurnFooterRenderer = (
   info: WebShellAssistantTurnFooterRenderInfo,
 ) => ReactNode | null | undefined;
+
+/** Return custom artifact artwork, or null/undefined/false for the built-in icon. */
+export type ArtifactImageRenderer = (
+  artifact: DaemonSessionArtifact,
+) => ReactNode | null | undefined;
+
+export interface WebShellArtifactCustomization {
+  renderImage?: ArtifactImageRenderer;
+}
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -306,6 +333,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 
@@ -371,6 +399,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(
@@ -449,10 +478,27 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
   exitCode?: number;
 }
 
+export interface WebShellWorkflowTask extends WebShellTaskBase {
+  kind: 'workflow';
+  status:
+    | 'running'
+    | 'pausing'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  currentPhase?: string;
+  agentsDispatched: number;
+  agentsCompleted: number;
+  tokensSpent: number;
+  tokenBudgetTotal?: number;
+}
+
 export type WebShellTaskInfo =
   | WebShellAgentTask
   | WebShellShellTask
-  | WebShellMonitorTask;
+  | WebShellMonitorTask
+  | WebShellWorkflowTask;
 
 // ---- Model info (public type for footer renderer) ----
 
@@ -505,6 +551,9 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  artifact?: WebShellArtifactCustomization;
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
@@ -528,6 +577,7 @@ export interface WebShellCustomization {
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
+  hostOwnsEditDiffPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving
@@ -540,13 +590,18 @@ export interface WebShellCustomization {
   loadingPhrases?: LoadingPhrasesResolver;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: setting `false`
    * force-disables upload even when the daemon advertises the capability,
    * while `true`/omitted still requires the capability (and the workspace
    * trust / qualified-route safety checks) to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.

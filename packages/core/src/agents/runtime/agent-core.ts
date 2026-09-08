@@ -38,12 +38,13 @@ import {
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
-  GeminiEventType,
+  LlmEventType,
   markDuplicateProviderToolCallResponseSent,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import type { LoopType } from '../../telemetry/types.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -77,7 +78,7 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { GeminiChat } from '../../core/geminiChat.js';
+import { LlmChat } from '../../core/llm-chat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -317,6 +318,12 @@ export interface ReasoningLoopResult {
   terminateMode: AgentTerminateMode | null;
   /** Number of model round-trips completed. */
   turnsUsed: number;
+  /**
+   * Which loop detector fired, when terminateMode is LOOP_DETECTED (issue
+   * #9450 — attribution for stops that all render as one generic message
+   * otherwise). null otherwise.
+   */
+  loopType?: LoopType | null;
 }
 
 /**
@@ -519,17 +526,17 @@ export class AgentCore {
   // ─── Chat Creation ────────────────────────────────────────
 
   /**
-   * Creates a GeminiChat instance configured for this agent.
+   * Creates a LlmChat instance configured for this agent.
    *
    * @param context - Context state for template variable substitution.
    * @param options - Chat creation options.
    *   - `interactive`: When true, omits the "non-interactive mode" system prompt suffix.
-   * @returns A configured GeminiChat, or undefined if initialization fails.
+   * @returns A configured LlmChat, or undefined if initialization fails.
    */
   async createChat(
     context: ContextState,
     options?: CreateChatOptions,
-  ): Promise<GeminiChat | undefined> {
+  ): Promise<LlmChat | undefined> {
     if (
       !this.promptConfig.systemPrompt &&
       !this.promptConfig.renderedSystemPrompt &&
@@ -585,7 +592,7 @@ export class AgentCore {
     }
 
     try {
-      const chat = new GeminiChat(
+      const chat = new LlmChat(
         this.runtimeContext,
         generationConfig,
         startHistory,
@@ -669,7 +676,7 @@ export class AgentCore {
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
-    const isHiddenByPermissionAllowList = (name: string | undefined): boolean =>
+    const isHiddenByEagerAllowList = (name: string | undefined): boolean =>
       !!name &&
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
@@ -688,14 +695,14 @@ export class AgentCore {
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
-        // built-ins). Permission-allowlist-deferred schemas remain hidden
-        // until ToolSearch reveals them, preserving the registry allowlist.
+        // built-ins). Tools demoted by the `settings.tools.eager` allowlist
+        // remain hidden until ToolSearch reveals them, preserving the
+        // allowlist's schema shrink.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
             .filter(
-              (t) =>
-                !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+              (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
             ),
         );
       } else {
@@ -704,7 +711,7 @@ export class AgentCore {
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
         const allowedNames = asStrings.filter((name) => {
-          if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
+          if (isExcluded(name) || isHiddenByEagerAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -725,7 +732,7 @@ export class AgentCore {
       // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (isExcluded(d.name) || isHiddenByPermissionAllowList(d.name)) {
+          if (isExcluded(d.name) || isHiddenByEagerAllowList(d.name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -743,8 +750,7 @@ export class AgentCore {
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
           .filter(
-            (t) =>
-              !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+            (t) => !isExcluded(t.name) && !isHiddenByEagerAllowList(t.name),
           ),
       );
     }
@@ -779,7 +785,7 @@ export class AgentCore {
    * - maxTimeMinutes is exceeded
    * - The abortController signal fires
    *
-   * @param chat - The GeminiChat session to use.
+   * @param chat - The LlmChat session to use.
    * @param initialMessages - The first messages to send (e.g., user task prompt).
    * @param toolsList - Available tool declarations.
    * @param abortController - Controls cancellation of the current loop.
@@ -787,7 +793,7 @@ export class AgentCore {
    * @returns ReasoningLoopResult with the final text, terminate mode, and turns used.
    */
   async runReasoningLoop(
-    chat: GeminiChat,
+    chat: LlmChat,
     initialMessages: Content[],
     toolsList: FunctionDeclaration[],
     abortController: AbortController,
@@ -902,7 +908,7 @@ export class AgentCore {
   }
 
   private async _runReasoningLoopInner(
-    chat: GeminiChat,
+    chat: LlmChat,
     initialMessages: Content[],
     toolsList: FunctionDeclaration[],
     abortController: AbortController,
@@ -927,7 +933,7 @@ export class AgentCore {
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
     );
-    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+    const checkSubagentLoop = (event: ServerLlmStreamEvent): boolean => {
       if (loopDetector.checkAlwaysOnSafeties(event)) {
         return true;
       }
@@ -994,6 +1000,13 @@ export class AgentCore {
         } as AgentRoundEvent);
 
         const functionCalls: FunctionCall[] = [];
+        // callIds already streamed to the loop guard this attempt. Mirrors
+        // dedupeToolCallsById (which collapses execution to one call per
+        // id): a provider can emit the same call id twice in one response,
+        // and counting both emissions would leave the request counters one
+        // ahead of the executed result evidence (one recordToolResult per
+        // executed call), fail-safe-halting a productive stateful poller.
+        const loopGuardStreamedCallIds = new Set<string>();
         let roundText = '';
         let roundThoughtText = '';
         let lastUsage: GenerateContentResponseUsageMetadata | undefined =
@@ -1017,7 +1030,7 @@ export class AgentCore {
           if (streamEvent.type === 'retry') {
             if (
               checkSubagentLoop({
-                type: GeminiEventType.Retry,
+                type: LlmEventType.Retry,
                 ...('isContinuation' in streamEvent
                   ? { isContinuation: streamEvent.isContinuation }
                   : {}),
@@ -1031,6 +1044,7 @@ export class AgentCore {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
             functionCalls.length = 0;
+            loopGuardStreamedCallIds.clear();
             roundText = '';
             roundThoughtText = '';
             lastUsage = undefined;
@@ -1039,7 +1053,7 @@ export class AgentCore {
             continue;
           }
 
-          // GeminiChat already mutated its own history; surface to the debug
+          // LlmChat already mutated its own history; surface to the debug
           // log so subagent compactions show up alongside the main session's.
           if (streamEvent.type === 'compressed') {
             this.runtimeContext
@@ -1088,7 +1102,7 @@ export class AgentCore {
             if (
               thoughtSummary &&
               checkSubagentLoop({
-                type: GeminiEventType.Thought,
+                type: LlmEventType.Thought,
                 value: thoughtSummary,
               })
             ) {
@@ -1101,7 +1115,7 @@ export class AgentCore {
             if (
               responseText &&
               checkSubagentLoop({
-                type: GeminiEventType.Content,
+                type: LlmEventType.Content,
                 value: responseText,
               })
             ) {
@@ -1112,9 +1126,20 @@ export class AgentCore {
 
             for (const fc of chunkFunctionCalls) {
               const toolName = String(fc.name);
+              // Provider-duplicate emissions of an already-streamed call id
+              // execute once (dedupeToolCallsById collapses them), so feed
+              // the loop guard once — request counts and result evidence
+              // must stay the same population. Id-less calls are never
+              // deduped, mirroring dedupeToolCallsById.
+              if (fc.id) {
+                if (loopGuardStreamedCallIds.has(fc.id)) {
+                  continue;
+                }
+                loopGuardStreamedCallIds.add(fc.id);
+              }
               if (
                 checkSubagentLoop({
-                  type: GeminiEventType.ToolCallRequest,
+                  type: LlmEventType.ToolCallRequest,
                   value: {
                     callId: fc.id ?? `${toolName}-${Date.now()}`,
                     providerCallId: getProviderToolCallId(fc),
@@ -1140,7 +1165,7 @@ export class AgentCore {
             if (
               finishReason &&
               checkSubagentLoop({
-                type: GeminiEventType.Finished,
+                type: LlmEventType.Finished,
                 value: {
                   reason: finishReason,
                   usageMetadata: resp.usageMetadata,
@@ -1199,6 +1224,24 @@ export class AgentCore {
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            break;
+          }
+          // Result-aware loop guards (issue #9450): stateful reads like
+          // task_list may legitimately repeat with identical arguments while
+          // the shared task board changes, so the detector must see each
+          // executed result before the next round re-emits the call.
+          for (const toolResult of toolCallResult.results) {
+            if (
+              loopDetector.recordToolResult(
+                { name: toolResult.toolName, args: toolResult.args },
+                toolResult.responseParts,
+              )
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              break;
+            }
+          }
+          if (terminateMode === AgentTerminateMode.LOOP_DETECTED) {
             break;
           }
           currentMessages = toolCallResult.messages;
@@ -1318,6 +1361,9 @@ export class AgentCore {
       text: finalText,
       terminateMode,
       turnsUsed: turnCounter,
+      ...(terminateMode === AgentTerminateMode.LOOP_DETECTED
+        ? { loopType: loopDetector.getLastLoopType() }
+        : {}),
     };
   }
 
@@ -1626,6 +1672,14 @@ export class AgentCore {
   ): Promise<{
     messages: Content[];
     repeatedDuplicateProviderToolCall: boolean;
+    /** Executed calls with their model-visible results, in call order.
+     * Consumed by the loop detector for result-aware stateful-read guards
+     * (issue #9450). */
+    results: Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      responseParts: Part[];
+    }>;
   }> {
     const responseByCallId = new Map<
       string,
@@ -1679,6 +1733,7 @@ export class AgentCore {
       return {
         messages: [{ role: 'user', parts: [] }],
         repeatedDuplicateProviderToolCall: true,
+        results: [],
       };
     }
 
@@ -2268,9 +2323,31 @@ export class AgentCore {
       timestamp: Date.now(),
     });
 
+    // Pair each executed call with its model-visible (finalized) result so
+    // the reasoning loop can feed the loop detector's result-aware guards.
+    const finalizedByCallId = new Map(
+      finalizedResponses.map((response) => [response.callId, response]),
+    );
+    const results: Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      responseParts: Part[];
+    }> = [];
+    for (const fc of uniqueFunctionCalls) {
+      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+      const finalized = finalizedByCallId.get(callId);
+      if (!finalized) continue;
+      results.push({
+        toolName: String(fc.name ?? ''),
+        args: (fc.args ?? {}) as Record<string, unknown>,
+        responseParts: finalized.responseParts,
+      });
+    }
+
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],
       repeatedDuplicateProviderToolCall: false,
+      results,
     };
   }
 

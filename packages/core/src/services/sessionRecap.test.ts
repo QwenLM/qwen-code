@@ -50,7 +50,7 @@ describe('generateSessionRecap', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
       })),
       getBaseLlmClient: vi.fn(() => ({ generateText })),

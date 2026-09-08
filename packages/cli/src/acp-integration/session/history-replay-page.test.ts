@@ -211,7 +211,7 @@ describe('history replay page', () => {
     // getChat() THROWS there. The skip probe must guard on isInitialized().
     const config = {
       getRestoreAskUserQuestion: () => true,
-      getGeminiClient: () => ({
+      getLlmClient: () => ({
         isInitialized: () => false,
         getChat: () => {
           throw new Error('Chat not initialized');
@@ -262,7 +262,7 @@ describe('history replay page', () => {
     };
     const config = {
       getRestoreAskUserQuestion: () => true,
-      getGeminiClient: () => ({
+      getLlmClient: () => ({
         isInitialized: () => true,
         getChat: () => ({ peekLastHistoryEntry: () => lastEntry }),
       }),

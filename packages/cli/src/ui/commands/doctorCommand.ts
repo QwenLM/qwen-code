@@ -475,7 +475,7 @@ function collectToolResultRetention(
 ): ToolResultRetentionReport | null {
   try {
     const config = context.services.config;
-    const history = config?.getGeminiClient()?.getHistoryShallow();
+    const history = config?.getLlmClient()?.getHistoryShallow();
     if (!history) {
       return null;
     }

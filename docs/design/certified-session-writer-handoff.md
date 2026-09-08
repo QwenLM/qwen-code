@@ -1,5 +1,16 @@
 # Certified session writer handoff
 
+> **Conversations-runtime update (2026-09-06):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. Every writer hosted by Conversations now participates,
+> superseding this document's exclusion of standalone ACP writers. Certified
+> handoff remains unchanged. Hardened local recovery additionally permits only
+> a provably dead active writer in the same local identity domain, including
+> the same boot and PID namespace on Linux; foreign, identity-less, and
+> ambiguous active records remain fenced.
+
 ## Problem
 
 Cooperative managed shutdown currently releases each session writer lock before
@@ -20,9 +31,11 @@ against the exact transcript requested by the new Config.
 Transcript paths must be absent or resolve to the same regular file opened for
 the proof. A dangling symlink is not treated as an absent transcript.
 
-The protocol remains gated by `experimental.sessionWriterLease`, which is
-disabled by default and snapshotted at ACP process startup. Standalone ACP,
-interactive, and headless recorders do not gain certified takeover. Normal
+For ACP writers outside Conversations, the protocol remains gated by
+`experimental.sessionWriterLease`, disabled by default and snapshotted at ACP
+process startup. Conversations-hosted ACP writers use the mandatory lease
+regardless of that setting and participate in certified handoff. Interactive
+and headless recorders do not gain certified takeover. Normal
 per-session close still releases its lock instead of leaving a sealed record.
 
 This change does not reclaim an active lock left by SIGKILL, an event-loop
@@ -217,4 +230,5 @@ Unit and multiprocess coverage must prove:
   delete an unknown successor;
 - managed flush failure retains the active primary;
 - normal recorder close releases instead of sealing; and
-- the default-off and standalone ACP paths remain unchanged.
+- Conversations-hosted ACP writers participate regardless of the experimental
+  setting; default-off ACP paths outside Conversations remain unchanged.

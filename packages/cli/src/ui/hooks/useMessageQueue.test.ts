@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -1121,6 +1122,48 @@ describe('useMessageQueue', () => {
         kind: 'peer',
         modelText: '<envelope one>',
         displayText: 'Session A: one',
+      });
+    });
+
+    it('preserves peer delivery identity through enqueue and restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
+      act(() => {
+        result.current.addMessage('/clear');
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          delivery,
+        );
+      });
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'user', modelText: '/clear' });
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'peer', delivery });
+
+      act(() => {
+        result.current.restorePeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          true,
+          delivery,
+        );
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'peer',
+        displayed: true,
+        delivery,
       });
     });
 

@@ -19,18 +19,19 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import {
   DAEMON_APPROVAL_MODES,
   useOptionalWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
-import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
   DaemonWorkspaceGitStatus,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
-import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -52,6 +53,8 @@ import {
 import { AtMentionPanel } from './AtMentionPanel';
 import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
 import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
+import { AddMenu } from './composer/AddMenu';
+import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
@@ -83,10 +86,12 @@ import {
   ChevronRightIcon,
   FolderClosedIcon,
   LoaderCircleIcon,
+  SlashIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
 import { FileTypeIcon } from './FileTypeIcon';
+import { FileAttachmentContent } from './FileAttachmentContent';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -132,7 +137,12 @@ export type ComposerToolbarAction =
   | 'files'
   | 'widthMode'
   | 'voice'
-  | 'workspace';
+  | 'workspace'
+  // Unlike the actions above, `addMenu` is never shown unless the host
+  // lists it explicitly in `visibleToolbarActions` — the generic gate
+  // defaults to "show" when the prop is absent, so `+` checks the prop
+  // directly to stay off by default.
+  | 'addMenu';
 
 // Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
 // items API can tell them apart, and folder uploads are out of scope.
@@ -153,6 +163,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'commands',
   'contextUsage',
   'gitBranch',
   'model',
@@ -175,6 +186,7 @@ interface ChatEditorProps {
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
+  cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
@@ -186,6 +198,7 @@ interface ChatEditorProps {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
@@ -223,13 +236,15 @@ interface ChatEditorProps {
   /** Current context-window occupancy for the `contextUsage` toolbar ring. */
   tokenCount?: number;
   contextWindow?: number;
+  /** Keep Context Usage available before a restored session reports usage. */
+  contextUsageAlwaysVisible?: boolean;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
-  onSelectReasoningEffort?: (value: string) => Promise<void> | void;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -242,10 +257,16 @@ interface ChatEditorProps {
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   scratchWorkspaceSupported?: boolean;
   existingFolderWorkspaceSupported?: boolean;
+  standaloneTargetSupported?: boolean;
+  selectedStandaloneTarget?: boolean;
+  onSelectStandaloneTarget?: () => void;
   workspaceMutationBusy?: boolean;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -265,6 +286,7 @@ interface ChatEditorProps {
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  compactOverlays?: boolean;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -380,7 +402,11 @@ function TopComposerTag({
     </span>
   );
   const tagElement = (
-    <span ref={anchorRef} className={styles.tag} data-web-shell-composer-tag>
+    <span
+      ref={anchorRef}
+      className={`${styles.tag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}`}
+      data-web-shell-composer-tag
+    >
       {hasTooltip ? (
         <TooltipPrimitive.Trigger asChild>
           {tagContent}
@@ -790,6 +816,7 @@ function ToolbarPopover({
   noResultsLabel,
   header,
   submenu,
+  compact = false,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -808,6 +835,7 @@ function ToolbarPopover({
     triggerAriaLabel: string;
     sectionLabel: string;
   };
+  compact?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -956,6 +984,7 @@ function ToolbarPopover({
         collisionPadding={8}
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
+        data-web-shell-compact-overlay={compact ? '' : undefined}
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
         onOpenAutoFocus={(event) => {
@@ -1057,12 +1086,12 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect?: (value: string) => Promise<void> | void;
+  onSelect?: (value: ReasoningSelection) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
-  const select = async (value: string) => {
+  const select = async (value: ReasoningSelection) => {
     if (busy || !onSelect) return;
     setBusy(true);
     try {
@@ -1087,7 +1116,7 @@ function ModelReasoningControls({
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? reasoning.effort : 'none')
+            void select(enabled ? 'default' : 'none')
           }
         />
       </div>
@@ -1124,6 +1153,7 @@ function SlashCommandPanel({
   anchorRef,
   panelRef,
   detailRef,
+  compact,
   onClose,
   onSelect,
   onAccept,
@@ -1132,6 +1162,7 @@ function SlashCommandPanel({
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
   detailRef: RefObject<HTMLDivElement | null>;
+  compact?: boolean;
   onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
@@ -1209,14 +1240,15 @@ function SlashCommandPanel({
           ref={panelRef}
           side="top"
           align="start"
-          alignOffset={16}
-          sideOffset={8}
-          avoidCollisions={false}
-          collisionPadding={12}
+          alignOffset={compact ? 0 : 16}
+          sideOffset={compact ? 6 : 8}
+          avoidCollisions={compact}
+          collisionPadding={compact ? 8 : 12}
           collisionBoundary={collisionBoundary ?? undefined}
           className="duration-0 data-open:animate-none data-closed:animate-none"
           role="listbox"
           data-web-shell-slash-menu
+          data-web-shell-compact-overlay={compact ? '' : undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1284,7 +1316,7 @@ function SlashCommandPanel({
                         }`}
                         onMouseEnter={(event) => {
                           onSelect(index);
-                          if (!item.detail) {
+                          if (!item.detail || compact) {
                             setHoverDetail(null);
                             return;
                           }
@@ -1322,6 +1354,12 @@ function SlashCommandPanel({
                       >
                         <span className={styles.slashCommand}>
                           {item.label}
+                          {item.argumentHint && (
+                            <span className={styles.slashArgumentHint}>
+                              {' '}
+                              {item.argumentHint}
+                            </span>
+                          )}
                         </span>
                         {item.detail && (
                           <span className={styles.slashDescription}>
@@ -1338,7 +1376,7 @@ function SlashCommandPanel({
         </PopoverContent>
       </Popover>
       <Popover
-        open={Boolean(hoverDetail)}
+        open={!compact && Boolean(hoverDetail)}
         onOpenChange={(open) => {
           if (!open) setHoverDetail(null);
         }}
@@ -1447,6 +1485,7 @@ export const ChatEditor = memo(
       onInputTextChange,
       onAttachmentsChange,
       onCycleMode,
+      cycleModeOnTab = false,
       onToggleShortcuts,
       onCancel,
       isRunning = false,
@@ -1457,6 +1496,7 @@ export const ChatEditor = memo(
       commands,
       skills = [],
       slashCommandCategoryOrder,
+      autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
@@ -1479,6 +1519,7 @@ export const ChatEditor = memo(
       visibleToolbarActions,
       tokenCount = 0,
       contextWindow = 0,
+      contextUsageAlwaysVisible = false,
       onShowContextUsage,
       availableModels = [],
       onSelectMode,
@@ -1491,10 +1532,16 @@ export const ChatEditor = memo(
       onSelectWorkspace,
       scratchWorkspaceSupported = false,
       existingFolderWorkspaceSupported = false,
+      standaloneTargetSupported = false,
+      selectedStandaloneTarget = false,
+      onSelectStandaloneTarget,
       workspaceMutationBusy = false,
       onCreateScratchWorkspace,
       onOpenExistingWorkspace,
       atWorkspaceCwd,
+      composerScopeKey,
+      workspaceFeaturesEnabled = true,
+      attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -1513,6 +1560,7 @@ export const ChatEditor = memo(
       onImageIngestionNotice,
       onImagePreview,
       onAttachmentPreview,
+      compactOverlays = false,
     } = props;
 
     const {
@@ -1527,6 +1575,7 @@ export const ChatEditor = memo(
       atProviders: contextAtProviders,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     } = useWebShellCustomization();
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
@@ -1548,7 +1597,7 @@ export const ChatEditor = memo(
     // item can be capability-gated (hidden on daemons without the feature).
     const uploadWorkspace = useOptionalWorkspace();
     const uploadTarget = useMemo(() => {
-      if (!uploadWorkspace) return undefined;
+      if (!uploadWorkspace || !workspaceFeaturesEnabled) return undefined;
       // The host prop can force-disable upload even when the daemon advertises
       // the capability; it does NOT bypass the capability check. Both must
       // allow: `fileUploadEnabled === false` short-circuits, otherwise the
@@ -1576,7 +1625,12 @@ export const ChatEditor = memo(
       if (primaryMatches.length !== 1 || primaryMatches[0].trusted !== true)
         return undefined;
       return { client: uploadWorkspace.client, targetKey: '<primary>' };
-    }, [uploadWorkspace, atWorkspaceCwd, fileUploadEnabled]);
+    }, [
+      uploadWorkspace,
+      atWorkspaceCwd,
+      fileUploadEnabled,
+      workspaceFeaturesEnabled,
+    ]);
     const uploadEnabled = uploadTarget !== undefined;
     const maxUploadBytes =
       uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
@@ -1589,7 +1643,7 @@ export const ChatEditor = memo(
     );
     useLayoutEffect(() => {
       setPendingDropFiles(null);
-    }, [disabled, uploadTargetKey]);
+    }, [disabled, uploadTargetKey, attachmentsEnabled, fileDropAction]);
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1641,13 +1695,15 @@ export const ChatEditor = memo(
       onSubmit,
       onInputTextChange,
       onCycleMode,
+      cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: fileUploadEnabled !== false,
+      fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
       skills,
       slashCommandCategoryOrder,
+      autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,
       currentMode,
@@ -1663,6 +1719,10 @@ export const ChatEditor = memo(
       builtinAtProviders: resolvedBuiltinAtProviders,
       atProviders: resolvedAtProviders,
       atWorkspaceCwd,
+      composerScopeKey,
+      disableLegacyHistoryFallback: composerScopeKey === 'standalone',
+      attachmentsEnabled,
+      workspaceFeaturesEnabled,
       composerTagIcons,
       parseUserMessageContent,
       renderComposerTag,
@@ -1681,6 +1741,7 @@ export const ChatEditor = memo(
 
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
+    const focusComposer = core.focus;
     const ingestFiles = core.ingestFiles;
     const insertUploadReference = useCallback(
       (path: string) => {
@@ -1731,10 +1792,12 @@ export const ChatEditor = memo(
     };
     const [uploadDragActive, setUploadDragActive] = useState(false);
     const uploadDragDepthRef = useRef(0);
+    const uploadDropEnabled =
+      uploadEnabled && (!attachmentsEnabled || fileDropAction !== 'attach');
     const handleUploadDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
@@ -1743,19 +1806,19 @@ export const ChatEditor = memo(
         uploadDragDepthRef.current += 1;
         setUploadDragActive(true);
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
           return;
         event.preventDefault();
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragLeave = useCallback(() => {
       if (uploadDragDepthRef.current === 0) return;
@@ -1799,27 +1862,38 @@ export const ChatEditor = memo(
           event.preventDefault();
           return;
         }
-        if (fileUploadEnabled === false) {
-          // Host force-disables file drag-in entirely: cancel the drop so
-          // the browser cannot navigate to the file, but ingest nothing on
-          // any lane (the image lane is gated off too).
-          event.preventDefault();
-          return;
-        }
         if (!uploadEnabled || files.length === 0) {
-          core.imageTransferHandlers.onDropCapture(event);
+          if (attachmentsEnabled) {
+            core.imageTransferHandlers.onDropCapture(event);
+          } else {
+            event.preventDefault();
+          }
           return;
         }
         clearImageDragState();
         event.preventDefault();
         event.stopPropagation();
-        setPendingDropFiles(files);
+        if (!attachmentsEnabled || fileDropAction === 'upload') {
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+          focusComposer();
+        } else if (fileDropAction === 'attach') {
+          ingestFiles(files);
+          focusComposer();
+        } else {
+          setPendingDropFiles(files);
+        }
       },
       [
         core.imageTransferHandlers,
         clearImageDragState,
         disabled,
-        fileUploadEnabled,
+        attachmentsEnabled,
+        fileDropAction,
+        focusComposer,
+        fileUploadDirectory,
+        ingestFiles,
+        insertUploadReference,
+        uploadFiles,
         pendingDropFiles,
         uploadEnabled,
       ],
@@ -1843,6 +1917,63 @@ export const ChatEditor = memo(
       pendingDropFiles,
       uploadFiles,
     ]);
+    // -- Composer add menu (`+`) ---------------------------------------------
+    const showAddMenuAction = visibleToolbarActions?.includes('addMenu');
+    const getAddMenuWorkspaceActions = useCallback(
+      () => core.workspaceActionsRef.current,
+      [core.workspaceActionsRef],
+    );
+    const handleAddMenuFiles = useCallback(
+      (files: File[], destination: 'attach' | 'upload') => {
+        if (destination === 'upload') {
+          if (!uploadEnabled) return;
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+        } else {
+          ingestFiles(files);
+        }
+        focusComposer();
+      },
+      [
+        fileUploadDirectory,
+        focusComposer,
+        ingestFiles,
+        insertUploadReference,
+        uploadEnabled,
+        uploadFiles,
+      ],
+    );
+    const handleAddMenuInsertReference = useCallback(
+      (tag: WebShellComposerTag) => {
+        addComposerTags([tag], { placement: 'inline', position: 'end' });
+        const view = core.viewRef.current;
+        if (view) {
+          view.dispatch({
+            selection: { anchor: view.state.doc.length },
+            scrollIntoView: true,
+          });
+        }
+        focusComposer();
+      },
+      [addComposerTags, core.viewRef, focusComposer],
+    );
+    const handleAddMenuPrependSkill = useCallback(
+      (invocation: string) => {
+        const view = core.viewRef.current;
+        const spec = computePrependSkillTransaction(
+          view ? view.state.doc.toString() : core.getText(),
+          invocation,
+        );
+        if (!spec) return focusComposer();
+        if (view) {
+          view.dispatch(spec);
+          view.focus();
+        } else {
+          core.mobileComposer?.textareaRef.current?.setSelectionRange(0, 0);
+          core.insertText(spec.changes.insert);
+        }
+      },
+      [core, focusComposer],
+    );
     const handleUploadPickerChange = useCallback(
       (event: ReactChangeEvent<HTMLInputElement>) => {
         const files = Array.from(event.target.files ?? []);
@@ -1899,8 +2030,8 @@ export const ChatEditor = memo(
       };
     }, [clearUploadDragState, uploadDragActive]);
     useEffect(() => {
-      if (disabled) clearUploadDragState();
-    }, [clearUploadDragState, disabled]);
+      if (disabled || !uploadDropEnabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled, uploadDropEnabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -2041,6 +2172,7 @@ export const ChatEditor = memo(
     };
     const showModeAction = showToolbarAction('approvalMode');
     const showModelAction = showToolbarAction('model');
+    const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -2284,13 +2416,22 @@ export const ChatEditor = memo(
       }
       return (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.tagIcon}
               style={cssUrlVar('--composer-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -2316,7 +2457,9 @@ export const ChatEditor = memo(
     const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
-        ? t(`reasoning.effort.${reasoning.effort}`)
+        ? reasoning.effort !== 'none' && reasoning.effort !== 'default'
+          ? t(`reasoning.effort.${reasoning.effort}`)
+          : t('reasoning.thinking')
         : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions
@@ -2334,9 +2477,11 @@ export const ChatEditor = memo(
     const workspaceSelectVisible = Boolean(
       workspaces &&
         onSelectWorkspace &&
+        showToolbarAction('workspace') &&
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
-          existingFolderWorkspaceSupported),
+          existingFolderWorkspaceSupported ||
+          standaloneTargetSupported),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -2525,6 +2670,7 @@ export const ChatEditor = memo(
       modeLabel,
       normalizedModelChipLabel,
       sessionName,
+      showAddMenuAction,
       showModelAction,
       showModeAction,
       workspaceIndicatorVisible,
@@ -2542,6 +2688,7 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        data-web-shell-compact-composer={compactOverlays ? '' : undefined}
         onDragOver={cancelShellFileDrag}
         onDrop={cancelShellFileDrag}
       >
@@ -2586,19 +2733,32 @@ export const ChatEditor = memo(
                       })
                     }
                   >
-                    {busy ? (
-                      <LoaderCircleIcon
-                        className={styles.uploadRowSpinner}
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <UploadIcon aria-hidden="true" />
-                    )}
-                    <span className={styles.uploadRowName}>
+                    <FileTypeIcon
+                      name={upload.file.name}
+                      mimeType={upload.file.type}
+                      size={20}
+                      className={styles.uploadRowIcon}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className={styles.uploadRowName}
+                      title={upload.file.name}
+                    >
                       {upload.file.name}
                     </span>
                     <span className={styles.uploadRowStatus}>
-                      {uploadStatusText(upload)}
+                      {busy && (
+                        <LoaderCircleIcon
+                          className={styles.uploadRowSpinner}
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span
+                        className={styles.uploadRowStatusText}
+                        title={uploadStatusText(upload)}
+                      >
+                        {uploadStatusText(upload)}
+                      </span>
                     </span>
                   </button>
                   <button
@@ -2674,6 +2834,7 @@ export const ChatEditor = memo(
                 <input
                   ref={searchInputRef}
                   className={styles.searchInput}
+                  data-web-shell-composer-history-search
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
@@ -2719,7 +2880,7 @@ export const ChatEditor = memo(
               )}
             </div>
           )}
-          <div className={styles.content}>
+          <div className={styles.content} data-web-shell-composer-content>
             {core.pastedImages.length > 0 && (
               <div className={styles.images} data-web-shell-composer-images>
                 {core.pastedImages.map((img, i) => {
@@ -2847,16 +3008,10 @@ export const ChatEditor = memo(
                             })
                           }
                         >
-                          <FileTypeIcon
+                          <FileAttachmentContent
                             name={file.name}
                             mimeType={file.media_type}
-                            size={14}
-                            className={styles.fileChipIcon}
-                            aria-hidden="true"
                           />
-                          <span className={styles.fileChipName}>
-                            {file.name}
-                          </span>
                         </button>
                         <button
                           type="button"
@@ -2905,9 +3060,10 @@ export const ChatEditor = memo(
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
                 detailRef={slashDetailRef}
+                compact={compactOverlays}
                 onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
-                onAccept={core.acceptSlashCompletion}
+                onAccept={(index) => core.acceptSlashCompletion(index, true)}
               />
             )}
             {core.atMenu && (
@@ -2915,6 +3071,7 @@ export const ChatEditor = memo(
                 menu={core.atMenu}
                 anchorRef={containerRef}
                 panelRef={atPanelRef}
+                compact={compactOverlays}
                 onSelect={core.selectAtCompletion}
                 onAccept={core.acceptAtCompletion}
                 onBack={() => {
@@ -2980,6 +3137,41 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {showAddMenuAction && (
+                    <AddMenu
+                      key={JSON.stringify([
+                        sessionId,
+                        atWorkspaceCwd,
+                        Boolean(disabled),
+                      ])}
+                      disabled={disabled}
+                      availabilityKey={JSON.stringify([
+                        fileUploadEnabled === false,
+                        attachmentsEnabled,
+                        uploadEnabled,
+                        Boolean(
+                          core.workspaceActionsRef.current?.globWorkspace ??
+                            core.workspaceActionsRef.current?.listDirectory,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current
+                            ?.loadExtensionsStatus,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current?.loadMcpStatus,
+                        ),
+                        Boolean(skills?.length),
+                      ])}
+                      addFileAvailable={attachmentsEnabled}
+                      uploadAvailable={uploadEnabled}
+                      onAddFiles={handleAddMenuFiles}
+                      onFilePickerCancel={focusComposer}
+                      onInsertReference={handleAddMenuInsertReference}
+                      onPrependSkill={handleAddMenuPrependSkill}
+                      getWorkspaceActions={getAddMenuWorkspaceActions}
+                      skills={skills ?? []}
+                    />
+                  )}
                   {workspaceSelectVisible &&
                     workspaces &&
                     onSelectWorkspace && (
@@ -2992,12 +3184,15 @@ export const ChatEditor = memo(
                         existingFolderSupported={
                           existingFolderWorkspaceSupported
                         }
+                        standaloneSupported={standaloneTargetSupported}
+                        selectedStandalone={selectedStandaloneTarget}
                         className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
                           showWorkspaceSelectLabel
                             ? ''
                             : styles.workspaceSelectTriggerCompact
                         }`}
                         onSelectWorkspace={onSelectWorkspace}
+                        onSelectStandalone={onSelectStandaloneTarget}
                         onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
                         onOpenExistingFolder={
                           onOpenExistingWorkspace ?? (() => {})
@@ -3030,6 +3225,7 @@ export const ChatEditor = memo(
                         onOpenChange={setBranchPickerOpen}
                         workspaceCwd={selectedWorkspace?.cwd ?? ''}
                         gitCwd={gitCwd}
+                        status={gitStatus}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >
@@ -3058,6 +3254,7 @@ export const ChatEditor = memo(
                       }`}
                     >
                       <ToolbarPopover
+                        compact={compactOverlays}
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}
@@ -3105,6 +3302,7 @@ export const ChatEditor = memo(
                       }`}
                     >
                       <ToolbarPopover
+                        compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
                         activeId={currentModel}
@@ -3255,8 +3453,8 @@ export const ChatEditor = memo(
                     </button>
                   )}
                 {showToolbarAction('contextUsage') &&
-                  contextWindow > 0 &&
-                  tokenCount > 0 && (
+                  (contextUsageAlwaysVisible ||
+                    (contextWindow > 0 && tokenCount > 0)) && (
                     <TooltipProvider delayDuration={300}>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -3269,25 +3467,60 @@ export const ChatEditor = memo(
                               onShowContextUsage?.();
                             }}
                             disabled={!onShowContextUsage}
-                            aria-label={t('status.contextUsed', {
-                              pct: ((tokenCount / contextWindow) * 100).toFixed(
-                                1,
-                              ),
-                            })}
+                            aria-label={
+                              contextWindow > 0 && tokenCount > 0
+                                ? t('status.contextUsed', {
+                                    pct: (
+                                      (tokenCount / contextWindow) *
+                                      100
+                                    ).toFixed(1),
+                                  })
+                                : t('contextUsage.title')
+                            }
                           >
                             <span className={styles.toolBtnIcon}>
                               <ContextUsageRing
-                                pct={(tokenCount / contextWindow) * 100}
+                                pct={
+                                  contextWindow > 0
+                                    ? (tokenCount / contextWindow) * 100
+                                    : 0
+                                }
                               />
                             </span>
                           </button>
                         </TooltipTrigger>
                         <TooltipContent side="top">
-                          {formatContextUsageDetail(tokenCount, contextWindow)}
+                          {contextWindow > 0 && tokenCount > 0
+                            ? formatContextUsageDetail(
+                                tokenCount,
+                                contextWindow,
+                              )
+                            : t('contextUsage.title')}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
+                {showCommandAction && (
+                  <button
+                    type="button"
+                    className={`${styles.toolBtn} ${styles.toolBtnCompact}`}
+                    data-web-shell-command-button
+                    aria-label={t('help.shortcut.commandMenu')}
+                    title={t('help.shortcut.commandMenu')}
+                    disabled={disabled}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (!core.openSlashMenu()) {
+                        core.insertText('/');
+                        core.focus();
+                      }
+                    }}
+                  >
+                    <span className={styles.toolBtnIcon}>
+                      <SlashIcon />
+                    </span>
+                  </button>
+                )}
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton />
