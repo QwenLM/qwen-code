@@ -430,6 +430,9 @@ function mergeLiveStandaloneSummary(
     updatedAt: laterTimestamp(live.updatedAt, persisted.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    ...(live.activeWorkState !== undefined
+      ? { activeWorkState: live.activeWorkState }
+      : {}),
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),

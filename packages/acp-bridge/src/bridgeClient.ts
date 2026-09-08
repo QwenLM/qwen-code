@@ -2227,14 +2227,15 @@ export class BridgeClient implements Client {
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
-        // Sessions the child claims but this channel does not own are dropped
-        // rather than rejecting the whole snapshot: the rest of it is still
-        // usable, and a channel must never influence another channel's state.
+        // Retain rows while a Session is registering so the bridge can apply
+        // a report that races the newSession response.
         this.onActiveWork?.({
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
           seq: snapshot.seq,
-          sessions: snapshot.sessions.filter((session) =>
-            this.ownsSession(session.sessionId),
+          sessions: snapshot.sessions.filter(
+            (session) =>
+              this.ownsSession(session.sessionId) ||
+              this.hasSessionSpawnInFlight(),
           ),
         });
       }
