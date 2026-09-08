@@ -1598,6 +1598,11 @@ export function bareEnabledGrantWarnings(
     const plural = registryNames.length > 1;
     const names = registryNames.map((name) => `'${name}'`).join(', ');
     const skillWord = plural ? 'skills' : 'skill';
+    const hardNote = lists.hardDisabled.has(authored)
+      ? ` A bare '${authored}' in skills.disabled also blocks ` +
+        `${plural ? 'them' : 'it'} under either spelling, so replacing the ` +
+        `grant alone will not enable anything: remove that entry too.`
+      : '';
     // A bare entry identical to a defaultDisabled entry is load-bearing: it
     // cancels that entry, so the pair is a working opt-in, not a stale grant.
     if (lists.defaultDisabled.has(authored)) {
@@ -1624,6 +1629,20 @@ export function bareEnabledGrantWarnings(
       if (stillOff.length) {
         const offPlural = stillOff.length > 1;
         const offList = stillOff.map((name) => `'${name}'`).join(', ');
+        // A qualified hard entry blocks only its own member, so the bare
+        // note above cannot see it: name it per blocked member or the
+        // replacement advice promises an enable the entry silently vetoes.
+        const hardQualified = stillOff.filter((name) =>
+          lists.hardDisabled.has(name),
+        );
+        const qualifiedNote = hardQualified.length
+          ? ` ${hardQualified.map((name) => `'${name}'`).join(', ')} in ` +
+            `skills.disabled also blocks ` +
+            `${hardQualified.length > 1 ? 'them' : 'it'} under either ` +
+            `spelling, so replacing the grant alone will not enable ` +
+            `anything: remove ` +
+            `${hardQualified.length > 1 ? 'those entries' : 'that entry'} too.`
+          : '';
         warnings.push(
           `Warning: skills.enabled and skills.defaultDisabled both list ` +
             `'${authored}' by bare name. The pair cancels the disablement ` +
@@ -1632,7 +1651,9 @@ export function bareEnabledGrantWarnings(
             `${offPlural ? 'default' : 'defaults'} off. Replace the bare ` +
             `'${authored}' with ${offList} in both skills.enabled and ` +
             `skills.defaultDisabled to enable ` +
-            `${offPlural ? 'them' : 'it'}.`,
+            `${offPlural ? 'them' : 'it'}.` +
+            hardNote +
+            qualifiedNote,
         );
       }
       if (onNames.length) {
@@ -1640,7 +1661,8 @@ export function bareEnabledGrantWarnings(
         const onList = onNames.map((name) => `'${name}'`).join(', ');
         warnings.push(
           `Warning: skills.enabled and skills.defaultDisabled both list ` +
-            `'${authored}' by bare name, but the qualified grant ` +
+            `'${authored}' by bare name, but the qualified ` +
+            `${onPlural ? 'grants' : 'grant'} ` +
             `${onList} in skills.enabled already ` +
             `${onPlural ? 'enable' : 'enables'} ` +
             `${onPlural ? 'them' : 'it'}, so the bare pair changes ` +
@@ -1651,11 +1673,6 @@ export function bareEnabledGrantWarnings(
       }
       continue;
     }
-    const hardNote = lists.hardDisabled.has(authored)
-      ? ` A bare '${authored}' in skills.disabled also blocks ` +
-        `${plural ? 'them' : 'it'} under either spelling, so replacing the ` +
-        `grant alone will not enable anything: remove that entry too.`
-      : '';
     warnings.push(
       `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
         `longer enables the extension ${skillWord} ${names}. Replace it ` +
