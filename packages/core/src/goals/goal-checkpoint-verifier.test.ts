@@ -145,8 +145,10 @@ describe('createGoalCheckpointVerifier', () => {
   });
 
   it('surfaces unusable model output as InvalidGoalCheckpointError', async () => {
-    // The stall breaker counts unusable results by error class, so every
-    // parse-level rejection must keep it, not degrade to a plain Error.
+    // Every parse-level rejection must keep its class and message rather
+    // than degrade to a plain Error the way a validate-hook failure would
+    // (runSideQuery re-wraps those): they are the diagnostic a stalled
+    // Goal's investigation gets to see.
     for (const reply of [
       JSON.stringify({ claims: [] }),
       'not json',
@@ -197,13 +199,21 @@ describe('createGoalCheckpointVerifier', () => {
       getOutputLanguageFilePath: vi.fn(),
     } as unknown as Config;
 
+    const caller = new AbortController();
     await expect(
-      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
+      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(
+        input(),
+        caller.signal,
+      ),
     ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
     expect(generateText).toHaveBeenCalledOnce();
     // The abort signal is the only cancellation mechanism for the side
     // query, so the timeout must actually abort it.
     expect(captured?.aborted).toBe(true);
+    // ...but never the caller's signal: the runtime treats an aborted
+    // attempt signal as a user interrupt and drops the check entirely
+    // instead of counting it as a stall, so the timeout must not reach it.
+    expect(caller.signal.aborted).toBe(false);
   });
 
   it('measures the claim limit after trimming, in code points', () => {
