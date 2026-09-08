@@ -7,6 +7,9 @@ import { ARTIFACT_ICON_URLS } from './artifacts/ArtifactIcon';
 describe('FileTypeIcon', () => {
   it.each([
     ['report.HTML', 'html'],
+    ['C#guide.pdf', 'pdf'],
+    ['data?.csv', 'csv'],
+    ['folder.with.dot/README', 'file'],
     ['report.pdf', 'pdf'],
     ['notes.md', 'md'],
     ['report.docx', 'word'],

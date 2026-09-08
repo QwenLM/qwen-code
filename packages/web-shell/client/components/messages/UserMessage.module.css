@@ -322,10 +322,11 @@
   cursor: pointer;
 }
 
-.messageTagClickable:hover {
+.messageTagClickable:where(.fileTag):hover {
   border-color: color-mix(in srgb, var(--border), var(--foreground) 20%);
 }
 
+.messageTagClickable:not(.fileTag):hover,
 .messageTagClickable:focus-visible {
   border-color: var(--chat-editor-accent-color, var(--foreground));
   outline: none;

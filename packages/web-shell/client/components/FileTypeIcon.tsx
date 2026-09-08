@@ -88,7 +88,11 @@ export function FileTypeIcon({
   ...props
 }: ComponentProps<LucideIcon> & { name: string; mimeType?: string }) {
   const Icon = iconForFile(name, mimeType);
-  const kind = getArtifactIconKind({ kind: 'file', title: name, mimeType });
+  const kind = getArtifactIconKind({
+    kind: 'file',
+    title: name.replace(/[?#]/g, '_'),
+    mimeType,
+  });
   if (kind !== 'file' || Icon === FileIcon) {
     return (
       <svg width={size} height={size} {...props} data-file-type-icon={kind}>

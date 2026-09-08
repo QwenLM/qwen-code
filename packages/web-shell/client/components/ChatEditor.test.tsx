@@ -2267,6 +2267,24 @@ describe('ChatEditor file upload gating', () => {
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
   });
 
+  it('disables attachment drag feedback when attachments are disabled', () => {
+    renderChatEditor({ attachmentsEnabled: false });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('does not advertise upload for an attach-only drop preference', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'attach' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'dragenter',
+      ['Files'],
+    );
+    expect(container.querySelector('[data-upload-drag-active]')).toBeNull();
+  });
+
   it('enables file drag-and-drop in the composer core by default', () => {
     uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
     renderChatEditor({});
@@ -2334,6 +2352,7 @@ describe('ChatEditor file upload gating', () => {
       expect(
         document.querySelector('[data-web-shell-drop-choice-dialog]'),
       ).toBeNull();
+      expect(composerCoreState.focus).toHaveBeenCalled();
       if (fileDropAction === 'attach' && attachmentsEnabled) {
         expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
         expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
@@ -2374,12 +2393,15 @@ describe('ChatEditor file upload gating', () => {
       attachmentsEnabled: false,
       customization: { fileDropAction: 'upload' },
     });
+    const onDrop = vi.fn();
+    container.addEventListener('drop', onDrop);
     const drop = dispatchDrag(
       container.querySelector('[data-web-shell-composer-editor]')!,
       'drop',
       ['Files'],
       [new File(['abc'], 'notes.txt')],
     );
+    expect(onDrop).toHaveBeenCalledTimes(1);
     expect(drop.defaultPrevented).toBe(true);
     expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
     expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
@@ -3055,6 +3077,9 @@ describe('ChatEditor file upload gating', () => {
       '[data-web-shell-upload-strip] [data-status="done"]',
     );
     expect(row?.textContent).toContain('Saved as report (1).txt');
+    expect(
+      row?.querySelector('[title="Saved as report (1).txt"]'),
+    ).not.toBeNull();
   });
 
   it('shows the plain Uploaded copy when the file kept its name', async () => {

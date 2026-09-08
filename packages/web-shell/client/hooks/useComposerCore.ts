@@ -662,13 +662,17 @@ class ComposerTagWidget extends WidgetType {
         });
       });
     }
+    const hasCustomTooltip =
+      this.tag.tooltip !== undefined && this.tag.tooltip !== null;
     if (isPreviewableFileComposerTag(this.tag)) {
       chip.style.verticalAlign = 'middle';
       chip.style.background = 'var(--chat-editor-bg-primary)';
       chip.style.borderRadius = '8px';
       chip.style.minHeight = '28px';
       chip.style.fontFamily = 'var(--font-sans,system-ui,sans-serif)';
-      chip.title = getComposerTagValue(this.tag);
+      if (!hasCustomTooltip) {
+        chip.title = getComposerTagValue(this.tag);
+      }
     }
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
@@ -715,7 +719,7 @@ class ComposerTagWidget extends WidgetType {
     ) {
       const icon = document.createElement('span');
       icon.style.cssText =
-        'display:inline-flex;flex:0 0 auto;margin-left:8px;color:var(--muted-foreground);';
+        'display:inline-flex;width:16px;height:16px;flex:0 0 auto;margin-left:8px;color:var(--muted-foreground);';
       icon.setAttribute('aria-hidden', 'true');
       this.contentRoot = createRoot(icon);
       this.contentRoot.render(

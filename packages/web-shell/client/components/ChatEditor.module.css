@@ -2201,18 +2201,6 @@
   pointer-events: auto;
 }
 
-.fileChip:hover .fileChipRemove:not(:disabled),
-.fileChipRemove:focus-visible {
-  pointer-events: auto;
-}
-
-@media (hover: none) {
-  .fileChipRemove:not(:disabled) {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-
 .searchPanel {
   display: flex;
   flex-direction: column;
@@ -2422,10 +2410,14 @@
   max-width: 40%;
   flex: 0 0 auto;
   overflow: hidden;
+  color: var(--chat-editor-text-dimmed);
+}
+
+.uploadRowStatusText {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--chat-editor-text-dimmed);
-  text-align: right;
 }
 
 .uploadRow[data-status='error'] .uploadRowStatus {

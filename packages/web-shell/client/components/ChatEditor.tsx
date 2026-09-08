@@ -1792,10 +1792,12 @@ export const ChatEditor = memo(
     };
     const [uploadDragActive, setUploadDragActive] = useState(false);
     const uploadDragDepthRef = useRef(0);
+    const uploadDropEnabled =
+      uploadEnabled && (!attachmentsEnabled || fileDropAction !== 'attach');
     const handleUploadDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
@@ -1804,19 +1806,19 @@ export const ChatEditor = memo(
         uploadDragDepthRef.current += 1;
         setUploadDragActive(true);
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
         if (
-          !uploadEnabled ||
+          !uploadDropEnabled ||
           disabled ||
           !event.dataTransfer.types.includes('Files')
         )
           return;
         event.preventDefault();
       },
-      [uploadEnabled, disabled],
+      [uploadDropEnabled, disabled],
     );
     const handleUploadDragLeave = useCallback(() => {
       if (uploadDragDepthRef.current === 0) return;
@@ -1865,7 +1867,6 @@ export const ChatEditor = memo(
             core.imageTransferHandlers.onDropCapture(event);
           } else {
             event.preventDefault();
-            event.stopPropagation();
           }
           return;
         }
@@ -1874,8 +1875,10 @@ export const ChatEditor = memo(
         event.stopPropagation();
         if (!attachmentsEnabled || fileDropAction === 'upload') {
           uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+          focusComposer();
         } else if (fileDropAction === 'attach') {
           ingestFiles(files);
+          focusComposer();
         } else {
           setPendingDropFiles(files);
         }
@@ -1886,6 +1889,7 @@ export const ChatEditor = memo(
         disabled,
         attachmentsEnabled,
         fileDropAction,
+        focusComposer,
         fileUploadDirectory,
         ingestFiles,
         insertUploadReference,
@@ -2026,8 +2030,8 @@ export const ChatEditor = memo(
       };
     }, [clearUploadDragState, uploadDragActive]);
     useEffect(() => {
-      if (disabled) clearUploadDragState();
-    }, [clearUploadDragState, disabled]);
+      if (disabled || !uploadDropEnabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled, uploadDropEnabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -2749,7 +2753,12 @@ export const ChatEditor = memo(
                           aria-hidden="true"
                         />
                       )}
-                      {uploadStatusText(upload)}
+                      <span
+                        className={styles.uploadRowStatusText}
+                        title={uploadStatusText(upload)}
+                      >
+                        {uploadStatusText(upload)}
+                      </span>
                     </span>
                   </button>
                   <button

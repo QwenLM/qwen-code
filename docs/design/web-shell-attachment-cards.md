@@ -13,8 +13,11 @@ removal, keyboard access, image thumbnails, and theme isolation.
 Changes are confined to Web Shell presentation, shared attachment content, and
 focused regression tests. No daemon, transport, or artifact behavior changes.
 
-Artifact SVG artwork is brought in by merging the local
-`codex/web-shell-artifact-icons-main` branch. FileTypeIcon now shares that
+FileTypeIcon shares the existing artifact
 component's format resolver and URL map; formats without specific artwork keep
 the existing Lucide fallback. The outer SVG preserves existing sizing, CSS and
 ARIA props while referencing the same asset as artifact cards.
+
+The shared artwork intentionally keeps its format colors across file icon consumers,
+including artifact file tabs, queued prompts and the environment panel. Lucide
+stroke styling continues to apply to formats without dedicated artwork.
