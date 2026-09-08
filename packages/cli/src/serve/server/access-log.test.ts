@@ -302,10 +302,10 @@ describe('installAccessLogMiddleware', () => {
 
   it('charges pre-auth gate rejects to their own budget, never the operator one', () => {
     const h = harness();
-    // 65 marked rejects: beyond the shared burst (60), so without the split
-    // the operator's own line would already be coalesced. Marked rejects
-    // draw from their own smaller budget instead — 30 logged, rest counted.
-    for (let i = 0; i < 65; i += 1) {
+    // 92 marked rejects: past the reject burst (30) AND past the point where
+    // a shared-suppressed flush would have drained the operator's burst
+    // entirely — a 65-request burst was not far enough to see that cliff.
+    for (let i = 0; i < 92; i += 1) {
       const { response } = h.begin({
         method: 'POST',
         path: '/session',
@@ -326,11 +326,12 @@ describe('installAccessLogMiddleware', () => {
       'request completed',
       expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
     );
-    // And the flood still coalesces loudly once its own budget drains.
-    expect(
-      vi
-        .mocked(h.logger.warn)
-        .mock.calls.some(([message]) => message === 'access logs suppressed'),
-    ).toBe(true);
+    // The reject flood's overflow surfaces at seal, counted on the reject
+    // side only — the flush spends nothing from the operator budget.
+    h.controller.sealAndFlushSuppressed();
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'access logs suppressed',
+      expect.objectContaining({ suppressed: 62 }),
+    );
   });
 });

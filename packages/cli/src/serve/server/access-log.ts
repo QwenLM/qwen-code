@@ -15,10 +15,14 @@ const ACCESS_LOG_BURST = 60;
 const ACCESS_LOG_REFILL_PER_SECOND = 2;
 // Gate rejects rejected before authentication (Host allowlist, the CORS
 // wall, the remote same-origin credential check) draw from a separate,
-// smaller budget. They share this middleware only because the walls moved
-// above it; without the split a credential-less host sustaining >2 req/s of
-// rejected traffic drains the burst in ~30 s and holds the OPERATOR's own
-// authenticated lines suppressed behind the aggregate warning.
+// smaller budget AND count suppression into a separate accumulator. They
+// share this middleware only because the walls moved above it; without the
+// split a credential-less host sustaining >2 req/s of rejected traffic
+// drains the burst in ~30 s and holds the OPERATOR's own authenticated
+// lines suppressed behind the aggregate warning. bearerAuth's 401s are
+// deliberately NOT marked: they were charged below the access log
+// pre-change too, so a no-Origin flood starves the operator budget exactly
+// as before — the split covers only the reject classes this reorder moved.
 const ACCESS_LOG_REJECT_BURST = 30;
 const ACCESS_LOG_REJECT_REFILL_PER_SECOND = 1;
 const ROUTE_MAX_BYTES = 2 * 1024;
@@ -101,7 +105,8 @@ export function installAccessLogMiddleware(
   let refillBaseline = monotonicNow();
   let rejectTokens = ACCESS_LOG_REJECT_BURST;
   let rejectRefillBaseline = refillBaseline;
-  let suppressed = emptySuppressedCounts();
+  const suppressed = emptySuppressedCounts();
+  const suppressedRejects = emptySuppressedCounts();
 
   const refill = (): void => {
     const now = Math.max(monotonicNow(), refillBaseline);
@@ -123,12 +128,13 @@ export function installAccessLogMiddleware(
     rejectRefillBaseline = now;
   };
 
-  const flushSuppressed = (): boolean => {
-    if (!daemonLog || suppressed.suppressed === 0) return false;
+  const flushSuppressed = (counts: SuppressedCounts): boolean => {
+    if (!daemonLog || counts.suppressed === 0) return false;
     context.with(ROOT_CONTEXT, () => {
-      daemonLog.warn('access logs suppressed', suppressed);
+      // Snapshot before reset: the logger may read the bag asynchronously.
+      daemonLog.warn('access logs suppressed', { ...counts });
     });
-    suppressed = emptySuppressedCounts();
+    Object.assign(counts, emptySuppressedCounts());
     return true;
   };
 
@@ -137,7 +143,8 @@ export function installAccessLogMiddleware(
       if (sealed) return;
       sealed = true;
       try {
-        flushSuppressed();
+        flushSuppressed(suppressed);
+        flushSuppressed(suppressedRejects);
       } catch {
         // Diagnostic logging must not prevent daemon shutdown.
       }
@@ -164,27 +171,34 @@ export function installAccessLogMiddleware(
           return;
         }
         refill();
-        if (suppressed.suppressed > 0 && tokens >= 1) {
-          tokens -= 1;
-          flushSuppressed();
-        }
+        refillReject();
         const isPreAuthReject = Boolean(
           (res.locals as Record<string, unknown> | undefined)?.[
             ACCESS_LOG_REJECT_LOCAL
           ],
         );
-        let admitted: boolean;
+        // Select the accumulator and the budget BEFORE flushing: a reject
+        // flood must never spend an operator token, not even on the flush.
         if (isPreAuthReject) {
-          refillReject();
-          admitted = rejectTokens >= 1;
-          if (admitted) rejectTokens -= 1;
+          if (suppressedRejects.suppressed > 0 && rejectTokens >= 1) {
+            rejectTokens -= 1;
+            flushSuppressed(suppressedRejects);
+          }
+          if (rejectTokens < 1) {
+            countSuppressed(suppressedRejects, status);
+            return;
+          }
+          rejectTokens -= 1;
         } else {
-          admitted = tokens >= 1;
-          if (admitted) tokens -= 1;
-        }
-        if (!admitted) {
-          countSuppressed(suppressed, status);
-          return;
+          if (suppressed.suppressed > 0 && tokens >= 1) {
+            tokens -= 1;
+            flushSuppressed(suppressed);
+          }
+          if (tokens < 1) {
+            countSuppressed(suppressed, status);
+            return;
+          }
+          tokens -= 1;
         }
 
         const route = truncateUtf8(`${method} ${reqPath}`, ROUTE_MAX_BYTES);

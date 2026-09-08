@@ -254,6 +254,7 @@ export function allowOriginCors(
     // flag if/when that materializes.
     if (origin === 'null') {
       res.setHeader('Vary', 'Origin');
+      markPreAuthReject(res);
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }

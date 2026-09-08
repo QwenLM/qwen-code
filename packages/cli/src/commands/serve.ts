@@ -270,7 +270,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates and still refuses; an empty value is rejected as operator error.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
       })
       .option('token', {
         type: 'string',

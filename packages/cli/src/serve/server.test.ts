@@ -32751,7 +32751,7 @@ describe('createServeApp', () => {
         { daemonLog },
       );
 
-      for (let i = 0; i < 65; i += 1) {
+      for (let i = 0; i < 100; i += 1) {
         const flood = await request(app)
           .post('/session')
           .set('Host', `192.168.1.2:${baseOpts.port}`)
@@ -32769,6 +32769,45 @@ describe('createServeApp', () => {
         expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
       );
       // Wall rejects are still individually logged — from their own budget.
+      expect(
+        vi
+          .mocked(daemonLog.warn)
+          .mock.calls.some(
+            ([message, ctx]) =>
+              message === 'request completed' &&
+              (ctx as { status?: number }).status === 403,
+          ),
+      ).toBe(true);
+    });
+
+    it('keeps operator lines logging through a null-origin flood', async () => {
+      // Same flood shape through the `Origin: null` arm — sandboxed iframes
+      // and cross-origin redirects send exactly this, so the marker must
+      // cover it too.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      for (let i = 0; i < 65; i += 1) {
+        const flood = await request(app)
+          .post('/session')
+          .set('Host', `192.168.1.2:${baseOpts.port}`)
+          .set('Origin', 'null')
+          .send({ cwd: WS_BOUND });
+        expect(flood.status).toBe(403);
+      }
+      const authed = await request(app)
+        .get('/capabilities')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(authed.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+      );
       expect(
         vi
           .mocked(daemonLog.warn)
