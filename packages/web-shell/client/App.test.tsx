@@ -28935,6 +28935,8 @@ describe('App session callbacks', () => {
       const report = testState.latestSplitViewProps!.onPendingPanesChange!;
       const ownerIds = outerPending ? [mockConnection.sessionId!] : [];
       await act(async () => report(ownerIds));
+      // Clear setup-time calls so the guard below measures only this rerender.
+      mockUseDaemonSessionActivityBridge.mockClear();
       rerender();
       expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
       expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalled();
