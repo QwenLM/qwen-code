@@ -245,6 +245,23 @@ describe('agent thread actions', () => {
       kind: 'skip',
       reason: 'turn_budget_exhausted',
     });
+    const third = await postMessage(
+      PROJECT_ROOT,
+      'th_root',
+      { from: BOB.id, text: '@alice once more' },
+      { agents: [ALICE, BOB], limits: { autoTurns: 1 } },
+    );
+    expect(third.thread.status).toBe('in_progress');
+    expect(third.thread.outbox).toHaveLength(1);
+    expect(third.thread.outbox[0]).toMatchObject({
+      kind: 'notification',
+      status: 'pending',
+      payload: {
+        event: 'gate_tripped',
+        reason: 'turn_budget_exhausted',
+        messageId: second.message.id,
+      },
+    });
   });
 
   it('counts only pending runs against the queue limit', () => {

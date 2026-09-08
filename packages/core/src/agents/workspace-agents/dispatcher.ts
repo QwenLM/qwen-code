@@ -925,6 +925,14 @@ export function notificationText(thread: Thread, event: ThreadEvent): string {
       return `${label} needs you: an agent asked a question and is waiting.`;
     case 'thread_in_review':
       return `${label} is ready for review.`;
+    case 'gate_tripped':
+      if (event.payload['reason'] === 'turn_budget_exhausted') {
+        return `${label} reached its automatic-turn limit. Reply to reset the turn counter.`;
+      }
+      if (event.payload['reason'] === 'token_budget_exhausted') {
+        return `${label} reached its task-tree token limit. A reply does not reset it; start a new root task to continue.`;
+      }
+      return `${label} reached a dispatch limit.`;
     case 'thread_blocked': {
       const reason = event.payload['reason'];
       return typeof reason === 'string'

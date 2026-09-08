@@ -779,8 +779,11 @@ Dependencies, with an early vertical proof before reliability and UI breadth.
    posts wake both new and coalesced work, and cancel/done persist intent before
    touching the runtime.
 10. **Channel notifications** for blocker raised, aggregate in_review, gate
-    tripped, and terminal failure. Last because it consumes state transitions
-    proven by steps 7-9.
+    tripped, and terminal failure. Gate notifications are persisted with the
+    rejected admission, even when live runs keep the aggregate `in_progress`;
+    they cannot depend on a status transition. Pending notifications of the
+    same gate reason coalesce. No configured destination means they stay pending.
+    Other notifications consume state transitions proven by steps 7-9.
 
 Steps 1-6 are unit-testable. Step 7 is the early integration gate; step 8 adds
 failure injection and restart tests; step 9 adds daemon/browser tests.

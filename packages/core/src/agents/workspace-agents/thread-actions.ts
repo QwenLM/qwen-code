@@ -5,6 +5,7 @@
  */
 
 import {
+  generateEventId,
   generateMessageId,
   generateRunId,
   prepareThreadInTransaction,
@@ -327,6 +328,34 @@ export async function postMessageInTransaction(
     }
 
     outcomes.push({ agentId, agentName: target?.name, decision });
+    if (
+      (decision.reason === 'turn_budget_exhausted' ||
+        decision.reason === 'token_budget_exhausted') &&
+      !next.outbox.some(
+        (event) =>
+          event.kind === 'notification' &&
+          event.status === 'pending' &&
+          event.payload['event'] === 'gate_tripped' &&
+          event.payload['reason'] === decision.reason,
+      )
+    ) {
+      next.outbox = [
+        ...next.outbox,
+        {
+          id: generateEventId(),
+          kind: 'notification',
+          status: 'pending',
+          attempts: 0,
+          createdAt: now,
+          payload: {
+            event: 'gate_tripped',
+            threadId: next.id,
+            messageId: message.id,
+            reason: decision.reason,
+          },
+        },
+      ];
+    }
   }
 
   const storedMessage = { ...message, outcomes: outcomes.map(storeOutcome) };

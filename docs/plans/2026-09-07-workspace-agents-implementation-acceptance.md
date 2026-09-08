@@ -30,9 +30,24 @@ Current run ids, timestamps and limitations are recorded in
 | Cancellation | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open. |
 | Running task after daemon restart | SIGKILL after a durable checkpoint exposed a startup-discovery defect; after its fix, the same run/session recovered as attempt 2 and reached human acceptance. Other crash windows remain open. |
 | Human resolves a blocker | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision. |
+| Automatic-turn gate | Isolated actual-source storage run: 12 running coalesces, posts 13/14 rejected, one pending turn-gate notification; human reply reset to 0, next agent delivery charged 1. Not a model experiment. |
 | Read-only boundary and ambient ownership | Guard wiring and direct source checks exist; full model-driven negative matrix has not been demonstrated. |
 | Storage and reliability gates in steps 3/7/8 | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix. |
 | External notifications | Consumer exists, but no recipient is configured for current acceptance; no external send authorized or observed. |
+
+Gate check (2026-09-08): before the fix, the same 12-turn experiment persisted
+the skip outcomes but produced zero notifications while both runs stayed live.
+Gate admission now writes its notification in the same transaction, without
+requiring an aggregate status change. Replaying the rejected post's
+`originEventId` left the entire stored record unchanged. A separate 10-token
+usage / 10-token cap check rejected two admissions and retained one pending
+token-gate notification. With no destination, the consumer made zero sender
+calls, delivered zero events, and retained both gate reasons as pending.
+These observations come from direct source assertions in temporary storage;
+no model calls, build, lint, or test suite were run. The existing turn-gate test
+now also asserts the pending notification and repeat suppression, but was not
+executed through Vitest. Design §5.2 step 10 no longer describes gate events as
+depending on state transitions: a rejected admission need not change status.
 
 This ledger is not an overall completion claim. The explicit failure cases below
 remain requirements; the demo-first workflow changes how work is sequenced, not
