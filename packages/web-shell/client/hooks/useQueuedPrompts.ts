@@ -425,14 +425,23 @@ function matchesUnboundSubmittingRow(
     return false;
   }
   if (server.content === undefined) {
-    // The started event carries no content to compare media with; only a
-    // resubmitted row may bind there — an ordinary submission's echo waits
-    // for its own admission id.
-    return item.resubmittedAfterIdleRejection === true;
+    // The started event carries no content to compare media with, so no
+    // attachment row can prove ownership here. An ordinary submission's echo
+    // waits for its own admission id, and a resubmitted row binds in the
+    // submit body's id arm.
+    return false;
   }
-  // Files never hydrate into the summary and a degraded or unhydrated image
-  // yields no payload, so only fully comparable images can prove ownership.
   if ((item.files?.length ?? 0) > 0) return false;
+  // A partially hydrated payload may be silently shortened — a lost image
+  // degrades to a text placeholder and a transient failure stays a raw
+  // reference, and contentToImages collects neither — so only fully hydrated
+  // images can prove ownership.
+  if (
+    contentHasDegradedMedia(server.content) ||
+    contentHasUnhydratedMedia(server.content)
+  ) {
+    return false;
+  }
   const serverImages = contentToImages(server.content);
   if (!serverImages || contentToFiles(server.content)) return false;
   const itemImages = item.images ?? [];
@@ -552,11 +561,14 @@ export function useQueuedPrompts({
    * The in-flight pending-prompts GET, if any. Refreshes are single-flight
    * per session: concurrent callers share the snapshot instead of bumping
    * the sequence number, which two re-awaiting submit bodies would
-   * otherwise use to invalidate each other forever.
+   * otherwise use to invalidate each other forever. `seq` is the dispatch
+   * sequence so a caller confirming a state it just changed can refuse to
+   * join a flight older than that change.
    */
   const inflightRefreshRef = useRef<{
     sessionId: string;
     ownerToken: typeof ownerToken;
+    seq: number;
     promise: Promise<RefreshPendingPromptsResult>;
   } | null>(null);
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
@@ -753,11 +765,16 @@ export function useQueuedPrompts({
           if (serverSideUnique) {
             const submittingIndex = next.indexOf(submittingRow);
             if (hasDisplayedPrompt) {
-              // Remember the claim: a resubmitted submit body that later
-              // finds this row gone must not read the splice as a user
-              // cancellation. Only flagged rows have a body that reads it.
-              if (submittingRow.resubmittedAfterIdleRejection === true) {
-                syncClaimedSubmittingRowIdsRef.current.add(submittingRow.id);
+              // Remember the claim: a submit body that later finds this row
+              // gone must not read the splice as a user cancellation. Both
+              // the resubmission branch and the ordinary tail read it.
+              syncClaimedSubmittingRowIdsRef.current.add(submittingRow.id);
+              while (syncClaimedSubmittingRowIdsRef.current.size > 200) {
+                const oldestClaim = syncClaimedSubmittingRowIdsRef.current
+                  .values()
+                  .next().value;
+                if (typeof oldestClaim !== 'number') break;
+                syncClaimedSubmittingRowIdsRef.current.delete(oldestClaim);
               }
               next.splice(submittingIndex, 1);
               continue;
@@ -812,64 +829,87 @@ export function useQueuedPrompts({
   );
 
   const refreshPendingPrompts = useCallback(
-    (targetSessionId = sessionId): Promise<RefreshPendingPromptsResult> => {
+    (
+      targetSessionId = sessionId,
+      notBefore = 0,
+    ): Promise<RefreshPendingPromptsResult> => {
       if (!connected || !targetSessionId)
         return Promise.resolve({ status: 'skipped' });
       if (latestSessionIdRef.current !== targetSessionId)
         return Promise.resolve({ status: 'skipped' });
+      const dispatchRefresh = (): Promise<RefreshPendingPromptsResult> => {
+        const ownerToken = ownerTokenRef.current;
+        const requestSeq = ++refreshRequestSeqRef.current;
+        // The finally clears the ref through the closure; the async body
+        // always yields at the GET await before the finally can run, so
+        // `promise` is assigned by then.
+        const runRefresh = async (): Promise<RefreshPendingPromptsResult> => {
+          try {
+            const result = await sessionActions.getPendingPrompts({
+              sessionId: targetSessionId,
+            });
+            if (requestSeq !== refreshRequestSeqRef.current)
+              return { status: 'superseded' };
+            if (
+              !isCurrentOwnerTokenRef.current(ownerToken) ||
+              latestSessionIdRef.current !== targetSessionId
+            ) {
+              return { status: 'skipped' };
+            }
+            syncServerQueuedPrompts(
+              result.pendingPrompts.filter(
+                (p) => p.state === 'queued' || p.state === 'running',
+              ),
+              targetSessionId,
+              clientId,
+            );
+            return {
+              status: 'refreshed',
+              pendingPrompts: result.pendingPrompts,
+            };
+          } catch (error) {
+            console.warn('Failed to refresh pending prompts', error);
+            return { status: 'failed' };
+          } finally {
+            if (inflightRefreshRef.current?.promise === promise) {
+              inflightRefreshRef.current = null;
+            }
+          }
+        };
+        const promise = runRefresh();
+        inflightRefreshRef.current = {
+          sessionId: targetSessionId,
+          ownerToken,
+          seq: requestSeq,
+          promise,
+        };
+        return promise;
+      };
       const inflight = inflightRefreshRef.current;
       if (
         inflight &&
         inflight.sessionId === targetSessionId &&
         isCurrentOwnerTokenRef.current(inflight.ownerToken)
       ) {
-        return inflight.promise;
-      }
-      const ownerToken = ownerTokenRef.current;
-      const requestSeq = ++refreshRequestSeqRef.current;
-      // The finally clears the ref through the closure; the async body
-      // always yields at the GET await before the finally can run, so
-      // `promise` is assigned by then.
-      const runRefresh = async (): Promise<RefreshPendingPromptsResult> => {
-        try {
-          const result = await sessionActions.getPendingPrompts({
-            sessionId: targetSessionId,
-          });
-          if (requestSeq !== refreshRequestSeqRef.current)
-            return { status: 'superseded' };
+        if (inflight.seq > notBefore) return inflight.promise;
+        // The in-flight snapshot was dispatched before the state change the
+        // caller is confirming, so it can prove nothing about it. Wait the
+        // stale flight out rather than storm the daemon, then take exactly
+        // one fresh snapshot — or join one dispatched meanwhile.
+        return inflight.promise.then(() => {
+          const latest = inflightRefreshRef.current;
           if (
-            !isCurrentOwnerTokenRef.current(ownerToken) ||
-            latestSessionIdRef.current !== targetSessionId
+            latest &&
+            latest.sessionId === targetSessionId &&
+            isCurrentOwnerTokenRef.current(latest.ownerToken) &&
+            latest.seq > notBefore
           ) {
-            return { status: 'skipped' };
+            return latest.promise;
           }
-          syncServerQueuedPrompts(
-            result.pendingPrompts.filter(
-              (p) => p.state === 'queued' || p.state === 'running',
-            ),
-            targetSessionId,
-            clientId,
-          );
-          return {
-            status: 'refreshed',
-            pendingPrompts: result.pendingPrompts,
-          };
-        } catch (error) {
-          console.warn('Failed to refresh pending prompts', error);
-          return { status: 'failed' };
-        } finally {
-          if (inflightRefreshRef.current?.promise === promise) {
-            inflightRefreshRef.current = null;
-          }
-        }
-      };
-      const promise = runRefresh();
-      inflightRefreshRef.current = {
-        sessionId: targetSessionId,
-        ownerToken,
-        promise,
-      };
-      return promise;
+          return dispatchRefresh();
+        });
+      }
+      return dispatchRefresh();
     },
     [clientId, connected, sessionActions, sessionId, syncServerQueuedPrompts],
   );
@@ -1097,7 +1137,13 @@ export function useQueuedPrompts({
         if (isCurrent()) await refreshPendingPrompts(targetSessionId);
         return undefined;
       }
-      const pendingResult = await refreshPendingPrompts(targetSessionId);
+      // The pending snapshot must post-date the mid-turn snapshot above:
+      // joining a GET dispatched before the promotion would read a queue
+      // that cannot list the promoted message and drop its row.
+      const pendingResult = await refreshPendingPrompts(
+        targetSessionId,
+        refreshRequestSeqRef.current,
+      );
       if (!isCurrent()) return undefined;
       const waitingIds = applyMidTurnSnapshot(
         snapshot,
@@ -1619,12 +1665,15 @@ export function useQueuedPrompts({
             latestSessionActiveRef.current &&
             !localMessageAppended
           ) {
-            // Refreshes are single-flight per session, so this shares any
-            // in-flight GET instead of superseding it: the snapshot is by
-            // construction the newest, and a concurrent body cannot
-            // invalidate it. The UI-side writes stay behind the sequence
-            // fence inside `refreshPendingPrompts`.
-            const refresh = await refreshPendingPrompts(targetSessionId);
+            // Refreshes are single-flight per session, but the snapshot must
+            // post-date this body's own admission: joining a GET dispatched
+            // before it would read a queue that cannot list the prompt and
+            // confirm a wrong verdict. The UI-side writes stay behind the
+            // sequence fence inside `refreshPendingPrompts`.
+            const refresh = await refreshPendingPrompts(
+              targetSessionId,
+              refreshRequestSeqRef.current,
+            );
             refreshedInBody = refresh.status === 'refreshed';
             if (
               !isCurrentOwnerTokenRef.current(ownerToken) ||
@@ -1765,12 +1814,20 @@ export function useQueuedPrompts({
               }
               return;
             }
+            // A start or completion that beat the snapshot wins over it:
+            // stamping the id here would mark a running prompt queued, and
+            // its Remove would abort the turn.
+            const startedSinceSnapshot =
+              displayedServerPromptIdsRef.current.has(result.promptId) ||
+              pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              completedPromptIdsRef.current.has(result.promptId);
             // Bind by the id the daemon returned, not by rendered text:
             // identical resubmissions carrying attachments suppress both the
             // text binding and the materialization, and the fall-through
             // below echoes a message the daemon still holds queued.
             const queuedInSnapshot =
               !settledOrRemoving &&
+              !startedSinceSnapshot &&
               refresh.pendingPrompts.some(
                 (p) => p.promptId === result.promptId && p.state === 'queued',
               );
@@ -1812,6 +1869,17 @@ export function useQueuedPrompts({
           const current = queuedPromptsRef.current;
           const idx = current.findIndex((p) => p.id === localId);
           if (idx === -1) {
+            if (syncClaimedSubmittingRowIdsRef.current.delete(localId)) {
+              // The confirming sync attributed this row to an
+              // already-displayed prompt with the same rendered text and
+              // dropped it — nothing was cleared, so the admitted prompt
+              // stays and the sync's own row carries it.
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              if (!refreshedInBody) void refreshPendingPrompts(targetSessionId);
+              return;
+            }
             sessionActions
               .removePendingPrompt(result.promptId, {
                 sessionId: targetSessionId,
@@ -1848,7 +1916,17 @@ export function useQueuedPrompts({
           ) {
             return;
           }
-          if (!queuedPromptsRef.current.some((p) => p.id === localId)) return;
+          // A row the confirming sync claimed for an already-displayed
+          // prompt is gone without any user cancellation; the failure path
+          // still owns it, or the draft would vanish with no error.
+          const syncClaimed =
+            syncClaimedSubmittingRowIdsRef.current.delete(localId);
+          if (
+            !syncClaimed &&
+            !queuedPromptsRef.current.some((p) => p.id === localId)
+          ) {
+            return;
+          }
           const next = queuedPromptsRef.current.filter(
             (prompt) => prompt.id !== localId,
           );
@@ -2682,7 +2760,13 @@ export function useQueuedPrompts({
           return false;
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
-        const refreshResult = await refreshPendingPrompts(targetSessionId);
+        // The confirming snapshot must post-date the DELETE: joining a GET
+        // dispatched before it would re-list the prompt and keep the row its
+        // own removal already deleted.
+        const refreshResult = await refreshPendingPrompts(
+          targetSessionId,
+          refreshRequestSeqRef.current,
+        );
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return true;
         if (refreshResult.status === 'failed') {
           setQueuedPromptFlags(target.id, {
