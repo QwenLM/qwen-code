@@ -124,7 +124,6 @@ import {
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import {
   collectScheduledTaskSession,
-  getScheduledTaskSessionGroup,
   type ScheduledTaskSessionSection,
 } from './scheduled-task-session-groups';
 import {
@@ -179,13 +178,6 @@ interface StandaloneSessionRowAdapter {
   onArchive?: () => void;
   onUnarchive?: () => void;
   onDelete: () => void;
-}
-
-function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
-  return (
-    session.sourceType === 'scheduled_task' ||
-    getScheduledTaskSessionGroup(session) !== undefined
-  );
 }
 
 function getSessionIdentity(
@@ -4171,9 +4163,6 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
-        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
-      ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
@@ -4227,17 +4216,6 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
-            {scheduledTaskIcon && (
-              <span className={styles.sessionStatusSlot}>
-                <span
-                  className={styles.sessionSourceIcon}
-                  data-web-shell-scheduled-task-session
-                  title={t('sidebar.scheduledTasks')}
-                >
-                  {scheduledTaskIcon}
-                </span>
-              </span>
-            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4441,28 +4419,14 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {scheduledTaskIcon ? (
-              <span
-                className={styles.sessionSourceIcon}
-                data-web-shell-scheduled-task-session
-                title={t('sidebar.scheduledTasks')}
-              >
-                {scheduledTaskIcon}
-              </span>
-            ) : null}
             {completedUnread ? (
               <span
-                className={cx(
-                  styles.sessionStatusDot,
-                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
-                )}
+                className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {session.hasActivePrompt &&
-            !scheduledTaskIcon &&
-            !completedUnread ? (
+            {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,

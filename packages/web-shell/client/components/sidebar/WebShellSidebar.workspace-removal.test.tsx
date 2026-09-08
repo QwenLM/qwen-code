@@ -4698,7 +4698,7 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
-  it('groups scheduled-task runs under the task title and source icon', async () => {
+  it('groups scheduled-task runs under the task title', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',
       displayName: 'Hourly review · 08-31 09:30',
@@ -4739,11 +4739,6 @@ describe('WebShellSidebar session source switch', () => {
     );
     const row = title?.closest('[role="button"]');
     expect(row).toBeTruthy();
-    const sourceIcon = row?.querySelector(
-      '[data-web-shell-scheduled-task-session]',
-    );
-    expect(sourceIcon).toBeTruthy();
-    expect(sourceIcon?.getAttribute('title')).toBe('Scheduled Tasks');
     expect(row?.textContent).not.toContain('🧵');
     expect(row?.textContent).not.toContain('⏰');
 
@@ -4761,9 +4756,6 @@ describe('WebShellSidebar session source switch', () => {
         (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
       )
       ?.closest('[role="button"]');
-    expect(
-      completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
-    ).toBeTruthy();
     expect(
       completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
     ).toBeTruthy();

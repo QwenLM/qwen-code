@@ -1029,36 +1029,10 @@
   animation: sidebarPulse 1.6s ease-in-out infinite;
 }
 
-.sessionStatusDotOverlay {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 5px;
-  height: 5px;
-  box-shadow: 0 0 0 1.5px var(--sidebar-background);
-}
-
 /* A running turn gets the same pulsing dot in green, so busy sessions are
    scannable without waiting for the right-edge spinner. */
 .sessionStatusDotRunning {
   color: var(--success-color, #3fb950);
-}
-
-.sessionSourceIcon {
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted-foreground);
-}
-
-.sessionSourceIcon svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
 }
 
 .collapsedSessionStatusDot {
