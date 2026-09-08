@@ -135,6 +135,16 @@ describe('package scripts', () => {
     );
   });
 
+  it('mirrors npm overrides in pnpm-workspace.yaml', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+    const { cliui, ...npmOverrides } = readPackageJson().overrides;
+
+    expect(workspace.overrides).toMatchObject({
+      ...npmOverrides,
+      'cliui>wrap-ansi': cliui['wrap-ansi'],
+    });
+  });
+
   it('checks both lockfiles for integrity', () => {
     const result = spawnSync(
       process.execPath,
