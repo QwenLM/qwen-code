@@ -9728,7 +9728,7 @@ export class Config {
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
 
-    if (options?.forSubAgent) {
+    if (options?.forSubAgent || this.sessionSourceType === 'agent') {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);

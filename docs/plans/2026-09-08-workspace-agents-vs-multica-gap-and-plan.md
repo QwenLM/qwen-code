@@ -2,6 +2,28 @@
 
 ## Current correction — task orchestration before process isolation
 
+### Browser/source acceptance observations, 2026-09-08
+
+- Direct source execution of `Config.createToolRegistry` now reports all six
+  `thread_*` tools for a top-level `agent` session and zero for an ordinary
+  session. Previously registration required `forSubAgent`, so replacement
+  sessions could not split work or explicitly close runs. The existing ambient
+  store checks remain the authority for every tool invocation.
+- Chrome against Vite on 5173 and the source daemon on 4170 reproduced the
+  shared-task page failing to parse an HTML response. The backend's plural
+  `/workspaces/:workspace/agents` prefix also collided with the existing
+  agent-definition `/:agentType` route. The collaboration backend now matches
+  the client's separate `/workspaces/:workspace/agent` prefix. After restart,
+  the page loads the real empty roster and server capability description with
+  no parse or missing-subagent error. No agents or tasks were created.
+- Task selection now clears the previous detail/draft, ignores stale refresh
+  and preview responses, and does not render task A's controls with task B's
+  ID. This race fix is source-reviewed, not yet browser race-injection verified.
+- Live model acceptance is **not passed**: the ACP child exits during startup
+  because the locally resolved bridge package lacks `DAEMON_AGENT_RUN_META_KEY`.
+  No build or local CI was run. The tool-registry observation and empty-panel
+  observation do not establish concurrent model work or child-task acceptance.
+
 The owner's clarified goal is existing agents collaborating on tasks, with
 assignment, child tasks, reports and human acceptance visible in the panel.
 Separate OS processes are not a prerequisite for this slice. Historical claims

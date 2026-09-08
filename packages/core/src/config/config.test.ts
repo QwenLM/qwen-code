@@ -12864,6 +12864,26 @@ describe('applyWorkspaceAgentPersona', () => {
     expect(config.getWorkspaceAgentName()).toBe('alice');
   });
 
+  it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
+    const agent = await agentSession().createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    const ordinary = await new Config(baseParams).createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    for (const name of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(agent.getAllToolNames()).toContain(name);
+      expect(ordinary.getAllToolNames()).not.toContain(name);
+    }
+  });
+
   it('refuses on a session that is not an agent', () => {
     // Otherwise any session could be handed a persona and post under a name
     // that is not its own.

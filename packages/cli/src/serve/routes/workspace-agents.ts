@@ -272,7 +272,8 @@ export function registerWorkspaceAgentRoutes(
   app: Application,
   deps: RegisterWorkspaceAgentRoutesDeps,
 ): void {
-  const prefix = '/workspaces/:workspace/agents';
+  // /agents/:agentType already belongs to reusable agent definitions.
+  const prefix = '/workspaces/:workspace/agent';
   const owners = new Map<
     string,
     {

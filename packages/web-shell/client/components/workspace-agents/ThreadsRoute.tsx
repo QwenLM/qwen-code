@@ -156,24 +156,46 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const createAssigneeRef = useRef<string | undefined>(undefined);
+  const scope = useMemo(() => ({ client, openId }), [client, openId]);
+  const activeScope = useRef(scope);
+  activeScope.current = scope;
+  const refreshSequence = useRef(0);
+  const appliedRefresh = useRef(0);
+
+  const openThread = (id?: string) => {
+    setOpenId(id);
+    setDetail(undefined);
+    setDraft('');
+    setPreview(undefined);
+    setActionError(undefined);
+  };
 
   const refresh = useCallback(async () => {
     if (!client) return;
+    const sequence = ++refreshSequence.current;
     try {
       const [nextAgents, nextThreads, nextDetail] = await Promise.all([
         client.listAgents(),
         client.listThreads(),
         openId ? client.getThread(openId) : undefined,
       ]);
+      if (activeScope.current !== scope || sequence < appliedRefresh.current) {
+        return;
+      }
+      appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
       setRefreshError(undefined);
     } catch (cause) {
+      if (activeScope.current !== scope || sequence < appliedRefresh.current) {
+        return;
+      }
+      appliedRefresh.current = sequence;
       setRefreshError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [client, openId]);
+  }, [client, openId, scope]);
 
   useEffect(() => {
     void refresh();
@@ -187,15 +209,23 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
       return;
     }
     const asked = draft;
+    let cancelled = false;
     const timer = setTimeout(() => {
       void client
         .previewReply(openId, asked)
         .then((result) => {
-          if (draftRef.current === asked) setPreview(result.targets);
+          if (!cancelled && draftRef.current === asked) {
+            setPreview(result.targets);
+          }
         })
-        .catch(() => setPreview(undefined));
+        .catch(() => {
+          if (!cancelled) setPreview(undefined);
+        });
     }, PREVIEW_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [client, draft, openId]);
 
   const previewThread = useCallback(
@@ -249,6 +279,17 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
     return <p role="alert">Open a workspace before using shared threads.</p>;
   }
 
+  if (openId && detail?.id !== openId) {
+    return (
+      <div>
+        <button type="button" onClick={() => openThread()}>
+          Back to tasks
+        </button>
+        <p role="status">{error ?? 'Loading task…'}</p>
+      </div>
+    );
+  }
+
   if (openId && detail) {
     return (
       <>
@@ -258,6 +299,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
           </p>
         ) : null}
         <ThreadView
+          key={openId}
           thread={detail}
           agents={agents}
           draft={draft}
@@ -266,17 +308,15 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
             void mutate(async () => {
               if (!draft.trim()) return;
               const result = await client.postReply(openId, draft);
-              setDraft('');
-              setPreview(undefined);
+              if (activeScope.current === scope && draftRef.current === draft) {
+                setDraft('');
+                setPreview(undefined);
+              }
               return result;
             })
           }
-          onBack={() => {
-            setOpenId(undefined);
-          }}
-          onOpenThread={(threadId) => {
-            setOpenId(threadId);
-          }}
+          onBack={() => openThread()}
+          onOpenThread={openThread}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onCancelRun={(runId) =>
             void mutate(() => client.cancelRun(openId, runId))
@@ -309,7 +349,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
         threads={threads}
         createPreview={createPreview}
         pending={pending}
-        onOpenThread={setOpenId}
+        onOpenThread={openThread}
         onCreateAgent={(input) => void mutate(() => client.createAgent(input))}
         onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
         onSetAgentEnabled={(id, enabled) =>
@@ -323,7 +363,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
           void mutate(async () => {
             const created = await client.createThread(input);
             setCreatePreview(undefined);
-            setOpenId(created.id);
+            openThread(created.id);
             return created;
           })
         }
