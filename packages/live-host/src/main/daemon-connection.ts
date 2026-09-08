@@ -560,6 +560,18 @@ export class LiveDaemonConnection {
       : undefined;
   }
 
+  getConfigFilePath(): string | undefined {
+    if (
+      this.quitPromise ||
+      this.quitTarget ||
+      !this.welcomed ||
+      this.snapshot.phase !== 'ready' ||
+      this.socket?.readyState !== WebSocket.OPEN
+    )
+      return undefined;
+    return this.currentRecord?.configPath;
+  }
+
   private handleDiscovery(result: DiscoveryResult): void {
     if (this.quitPromise || this.quitTarget) return;
     if (result.kind !== 'ready') {

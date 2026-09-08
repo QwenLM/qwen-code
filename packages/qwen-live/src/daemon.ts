@@ -17,7 +17,7 @@
 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { AcpAdaptor } from './adaptor/acp-adaptor.js';
 import { QwenCodeAdaptor } from './adaptor/qwen-code-adaptor.js';
@@ -523,6 +523,7 @@ export class LiveDaemon {
     const record = {
       url,
       token: this.token,
+      configPath: resolve(this.config.dataDir, 'config.json'),
       protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
       pid: process.pid,
       instanceNonce: this.instanceNonce,

@@ -58,6 +58,13 @@ export class SettingsPanel {
   private readonly modeDescription = document.createElement('p');
   private readonly memory: MemoryPanel;
   private readonly close = button('ui.close', () => this.hide());
+  private readonly openConfig = button(
+    'ui.openConfig',
+    () => void this.openConfigFile(),
+  );
+  private readonly configStatus = document.createElement('p');
+  private openingConfig = false;
+  private configError = '';
   private readonly english = button(
     'language.english',
     () => void this.run(() => this.api.setLanguage('en')),
@@ -118,6 +125,14 @@ export class SettingsPanel {
     makeOverlayDraggable(header, api);
     const body = document.createElement('div');
     body.className = 'settings-body';
+    const config = document.createElement('div');
+    config.className = 'settings-config';
+    uiLabel(this.openConfig, 'ui.openConfig');
+    this.configStatus.className = 'settings-hint settings-config-status';
+    this.configStatus.id = 'settings-config-status';
+    this.configStatus.setAttribute('role', 'status');
+    this.openConfig.setAttribute('aria-describedby', this.configStatus.id);
+    config.append(this.openConfig, this.configStatus);
     uiLabel(this.device, 'ui.audioSource');
     this.device.addEventListener('change', () => {
       const id = this.device.value || undefined;
@@ -137,6 +152,7 @@ export class SettingsPanel {
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
     body.append(
+      config,
       field('ui.audioSource', this.device, this.refresh),
       field('ui.videoSource', this.sourceScreen, this.sourceCamera),
       field('ui.captureMode', this.modeDemand, this.modeFeed),
@@ -262,6 +278,23 @@ export class SettingsPanel {
     const unavailable = state.connection !== 'ready';
     const language = state.language ?? 'en';
     localizeUi(this.element, language);
+    this.openConfig.disabled =
+      this.openingConfig ||
+      this.busy ||
+      unavailable ||
+      !state.canOpenConfig ||
+      Boolean(state.quitState);
+    this.configStatus.textContent =
+      displayLiveMessage(language, this.configError) ||
+      liveText(
+        language,
+        this.openingConfig
+          ? 'ui.openingConfig'
+          : state.canOpenConfig
+            ? 'ui.openConfigHint'
+            : 'host.config.unavailable',
+      );
+    this.configStatus.classList.toggle('error', Boolean(this.configError));
     for (const [option, value] of this.deviceLabels) {
       option.textContent = displayLiveMessage(language, value);
     }
@@ -311,6 +344,21 @@ export class SettingsPanel {
           ? liveText(language, 'ui.loadingDevices')
           : '');
     this.status.classList.toggle('error', Boolean(this.error));
+  }
+
+  private async openConfigFile(): Promise<void> {
+    if (this.disposed || this.openConfig.disabled) return;
+    this.openingConfig = true;
+    this.configError = '';
+    this.render();
+    try {
+      await this.api.openConfig();
+    } catch (error) {
+      this.configError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.openingConfig = false;
+      this.render();
+    }
   }
 
   private async run(action: () => Promise<void>): Promise<void> {

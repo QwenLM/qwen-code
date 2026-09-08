@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { request } from 'node:http';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BackendRegistry } from './adaptor/registry.js';
@@ -169,6 +169,26 @@ afterEach(async () => {
 });
 
 describe('LiveDaemon', () => {
+  it.each(['absolute', 'relative'])(
+    'advertises the configuration under a custom %s data directory',
+    async (pathType) => {
+      const config = await testConfig();
+      config.dataDir = join(config.dataDir, 'custom data');
+      const configPath = resolve(config.dataDir, 'config.json');
+      if (pathType === 'relative')
+        config.dataDir = relative(process.cwd(), config.dataDir);
+      const daemon = startedDaemon(config);
+
+      await daemon.start();
+
+      const record = await readDiscoveryRecord(config.discoveryDir);
+      expect(record.configPath).toBe(configPath);
+      await expect(readFile(configPath, 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
   it('confirms and persists language independently of disabled Memory', async () => {
     const config = await testConfig();
     await mkdir(config.dataDir, { recursive: true });

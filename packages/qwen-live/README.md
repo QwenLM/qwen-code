@@ -96,7 +96,15 @@ Camera selection shows a nearby preview by default. Its floating eye button
 only hides/shows the preview; it does not stop camera input or frame delivery.
 Selecting Screen or quitting retains the existing camera shutdown behavior.
 
-**Language** is the last Settings group. It switches the fixed Live interface
+**Open config.json ↗** at the top of Settings opens the connected standalone
+daemon's actual configuration in the OS-associated JSON editor or IDE. This
+respects the daemon's `QWEN_LIVE_DATA_DIR`, even when Host starts separately.
+Save the file and restart Qwen Live to apply manual edits. Older daemons and
+built-in `qwen serve` do not advertise this action. Missing, non-regular (including
+symlink) files or editor failures show an error; the action never creates or
+overwrites configuration.
+
+**Language** is followed by Theme at the end of Settings. It switches the fixed Live interface
 between English and Simplified Chinese and saves the selection in the top-level
 `language` config field (`"en"` or `"zh-CN"`). Existing configs without the field
 remain English. Language changes apply during a call without restarting media;

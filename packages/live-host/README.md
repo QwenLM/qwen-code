@@ -117,6 +117,11 @@ Host 启动后会等待连接、当前来源权限和自检就绪，再自动开
 日常设置集中在 `Settings`：Audio Source（麦克风）、Video Source（Screen／Camera）、
 Capture Mode（On Demand／Live Feed）三个同级设置组，以及独立 daemon 支持的 Memory。
 模式说明随已确认的选项更新。设置支持 Esc、外部点击关闭，编辑草稿保留。
+顶部的 `Open config.json ↗`／`打开 config.json ↗` 会使用系统为 JSON 文件关联的
+默认 IDE／文本编辑器，打开当前独立 daemon 实际使用的配置（默认
+`~/.qwen-live/config.json`，也支持 daemon 的 `QWEN_LIVE_DATA_DIR`）。保存后需重启
+Qwen Live 才应用手动修改。旧 daemon 或内置 `qwen serve` 不提供此入口能力；文件
+缺失、不是常规文件（包括符号链接）或编辑器打开失败时会提示，不自动创建或覆盖配置。
 设置标题栏可以拖动，与小球共享位置记忆；打开时先等待原生窗口完成屏内定位再显示，
 避免边缘处先露出被裁切的面板。用户说话的小音量视觉响应已增强，保留有界动画和缓慢
 回落，不会提高发送给模型的音频音量。

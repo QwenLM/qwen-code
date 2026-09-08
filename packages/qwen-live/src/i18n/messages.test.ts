@@ -46,6 +46,17 @@ describe('Live display text catalogue', () => {
     ).toBe(liveText('zh-CN', 'code.camera_snapshot_resolution_unavailable'));
   });
 
+  it('points config-file recovery at the standalone Live initializer', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      expect(liveText(language, 'host.config.inaccessible')).toContain(
+        'qwen-live init',
+      );
+      expect(liveText(language, 'host.config.inaccessible')).not.toContain(
+        'qwen live init',
+      );
+    }
+  });
+
   it('bounds encoded details without emitting truncated JSON', () => {
     for (const detail of [
       'large '.repeat(2000),

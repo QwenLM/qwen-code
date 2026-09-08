@@ -440,6 +440,16 @@ button[aria-pressed='true'] {
 .settings-body::-webkit-scrollbar-thumb:hover {
   background: var(--live-scroll-thumb-hover);
 }
+.settings-config {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.settings-config > button {
+  justify-self: end;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 .settings-field,
 .memory-field,
 .memory-name-form,
@@ -484,6 +494,7 @@ button[aria-pressed='true'] {
   display: none;
 }
 .settings-status.error,
+.settings-config-status.error,
 .memory-status.error {
   color: var(--live-error);
 }

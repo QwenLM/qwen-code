@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter, once } from 'node:events';
 import { liveText, liveMessage } from '@qwen-code/qwen-live/i18n';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -58,11 +59,13 @@ describe('LiveDaemonConnection', () => {
     const directory = await mkdtemp(join(tmpdir(), 'qwen-live-connection-'));
     cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const discoveryPath = join(directory, 'daemon.json');
+    const configPath = join(directory, 'custom data', 'config.json');
     await writeFile(
       discoveryPath,
       JSON.stringify({
         url: `http://127.0.0.1:${address.port}`,
         token: 'private-token',
+        configPath,
         protocolVersion: LIVE_PROTOCOL_VERSION,
         pid: process.pid,
         instanceNonce: 'abcdefghijklmnop',
@@ -147,6 +150,7 @@ describe('LiveDaemonConnection', () => {
       discoveryPath,
     );
     cleanup.push(() => connection.stop());
+    assert.equal(connection.getConfigFilePath(), undefined);
     connection.start();
 
     const request = await requestPromise;
@@ -157,6 +161,7 @@ describe('LiveDaemonConnection', () => {
     assert(peer);
 
     const helloFrame = await nextMessage(peer);
+    assert.equal(connection.getConfigFilePath(), undefined);
     assert.equal(helloFrame.isBinary, false);
     const hello = JSON.parse(
       helloFrame.data.toString('utf8'),
@@ -217,6 +222,8 @@ describe('LiveDaemonConnection', () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(snapshots.at(-1), 'ready');
+    assert.equal(connection.getConfigFilePath(), configPath);
+    assert.equal('configPath' in connection.getSnapshot(), false);
     assert.deepEqual(connection.getSnapshot().capabilities, {
       outputAudioEndMarkerV1: true,
     });
@@ -480,6 +487,109 @@ describe('LiveDaemonConnection', () => {
       epoch: 0,
       outputId: 23,
     });
+    connection.stop();
+    assert.equal(connection.getConfigFilePath(), undefined);
+  });
+
+  it('withholds configuration authority on nonce mismatch, disconnect and Quit', async () => {
+    for (const outcome of ['mismatch', 'disconnect', 'quit']) {
+      const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+      cleanup.push(() => {
+        for (const client of server.clients) client.terminate();
+        server.close();
+      });
+      await once(server, 'listening');
+      const address = server.address();
+      assert(address && typeof address === 'object');
+      const directory = await mkdtemp(join(tmpdir(), 'live-config-connect-'));
+      cleanup.push(() => rm(directory, { recursive: true, force: true }));
+      const discoveryPath = join(directory, 'daemon.json');
+      const configPath = join(directory, 'config.json');
+      await writeFile(
+        discoveryPath,
+        JSON.stringify({
+          url: `http://127.0.0.1:${address.port}`,
+          token: 'fixture-private-token',
+          configPath,
+          protocolVersion: LIVE_PROTOCOL_VERSION,
+          pid: process.pid,
+          instanceNonce: 'abcdefghijklmnop',
+        }),
+        { mode: 0o600 },
+      );
+      const changes = new EventEmitter();
+      const connection = new LiveDaemonConnection(
+        '0.0.6',
+        {
+          getReadiness: () => ({
+            permissions: {
+              microphone: 'granted',
+              camera: 'granted',
+              accessibility: 'granted',
+              screenRecording: 'granted',
+            },
+            selfChecks: {
+              audioInput: true,
+              audioOutput: true,
+              globalShortcut: true,
+              appshot: true,
+            },
+          }),
+          onSnapshot: () => changes.emit('snapshot'),
+          onOutputAudio: () => undefined,
+          onOutputAudioFinished: () => undefined,
+          onClearOutput: () => undefined,
+        },
+        discoveryPath,
+      );
+      cleanup.push(() => connection.stop());
+      const waitForPhase = async (phase: string) => {
+        const signal = AbortSignal.timeout(3_000);
+        while (connection.getSnapshot().phase !== phase)
+          await once(changes, 'snapshot', { signal });
+      };
+      const peerReady = new Promise<WebSocket>((resolve, reject) => {
+        server.once('connection', (peer) => {
+          void nextMessage(peer).then(() => resolve(peer), reject);
+        });
+      });
+      connection.start();
+      const peer = await peerReady;
+      assert.equal(connection.getConfigFilePath(), undefined);
+      peer.send(
+        JSON.stringify({
+          type: 'host.welcome',
+          protocolVersion: LIVE_PROTOCOL_VERSION,
+          daemonInstanceNonce:
+            outcome === 'mismatch' ? 'wrong_nonce_0001' : 'abcdefghijklmnop',
+          heartbeatIntervalMs: 10_000,
+          epoch: 0,
+          status: {
+            v: 1,
+            available: true,
+            state: 'idle',
+            shortcut: 'Command+E',
+          },
+        }),
+      );
+      if (outcome === 'mismatch') {
+        await waitForPhase('error');
+        assert.equal(connection.getSnapshot().error, 'daemon_identity');
+      } else {
+        await waitForPhase('ready');
+        assert.equal(connection.getConfigFilePath(), configPath);
+        if (outcome === 'quit') {
+          const quitting = connection.requestQuit();
+          assert.equal(connection.getConfigFilePath(), undefined);
+          await quitting;
+        } else {
+          peer.close();
+          await waitForPhase('disconnected');
+        }
+      }
+      assert.equal(connection.getConfigFilePath(), undefined);
+      connection.stop();
+    }
   });
 
   it('keeps retrying the same discovery identity slowly after the fast budget', async () => {
@@ -585,6 +695,7 @@ describe('LiveDaemonConnection', () => {
     assert.equal(connectionCount, 3);
     assert(errors.includes('daemon_reconnect_exhausted'));
     assert.equal(connection.getSnapshot().phase, 'ready');
+    assert.equal(connection.getConfigFilePath(), undefined);
     assert(readyPeer);
     readyPeer.send(
       JSON.stringify({

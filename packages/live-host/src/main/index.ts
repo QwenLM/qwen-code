@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createWriteStream, mkdirSync } from 'node:fs';
+import { createWriteStream, lstatSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   isLiveLanguage,
@@ -415,6 +415,10 @@ function publicState(): HostPublicState {
     resolvedTheme: resolvedTheme(),
     language,
     connection: connection.phase,
+    canOpenConfig:
+      connection.phase === 'ready' &&
+      !quitState &&
+      Boolean(daemon.getConfigFilePath()),
     ...(quitState ? { quitState } : {}),
     overlayOffset: { ...overlayOffset },
     ...(connection.error ? { connectionError: connection.error } : {}),
@@ -1410,6 +1414,28 @@ async function captureOnDemandVisual(request: {
 }
 
 function registerIpc(): void {
+  ipcMain.handle('live:open-config', async (event) => {
+    if (
+      !isTrustedSender(event) ||
+      !rendererEventsEnabled ||
+      connection.phase !== 'ready' ||
+      quitState
+    )
+      throw new Error(liveMessage('host.config.unavailable'));
+    const configPath = daemon.getConfigFilePath();
+    if (!configPath) throw new Error(liveMessage('host.config.unavailable'));
+    try {
+      if (!lstatSync(configPath).isFile()) throw new Error();
+    } catch {
+      throw new Error(liveMessage('host.config.inaccessible'));
+    }
+    try {
+      const error = await shell.openPath(configPath);
+      if (error) throw new Error();
+    } catch {
+      throw new Error(liveMessage('host.config.openFailed'));
+    }
+  });
   ipcMain.on('live:subagents:orb-keyboard', (event, held: unknown) => {
     if (
       isTrustedSender(event) &&

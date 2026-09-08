@@ -141,6 +141,7 @@ function fixture(saved?: LiveTheme, systemDark = false) {
     liveMessage,
     nativeTheme,
     overlay,
+    daemon: { getConfigFilePath: () => undefined },
     overlayReady: true,
     rendererEventsEnabled: true,
     theme: 'system',

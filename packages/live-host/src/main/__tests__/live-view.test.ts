@@ -7,6 +7,7 @@ import { liveMessage, liveText } from '@qwen-code/qwen-live/i18n';
 
 const baseline: HostPublicState = {
   connection: 'ready',
+  canOpenConfig: true,
   live: { v: 1, available: true, state: 'idle', shortcut: 'Command+E' },
   permissions: {
     microphone: 'granted',
@@ -91,6 +92,9 @@ function setup(overrides: Partial<LiveHostApi> = {}) {
     setSettingsOpen: async (value) => {
       calls.push(['settings', value]);
     },
+    openConfig: async () => {
+      calls.push(['openConfig']);
+    },
     setOverlayLayout: (layout) => {
       layouts.push(layout);
     },
@@ -172,6 +176,118 @@ function setup(overrides: Partial<LiveHostApi> = {}) {
 }
 
 describe('persistent Live orb and Settings', () => {
+  it('opens the active config with no path argument, without dragging or changing the call', async () => {
+    const h = setup();
+    h.click('Settings');
+    await settled();
+    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
+    assert.equal(h.get('.settings-body').firstElementChild, open.parentElement);
+    assert.equal(open.textContent, 'Open config.json ↗');
+    assert.equal(open.disabled, false);
+    assert.match(
+      h.get('.settings-config-status').textContent ?? '',
+      /restart Qwen Live/,
+    );
+    h.calls.length = 0;
+    h.pointer(open, 'pointerdown', 100, 100);
+    h.pointer(open, 'pointermove', 130, 120);
+    h.pointer(open, 'pointerup', 130, 120);
+    assert.deepEqual(h.calls, []);
+    open.click();
+    await settled();
+    assert.deepEqual(h.calls, [['openConfig']]);
+    assert.equal(h.get('.settings-layer').hidden, false);
+    h.update({ ...h.state(), language: 'zh-CN' });
+    assert.equal(open.textContent, '打开 config.json ↗');
+    assert.equal(open.getAttribute('aria-label'), '打开 config.json ↗');
+    assert.match(
+      h.get('.settings-config-status').textContent ?? '',
+      /保存后重启/,
+    );
+    const groups = Array.from(
+      h.app.querySelectorAll('.settings-field > strong'),
+    );
+    assert.deepEqual(
+      groups.slice(-2).map((group) => group.textContent),
+      ['语言', '主题'],
+    );
+  });
+
+  it('deduplicates pending config opens and shows localized errors next to the action for retry', async () => {
+    let calls = 0;
+    let rejectOpen: (error: Error) => void = () => {};
+    const h = setup({
+      openConfig: () => {
+        calls++;
+        return new Promise<void>((_resolve, reject) => {
+          rejectOpen = reject;
+        });
+      },
+    });
+    h.click('Settings');
+    await settled();
+    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
+    open.click();
+    open.click();
+    assert.equal(calls, 1);
+    assert.equal(open.disabled, true);
+    assert.equal(
+      h.get('.settings-config-status').textContent,
+      'Opening editor…',
+    );
+    h.update({ ...h.state(), language: 'zh-CN' });
+    assert.equal(
+      h.get('.settings-config-status').textContent,
+      '正在打开编辑器…',
+    );
+    rejectOpen(
+      new Error(
+        `Error invoking remote method 'live:open-config': Error: ${liveMessage('host.config.openFailed')}`,
+      ),
+    );
+    await settled();
+    assert.equal(open.disabled, false);
+    assert.equal(
+      h.get('.settings-config-status.error').textContent,
+      liveText('zh-CN', 'host.config.openFailed'),
+    );
+    open.click();
+    assert.equal(calls, 2);
+    assert.equal(
+      h.get('.settings-config-status').classList.contains('error'),
+      false,
+    );
+    rejectOpen(new Error(liveMessage('host.config.inaccessible')));
+    await settled();
+    assert.equal(
+      h.get('.settings-config-status.error').textContent,
+      liveText('zh-CN', 'host.config.inaccessible'),
+    );
+  });
+
+  it('does not offer config opening on unsupported, quitting or disconnected connections', async () => {
+    const h = setup();
+    h.click('Settings');
+    await settled();
+    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
+    h.calls.length = 0;
+    for (const state of [
+      { ...baseline, canOpenConfig: undefined },
+      { ...baseline, canOpenConfig: false },
+      { ...baseline, quitState: 'pending' as const },
+      { ...baseline, connection: 'disconnected' as const },
+    ]) {
+      h.update(state);
+      assert.equal(open.disabled, true);
+      open.click();
+    }
+    assert.equal(
+      h.calls.some(([action]) => action === 'openConfig'),
+      false,
+    );
+    assert.equal(h.get('.settings-layer').hidden, true);
+  });
+
   it('keeps mute indicators below the primary call state in English and Chinese without requiring hover', () => {
     const h = setup();
     for (const language of ['en', 'zh-CN'] as const) {

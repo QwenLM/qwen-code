@@ -41,6 +41,15 @@ export const LIVE_MESSAGES = {
   'ui.videoSource': { en: 'Video Source', 'zh-CN': '视频来源' },
   'ui.captureMode': { en: 'Capture Mode', 'zh-CN': '获取模式' },
   'ui.settings': { en: 'Settings', 'zh-CN': '设置' },
+  'ui.openConfig': {
+    en: 'Open config.json ↗',
+    'zh-CN': '打开 config.json ↗',
+  },
+  'ui.openingConfig': { en: 'Opening editor…', 'zh-CN': '正在打开编辑器…' },
+  'ui.openConfigHint': {
+    en: 'Open in your default editor. Save, then restart Qwen Live to apply file edits.',
+    'zh-CN': '使用默认编辑器打开。保存后重启 Qwen Live，以应用文件中的修改。',
+  },
   'ui.close': { en: 'Close', 'zh-CN': '关闭' },
   'ui.closeSettings': { en: 'Close settings', 'zh-CN': '关闭设置' },
   'ui.quit': { en: 'Quit Host', 'zh-CN': '退出 Qwen Live' },
@@ -998,6 +1007,19 @@ export const LIVE_MESSAGES = {
   'host.settings.unavailable': {
     en: 'Settings are unavailable. Please reconnect.',
     'zh-CN': '设置暂不可用，请重新连接。',
+  },
+  'host.config.unavailable': {
+    en: 'Opening config is unavailable. Connect to an updated standalone Qwen Live daemon.',
+    'zh-CN': '暂时无法打开配置，请连接更新后的独立 Qwen Live daemon。',
+  },
+  'host.config.inaccessible': {
+    en: 'Cannot access a regular config.json file. Check the file or run qwen-live init to create it.',
+    'zh-CN':
+      '无法访问常规 config.json 文件。请检查文件，或运行 qwen-live init 创建配置。',
+  },
+  'host.config.openFailed': {
+    en: 'Could not open config.json. Set a default text editor for JSON files and try again.',
+    'zh-CN': '无法打开 config.json。请为 JSON 文件设置默认文本编辑器后重试。',
   },
   'host.language.unavailable': {
     en: 'Language settings are unavailable for this connection.',

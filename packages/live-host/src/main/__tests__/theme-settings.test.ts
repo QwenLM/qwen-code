@@ -90,6 +90,7 @@ function host(overrides: Partial<LiveHostApi> = {}) {
       themes.push(theme);
     },
     setSettingsOpen: async () => {},
+    openConfig: async () => {},
     setOverlayLayout: () => {},
     onSettingsDismiss: () => () => {},
     onOverlayOffset: () => () => {},

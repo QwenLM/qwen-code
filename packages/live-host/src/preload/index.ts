@@ -63,6 +63,7 @@ const api: LiveHostApi = {
   setLanguage: (language) => invoke('live:set-language', language),
   setTheme: (theme) => invoke('live:set-theme', theme),
   setSettingsOpen: (open) => invoke('live:settings-open', open),
+  openConfig: () => invoke('live:open-config'),
   setOverlayLayout: (layout) => ipcRenderer.send('live:overlay-layout', layout),
   onSettingsDismiss: (listener) => {
     const handler = () => listener();

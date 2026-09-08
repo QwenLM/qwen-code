@@ -34,6 +34,7 @@ export type HostPublicState = {
     | 'incompatible'
     | 'error';
   connectionError?: string;
+  canOpenConfig?: boolean;
   quitState?: 'pending' | 'failed';
   overlayOffset?: OverlayOffset;
   visualInput?: VisualInput;
@@ -59,6 +60,7 @@ export type LiveHostApi = {
   setLanguage: (language: LiveLanguage) => Promise<void>;
   setTheme: (theme: LiveTheme) => Promise<void>;
   setSettingsOpen: (open: boolean) => Promise<void>;
+  openConfig: () => Promise<void>;
   setOverlayLayout: (layout: OverlayLayout) => void;
   onSettingsDismiss: (listener: () => void) => () => void;
   onOverlayOffset: (listener: (offset: OverlayOffset) => void) => () => void;

@@ -166,6 +166,7 @@ function fixture(minimumNativeY?: number) {
       },
     },
     daemon: {
+      getConfigFilePath: () => undefined,
       getEpoch: () => 1,
       sendPlaybackStarted: (epoch: number, outputId: number) => {
         playback.push({ kind: 'started', epoch, outputId });
