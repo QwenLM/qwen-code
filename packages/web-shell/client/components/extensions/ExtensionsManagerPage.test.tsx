@@ -563,6 +563,51 @@ describe('ExtensionsManagerPage activation refresh', () => {
     expect(container.textContent).not.toContain('session refresh failed');
   });
 
+  it('keeps the last known trust when the reload loses the activation projection', async () => {
+    state.workspaceHandle.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: false,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    await renderPage();
+
+    // The post-activation reload loses the projection entirely; the refresh
+    // decision must fall back to the remembered trust, not default to
+    // trusted.
+    state.workspaceHandle.workspaceExtensions.mockRejectedValue(
+      new Error('projection-unavailable'),
+    );
+    await chooseActivation('user', 'Disabled');
+
+    // The success message renders only after the refresh call site, so a
+    // refresh that would happen could not arrive after this assertion.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Extension "demo" disabled.');
+    });
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+    expect(
+      state.workspaceHandle.refreshExtensionRuntime,
+    ).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+  });
+
   it('keeps the newer refresh failure when a superseded refresh rejects late', async () => {
     state.actions.loadExtensionsStatus.mockResolvedValue({
       v: 1,
