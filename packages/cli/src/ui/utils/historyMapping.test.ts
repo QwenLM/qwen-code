@@ -1449,6 +1449,71 @@ describe('same-text impostors the text proof alone cannot reject', () => {
     ];
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
   });
+
+  it('demotes to the walk when a second API entry carries the target text unmarked', () => {
+    // The API-side same-text census (ownership uniqueness): the marked match
+    // cannot be the target's own when ANOTHER entry carries the same text —
+    // the target's own entry, which never got marked. The census is the only
+    // conjunct that sees it here: no UI twin claims the id, and the walk
+    // lands at the own entry (not earlier), so the backstop does not fire.
+    // Without the census the gate resolves onto the impostor's boundary (0)
+    // and the rewind silently drops the target's own prompt+response.
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ownEntry = userContent('run tests'); // target's own, never marked
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      impostor, // claimant-less re-send wearing the target's id+text
+      modelContent('r1'),
+      ownEntry,
+      modelContent('r2'),
+    ];
+    // The walk's answer: truncate right before the target's own entry.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('demotes a UI twin that shares the id and the model-facing text but not the display text', () => {
+    // The claimant census must compare like with like: the twin's
+    // `promptOwnerText` (its model-facing text), not its display string. Two
+    // resumed turns can share a promptId and the text the model saw while
+    // rendering different display strings (e.g. one carried attachments);
+    // keyed on display text the census would see no twin and resolve onto
+    // the twin's entry (0), truncating the target's own turn away.
+    const twinEntry = userContent('run tests');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const withOwnerText = (
+      id: number,
+      displayText: string,
+      promptId: string,
+      ownerText: string,
+    ): HistoryItem => {
+      const item = userItem(id, displayText) as HistoryItem & {
+        promptId: string;
+        promptOwnerText?: string;
+      };
+      item.promptId = promptId;
+      item.promptOwnerText = ownerText;
+      return item;
+    };
+    const ui: HistoryItem[] = [
+      withOwnerText(1, 'display A', 'session########1', 'run tests'),
+      llmItem(2),
+      withOwnerText(3, 'display B', 'session########1', 'run tests'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      twinEntry, // the twin's entry; the target's own never landed
+      modelContent('r1'),
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
 });
 
 describe('promptIdFileKeyOnly guards', () => {
@@ -1575,6 +1640,132 @@ describe("this PR's own headline reproduction (#9437)", () => {
     // Truncating at 2 keeps [hello, response 1]. Truncating at 4 keeps the
     // selected prompt and its response — the regression this pins.
     expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('resolves the placeholder target when an unrelated cleared entry precedes it', () => {
+    // R32-1: the ordinal proof must count the same population on both sides
+    // of the UI/API boundary. An unrelated media-only turn whose API entry
+    // was cleared to a placeholder never had a UI turn, so it must not
+    // offset the API-side count: with the unfiltered classifier it does,
+    // the counts disagree, and the target's own marked, text-matching entry
+    // is refused — the walk then lands one turn late (6), keeping the
+    // selected prompt and its response.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      withPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'third prompt', 'session########2'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('response 1'),
+      {
+        role: 'user',
+        parts: [{ text: '[Old inline media cleared: image/jpeg]' } as Part],
+      }, // unrelated cleared media-only turn; no UI turn
+      modelContent('response media'),
+      markedUser(PLACEHOLDER, 'session########1'),
+      modelContent('response 2'),
+      markedUser('third prompt', 'session########2'),
+      modelContent('response 3'),
+    ];
+
+    // The target's own entry sits at index 4.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+  });
+
+  it('refuses (-1) a placeholder impostor admitted by a cancelled ordinal mismatch', () => {
+    // R32-1's witness shape. One attachment-only UI turn (no API text part,
+    // so the API count runs one BEHIND) and two cleared media-only entries
+    // (no UI turns, so the unfiltered API count runs two AHEAD) sit before
+    // the target. Under the pre-fix unfiltered count the two divergences
+    // cancel — 3 === uiUserTurnCount — at an entry that is NOT the target's
+    // own: a cleared placeholder entry wearing the target's re-minted mark,
+    // sitting one real prompt EARLY. Resolving it truncates away the still
+    // displayed 'visible later prompt' turn with no error and no -1.
+    const PLACEHOLDER = '[Old inline media cleared: image/png]';
+    const attachmentOnlyItem = (id: number, promptId: string): HistoryItem => {
+      const item = userItem(
+        id,
+        '[User message with attachments]',
+      ) as HistoryItem & { promptId: string; promptHasModelText?: boolean };
+      item.promptId = promptId;
+      item.promptHasModelText = false;
+      return item;
+    };
+    const withPromptId = (
+      id: number,
+      text: string,
+      promptId: string,
+    ): HistoryItem => {
+      const item = userItem(id, text) as HistoryItem & { promptId: string };
+      item.promptId = promptId;
+      return item;
+    };
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const clearedEntry = (mime: string): Content => ({
+      role: 'user',
+      parts: [{ text: `[Old inline media cleared: ${mime}]` } as Part],
+    });
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      attachmentOnlyItem(3, 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'visible later prompt', 'session########2'),
+      llmItem(6),
+      withPromptId(7, PLACEHOLDER, 'session########3'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      markedUser('hello', 'session########0'),
+      modelContent('r0'),
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          } as unknown as Part,
+        ],
+      }, // the attachment-only turn's entry: no text part
+      modelContent('r1'),
+      clearedEntry('image/jpeg'), // cleared media-only entry; no UI turn
+      modelContent('r2'),
+      clearedEntry('image/gif'), // second cleared entry; no UI turn
+      modelContent('r3'),
+      markedUser(PLACEHOLDER, 'session########3'), // impostor wearing the re-minted mark
+      modelContent('r4'),
+      markedUser('visible later prompt', 'session########2'),
+      modelContent('r5'),
+    ];
+
+    // Pre-fix the cancelled counts admitted the impostor at 8, dropping the
+    // still-displayed turn. The walk cannot land (the target's own entry is
+    // absent), so the refusal is loud.
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(-1);
   });
 });
 

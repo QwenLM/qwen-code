@@ -447,6 +447,7 @@ function convertToHistoryItems(
               ...(promptId && ownerText && ownerText !== text
                 ? { promptOwnerText: ownerText }
                 : {}),
+              ...(ownerText === undefined ? { promptHasModelText: false } : {}),
             });
           }
 
@@ -489,6 +490,7 @@ function convertToHistoryItems(
             ...(promptId && ownerText && ownerText !== text
               ? { promptOwnerText: ownerText }
               : {}),
+            ...(ownerText === undefined ? { promptHasModelText: false } : {}),
           });
         }
         break;

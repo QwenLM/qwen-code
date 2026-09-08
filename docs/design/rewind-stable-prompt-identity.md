@@ -40,10 +40,15 @@ another entrance). A match is accepted only when **all** hold:
    `promptIdFileKeyOnly` (a `/restore`d item, whose id is a file-snapshot key
    only — the checkpoint's `clientHistory` is JSON and carries no marks);
 2. exactly one post-`startIndex` entry carries the id;
-3. that entry's text equals the target's text (the ownership proof);
+3. that entry's text equals the target's model-facing text (the ownership
+   proof) — compared against `promptOwnerText ?? text`, because a resumed UI
+   item's `text` is a display projection and can be a synthetic string such
+   as `'[User message with attachments]'` that no API entry ever carries;
 4. if the target's own text is itself a cleared-media placeholder, the match's
-   ordinal also agrees — it has exactly `uiUserTurnCount` user prompt entries
-   before it, counted with the unfiltered classifier;
+   ordinal also agrees — the entry has exactly as many prompt entries with a
+   model-facing text before it as the target has preceding real UI turns that
+   carried one (the resume builder records `promptHasModelText` so the two
+   sides count the same population; see below);
 5. the proof is unique — no other real, non-file-key-only UI turn claims the
    same id with the same text, and at most one post-`startIndex` entry carries
    the target's text;
@@ -57,11 +62,16 @@ less: it never introduces a refusal on a session that previously rewound.
 
 A cleared media-only entry and a genuine prompt whose entire text equals the
 generated placeholder are byte-identical once serialized, so the text proof
-cannot separate them. Their ordinal can: the target has `uiUserTurnCount` real
-UI turns before it, so its own entry carries exactly that many user prompt
-entries ahead of it, while a cleared entry wearing a re-minted mark sits
-elsewhere. The count uses the unfiltered classifier deliberately — a cleared
-entry still occupies the ordinal that the rewind walk skips.
+cannot separate them. Their ordinal can: the target's own entry is the n-th
+entry whose prompt carried a model-facing text, where n is the number of
+preceding real UI turns that carried one, while a cleared entry wearing a
+re-minted mark sits elsewhere. The two sides must count the SAME population:
+an unfiltered API count also counts cleared placeholders (which never had a
+UI turn) and a raw UI count also counts resumed attachment-only turns (whose
+API entry has no text part), so the two divergence directions can cancel and
+admit an impostor. The API side therefore uses the walk's own filtered
+binding and the UI side counts only turns the resume builder did not flag
+`promptHasModelText: false`.
 
 Ordinal agreement is a positional proof, so it stops holding exactly where
 positions desync: a turn absorbed by compression. That is the case identity

@@ -192,6 +192,17 @@ export type HistoryItemUser = HistoryItemBase & {
    */
   promptOwnerText?: string;
   /**
+   * `false` when this turn's record carried no model-facing text part — a
+   * resumed attachment-only prompt displayed as the synthetic
+   * `'[User message with attachments]'`. The rewind ordinal proof counts
+   * user prompts on both sides of the UI/API boundary and must count the
+   * same population on each: the API side never counts such a turn (its
+   * entry has no text part), so the UI side must not count it either.
+   * Absent on the live path, where a real turn's text is what the model
+   * received.
+   */
+  promptHasModelText?: boolean;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

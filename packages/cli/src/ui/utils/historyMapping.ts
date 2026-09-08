@@ -268,11 +268,18 @@ export function computeApiTruncationIndex(
     //
     // Text alone cannot separate the two: a cleared media-only entry and a
     // genuine placeholder-texted prompt are byte-identical once serialized.
-    // Their ORDINAL differs, though. The target has `uiUserTurnCount` real
-    // UI turns before it, so its own entry must have exactly that many user
-    // prompt entries before it — counted with the UNFILTERED classifier, so
-    // cleared entries still occupy the ordinal the walk skips. A cleared
-    // entry wearing a re-minted mark sits at some other ordinal.
+    // Their ORDINAL differs, though: the target's own entry is the
+    // (number of preceding turns with a model-facing prompt text)-th such
+    // entry, while a cleared entry wearing a re-minted mark sits at some
+    // other ordinal. Both sides of the comparison must count that SAME
+    // population. The API side uses the walk's own filtered binding, which
+    // skips cleared-media placeholders (a media-only turn never had a UI
+    // turn) and can never count a text-less entry; the UI side accordingly
+    // counts real turns that carried a model-facing text, which the resume
+    // builder records (`promptHasModelText`) because an attachment-only turn
+    // displays a synthetic string while its entry has no text part. Counting
+    // different populations lets the two divergence directions cancel and
+    // admit an impostor (R32-1).
     //
     // The check is scoped to placeholder-texted targets on purpose. Ordinal
     // agreement is a positional proof, so it breaks down exactly where
@@ -280,11 +287,22 @@ export function computeApiTruncationIndex(
     // identity exists to resolve and which the round-28 tests pin. Those
     // targets carry ordinary text and never reach this branch.
     const matchOrdinalAgrees = (matchIndex: number): boolean => {
+      let expected = 0;
+      for (
+        let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+        i < targetIndex;
+        i++
+      ) {
+        const item = uiHistory[i]!;
+        if (isRealUserTurn(item) && item.promptHasModelText !== false) {
+          expected++;
+        }
+      }
       let counted = 0;
       for (let i = startIndex; i < matchIndex; i++) {
-        if (isApiUserPrompt(apiHistory[i]!)) counted++;
+        if (isUserTextContent(apiHistory[i]!)) counted++;
       }
-      return counted === uiUserTurnCount;
+      return counted === expected;
     };
     const ownershipProven = (matchIndex: number): boolean =>
       isApiEntryOwnedByText(apiHistory[matchIndex]!, ownerText) &&
@@ -294,15 +312,17 @@ export function computeApiTruncationIndex(
       ownershipProven(identifiedIndex) &&
       ownershipProofIsUnique()
     ) {
-      // Even a unique, ownership-proven match cannot be trusted when the
-      // positional walk lands EARLIER than it: counted entries precede the
-      // match that the UI turn count does not account for — entries of turns
-      // the UI deleted, or of a claimant-less re-send — while the target's
-      // own entry is absent. No compressed prefix explains that (startIndex
+      // Even a unique, ownership-proven match is demoted when the
+      // positional walk lands EARLIER than it: an early walk means counted
+      // entries precede the match that the UI turn count does not account
+      // for — entries of turns the UI deleted, or of a claimant-less
+      // re-send. No compressed prefix explains an early walk (startIndex
       // skips the prefix, and excluded entries desync the walk LATE, never
-      // early), so the walk's earlier answer is the exact pre-identity
-      // boundary. A walk that lands late or cannot land leaves identity
-      // preferred, which is the absorbed-turn exactness this gate is for.
+      // early). The walk's answer is the exact pre-identity boundary, so
+      // preferring it can never produce a truncation shape the pre-identity
+      // mapping would not have produced. A walk that lands late or cannot
+      // land leaves identity preferred, which is the absorbed-turn
+      // exactness this gate is for.
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         return positional;

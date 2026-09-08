@@ -741,7 +741,14 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 50);
 
     expect(items).toEqual([
-      { id: 51, type: 'user', text: '[User message with attachments]' },
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+        // The record carries no model-facing text part; the rewind ordinal
+        // proof must not count this turn against the API prompt ordinals.
+        promptHasModelText: false,
+      },
     ]);
   });
 
@@ -2086,6 +2093,42 @@ describe('resumed identity survives a synthetic display string', () => {
           promptId: 's########2',
           message: { role: 'user', parts: [{ text: 'run the tests' }] },
           systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
+    // R32-1 (the behind direction): an attachment-only record resumes to a
+    // visible '[User message with attachments]' turn whose API entry has no
+    // text part, so the UI turn count and the API prompt count diverge by
+    // one. The ordinal proof must count the same population on both sides —
+    // turns whose prompt carried a model-facing text — or the placeholder
+    // target's own marked, text-matching entry is refused (-1) even though
+    // nothing about it is ambiguous.
+    expect(
+      truncationIndexForLastUserTurn([
+        leadingTurns()[0]!,
+        model('r0'),
+        rec({
+          type: 'user',
+          promptId: 's########1',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+              } as unknown as Part,
+            ],
+          },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
         }),
         model('r2'),
       ]),
