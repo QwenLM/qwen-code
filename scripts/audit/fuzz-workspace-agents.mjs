@@ -3,12 +3,19 @@
  * Random operation sequences against the workspace store's invariants.
  *
  * Usage: node scripts/audit/fuzz-workspace-agents.mjs [seed] [steps]
+ *        WA_FUZZ_TRACE=1 … to print each operation as it runs, which is how
+ *        you check the draw is exploring rather than idling.
  *
  * The other scripts check scenarios someone thought of. This one does not:
  * it draws operations at random and asserts, after every step, the properties
  * that must hold no matter what order things happened in. The seed is printed
  * and accepted back, so a failure is reproducible rather than a story about a
  * run nobody can repeat.
+ *
+ * It is probabilistic, and that is a real limit rather than a caveat: removing
+ * the retirement guard from decideDispatch is caught on seed 42 by step 130
+ * and not caught at all on seed 1 within 300 steps. A clean run on one seed
+ * says very little; several seeds say more; neither is a proof.
  */
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
@@ -30,6 +37,9 @@ await fs.writeFile(
 export * from '${src}/thread-actions.js';
 export * from '${src}/types.js';
 export { resolveThreadStatus } from '${src}/thread-status.js';
+export * from '${src}/run-lifecycle.js';
+export { runWithAgentRunContext } from '${src}/run-context.js';
+export { ThreadPostTool, ThreadReviewTool, ThreadBlockTool, ThreadCreateTool, ThreadWaitTool } from '${repo}/packages/core/src/tools/thread-tools.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 `,
 );
@@ -62,6 +72,7 @@ const rnd = () => {
 const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
 
 const AGENTS = ['ag_1', 'ag_2', 'ag_3'];
+let agentSeq = AGENTS.length;
 await M.updateWorkspaceAgents(ROOT, () =>
   AGENTS.map((id, i) => ({
     id,
@@ -105,9 +116,12 @@ async function check(step, op) {
       `${t.id}: rootThreadId ${t.rootThreadId} resolves to nothing`,
     );
     if (t.parentThreadId) {
+      const parent = threads.find((p) => p.id === t.parentThreadId);
+      say(Boolean(parent), `${t.id}: parentThreadId resolves to nothing`);
+      // Splitting work must not mint a second budget.
       say(
-        threads.some((p) => p.id === t.parentThreadId),
-        `${t.id}: parentThreadId resolves to nothing`,
+        !parent || parent.rootThreadId === t.rootThreadId,
+        `${t.id}: child root ${t.rootThreadId} differs from parent root ${parent?.rootThreadId}`,
       );
     }
     const ids = t.runs.map((r) => r.id);
@@ -120,6 +134,13 @@ async function check(step, op) {
       } else {
         say(typeof r.endedAt === 'number', `${r.id}: terminal without endedAt`);
       }
+      if (r.status === 'finishing') {
+        say(Boolean(r.closeKind), `${r.id}: finishing without a close kind`);
+      }
+      say(
+        agents.some((a) => a.id === r.agentId),
+        `${r.id}: booked for ${r.agentId}, which is not on the roster`,
+      );
     }
     // The resolver must answer for any shape the store can be in.
     M.resolveThreadStatus({ thread: t, hasLiveChildDependency: false });
@@ -161,7 +182,71 @@ async function check(step, op) {
   }
 }
 
+const cfg = { getProjectRoot: () => ROOT };
+const sig = () => new AbortController().signal;
+const workspaceId = (await M.readAgentWorkspace(ROOT)).workspaceId;
+
+/** A frame for some run the store currently reports as running. */
+async function someFrame() {
+  const { threads } = await M.listThreads(ROOT);
+  const running = threads.flatMap((t) =>
+    t.runs.filter((r) => r.status === 'running').map((r) => [t, r]),
+  );
+  if (!running.length) return null;
+  const [t, r] = pick(running);
+  return {
+    frame: {
+      workspaceId,
+      agentId: r.agentId,
+      runId: r.id,
+      threadId: t.id,
+      rootThreadId: t.rootThreadId,
+      attempt: r.attempts,
+    },
+    label: `${r.agentId} on ${t.id.slice(0, 12)}`,
+  };
+}
+
 const ops = [
+  async () => {
+    const it = await someFrame();
+    if (!it) return 'tool (nothing running)';
+    const Tool = pick([
+      M.ThreadPostTool,
+      M.ThreadReviewTool,
+      M.ThreadBlockTool,
+      M.ThreadCreateTool,
+      M.ThreadWaitTool,
+    ]);
+    const params =
+      Tool === M.ThreadPostTool
+        ? {
+            text:
+              rnd() < 0.4 ? `see this @a${1 + Math.floor(rnd() * 3)}` : 'noted',
+          }
+        : Tool === M.ThreadReviewTool
+          ? { summary: 'done as far as I can tell' }
+          : Tool === M.ThreadBlockTool
+            ? { question: 'which one?' }
+            : Tool === M.ThreadCreateTool
+              ? {
+                  title: `sub${Math.floor(rnd() * 1e5)}`,
+                  ...(rnd() < 0.5
+                    ? { assignee: `a${1 + Math.floor(rnd() * 3)}` }
+                    : {}),
+                }
+              : {};
+    const res = await M.runWithAgentRunContext(it.frame, () =>
+      new Tool(cfg).buildAndExecute(params, sig()),
+    );
+    return `${Tool.Name ?? 'tool'} by ${it.label}${res.error ? ' (refused)' : ''}`;
+  },
+  async () => {
+    const { threads } = await M.listThreads(ROOT);
+    const t = pick(threads);
+    await M.assignThread(ROOT, t.id, `a${1 + Math.floor(rnd() * 3)}`);
+    return `assign ${t.id.slice(0, 12)}`;
+  },
   async () => {
     const t = await M.createThread(ROOT, {
       title: `t${Math.floor(rnd() * 1e6)}`,
@@ -224,18 +309,61 @@ const ops = [
     await M.retireWorkspaceAgent(ROOT, id);
     return `retire ${id}`;
   },
+  async () => {
+    const id = `ag_${++agentSeq}`;
+    AGENTS.push(id);
+    await M.updateWorkspaceAgents(ROOT, (a) => [
+      ...a,
+      {
+        id,
+        name: `a${agentSeq}`,
+        createdAt: 1,
+        ...(rnd() < 0.3 ? { maxConcurrentRuns: 2 } : {}),
+      },
+    ]);
+    return `hire ${id}`;
+  },
 ];
+
+/**
+ * Weights, because an unweighted draw degenerates twice over. Retiring is as
+ * likely as anything else, so within a hundred steps every agent is retired
+ * and the rest of the alphabet turns into no-ops; and claiming is rare enough
+ * that few runs are ever running, so the thread tools have nothing to act on.
+ * The first version executed one thread tool in 400 steps. Claiming is
+ * weighted heavily, retiring and hiring are rare and balance each other, and
+ * the array is index-aligned with `ops` — an earlier version was shorter than
+ * `ops` and silently never drew the last two.
+ */
+// tool, assign, createThread, post, claim, finish, toggle, retire, hire
+const WEIGHTS = [6, 2, 3, 6, 10, 4, 1, 1, 1];
+const bag = WEIGHTS.flatMap((n, i) => Array.from({ length: n }, () => ops[i]));
 
 console.log(`seed ${seed}, ${steps} steps`);
 for (let step = 1; step <= steps; step++) {
-  const op = pick(ops);
+  const op = pick(bag);
   let label;
   try {
     label = await op();
   } catch (error) {
-    // A refusal is a legal outcome; the store must simply stay consistent.
+    // A refusal is a legal outcome and the store must simply stay consistent
+    // through it. A harness bug is not: this catch swallowed
+    // `finishRunInTransaction is not a function` for a whole session, so the
+    // finish operation never ran and runs never reached a terminal state —
+    // a large part of the space silently unexplored behind a green result.
+    if (
+      error instanceof TypeError ||
+      /is not a function|is not defined|Cannot read propert/.test(
+        String(error.message),
+      )
+    ) {
+      console.log(`\nHARNESS BUG at step ${step}: ${error.message}`);
+      await fs.rm(tmp, { recursive: true, force: true });
+      process.exit(2);
+    }
     label = `refused (${String(error.message).slice(0, 60)})`;
   }
+  if (process.env.WA_FUZZ_TRACE) console.log(String(step).padStart(3), label);
   await check(step, label);
 }
 await fs.rm(tmp, { recursive: true, force: true });
