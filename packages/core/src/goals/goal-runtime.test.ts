@@ -4941,9 +4941,10 @@ describe('goal runtime', () => {
     const checkpointVerifier = vi.fn(async (): Promise<never> => {
       throw new Error('provider failed');
     });
+    let records: readonly RuntimeRecord[] = [];
     const runtime = createGoalRuntime({
       journal,
-      evidenceSource: fakeEvidenceSource(() => []),
+      evidenceSource: fakeEvidenceSource(() => records),
       verifier: vi.fn(),
       checkpointVerifier,
     });
@@ -5003,6 +5004,40 @@ describe('goal runtime', () => {
       'checkpoint',
     ]);
     expect(host.started).toHaveLength(1);
+    // The trace separates the exempt replay from a live turn that spent a
+    // stall: both overflow the window, only the replay carries the flag.
+    expect(failedCheckpointChecks()).toHaveLength(1);
+    expect(failedCheckpointChecks()[0]![3]).toBe('replay=true');
+
+    // The exemption's bound: the continuation the replay minted is a live
+    // turn, so its own stalled check on a still-overflowing window spends
+    // the last stall the replay preserved and stops the Goal.
+    const permit = host.started.at(-1)!;
+    records = verifierEvidenceWindow(permit, 'create-record', 101, 'resumed');
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'checkpoint',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    // No further continuation was minted for the stopped Goal.
+    expect(host.started).toHaveLength(1);
+    // The live turn's failed check logs the same rule without the
+    // exemption flag: the two arms are distinguishable in the trace.
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(2);
+    expect(failedChecks[1]![3]).toBe('replay=false');
   });
 
   it('coalesces preparation and activation and rejects activation before preparation', async () => {

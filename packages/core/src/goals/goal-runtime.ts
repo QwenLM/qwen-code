@@ -1210,9 +1210,10 @@ export function createGoalRuntime(
           return;
         }
         debugLogger.debug(
-          'Checkpoint check failed; counted as a stall only if the window overflowed.',
+          'Checkpoint check failed; counted as a stall only if the window overflowed and the check was not a restore replay.',
           `windowTruncated=${window.truncated}`,
           error,
+          `replay=${replay}`,
         );
         // A restore replay is exempt: it runs no turn of its own, so a
         // transient failure at startup must not spend a streak the restored
