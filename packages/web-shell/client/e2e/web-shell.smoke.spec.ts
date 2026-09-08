@@ -309,7 +309,7 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
   expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
     configId: 'reasoning_effort',
-    value: 'default',
+    value: 'xhigh',
     persist: true,
   });
   await expect(thinking).toBeChecked();
