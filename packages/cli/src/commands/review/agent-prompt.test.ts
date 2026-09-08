@@ -5802,6 +5802,63 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('posture-narrowed');
   });
 
+  for (const [label, corruptFiles] of [
+    ['null', null],
+    ['absent', undefined],
+  ] as const) {
+    it(`a chunk whose files list is ${label} restores the ordinary schedule (#10136 R17-5)`, () => {
+      // An unreadable `files` list coerced to `[]` passes both of
+      // postureNarrowing's gates vacuously: the chunk is classified a
+      // NON-delta territory and priced out of the wave on its single
+      // latest dry receipt — the one malformed shape failing toward LESS
+      // coverage. It must return null like every sibling shape: an honest
+      // capture never emits a chunk without a files list.
+      const corrupt = {
+        ...PLAN,
+        chunks: (PLAN.chunks as Array<{ id: number; files?: unknown }>).map(
+          (c) =>
+            c.id === 14
+              ? label === 'absent'
+                ? (({ files: _files, ...rest }) => rest)(c)
+                : { ...c, files: corruptFiles }
+              : c,
+        ),
+        incremental: {
+          since: 'a'.repeat(40),
+          effective: true,
+          posture: 'critical',
+          postureCause: 'round',
+          scope: {
+            anchor: 'a'.repeat(40),
+            deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+            interaction: [
+              {
+                path: 'bundle.min.js',
+                importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              },
+            ],
+          },
+        },
+      };
+      writeFileSync(plan, JSON.stringify(corrupt));
+      const old = new Date(2020, 0, 1);
+      utimesSync(plan, old, old);
+
+      // Two dry receipts each: the narrowing would narrow on the receipt,
+      // the ordinary rules retire — the note names which schedule ran.
+      answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+      answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+      const out = runRound(3);
+
+      expect(process.exitCode).toBeUndefined();
+      expect(out).toContain('1 auditors required this round');
+      expect(out).toContain('2 retired chunk(s) skipped');
+      expect(out).toContain('retirement: a chunk whose two most recent audits');
+      expect(out).not.toContain('posture narrowing');
+      expect(out).not.toContain('posture-narrowed');
+    });
+  }
+
   it('the per-chunk path names the narrowed chunks in CONVERGED too (#10136 R1-10)', () => {
     const fixAuditPlan = {
       ...PLAN,

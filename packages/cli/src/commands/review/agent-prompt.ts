@@ -3037,9 +3037,16 @@ function postureNarrowing(
     : [];
   for (const c of chunks) {
     if (!Number.isSafeInteger(c?.id)) continue;
-    const files = Array.isArray(c.files)
-      ? (c.files as Array<{ path?: unknown }>)
-      : [];
+    // An unreadable `files` list is the one malformed shape that must NOT
+    // be coerced to `[]` (#10136 R17-5): `[]` passes both gates below
+    // vacuously, silently classifying the chunk as a NON-delta territory —
+    // failing it toward LESS coverage where every sibling shape returns
+    // null. An honest capture never emits a chunk without a files list
+    // (`planChunks` tiles the published diff), so unreadable — or
+    // explicitly empty — is a hand-edited plan and restores the ordinary
+    // schedule like every other malformed shape here.
+    if (!Array.isArray(c?.files) || c.files.length === 0) return null;
+    const files = c.files as Array<{ path?: unknown }>;
     // Containment (#10136 R12-1): a chunk holding a file the scope record
     // classifies as NEITHER delta nor interaction is a chunk the record
     // never ruled on. An honest capture cannot produce it (`widenScope`

@@ -92,6 +92,12 @@ interface Classification {
   outcome: AuditOutcome;
   /** Defined exactly when `outcome` is `unknown`. */
   failure: CertificationFailure | null;
+  /**
+   * Defined exactly when `outcome` is `yielded`: the first filed finding's
+   * file — the entry a later round's findings list must carry to prove it
+   * was built after the yield merged.
+   */
+  filedFile?: string;
 }
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
@@ -113,8 +119,10 @@ export interface RoundSchedule {
   /**
    * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
    * delta territory, and the most recent audit on record is a substantive
-   * dry receipt not stale against a same-digest yield or uncertified
-   * receipt. Unlike a retired chunk they get no alternating cold check —
+   * dry receipt not stale against a yield or uncertified receipt — same
+   * digest, same entries modulo verification tags, or a filed finding the
+   * receipt's list never carried. Unlike a retired chunk they get no
+   * alternating cold check —
    * on a critical-posture round the wave re-launches the delta territories
    * under the ordinary retirement rules and every non-delta chunk the
    * previous waves could not certify dry: a yield, an uncertified receipt
@@ -472,18 +480,42 @@ function substantiveClause(clause: string): boolean {
  * pairing walk reads each round's list once, not once per record.
  */
 
+/**
+ * A finding entry's trailing `— [unverified]` tag — the marker the merge
+ * adds at admission and removes once the verdict lands (SKILL.md:789).
+ * Whitespace-tolerant like compose-review's own reader of the same tag.
+ */
+const UNVERIFIED_FINDING_TAG_RE = /—\s*\[unverified\]/gi;
+
+/**
+ * Two lists compared for the SAME entries, ignoring verification-tag state:
+ * the convergence pair's rounds legitimately build against the same entries
+ * with only the tags cleared in between, and the digest over the bytes
+ * cannot see it (#10136 R17-1). Tags out and whitespace runs collapsed —
+ * a stripped tag leaves its separator spaces behind, and a re-wrap must
+ * not read as a different list.
+ */
+function stripUnverifiedTags(list: string): string {
+  return list
+    .replace(UNVERIFIED_FINDING_TAG_RE, ' ')
+    .split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .join('\n');
+}
+
 function findingsListFor(
   prompt: string,
   recordDir: string,
   memo: Map<string, string>,
-): string {
+): { content: string; fromFile: boolean } {
   const pointer = findingsPointerOf(prompt);
-  if (pointer === null) return prompt;
+  if (pointer === null) return { content: prompt, fromFile: false };
   const root = resolve(recordDir);
   const target = resolve(pointer);
-  if (target !== root && !target.startsWith(root + sep)) return prompt;
+  if (target !== root && !target.startsWith(root + sep))
+    return { content: prompt, fromFile: false };
   const cached = memo.get(pointer);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return { content: cached, fromFile: true };
   try {
     const content = readFileSync(target, 'utf8');
     // Memoize ONLY a successful read: the pointer is shared by every chunk of
@@ -492,9 +524,10 @@ function findingsListFor(
     // other chunk's findings list. On a miss each record falls back to its
     // OWN prompt (no entry matches there → stays hot), uncached.
     memo.set(pointer, content);
-    return content;
+    return { content, fromFile: true };
   } catch {
-    return prompt; // Fall back to this record's own prompt.
+    // Fall back to this record's own prompt.
+    return { content: prompt, fromFile: false };
   }
 }
 
@@ -576,7 +609,7 @@ function classifyReturn(
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
       if (findingsList.includes(`**File:** ${file}`)) continue;
-      return { outcome: 'yielded', failure: null };
+      return { outcome: 'yielded', failure: null, filedFile: file };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -785,6 +818,8 @@ export function scheduleReverseAuditRound(
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
+    /** The list was read back from its `.findings.md` file, not the prompt fallback. */
+    findingsFromFile: boolean;
     pointer: string | null;
   }> = [];
   for (const [key, prompt] of built) {
@@ -792,6 +827,7 @@ export function scheduleReverseAuditRound(
     if (!m) continue;
     const r = Number(m[2]);
     if (r >= round) continue;
+    const list = findingsListFor(prompt, recordDir, findingsMemo);
     records.push({
       chunkId: Number(m[1]),
       round: r,
@@ -801,7 +837,8 @@ export function scheduleReverseAuditRound(
       // pair.
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
-      findings: findingsListFor(prompt, recordDir, findingsMemo),
+      findings: list.content,
+      findingsFromFile: list.fromFile,
       pointer: findingsPointerOf(prompt),
     });
   }
@@ -906,6 +943,9 @@ export function scheduleReverseAuditRound(
         outcomes: AuditOutcome[];
         failures: CertificationFailure[];
         digests: Set<string>;
+        lists: Set<string>;
+        fileLists: Set<string>;
+        filedFiles: Set<string>;
       }
     >
   >();
@@ -919,10 +959,18 @@ export function scheduleReverseAuditRound(
       outcomes: [],
       failures: [],
       digests: new Set<string>(),
+      lists: new Set<string>(),
+      fileLists: new Set<string>(),
+      filedFiles: new Set<string>(),
     };
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
+    for (const c of classificationsByRecord[i]) {
+      if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
+    }
     entry.digests.add(rec.digest);
+    entry.lists.add(rec.findings);
+    if (rec.findingsFromFile) entry.fileLists.add(rec.findings);
     byRound.set(rec.round, entry);
   });
 
@@ -938,6 +986,9 @@ export function scheduleReverseAuditRound(
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
         digests: [...entry.digests],
+        lists: [...entry.lists],
+        fileLists: [...entry.fileLists],
+        filedFiles: [...entry.filedFiles],
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -955,16 +1006,50 @@ export function scheduleReverseAuditRound(
     // `unknown` while the orchestrator still merges the finding — so the
     // dry member was built before those findings entered it. It never saw
     // them, and pricing the chunk out of the wave on it would certify
-    // convergence over live findings. Serial rounds are untouched: a round
-    // built after merged findings carries the list's different digest.
+    // convergence over live findings. Digest inequality does NOT lift the
+    // doubt (#10136 R17-1): the pair's two lists may differ by tag state
+    // alone, so staleness is ruled on the lists themselves below, with the
+    // digest kept as the same-bytes arm.
     if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
       const latest = audits[audits.length - 1];
       if (latest !== undefined && latest.outcome === 'dry') {
-        const staleAgainstYield = audits.some(
-          (a) =>
-            a.outcome !== 'dry' &&
-            a.digests.some((d) => latest.digests.includes(d)),
-        );
+        // A dry receipt is stale against a non-dry round it shows no
+        // evidence of having been launched after (#10136 R17-1). Digest
+        // INEQUALITY alone is not freshness: the convergence pair's two
+        // lists legitimately differ by `— [unverified]` tag state alone
+        // (SKILL.md:771 — the merge clears tags between the pair's
+        // rounds), so a receipt built against the same entries under a
+        // different digest never saw the round's findings. Three arms,
+        // each its own evidence:
+        const staleAgainstYield = audits.some((a) => {
+          if (a.outcome === 'dry') return false;
+          // Same digest: built against the same list bytes.
+          if (a.digests.some((d) => latest.digests.includes(d))) return true;
+          // Same entries once the verification tags are stripped — the
+          // pair shape the digest cannot see.
+          if (
+            a.lists.some((l) =>
+              latest.lists.some(
+                (ll) => stripUnverifiedTags(l) === stripUnverifiedTags(ll),
+              ),
+            )
+          )
+            return true;
+          // A yield filed a finding; a receipt whose list carries no
+          // entry for that file was built before the finding merged.
+          // Only a list read back from its findings file is evidence here
+          // — a prompt fallback names no entries either way (the serial
+          // shape narrows on it exactly as before). File-line
+          // granularity, the same bar the yield scan itself applies to
+          // tell a filing from a quotation.
+          return (
+            latest.fileLists.length > 0 &&
+            a.filedFiles.some(
+              (f) =>
+                !latest.fileLists.some((l) => l.includes(`**File:** ${f}`)),
+            )
+          );
+        });
         if (!staleAgainstYield) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;

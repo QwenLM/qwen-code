@@ -151,6 +151,11 @@ export function widenScope(input: WidenInput): WidenedScope {
   const seams = new Map<string, { kept: number; total: number }>();
   if (seamBound === true && interaction.size > 0) {
     const byPath = new Map(selection.sections.map((f) => [f.path, f]));
+    // The full capture's lines, for the kept slice's own +/- counts — the
+    // second heaviness classification below reads them exactly as a
+    // re-parse of the emitted hunks would (`assembleSections` emits each
+    // kept hunk's diff text verbatim).
+    const diffLines = selection.fullText.split('\n');
     for (const path of interaction.keys()) {
       const section = byPath.get(path);
       if (!section || section.hunks.length === 0) continue;
@@ -196,6 +201,38 @@ export function widenScope(input: WidenInput): WidenedScope {
           kept.add(i);
         }
       });
+      // The heavy exemption's second direction (#10136 R17-4): the plan
+      // classifies heaviness from the PUBLISHED slice — the kept hunks'
+      // own +/- counts against the whole-file post-image, by the same
+      // identity `buildPlanReport` applies — and the bound is the first
+      // partial publisher, so a full-range NON-heavy file can classify
+      // heavy once bounded (shedding hunks lowers changedLines while the
+      // identity raises preLines; the two move in opposite directions).
+      // The classifications must tell one story: a disagreement
+      // republishes the file whole with NO census, or the plan's `heavy`
+      // would roster three whole-file invariant agents on a file this
+      // loop deliberately bounded, in the round shape whose purpose is to
+      // stop spending them.
+      if (kept.size < section.hunks.length) {
+        let keptAdded = 0;
+        let keptRemoved = 0;
+        section.hunks.forEach((h, i) => {
+          if (!kept.has(i)) return;
+          for (let ln = h.diffStart; ln <= h.diffEnd; ln++) {
+            const ch = diffLines[ln - 1]?.charAt(0);
+            if (ch === '+') keptAdded++;
+            else if (ch === '-') keptRemoved++;
+          }
+        });
+        const keptHeavy = classifyHeavy({
+          preLines: Math.max(0, fileLines - keptAdded + keptRemoved),
+          fileLines,
+          changedLines: keptAdded + keptRemoved,
+          binary: section.binary,
+          kind: section.kind,
+        }).heavy;
+        if (keptHeavy) continue;
+      }
       seams.set(path, { kept: kept.size, total: section.hunks.length });
       if (kept.size < section.hunks.length) hunkKeep.set(path, kept);
     }

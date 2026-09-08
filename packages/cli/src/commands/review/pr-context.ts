@@ -1683,6 +1683,18 @@ export function persistRecoveredLedger(
           {
             ...recoveredOut,
             ...carryFileChurn,
+            // The fetch's merge-base stamp (#10136 R18-3), carried through
+            // the rewrite: it is a fact about THIS machine's capture — the
+            // base this round's published diff was captured over — not a
+            // marker field, so the recovery walk has nothing to say about
+            // it and a wholesale write would drop it every round, keeping
+            // the seam bound's continuity gate permanently unprovable.
+            // Like every carried field it rides the fail-safe direction: a
+            // file with no stamp simply keeps the next round's bound off.
+            ...(typeof existing?.['mergeBaseSha'] === 'string' &&
+            existing['mergeBaseSha'] !== ''
+              ? { mergeBaseSha: existing['mergeBaseSha'] }
+              : {}),
             ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
             // The grafted anchor's provenance — the round that CERTIFIED it.
             // Persisted beside the pair so compose-review's `prevLedgerFacts`

@@ -1550,12 +1550,15 @@ describe('fetch-pr report assembly', () => {
       if (String(path).endsWith('b.ts')) return B_SOURCE;
       if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
         // The previous posted round: round 7, so this round is 8 — past the
-        // auto floor's round schedule.
+        // auto floor's round schedule. Its merge-base stamp matches this
+        // round's base, so the seam bound's continuity gate (#10136 R18-3)
+        // is satisfied and the bound actually runs.
         return JSON.stringify({
           round: 7,
           findings: [],
           posted: 1,
           floor: 'c',
+          mergeBaseSha: BASE,
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1579,13 +1582,148 @@ describe('fetch-pr report assembly', () => {
     expect(report.budget.reverseAuditRounds).toBe(5);
   });
 
+  it('a moved merge base keeps the seam bound off — the interaction file republishes whole (#10136 R18-3)', async () => {
+    // The bound sheds hunks on the premise a prior round published them,
+    // which holds only while the merge base holds still. The side file's
+    // stamp names a DIFFERENT base than this round resolved — a retarget
+    // moved the base between rounds — so hunks the move smuggled into the
+    // full-range slice were never published. The bound stays off: no seam
+    // record, and the published diff carries the file's non-seam hunk.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+          // The previous round's capture ran over a DIFFERENT base.
+          mergeBaseSha: 'c'.repeat(40),
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    // The posture still resolves — the roster, the round-cap tier and the
+    // wave narrowing all follow it. Only the seam bound is gated.
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('round');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    const diff = writtenDiff() ?? '';
+    expect(diff).toContain('diff --git a/b.ts b/b.ts');
+    expect(diff).toContain('+y2');
+    // The disclosure names why the bound stayed off, instead of reading as
+    // "no interaction file needed seam-bounding".
+    const err = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain(
+      'merge-base continuity with the previous round is unproven',
+    );
+    expect(err).not.toContain('no interaction file needed seam-bounding');
+  });
+
+  it('no recorded merge base keeps the seam bound off until continuity is provable (#10136 R18-3)', async () => {
+    // Today's state: side files predate the stamp. The gate resolves false
+    // and whole-section republication remains the floor — the bound never
+    // engages on a premise it cannot prove, even with the posture on.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({
+          round: 7,
+          findings: [],
+          posted: 1,
+          floor: 'c',
+        });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    expect(writtenDiff() ?? '').toContain('+y2');
+  });
+
+  it("stamps this round's merge base into the side file for the next round's gate (#10136 R18-3)", async () => {
+    // The carry chain: a published round records the base its diff was
+    // captured over, preserving the ledger's own fields, so the NEXT
+    // round's continuity gate has something to compare against. Written
+    // through the same write-temp-then-rename discipline the file's own
+    // writer uses.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({ round: 7, findings: [], posted: 1 });
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    await reportFor({ since: ANCHOR });
+
+    const stamp = producerMocks.writeFileSync.mock.calls.find(([path]) =>
+      String(path).includes('qwen-review-pr-42-prev-ledger.json'),
+    );
+    expect(stamp).toBeDefined();
+    const written = JSON.parse(String(stamp?.[1])) as Record<string, unknown>;
+    expect(written['mergeBaseSha']).toBe(BASE);
+    // The ledger's own fields survive the stamp.
+    expect(written['round']).toBe(7);
+    expect(written['posted']).toBe(1);
+  });
+
   // The capture-time recovery of the operator's RECORDED floor (#10136
   // R1-5): the same record compose and submit read, bound to the same
   // identity axes. Each test plants the CLI's own args record beside a side
   // file that would otherwise resolve the posture.
   function postureSideFile(path: unknown): string | null {
     if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
-      return JSON.stringify({ round: 7, findings: [], posted: 1, floor: 'c' });
+      return JSON.stringify({
+        round: 7,
+        findings: [],
+        posted: 1,
+        floor: 'c',
+        mergeBaseSha: BASE,
+      });
     }
     return null;
   }
@@ -1789,11 +1927,15 @@ describe('fetch-pr report assembly', () => {
         return B_SOURCE;
       }
       if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        // Continuity proven (#10136 R18-3): the stamp matches this round's
+        // base, so the seam bound engages and the HEAVY exemption — not
+        // the continuity gate — is what lifts it.
         return JSON.stringify({
           round: 7,
           findings: [],
           posted: 1,
           floor: 'c',
+          mergeBaseSha: BASE,
         });
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });

@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, it, expect } from 'vitest';
@@ -1187,7 +1187,15 @@ describe('the seam oracle and its parser (#10136)', () => {
     };
     walk(root);
     expect(files.length).toBeGreaterThan(1500);
-    const rels = files.map((f) => f.slice(root.length + 1));
+    // The resolver the corpus feeds is posix-hardcoded (`repoJoin` →
+    // nodePath.posix), so a win32-spelled relative path would resolve
+    // nothing into the corpus; normalise the same way paths.ts:499-502 does.
+    const rels = files.map((f) =>
+      f
+        .slice(root.length + 1)
+        .split(sep)
+        .join('/'),
+    );
     const corpus = new Set(rels);
     const doubted: string[] = [];
     const unexplained: string[] = [];

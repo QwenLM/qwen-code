@@ -110,6 +110,63 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it("carries the fetch's merge-base stamp through the identity-known rewrite (#10136 R18-3)", () => {
+    // The stamp is a fact about THIS machine's capture, not a marker
+    // field: `fetch-pr` writes it when a round publishes, and the seam
+    // bound's continuity gate reads it next round. A wholesale rewrite
+    // that dropped it would keep the gate permanently unprovable; a file
+    // with no stamp writes none (the bound simply stays off).
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          round: 1,
+          findings: [],
+          mergeBaseSha: 'b'.repeat(40),
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger,
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(written['mergeBaseSha']).toBe('b'.repeat(40));
+      // …and a stamp-less predecessor yields a stamp-less file: the field
+      // is never invented, only carried.
+      writeFileSync(side, JSON.stringify({ round: 1, findings: [] }));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger,
+          commitId: 'a'.repeat(40),
+          reviewId: 43,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const unstamped = JSON.parse(readFileSync(side, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect('mergeBaseSha' in unstamped).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a FOREIGN winner carries no planted churn state — and own streak still restores across the round gap', () => {
     // The round trip for the recovery seam, both halves: any account that
     // can submit a review can post a marker carrying `churnRounds`, and

@@ -368,6 +368,153 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a dry receipt whose list differs only by cleared verification tags is still stale (#10136 R17-1)', () => {
+    // The convergence pair's lists legitimately differ by `— [unverified]`
+    // tag state alone (SKILL.md:771 — the merge clears tags between the
+    // pair's rounds), so round 2's record carries a NEW digest over the
+    // SAME entries: chunk 14 yielded in round 1 against list L (digest
+    // d1); its round-2 record (digest d2) points at L with the tags
+    // cleared and no new entry. Digest inequality is not freshness — the
+    // dry receipt never saw round 1's finding, so the chunk falls through
+    // to the ordinary rules, which see the yield and keep it hot.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2 =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(plan, 'reverse-audit--round-2--d2', L2);
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a dry receipt whose list never carried the yield is stale even with new entries elsewhere (#10136 R17-1)', () => {
+    // The sibling arm: round 2's list DID change between the rounds — a
+    // different chunk's finding merged — so neither the digest nor the
+    // tag-stripped comparison proves staleness. What proves it is the
+    // yield's own filed file: the list the dry receipt was launched
+    // against carries no entry for it, so the receipt predates the merge
+    // of THIS chunk's finding. The control beside it: the same history
+    // with the yield's entry present in round 2's list narrows — the
+    // receipt saw the finding.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_OTHER_ONLY =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** src/other.ts:7 — an unrelated finding\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--d2',
+      L2_OTHER_ONLY,
+    );
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a dry receipt whose list CARRIES the yield narrows — the serial shape (#10136 R17-1)', () => {
+    // The control for the entry arm: round 1's yield is IN round 2's
+    // list, so the receipt was built with the finding in view. Different
+    // digest, different entries, entry present — nothing is stale, and
+    // the non-delta chunk narrows out on its single dry receipt exactly
+    // as the posture intends.
+    const L1 =
+      '- **File:** src/pay.ts:42 — the double charge — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const L2_SAW_YIELD =
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+      '- **Severity:** Suggestion\n' +
+      '- **File:** packages/cli/src/commands/review/x.test.ts:12 — [unverified]\n' +
+      '- **Severity:** Suggestion\n';
+    const f1 = writeFindingsFile(plan, 'reverse-audit--round-1--d1', L1);
+    const f2 = writeFindingsFile(
+      plan,
+      'reverse-audit--round-2--d2',
+      L2_SAW_YIELD,
+    );
+    transcript(
+      record(
+        1,
+        14,
+        'chunk 14 round 1 territory walk\n' +
+          `read_file(file_path="${f1 ?? ''}")`,
+        'd1',
+      ),
+      YIELD,
+    );
+    transcript(
+      record(
+        2,
+        14,
+        'chunk 14 round 2 territory walk\n' +
+          `read_file(file_path="${f2 ?? ''}")`,
+        'd2',
+      ),
+      DRY,
+    );
+
+    const r3 = scheduleReverseAuditRound(plan, [14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.converged).toBe(true);
+  });
+
   it('a retired DELTA chunk still cold-checks; a narrowed one never does', () => {
     dryTwice([13, 14]);
     const narrowing = { deltaChunkIds: new Set([13]) };

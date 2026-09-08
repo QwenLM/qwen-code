@@ -411,6 +411,70 @@ describe('widenScope seam bound (#10104)', () => {
     expect(bounded.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
   });
 
+  it('a KEPT slice that classifies heavy republishes whole with no census (#10136 R17-4)', () => {
+    // The exemption's second direction. `buildPlanReport` re-derives
+    // heaviness from the PUBLISHED slice — the kept hunks' +/- counts
+    // against the whole-file post-image — so a file non-heavy full-range
+    // can classify heavy once bounded: shedding hunks lowers changedLines
+    // while the preLines identity RAISES the pre-image count, and the two
+    // move in opposite directions. The plan's `heavy` would then roster
+    // three whole-file invariant agents on a file the loop deliberately
+    // bounded. The two classifications must tell one story: a
+    // disagreement republishes the file whole, recording NO census.
+    //
+    // Dimensioned on the measured shape: a 400-line post-image whose
+    // full-range section carries 340 added / 200 removed (preLines 260 —
+    // below the 300 bar, so the bound engages), where the seam keeps only
+    // the removal-heavy hunk (0 added / 200 removed → preLines 600,
+    // changedLines/fileLines 0.5 — heavy).
+    const gone = Array.from({ length: 200 }, (_, i) => `-gone ${i}`);
+    const added = Array.from({ length: 340 }, (_, i) => `+new ${i}`);
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,201 +1,1 @@',
+      " import './changed.js';",
+      ...gone,
+      '@@ -202,1 +2,341 @@',
+      ' // filler 2',
+      ...added,
+      '',
+    ].join('\n');
+    const source =
+      "import './changed.js';\n" +
+      Array.from({ length: 399 }, (_, i) => `// filler ${i + 2}`).join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    // Sanity: the fixture really is the divergent shape — the full-range
+    // section is NOT heavy (preLines 260 < 300), the kept slice IS
+    // (preLines 600, ratio 0.5).
+    const section400 = selection.sections.find((f) => f.path === 'src/imp.ts');
+    expect(section400?.addedLines).toBe(340);
+    expect(section400?.removedLines).toBe(200);
+    expect(widened.scope.interaction[0].seam).toBeUndefined();
+    expect(widened.hunkKeep).toBeUndefined();
+    // The published bytes carry the whole section, both hunks — the file
+    // is republished exactly as the unbounded widening would have.
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('-gone 0');
+    expect(diff).toContain('+new 0');
+  });
+
   it('a seam line on a hunk boundary keeps the hunk — both ends inclusive (#10136)', () => {
     // IMP_SECTION's second hunk spans new-side lines 10-12. A seam use on
     // line 12 exactly (the last line) must keep it; one on line 10 exactly
