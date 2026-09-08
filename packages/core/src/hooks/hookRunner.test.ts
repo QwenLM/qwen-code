@@ -1390,6 +1390,49 @@ describe('HookRunner', () => {
       expect(killSpy).toHaveBeenCalledWith(survivingPid, 'SIGKILL');
     });
 
+    it('does not directly SIGKILL a surviving Windows hook pid that taskkill reported dead', async () => {
+      // taskkillProcessTree also resolves false when the pid was already dead,
+      // not just when it failed to kill. A pid-based fallback against a dead
+      // pid can land on a recycled pid (the #6067 collateral-kill mode). The
+      // liveness re-probe after taskkill must skip the fallback then.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const survivingPid = 9914;
+      let probes = 0;
+      const killSpy = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((target, signal) => {
+          if (target === survivingPid && signal === 0) {
+            probes += 1;
+            if (probes === 1) {
+              // The initial liveness probe passes: taskkill is attempted.
+              return true;
+            }
+            // The re-probe after taskkill reports the pid as dead/recycled.
+            throw createNoSuchProcessError();
+          }
+          return true;
+        });
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(new Error('ERROR_ACCESS_DENIED'));
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, survivingPid);
+
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+
+      expect(mockExecFile).toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalledWith(survivingPid, 'SIGKILL');
+    });
+
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');
       mockSpawn.mockReturnValue(mockProcess);

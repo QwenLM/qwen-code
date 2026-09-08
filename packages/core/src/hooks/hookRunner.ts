@@ -505,7 +505,12 @@ async function terminateSurvivingHookProcessGroup(
     // cmd.exe tree running with nothing else able to reap it, which is exactly
     // the leak this branch exists to close. Mirrors the fallback in
     // terminateWindowsHookProcessTree above.
-    if (!(await taskkillProcessTree(pid))) {
+    //
+    // But taskkill also resolves false when the pid was ALREADY dead, and a
+    // pid-based kill against a recycled pid is a collateral kill (the #6067
+    // failure mode). Re-probe liveness before falling back so a dead pid is
+    // never signalled directly.
+    if (!(await taskkillProcessTree(pid)) && isProcessAlive(pid)) {
       try {
         process.kill(pid, 'SIGKILL');
       } catch {

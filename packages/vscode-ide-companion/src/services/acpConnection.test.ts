@@ -7,10 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
+import { PassThrough } from 'node:stream';
 import { logger } from '../utils/logger.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
+const sdkClientFactory = vi.hoisted(() => ({
+  factory: null as null | ((agent: unknown) => Record<string, unknown>),
+}));
 
 // Mirrors the module-private SHUTDOWN_GRACE_MS in acpConnection.ts. Kept as a
 // literal here on purpose: the escalation tests step to just before and just
@@ -24,6 +28,23 @@ vi.mock('vscode', () => ({}));
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
   return { ...actual, spawn: spawnMock, execFile: execFileMock };
+});
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@agentclientprotocol/sdk')>();
+  return {
+    ...actual,
+    // Capture the Client factory so tests can drive the inbound callbacks
+    // (sessionUpdate / writeTextFile / ...) that guard against a superseded
+    // connection. The real SDK would hold this factory internally.
+    ClientSideConnection: class {
+      constructor(factory: (agent: unknown) => Record<string, unknown>) {
+        sdkClientFactory.factory = factory;
+      }
+      initialize = vi.fn().mockResolvedValue({ protocolVersion: '1.0' });
+    },
+    ndJsonStream: () => ({}),
+  };
 });
 
 import { AcpConnection } from './acpConnection.js';
@@ -330,11 +351,12 @@ describe('AcpConnection child exit cleanup', () => {
     );
   });
 
-  it('disconnect force-kills the CLI only after it fails to exit on its own', () => {
+  it('disconnect force-kills the CLI process group only after it fails to exit on its own', () => {
     // Pinned so the assertion does not depend on which runner executes it.
     const platform = vi
       .spyOn(process, 'platform', 'get')
       .mockReturnValue('linux');
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
     vi.useFakeTimers();
     try {
       const mockKill = vi.fn();
@@ -347,17 +369,23 @@ describe('AcpConnection child exit cleanup', () => {
 
       (conn as unknown as AcpConnection).disconnect();
       expect(mockKill).not.toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalled();
 
       // The grace has to outlast the CLI's own wind-down (8s MCP pool drain +
       // 30s session drain), so nothing may be signalled one tick before it
       // expires. A grace shorter than that wind-down reds this assertion.
       vi.advanceTimersByTime(SHUTDOWN_GRACE_MS - 1);
-      expect(mockKill).not.toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(1);
-      expect(mockKill).toHaveBeenCalledWith('SIGKILL');
+      // The escalation signals the process GROUP (negative pid), not just the
+      // CLI root process, so the PTYs/ConPTY hosts/MCP children underneath it
+      // are reaped too. Removing the group kill reds this assertion.
+      expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGKILL');
+      expect(mockKill).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
+      killSpy.mockRestore();
       platform.mockRestore();
     }
   });
@@ -436,6 +464,66 @@ describe('AcpConnection child exit cleanup', () => {
     // this is an unhandled rejection in the extension host — vitest reports it
     // as a suite error even with every test green.
     await Promise.resolve();
+  });
+
+  it('a superseded connection stops dispatching inbound callbacks', async () => {
+    // The five inbound callbacks on the SDK Client object read `this.*` at
+    // call time. `disconnect()` ends stdin and nulls sdkConnection but does
+    // not close the superseded child's stdout, so its ClientSideConnection
+    // stays live. Each callback must gate on `this.child !== ownChild`, or the
+    // retired connection keeps dispatching into callbacks bound to the live
+    // replacement. Removing any guard makes one of these spies fire.
+    vi.useFakeTimers();
+    try {
+      const stdout = new PassThrough();
+      const stdin = new PassThrough();
+      const oldChild = createMockChild({ stdout, stdin, on: vi.fn() });
+      const conn = new AcpConnection() as unknown as AcpConnectionInternal & {
+        onSessionUpdate: (data: unknown) => void;
+        fileHandler: {
+          handleWriteTextFile: (request: unknown) => Promise<unknown>;
+        };
+      };
+      conn.child = oldChild;
+      conn.onSessionUpdate = vi.fn();
+      const writeSpy = vi
+        .spyOn(conn.fileHandler, 'handleWriteTextFile')
+        .mockResolvedValue({});
+
+      const setup = (
+        conn as unknown as {
+          setupChildProcessHandlers: () => Promise<void>;
+        }
+      ).setupChildProcessHandlers();
+      await vi.advanceTimersByTimeAsync(1000);
+      await setup;
+
+      const client = sdkClientFactory.factory?.(null);
+      expect(client).toBeDefined();
+      const writeTextFile = (
+        client as unknown as {
+          writeTextFile: (request: unknown) => Promise<unknown>;
+        }
+      ).writeTextFile;
+      const sessionUpdate = (
+        client as unknown as {
+          sessionUpdate: (notification: unknown) => Promise<void>;
+        }
+      ).sessionUpdate;
+
+      // Supersede the child after the connection has been built.
+      conn.child = createMockChild();
+
+      await expect(
+        writeTextFile({ path: '/tmp/x', content: 'x', sessionId: 's' }),
+      ).rejects.toBeInstanceOf(RequestError);
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      await sessionUpdate({});
+      expect(conn.onSessionUpdate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('disconnect does not force-kill a CLI that exited on its own', () => {

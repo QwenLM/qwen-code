@@ -152,6 +152,11 @@ export class AcpConnection {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       shell: false,
+      // A detached child becomes a process-group leader on POSIX, so the
+      // disconnect() escalation can signal the whole group and reap the PTYs,
+      // ConPTY hosts and MCP children the CLI is tracking. Windows has no
+      // process group to signal — its tree kill goes through taskkill instead.
+      detached: process.platform !== 'win32',
     };
 
     this.child = spawn(spawnCommand, spawnArgs, options);
@@ -252,6 +257,11 @@ export class AcpConnection {
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
+          if (this.child !== ownChild) {
+            // A fire-and-forget notifier on a superseded connection must not
+            // re-enter callbacks that read `this.*` at call time.
+            return Promise.resolve();
+          }
           this.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
@@ -259,6 +269,11 @@ export class AcpConnection {
         requestPermission: async (
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
+          if (this.child !== ownChild) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -345,6 +360,11 @@ export class AcpConnection {
         readTextFile: async (
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> => {
+          if (this.child !== ownChild) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           try {
             const result = await this.fileHandler.handleReadTextFile({
               path: params.path,
@@ -361,6 +381,11 @@ export class AcpConnection {
         writeTextFile: async (
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> => {
+          if (this.child !== ownChild) {
+            throw RequestError.internalError({
+              details: 'connection superseded',
+            });
+          }
           await this.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
@@ -372,7 +397,14 @@ export class AcpConnection {
         extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => this.handleExtNotification(method, params),
+        ): Promise<void> => {
+          if (this.child !== ownChild) {
+            // A fire-and-forget notifier on a superseded connection must not
+            // re-enter `this.*` callbacks; drop it instead of erroring.
+            return;
+          }
+          return this.handleExtNotification(method, params);
+        },
       }),
       stream,
     );
@@ -721,6 +753,7 @@ export class AcpConnection {
     if (child.pid === undefined) {
       return;
     }
+    const childPid = child.pid;
 
     // Close the child's stdin instead of killing it. Ending the ndjson stream
     // is the CLI's own shutdown path: `await connection.closed` returns, it
@@ -783,17 +816,22 @@ export class AcpConnection {
         );
         return;
       }
-      // The child is spawned without `detached`, so there is no process group
-      // to signal on this branch: SIGKILL reaches the CLI process alone and
-      // the shells and PTY hosts underneath it survive. Log what actually
-      // happens rather than claiming a tree kill.
+      // The child is detached on POSIX, so it leads its own process group:
+      // signalling the group reaches the shells, PTY hosts and MCP children
+      // the CLI is tracking, not just the CLI root process.
       logger.error(
-        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing the CLI process`,
+        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process group`,
       );
       try {
-        child.kill('SIGKILL');
+        process.kill(-childPid, 'SIGKILL');
       } catch {
-        // Already gone.
+        // The process group is already gone (or the child predates the
+        // detached spawn). The root kill is the fallback.
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Already gone.
+        }
       }
     }, SHUTDOWN_GRACE_MS);
   }
