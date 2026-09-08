@@ -561,9 +561,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           : undefined,
       );
       if (applied.submitNow) {
-        // Same cleanup as the real submit path (handleSubmit): expand pending
-        // paste placeholders, collect attachments, then clear everything —
-        // an accepted completion must not leave placeholders or chips behind.
+        // Same cleanup as the submit path (the global Enter handler): expand
+        // pending paste placeholders, collect attachments, then clear
+        // everything — an accepted completion must not leave placeholders or
+        // chips behind.
         let finalText = applied.submitNow;
         if (pendingPastesRef.current.size > 0) {
           finalText = expandPendingPastePlaceholders(
@@ -1096,41 +1097,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   });
 
-  const handleSubmit = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const text = el.plainText;
-    const decision = decideSubmit(
-      text,
-      displayOffsetToCodePointIndex(text, el.cursorOffset),
-    );
-    if (decision.kind === 'noop') return;
-    if (decision.kind === 'newline-continuation') {
-      el.deleteCharBackward();
-      el.newLine();
-      setTextVersion((v) => v + 1);
-      return;
-    }
-    let finalText = decision.text.trim();
-    if (pendingPastesRef.current.size > 0) {
-      finalText = expandPendingPastePlaceholders(
-        finalText,
-        pendingPastesRef.current,
-      );
-      pendingPastesRef.current.clear();
-      activePlaceholderIdsRef.current.clear();
-    }
-    const images = attachments.map((a) => a.path);
-    el.clear();
-    setTextVersion((v) => v + 1);
-    historyRef.current?.reset();
-    historyRestoredTextRef.current = null;
-    setSuggestions([]);
-    setLoadingSuggestions(false);
-    setAttachments([]);
-    onSubmit(finalText, images.length > 0 ? images : undefined);
-  }, [onSubmit, attachments]);
-
   // Force the editor text color after mount (prop may not forward), max contrast.
   useEffect(() => {
     const el = editorRef.current as
@@ -1210,7 +1176,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           selectionBg={C.selectionBg}
           selectionFg={C.selectionFg}
           wrapMode="char"
-          onSubmit={handleSubmit}
           onContentChange={() => setTextVersion((v) => v + 1)}
           onCursorChange={() => setTextVersion((v) => v + 1)}
           keyBindings={[
