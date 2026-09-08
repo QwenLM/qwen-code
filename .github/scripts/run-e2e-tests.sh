@@ -107,14 +107,31 @@ fi
 # the step above just built.
 # Keep the long-lived serve daemon out of the three-fork batch so
 # sibling E2E processes cannot starve its local HTTP requests.
+run_vitest() {
+  if [ "$sandbox" = 'sandbox:docker' ]; then
+    npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests "$@" 9>&-
+  else
+    QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- "$@"
+  fi
+}
+
+bulk_args=(
+  --exclude '**/interactive/cron-interactive.test.ts'
+  --exclude '**/channel-plugin.test.ts'
+  --exclude '**/chat-transcript-document.test.ts'
+  --exclude '**/qwen-serve-routes.test.ts'
+  --poolOptions.forks.maxForks=3
+  --shard="$shard"
+)
+
+run_shard() {
+  run_vitest "${bulk_args[@]}" &&
+    run_vitest cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork
+}
+
 if [ "$sandbox" = 'sandbox:docker' ]; then
-  npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard="$shard" 9>&-
-  npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork 9>&-
+  run_shard
 else
-  run_shard() {
-    QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard="$shard" &&
-      QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork
-  }
   # One bounded retry: pool runners' sandbox:none shards die under
   # shared-host pressure with every test green and no vitest FAIL
   # line — runs 33293739505, 33302550436 and 33317457036 failed

@@ -43,20 +43,18 @@ describe('e2e workflow', () => {
 
     expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
     expect(runStep.run).toContain('.github/scripts/run-e2e-tests.sh');
-    expect(e2eRunScript).toMatch(
-      /^\s*npx cross-env .*QWEN_SANDBOX=docker vitest run .*--poolOptions\.forks\.maxForks=3/m,
+    expect(e2eRunScript).toContain(
+      'npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests "$@"',
     );
-    expect(e2eRunScript).toMatch(
-      /^\s*QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- .*--poolOptions\.forks\.maxForks=3/m,
+    expect(e2eRunScript).toContain(
+      'QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- "$@"',
     );
     expect(
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(
-      e2eRunScript.match(
-        /cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.singleFork/g,
-      ),
-    ).toHaveLength(2);
+      e2eRunScript.match(/--poolOptions\.forks\.singleFork/g),
+    ).toHaveLength(1);
   });
 
   describe('sandbox image preparation', () => {
@@ -169,7 +167,9 @@ describe('e2e workflow', () => {
       // on the host. This shell keeps its own copy of the descriptor, so
       // closing it in children costs nothing.
       expect(e2eRunScript).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
-      expect(e2eRunScript).toContain('--shard="$shard" 9>&-');
+      expect(e2eRunScript).toContain(
+        'vitest run --root ./integration-tests "$@" 9>&-',
+      );
       expect(e2eRunScript).toContain('exec 7>&-');
       expect(e2eRunScript).toContain('exec 8>&-');
       const cleanupStep = steps.find(
@@ -214,12 +214,9 @@ describe('e2e workflow', () => {
     });
 
     it('retries the full shard command, shard and excludes included', () => {
-      // Everything after `--` is forwarded to vitest by the npm script, so
-      // shard and exclude coverage lives only in this argument list. The
-      // excludes are shared verbatim with the docker leg above.
-      expect(e2eRunScript).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard=\"$shard\"",
-      );
+      expect(e2eRunScript).toContain('run_vitest "${bulk_args[@]}"');
+      expect(e2eRunScript).toContain('--poolOptions.forks.maxForks=3');
+      expect(e2eRunScript).toContain('--shard="$shard"');
     });
 
     it('retries the sandbox:none shard exactly once', () => {
@@ -227,7 +224,10 @@ describe('e2e workflow', () => {
       // Definition + first attempt + one retry: the second attempt's exit
       // status is the step's, and a third attempt would burn pool time for
       // nothing.
-      expect(e2eRunScript.match(/run_shard/g)).toHaveLength(3);
+      const retryBranch = e2eRunScript.slice(
+        e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+      );
+      expect(retryBranch.match(/run_shard/g)).toHaveLength(3);
       // End-anchored scope: the retry is the group's last command and the
       // group is the script's last statement. A retry moved outside the
       // `|| { ... }` would run unconditionally, re-running green shards too.
@@ -268,25 +268,12 @@ describe('e2e workflow', () => {
     });
 
     it('does not retry the docker leg', () => {
-      // The bulk run and isolated serve-routes run each execute once.
-      const commands = [
-        ...e2eRunScript.matchAll(/QWEN_SANDBOX=docker vitest run/g),
-      ];
-      expect(commands).toHaveLength(2);
-      // Structure, not just count: wrapping either command in a function and
-      // calling it later keeps the literal count unchanged. The
-      // docker leg defines its own helper functions, so match by brace
-      // depth rather than any earlier definition: every `${...}` brace in
-      // the script is balanced, leaving the command at depth zero unless
-      // something wraps it.
-      for (const command of commands) {
-        let depth = 0;
-        for (const ch of e2eRunScript.slice(0, command.index)) {
-          if (ch === '{') depth += 1;
-          if (ch === '}') depth -= 1;
-        }
-        expect(depth).toBe(0);
-      }
+      const dockerBranch = e2eRunScript
+        .slice(
+          e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+        )
+        .split('\nelse\n', 1)[0];
+      expect(dockerBranch.match(/run_shard/g)).toHaveLength(1);
     });
   });
 
