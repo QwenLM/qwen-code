@@ -67,15 +67,6 @@ function isStatuslessThrottle(error: unknown): boolean {
     const { source } = selected;
     const { type, message } = source as { type?: unknown; message?: unknown };
     if (type === 'rate_limit_error' || type === 'overloaded_error') return true;
-    if (
-      type === 'api_error' &&
-      typeof message === 'string' &&
-      /^Streaming error: 404: Rate limit exceeded on Anthropic API\.?$/i.test(
-        message.trim(),
-      )
-    ) {
-      return true;
-    }
     if (type !== 'invalid_request_error' || typeof message !== 'string')
       continue;
 

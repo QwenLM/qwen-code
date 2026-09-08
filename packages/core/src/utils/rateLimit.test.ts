@@ -96,7 +96,7 @@ describe('isRateLimitError — statusless provider errors', () => {
     [
       'api_error',
       'Streaming error: 404: Rate limit exceeded on Anthropic API.',
-      true,
+      false,
     ],
     ['api_error', 'Streaming error: 404: Model not found.', false],
     ['api_error', 'Streaming error: 404: Account quota exceeded.', false],
