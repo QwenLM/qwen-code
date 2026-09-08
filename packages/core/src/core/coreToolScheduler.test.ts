@@ -16274,6 +16274,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     // assertions.
     abortController.abort();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const cancelledCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'cancelled',
+    )) as CompletedToolCall;
 
     expect(
       (scheduler as unknown as { toolSpans: Map<string, unknown> }).toolSpans
@@ -16295,6 +16299,13 @@ describe('CoreToolScheduler telemetry spans', () => {
       (r) => r.name === 'tool.mockEditTool',
     );
     expect(toolSpan?.ended).toBe(true);
+    const responseText = JSON.stringify(cancelledCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call before it ran.',
+    );
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('plan-mode block emits failure_kind=plan_mode_blocked (#4321)', async () => {
@@ -16416,7 +16427,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   it('validated pre-execution cancellation keeps the parent span UNSET', async () => {
     const abortController = new AbortController();
-    const { spanRecord } = await runSingleTool({
+    const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
       tools: [
         new MockTool({
@@ -16434,6 +16445,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       toolSpanRecords.find((record) => record.name === 'tool.execution'),
     ).toBeUndefined();
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call before it ran.',
+    );
+    expect(responseText).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('signal.abort during awaiting_approval: blocked span ends with aborted/system (#4321)', async () => {
