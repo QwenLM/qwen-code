@@ -25,7 +25,7 @@ const daemonPermissionCancelMessages = {
   timeout: 'Permission request timed out before the user answered.',
   session_closed:
     'Permission request was cancelled because the session closed before the user answered.',
-  agent_cancelled: 'Permission request was cancelled before the user answered.',
+  agent_cancelled: 'Permission request was cancelled.',
 } satisfies Record<DaemonPermissionCancelReason, string>;
 
 const basicPermissionOptions = [
