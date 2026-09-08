@@ -1414,37 +1414,67 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     );
   });
 
-  it('loads extension references from the chosen workspace runtime', async () => {
-    const ensureRuntime = vi.fn(async () => ({}));
-    const workspaceRuntimeExtensions = vi.fn(async () => ({ extensions: [] }));
-    const workspaceByCwd = vi.fn(() => ({
-      ensureRuntime,
-      workspaceRuntimeExtensions,
-    }));
-    optionalWorkspaceState.current = {
-      capabilities: { features: ['workspace_extension_mentions'] },
-      client: {
-        ensureWorkspaceRuntime: vi.fn(),
-        workspaceRuntimeExtensions: vi.fn(),
-        workspaceByCwd,
-      },
-    };
-    await mountMulti({ primary: [], 'id-other': [] });
-    click(findButton('New scheduled task'));
+  it.each(['ready', 'starting', 'uninitialized', 'errors', 'stale epoch'])(
+    'checks chosen workspace extension references: %s',
+    async (state) => {
+      const ensureRuntime = vi.fn(async () => ({
+        runtimeEpoch: 3,
+        capabilities: {
+          extensions: {
+            state: state === 'starting' ? 'starting' : 'ready',
+            runtimeEpoch: 3,
+          },
+        },
+      }));
+      const workspaceRuntimeExtensions = vi.fn(async () => ({
+        initialized: state !== 'uninitialized',
+        runtimeEpoch: state === 'stale epoch' ? 2 : 3,
+        errors: state === 'errors' ? [{ error: 'broken extension' }] : [],
+        extensions: [
+          { id: 'ext-test', name: 'test-extension', isActive: true },
+        ],
+      }));
+      const workspaceByCwd = vi.fn(() => ({
+        ensureRuntime,
+        workspaceRuntimeExtensions,
+      }));
+      optionalWorkspaceState.current = {
+        capabilities: { features: ['workspace_extension_mentions'] },
+        client: {
+          ensureWorkspaceRuntime: vi.fn(),
+          workspaceRuntimeExtensions: vi.fn(),
+          workspaceByCwd,
+        },
+      };
+      await mountMulti({ primary: [], 'id-other': [] });
+      click(findButton('New scheduled task'));
 
-    const wsSelect = findWorkspaceSelect()!;
-    act(() => {
-      wsSelect.value = 'id-other';
-      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    click(findButtonContaining('Extensions'));
-    await flush();
+      const wsSelect = findWorkspaceSelect()!;
+      act(() => {
+        wsSelect.value = 'id-other';
+        wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      click(findButtonContaining('Extensions'));
+      await flush();
 
-    expect(workspaceByCwd).toHaveBeenCalledWith('/repo/other');
-    expect(ensureRuntime).toHaveBeenCalledOnce();
-    expect(workspaceRuntimeExtensions).toHaveBeenCalledOnce();
-    expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
-  });
+      expect(workspaceByCwd).toHaveBeenCalledWith('/repo/other');
+      expect(ensureRuntime).toHaveBeenCalledOnce();
+      expect(workspaceRuntimeExtensions).toHaveBeenCalledTimes(
+        state === 'starting' ? 0 : 1,
+      );
+      expect(actions.loadExtensionsStatus).not.toHaveBeenCalled();
+      expect(document.body.textContent?.includes('test-extension')).toBe(
+        state === 'ready',
+      );
+      if (state !== 'ready') {
+        expect(document.body.textContent).toContain(
+          state === 'errors'
+            ? 'broken extension'
+            : 'Extension runtime catalog is not initialized.',
+        );
+      }
+    },
+  );
 
   it('keeps the legacy extension loader when the form targets an untrusted primary', async () => {
     const ensureWorkspaceRuntime = vi.fn(async () => ({}));

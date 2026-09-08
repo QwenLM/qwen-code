@@ -883,13 +883,37 @@ export function ScheduledTasksDialog({
             ) === true &&
             !(formWorkspace?.primary === true && !formWorkspace.trusted)
           ) {
-            if (formWorkspace?.primary === false) {
-              const client = workspace.client.workspaceByCwd(formWorkspace.cwd);
-              await client.ensureRuntime();
-              status = await client.workspaceRuntimeExtensions();
-            } else {
-              await workspace.client.ensureWorkspaceRuntime();
-              status = await workspace.client.workspaceRuntimeExtensions();
+            const client =
+              formWorkspace?.primary === false
+                ? workspace.client.workspaceByCwd(formWorkspace.cwd)
+                : undefined;
+            const coordinator = client
+              ? await client.ensureRuntime()
+              : await workspace.client.ensureWorkspaceRuntime();
+            const capability = coordinator.capabilities?.extensions;
+            if (
+              capability &&
+              (capability.state !== 'ready' ||
+                capability.runtimeEpoch !== coordinator.runtimeEpoch)
+            ) {
+              throw new Error(
+                capability.error?.message ??
+                  'Extension runtime catalog is not initialized.',
+              );
+            }
+            status = await (
+              client ?? workspace.client
+            ).workspaceRuntimeExtensions();
+            if (
+              status.initialized === false ||
+              (status.errors?.length ?? 0) > 0 ||
+              (coordinator.runtimeEpoch !== undefined &&
+                status.runtimeEpoch !== coordinator.runtimeEpoch)
+            ) {
+              throw new Error(
+                status.errors?.[0]?.error ??
+                  'Extension runtime catalog is not initialized.',
+              );
             }
           } else {
             status = await actions.loadExtensionsStatus();

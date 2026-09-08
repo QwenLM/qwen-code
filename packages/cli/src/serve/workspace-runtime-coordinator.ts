@@ -421,7 +421,6 @@ export class WorkspaceRuntimeCoordinator {
         error instanceof ExtensionRuntimeRefreshError
           ? error.result
           : undefined;
-      this.afterExtensionApply(options);
       return {
         state: 'failed',
         refreshed: refresh?.sessionsRefreshed ?? 0,
@@ -751,6 +750,17 @@ export class WorkspaceRuntimeCoordinator {
       return result;
     } catch (error) {
       this.recordExtensionsError(revision, runtimeEpoch, error);
+      const current = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+      if (
+        !this.draining &&
+        !this.disposed &&
+        current.runtimeLive &&
+        current.runtimeEpoch === runtimeEpoch &&
+        revision === this.extensionsRevision &&
+        generation === this.desiredExtensionGeneration
+      ) {
+        this.afterExtensionApply(options);
+      }
       throw error;
     }
   }
@@ -1054,8 +1064,8 @@ export class WorkspaceRuntimeCoordinator {
     };
   }
 
-  // Every path that advances the applied Extension generation — the
-  // mutation/poller reconcile and the ensure-path prepare — invalidates and
+  // Every Extension apply, including partial failure on either the
+  // mutation/poller reconcile or ensure-path prepare, invalidates and
   // reschedules the capabilities derived from it, so a ready Skills/MCP
   // status never certifies revisions that predate the applied generation.
   private afterExtensionApply(options: { skillsOnly?: boolean } = {}): void {
