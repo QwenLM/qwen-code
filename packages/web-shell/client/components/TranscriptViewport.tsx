@@ -59,6 +59,15 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const loadFrame = useRef<number | undefined>(undefined);
+  useLayoutEffect(
+    () => () => {
+      if (loadFrame.current !== undefined)
+        cancelAnimationFrame(loadFrame.current);
+      loadFrame.current = undefined;
+    },
+    [viewKey],
+  );
   useLayoutEffect(() => {
     if (historical || loading) onCanScrollToBottomChange?.(true);
   }, [historical, loading, onCanScrollToBottomChange]);
@@ -212,12 +221,31 @@ export const TranscriptViewport = forwardRef<
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
-    anchor.current = capture();
-    entryDirection.current = direction;
-    void viewport.load(direction, refreshAnchor);
+    if (loadFrame.current !== undefined) return;
+    const intent = scrollIntent.current;
+    let remaining = 8;
+    const loadWhenVisible = () => {
+      loadFrame.current = undefined;
+      if (intent !== scrollIntent.current) return;
+      const saved = capture();
+      // A scroll event can arrive before the virtualized rows mount. Loading
+      // without an anchor would leave no reading position to restore.
+      if (!saved) {
+        if (--remaining > 0)
+          loadFrame.current = requestAnimationFrame(loadWhenVisible);
+        return;
+      }
+      anchor.current = saved;
+      entryDirection.current = direction;
+      void viewport.load(direction, refreshAnchor);
+    };
+    loadWhenVisible();
   };
   const handleScrollIntent = () => {
     scrollIntent.current += 1;
+    if (loadFrame.current !== undefined)
+      cancelAnimationFrame(loadFrame.current);
+    loadFrame.current = undefined;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
     restoring.current = false;
@@ -269,6 +297,7 @@ export const TranscriptViewport = forwardRef<
             state={viewport.navigation}
             store={viewport.store}
             onSelect={(ordinal) => {
+              handleScrollIntent();
               anchor.current = undefined;
               void viewport.selectOrdinal(ordinal);
             }}
