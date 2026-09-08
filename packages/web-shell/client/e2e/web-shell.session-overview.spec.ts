@@ -283,6 +283,15 @@ test('keeps text selection and rename drafts in the overview @smoke', async ({
   await expect(panel).toBeVisible();
   await expect(editor).toBeFocused();
   await expect(editor).toHaveValue('Unsaved rename');
+  // Controls in other rows still take their click: the blur-cancel re-render
+  // must not detach the pressed node before mouseup.
+  const approveCheckbox = panel.getByRole('checkbox', {
+    name: 'Select Approve fixture',
+    exact: true,
+  });
+  await approveCheckbox.click();
+  await expect(approveCheckbox).toBeChecked();
+  await expect(editor).toHaveValue('Unsaved rename');
   await editor.press('Escape');
   await expect(editor).toHaveCount(0);
 });
@@ -380,6 +389,11 @@ test('overview details stay inside an embedded shell @smoke', async ({
       );
     })
     .toBe(true);
+  expect(
+    await dialog.evaluate(
+      (element) => element.closest('[data-web-shell-portal-root]') !== null,
+    ),
+  ).toBe(true);
 });
 
 test('attention cues stay visible in the pinned title at narrow widths @smoke', async ({
@@ -401,11 +415,16 @@ test('attention cues stay visible in the pinned title at narrow widths @smoke', 
         .poll(() => scroller.evaluate((element) => element.scrollLeft))
         .toBeGreaterThan(0);
     }
-    for (const status of ['needsApproval', 'askUserQuestion', 'running']) {
+    for (const [status, label] of [
+      ['needsApproval', 'Needs approval'],
+      ['askUserQuestion', 'User input needed'],
+      ['running', 'Running'],
+    ] as const) {
       const cue = panel.locator(
         `[data-web-shell-session-status-cue="${status}"]`,
       );
       await expect(cue).toBeVisible();
+      await expect(cue).toHaveAttribute('title', label);
       await expect
         .poll(() =>
           cue.evaluate((element) => {
@@ -421,4 +440,7 @@ test('attention cues stay visible in the pinned title at narrow widths @smoke', 
         .toBe(true);
     }
   }
+  await expect(
+    panel.locator('[data-web-shell-session-status-cue="idle"]'),
+  ).toHaveCount(0);
 });

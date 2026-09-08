@@ -165,6 +165,59 @@ describe('SessionDetailsTooltip', () => {
     }
   });
 
+  it("leaves another owner's pinned details open and focused on hover", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{ sessionId: 'a', workspaceCwd: '/w' }}
+              label="Alpha"
+              time=""
+              completedUnread={false}
+              openOnClick
+            >
+              <button type="button">Alpha details</button>
+            </SessionDetailsTooltip>
+            <SessionDetailsTooltip
+              session={{ sessionId: 'b', workspaceCwd: '/w' }}
+              label="Bravo"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Bravo title</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const alpha = document.querySelector(
+        '[role="dialog"][aria-label="Alpha"]',
+      );
+      const copy = alpha?.querySelector('[data-web-shell-session-id-copy]');
+      expect(document.activeElement).toBe(copy);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      // A hover from a different owner must not steal focus from — or
+      // dismiss — this pinned popover.
+      expect(
+        document.querySelector('[role="dialog"][aria-label="Bravo"]'),
+      ).not.toBeNull();
+      expect(alpha?.getAttribute('data-state')).toBe('open');
+      expect(document.activeElement).toBe(copy);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('shows the same structured details on row hover', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

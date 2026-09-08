@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   CheckIcon,
@@ -33,6 +33,7 @@ interface SessionDetailsTooltipProps {
   completedUnread: boolean;
   workspaceLabel?: string;
   openOnClick?: boolean;
+  ownerToken?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   children: ReactElement;
@@ -45,6 +46,7 @@ export function SessionDetailsTooltip({
   completedUnread,
   workspaceLabel,
   openOnClick = false,
+  ownerToken,
   open: controlledOpen,
   onOpenChange,
   children,
@@ -64,6 +66,11 @@ export function SessionDetailsTooltip({
   const anchorRef = useRef<HTMLElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
+  // The overview shares one token so its own entry points replace each
+  // other; every other instance keeps its own, so a hover elsewhere (e.g.
+  // the sidebar) never moves focus out of this popover.
+  const selfOwnerToken = useId();
+  const detailsOwner = ownerToken ?? selfOwnerToken;
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
@@ -121,7 +128,7 @@ export function SessionDetailsTooltip({
       // Move focus before replacing its owner so the new hover stays open.
       if (
         anchor?.ownerDocument.activeElement?.closest(
-          '[data-web-shell-session-details-content]',
+          `[data-web-shell-session-details-content="${detailsOwner}"]`,
         )
       ) {
         anchor.focus({ preventScroll: true });
@@ -188,7 +195,7 @@ export function SessionDetailsTooltip({
         updatePositionStrategy="always"
         showArrow
         role="dialog"
-        data-web-shell-session-details-content
+        data-web-shell-session-details-content={detailsOwner}
         aria-label={label}
         onOpenAutoFocus={(event) => {
           if (!openOnClick) {

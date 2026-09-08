@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   useActions,
   useConnection,
@@ -443,6 +450,9 @@ function SessionOverviewPanelInner({
     identity: string;
     click: boolean;
   } | null>(null);
+  // One replacement owner for every details entry point of this panel, so
+  // the focus rescue only fires within the overview.
+  const sessionDetailsOwner = useId();
   // Stable column renderers keep the hover anchor mounted as details change.
   const detailsOpenRef = useRef(detailsOpen);
   detailsOpenRef.current = detailsOpen;
@@ -534,6 +544,7 @@ function SessionOverviewPanelInner({
       const identity = getSessionIdentity(card);
       return {
         openOnClick: click,
+        ownerToken: sessionDetailsOwner,
         open:
           detailsOpenRef.current?.identity === identity &&
           detailsOpenRef.current.click === click,
@@ -558,7 +569,7 @@ function SessionOverviewPanelInner({
         completedUnread: false,
       };
     },
-    [sessionByIdentity, t],
+    [sessionByIdentity, sessionDetailsOwner, t],
   );
 
   const isPrimaryCard = useCallback(
@@ -1623,7 +1634,7 @@ function SessionOverviewPanelInner({
           editingCard &&
           event.button === 0 &&
           target.closest('[data-web-shell-session-table-viewport] tr') &&
-          !target.closest('button, a, input')
+          !target.closest('input')
         ) {
           event.preventDefault();
         }

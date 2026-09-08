@@ -658,6 +658,20 @@ describe('SessionOverviewPanel', () => {
       states[1]?.querySelector('svg.lucide-circle-question-mark'),
     ).not.toBeNull();
     expect(states[3]?.querySelector('svg.lucide-circle')).not.toBeNull();
+    // The attention cue and the status column pick their icon twice; pin
+    // them to the same glyph so the mappings cannot drift apart.
+    for (const index of [0, 1]) {
+      const cueIcon = rows()[index]!.querySelector(
+        '[data-web-shell-session-status-cue] svg',
+      );
+      expect(cueIcon?.outerHTML).toBe(
+        states[index]?.querySelector('svg')?.outerHTML,
+      );
+    }
+    // An idle row renders no attention cue at all.
+    expect(
+      rows()[3]!.querySelector('[data-web-shell-session-status-cue]'),
+    ).toBeNull();
   });
 
   it('opens the owning session on row click and selects only with the checkbox', () => {
@@ -711,15 +725,26 @@ describe('SessionOverviewPanel', () => {
       'input[aria-label="Rename: One"]',
     )!;
     act(() => setInputValue(input, 'Renamed'));
-    for (const target of [input, rowActionButton(rows()[0]!, 'Rename')]) {
-      const mouseDown = new MouseEvent('mousedown', {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-      });
-      act(() => target.dispatchEvent(mouseDown));
-      expect(mouseDown.defaultPrevented).toBe(false);
-    }
+    // The editor keeps native mousedown so the caret can be placed.
+    const editorMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => input.dispatchEvent(editorMouseDown));
+    expect(editorMouseDown.defaultPrevented).toBe(false);
+    // In-row controls get a prevented mousedown instead: no blur-cancel may
+    // remount the pressed node before mouseup, so their click still lands.
+    const actionMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() =>
+      rowActionButton(rows()[0]!, 'Rename').dispatchEvent(actionMouseDown),
+    );
+    expect(actionMouseDown.defaultPrevented).toBe(true);
+    expect(input.value).toBe('Renamed');
     const cell = rows()[0]!.querySelectorAll('td')[2]!;
     const mouseDown = new MouseEvent('mousedown', {
       bubbles: true,
