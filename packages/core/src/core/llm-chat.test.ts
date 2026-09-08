@@ -25,6 +25,7 @@ import {
 } from './llm-chat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import { getApiHistoryPromptId } from '../services/session-api-history.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
@@ -531,6 +532,40 @@ describe('LlmChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks the pushed user entry with the send promptId', async () => {
+      // The single hop that makes rewind identity work in a live session:
+      // the mark goes on the entry at push time, and must survive the
+      // accessor the rewind path actually reads (`getHistoryShallow`, see
+      // AppContainer's handleRewindConfirm).
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const send = async (options?: { promptId?: string }) => {
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          'prompt-id-mark',
+          undefined,
+          options,
+        );
+        for await (const _ of stream) {
+          /* consume stream */
+        }
+        return chat
+          .getHistoryShallow()
+          .filter((entry) => entry.role === 'user')
+          .at(-1)!;
+      };
+
+      expect(
+        getApiHistoryPromptId(await send({ promptId: 'session########7' })),
+      ).toBe('session########7');
+      // No identity supplied (retry, continuation, tool result): unmarked, so
+      // rewind stays on the positional path for that turn.
+      expect(getApiHistoryPromptId(await send())).toBeUndefined();
     });
 
     describe('manual plan-exit notices', () => {
