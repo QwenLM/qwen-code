@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cleanup_release_containers() {
+  container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)" || container_ids=''
+  if [ -n "$container_ids" ]; then
+    printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
+  fi
+}
+
+if [ "${1:-}" = 'cleanup' ]; then
+  cleanup_release_containers
+  remaining="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}")"
+  if [ -n "$remaining" ]; then
+    echo "::error::release containers remain for ${RELEASE_CONTAINER_OWNER}: ${remaining//$'\n'/,}"
+    exit 1
+  fi
+  exit 0
+fi
+
+trap cleanup_release_containers EXIT
+trap 'exit 1' INT TERM
+
 sandbox_revision="$(git rev-parse HEAD)"
 sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
