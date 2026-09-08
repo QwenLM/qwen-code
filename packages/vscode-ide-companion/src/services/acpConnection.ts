@@ -44,16 +44,20 @@ import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 /**
- * ACP Connection Handler for VSCode Extension
- *
- * External API preserved for backward compatibility.
- * Internally uses SDK ClientSideConnection + ndJsonStream for protocol handling.
- */
-/**
  * How long the CLI gets to shut itself down after its stdin is closed, before
- * its process tree is force-killed.
+ * it is force-killed.
+ *
+ * This has to outlast the CLI's own wind-down, or the escalation lands in the
+ * middle of a shutdown that is progressing correctly and skips the
+ * `process.on('exit')` cleanup this teardown exists to protect. On the
+ * ide_close path the CLI budgets 8s for the MCP pool drain
+ * (`shutdownMcpPool(8_000)`) plus 30s for the session drain
+ * (`SESSION_DRAIN_TIMEOUT_MS`), both in acpAgent.ts, so 40s covers the two
+ * stages that always run. SessionEnd hooks are user-configured and can still
+ * exceed it (`DEFAULT_HOOK_TIMEOUT` is 60s each), so the escalation stays as
+ * the backstop rather than being removed.
  */
-const SHUTDOWN_GRACE_MS = 5_000;
+const SHUTDOWN_GRACE_MS = 40_000;
 
 // Resolve taskkill by absolute System32 path, never the bare name: on Windows
 // a bare command is resolved through PATH *and* the current directory, so a
@@ -61,6 +65,12 @@ const SHUTDOWN_GRACE_MS = 5_000;
 // environment.
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
+/**
+ * ACP Connection Handler for VSCode Extension
+ *
+ * External API preserved for backward compatibility.
+ * Internally uses SDK ClientSideConnection + ndJsonStream for protocol handling.
+ */
 export class AcpConnection {
   private child: ChildProcess | null = null;
   private sdkConnection: ClientSideConnection | null = null;
@@ -749,10 +759,10 @@ export class AcpConnection {
       if (child.exitCode !== null || child.signalCode !== null) {
         return;
       }
-      logger.error(
-        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process tree`,
-      );
       if (process.platform === 'win32' && child.pid) {
+        logger.error(
+          `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process tree`,
+        );
         execFile(
           WINDOWS_TASKKILL,
           ['/f', '/t', '/pid', String(child.pid)],
@@ -770,6 +780,13 @@ export class AcpConnection {
         );
         return;
       }
+      // The child is spawned without `detached`, so there is no process group
+      // to signal on this branch: SIGKILL reaches the CLI process alone and
+      // the shells and PTY hosts underneath it survive. Log what actually
+      // happens rather than claiming a tree kill.
+      logger.error(
+        `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing the CLI process`,
+      );
       try {
         child.kill('SIGKILL');
       } catch {

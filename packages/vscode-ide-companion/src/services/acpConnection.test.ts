@@ -11,6 +11,12 @@ import type { ContentBlock } from '@agentclientprotocol/sdk';
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
 
+// Mirrors the module-private SHUTDOWN_GRACE_MS in acpConnection.ts. Kept as a
+// literal here on purpose: the escalation tests step to just before and just
+// after the deadline, so a grace that changes without these tests changing
+// fails them instead of silently widening or vacating the pin.
+const SHUTDOWN_GRACE_MS = 40_000;
+
 // AcpConnection imports AcpFileHandler which imports vscode.
 // Mock vscode so it can be resolved without the actual VS Code runtime.
 vi.mock('vscode', () => ({}));
@@ -280,7 +286,13 @@ describe('AcpConnection child exit cleanup', () => {
       (conn as unknown as AcpConnection).disconnect();
       expect(mockKill).not.toHaveBeenCalled();
 
-      vi.advanceTimersByTime(10_000);
+      // The grace has to outlast the CLI's own wind-down (8s MCP pool drain +
+      // 30s session drain), so nothing may be signalled one tick before it
+      // expires. A grace shorter than that wind-down reds this assertion.
+      vi.advanceTimersByTime(SHUTDOWN_GRACE_MS - 1);
+      expect(mockKill).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
       expect(mockKill).toHaveBeenCalledWith('SIGKILL');
     } finally {
       vi.useRealTimers();
@@ -304,7 +316,7 @@ describe('AcpConnection child exit cleanup', () => {
       });
 
       (conn as unknown as AcpConnection).disconnect();
-      vi.advanceTimersByTime(10_000);
+      vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
 
       // A tree kill: the CLI is unresponsive by now, so nothing else will reap
       // the shells and ConPTY hosts underneath it. See #11303.
@@ -383,7 +395,9 @@ describe('AcpConnection child exit cleanup', () => {
 
       (conn as unknown as AcpConnection).disconnect();
       exitListener?.();
-      vi.advanceTimersByTime(10_000);
+      // Past the deadline the cancelled timer would have fired at, otherwise
+      // the cancellation this test pins is never exercised.
+      vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
 
       expect(mockKill).not.toHaveBeenCalled();
     } finally {
