@@ -231,6 +231,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Qwen UI language used by adapter-owned presentation. */
+  displayLanguage?: string;
   /** Adapter-owned persistent state directory. */
   stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
@@ -494,6 +496,9 @@ export abstract class ChannelBase {
     event: SessionDiedEvent,
   ): void => {
     this.onSessionDied(event.sessionId);
+  };
+  private readonly bridgeDisconnectedListener = (): void => {
+    this.onBridgeDisconnected();
   };
   private readonly bridgePermissionRequestListener = (
     event: PermissionRequestEvent,
@@ -1253,7 +1258,7 @@ export abstract class ChannelBase {
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
-  abstract disconnect(): void;
+  abstract disconnect(): void | Promise<void>;
 
   waitForDisconnect(): Promise<void> {
     return Promise.resolve();
@@ -2697,12 +2702,21 @@ export abstract class ChannelBase {
     this.removePendingPermissionsForSession(sessionId);
   }
 
+  /**
+   * Called when the standalone ACP bridge process exits. Its in-flight turns
+   * never settle, but crash recovery restores the sessions on a fresh bridge,
+   * so overrides must clear only turn-scoped transient state (never session
+   * routing) and must not fabricate terminal outcomes for interrupted turns.
+   */
+  onBridgeDisconnected(): void {}
+
   protected onSessionRetiring(_sessionId: string): void {}
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
     bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
+    bridge.on('disconnected', this.bridgeDisconnectedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
   }
@@ -2711,6 +2725,7 @@ export abstract class ChannelBase {
     bridge.off('toolCall', this.bridgeToolCallListener);
     bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
+    bridge.off('disconnected', this.bridgeDisconnectedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
   }
