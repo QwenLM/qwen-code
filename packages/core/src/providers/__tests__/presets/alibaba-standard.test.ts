@@ -44,6 +44,14 @@ describe('alibabaStandardProvider', () => {
       'glm-5.1',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
+      'qwen3.8-max',
+      'qwen3.8-max-0902',
+      'qwen3.8-flash',
+      'deepseek-v4-pro-0813',
+      'deepseek-v4-flash-0731',
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.6',
     ]);
   });
 
@@ -95,6 +103,17 @@ describe('alibabaStandardProvider', () => {
     expect(models?.[1]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
     });
+  });
+
+  it('limits the Alibaba Kimi K3 route to image input', () => {
+    const plan = buildInstallPlan(alibabaStandardProvider, {
+      baseUrl: resolveBaseUrl(alibabaStandardProvider),
+      apiKey: 'test-key',
+      modelIds: ['kimi-k3'],
+    });
+    expect(
+      plan.modelProviders?.[0]?.models[0].generationConfig?.modalities,
+    ).toEqual({ image: true });
   });
 
   it('auto-derives ownership via envKey + prefix', () => {

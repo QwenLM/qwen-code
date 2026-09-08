@@ -22,7 +22,10 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { clampReasoningEffort } from '../../reasoning-effort.js';
+import {
+  clampReasoningEffort,
+  parseModelReasoningCapabilities,
+} from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -58,8 +61,9 @@ export function selectDashScopeThinkingKnob(
   extraBody: Record<string, unknown> | undefined,
   samplingParams: Record<string, unknown> | undefined,
   reasoningEffort: unknown,
+  tieredModel = isTieredEffortWireModel(model),
 ): DashScopeThinkingKnobSelection | undefined {
-  if (!isTieredEffortWireModel((model ?? '').toLowerCase())) {
+  if (!tieredModel) {
     return undefined;
   }
 
@@ -377,9 +381,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const isTieredQwenModel = isTieredEffortWireModel(
-      this.resolveWireModel(request.model),
-    );
+    const isTieredQwenModel = this.isTieredEffortModel(request.model);
     const extraBody = isTieredQwenModel
       ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
       : this.contentGeneratorConfig.extra_body;
@@ -415,6 +417,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
           extraBody,
           requestParams,
           qwenEffortConfig['reasoning_effort'],
+          isTieredQwenModel,
         )
       : undefined;
 
@@ -526,6 +529,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
+  private getConfiguredReasoning(model: string | undefined) {
+    const { authType, baseUrl } = this.contentGeneratorConfig;
+    const wireModel = model ?? this.contentGeneratorConfig.model;
+    const reasoning = authType
+      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
+          ?.capabilities.reasoning
+      : undefined;
+    return parseModelReasoningCapabilities(reasoning);
+  }
+
+  private isTieredEffortModel(model: string | undefined): boolean {
+    return isTieredEffortWireModel(
+      model ?? this.contentGeneratorConfig.model,
+      this.getConfiguredReasoning(model),
+    );
+  }
+
   private resolveWireModel(model: string | undefined): string {
     return (model ?? this.contentGeneratorConfig.model ?? '').toLowerCase();
   }
@@ -547,7 +567,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const wireModel = this.resolveWireModel(model);
-    if (isTieredEffortWireModel(wireModel)) {
+    if (this.isTieredEffortModel(model)) {
+      const configured = this.getConfiguredReasoning(model);
+      if (configured && !configured.toggleOnly) {
+        return configured.efforts.includes(reasoning.effort)
+          ? { reasoning_effort: reasoning.effort }
+          : {};
+      }
       return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
@@ -610,7 +636,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (!isQwenFamilyWireModel(wireModel)) {
       return [];
     }
-    const isTieredEffortModel = isTieredEffortWireModel(wireModel);
+    const isTieredEffortModel = this.isTieredEffortModel(model);
     if (
       isTieredEffortModel &&
       selectedThinkingKnob?.field === 'enable_thinking' &&
