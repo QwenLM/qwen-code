@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { StandaloneAuth } from './StandaloneAuth';
+import AppStyles from '../App.module.css';
 import { getDaemonToken } from '../config/daemon';
 import type { WebShellLanguage } from '../i18n';
 import type { WebShellTheme } from '../themeContext';
@@ -439,6 +440,7 @@ it('scopes and themes the gate root like the app root', async () => {
   expect(gate?.hasAttribute('data-web-shell-root')).toBe(true);
   expect(gate?.hasAttribute('data-web-shell-shadcn')).toBe(true);
   expect(gate?.classList.contains('dark')).toBe(true);
+  expect(gate?.classList.contains(AppStyles.themeDark)).toBe(true);
 });
 
 it('applies the light palette when requested', async () => {
@@ -449,4 +451,145 @@ it('applies the light palette when requested', async () => {
   await mount(undefined, 'en', 'light');
   const gate = container.querySelector('[data-web-shell-gate]');
   expect(gate?.classList.contains('dark')).toBe(false);
+  expect(gate?.classList.contains(AppStyles.themeLight)).toBe(true);
+});
+
+it('keeps the transient status and an enabled button during automatic retries', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '1' }))
+    .mockImplementation(hangingFetch());
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting');
+  // Mid-cycle: the automatic probe is in flight, but the transient copy and
+  // the button stay put — a manual retry can always jump the queue, and a
+  // screen reader is not re-announced once per cycle.
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  const live = container.querySelector('[role="status"]');
+  expect(live?.textContent).toContain('Daemon is starting');
+  expect(submitButton().disabled).toBe(false);
+});
+
+it('clamps an HTTP-date Retry-After to the ceiling too', async () => {
+  vi.useFakeTimers();
+  const when = new Date(Date.now() + 3_600_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: when }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(29_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('treats a failed runtime as permanent even with Retry-After attached', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockResolvedValue(
+    stubResponse({
+      status: 503,
+      retryAfter: '5',
+      body: { code: 'daemon_runtime_failed', error: 'boom' },
+    }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon failed to start. boom');
+  expect(container.textContent).not.toContain('Connected ');
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each([401, 403])('never auto-retries a %i answer', async (status) => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('asks a first-visit operator to enter the token, not correct an invalid one', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  expect(container.textContent).toContain(
+    'Enter the bearer token from the daemon terminal.',
+  );
+  expect(container.textContent).not.toContain('Invalid or expired');
+  expect(container.textContent).not.toContain('Connected ');
+  // The destination is on screen — the only in-UI cue distinguishing this
+  // gate from a look-alike page asking for the same credential.
+  expect(container.textContent).toContain('http://daemon.test');
+});
+
+it('asks a first-visit zh-CN operator for the bearer token', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(undefined, 'zh-CN');
+  // The shared prefix appears in both zh messages, so key on the tail.
+  expect(container.textContent).toContain('bearer token');
+  expect(container.textContent).not.toContain('令牌无效或已过期');
+});
+
+it('trims a whitespace-padded typed token before probing and persisting', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  act(() => {
+    const input = container.querySelector('input')!;
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, '  padded-token  ');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(container.textContent).toContain('Connected padded-token');
+  expect(sessionStorage.getItem('qwen-daemon-token')).toBe('padded-token');
+  expect(fetch.mock.calls[1][1].headers).toEqual({
+    Authorization: 'Bearer padded-token',
+  });
+});
+
+it('lets a manual retry supersede an armed auto-retry', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Cannot reach the daemon');
+  // The auto-retry is armed for 2 s; a manual submit inside that window
+  // supersedes it, so exactly one more probe fires.
+  await act(submitForm);
+  expect(container.textContent).toBe('Connected ');
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
 });

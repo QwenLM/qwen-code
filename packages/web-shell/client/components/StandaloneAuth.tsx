@@ -123,6 +123,11 @@ export function StandaloneAuth({
   // and aborts its predecessor on cleanup.
   const [attempt, setAttempt] = useState(0);
   const candidateRef = useRef(initialToken ?? '');
+  // Distinguish an operator-initiated probe from an automatic retry: only
+  // the operator's probe may reset the button and the live region. Every
+  // cold-start cycle otherwise flips a possibly-focused control and
+  // re-announces two strings once per retry for the whole window.
+  const operatorProbeRef = useRef(true);
   // Remember the credential the gate started with so a 401 against it can be
   // told apart from a 401 against something the operator just typed.
   const initialCandidateRef = useRef(initialToken ?? '');
@@ -137,12 +142,17 @@ export function StandaloneAuth({
     async (candidate: string) => {
       const controller = new AbortController();
       controllerRef.current = controller;
-      setBusy(true);
-      // Reset the live region too: keeping the previous outcome (e.g.
-      // "Invalid or expired token…") on screen for the whole in-flight probe
-      // leaves a screen-reader user without any announcement that the submit
-      // landed. retryIn overwrites this once the outcome is known.
-      setStatus(copyRef.current.connecting);
+      if (operatorProbeRef.current) {
+        operatorProbeRef.current = false;
+        setBusy(true);
+        // Reset the live region too: keeping the previous outcome (e.g.
+        // "Invalid or expired token…") on screen for the whole in-flight
+        // probe leaves a screen-reader user without any announcement that
+        // the submit landed. retryIn overwrites this once the outcome is
+        // known. The automatic retry leaves both alone, so the transient
+        // copy and an enabled button survive the whole cold start.
+        setStatus(copyRef.current.connecting);
+      }
       const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
       // Transient failures re-probe on their own and leave the button enabled,
       // so a manual retry can always jump the queue.
@@ -263,6 +273,7 @@ export function StandaloneAuth({
             className="flex flex-col gap-3"
             onSubmit={(event) => {
               event.preventDefault();
+              operatorProbeRef.current = true;
               candidateRef.current = token.trim();
               setAttempt((n) => n + 1);
             }}
