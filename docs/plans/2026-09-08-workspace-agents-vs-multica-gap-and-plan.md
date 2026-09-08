@@ -334,7 +334,7 @@ then connect live input acknowledgement and verify child-report/acceptance flow.
 ## 1. What Multica actually is
 
 An issue tracker in Linear's shape, where an assignee may be an agent, plus a
-registry that makes agents real processes on registered machines.
+runtime registry and daemon that dispatch tasks to registered machines.
 
 | Entity                    | What it carries                                                                                                                                                       |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -351,9 +351,14 @@ integrations / activity tabs), `agents/new` (manual or AI-authored),
 **`runtimes`, `runtimes/[id]`**, `issues`, `issues/[id]`, `my-issues`, `inbox`,
 `squads`, `projects`, `skills`, `chat`, `autopilots`.
 
-The load-bearing idea, and the one we inverted: **an agent is a process on a
-registered runtime, and dispatch hands work to that runtime.** Everything else
-is a tracker built around that fact.
+The load-bearing idea, and the one we inverted: **an agent is a persistent
+identity bound to a registered runtime, and dispatch hands its queued work to
+that runtime.** The runtime daemon then launches the provider backend for the
+task. For Qwen, `qwenBackend.Execute` starts a new CLI process and
+`PriorSessionID` resumes the provider session from the previous task on that
+issue. Multica therefore does not keep one permanent OS process per Agent;
+runtime registration, task-process isolation, and conversation continuity are
+separate properties.
 
 ## 2. What we have, honestly
 
@@ -561,7 +566,8 @@ Stage A's initial sessionization is complete: `launcher.ts`, `dispatch-port.ts` 
 `dispatchAgentRuns` and the two ACP control methods behind them. Dispatch runs
 in the daemon, where the sessions are. The follow-up correction scopes those
 sessions to `(agent, thread)` instead of one transcript per identity.
-Multica-style runtime registration and process isolation remain absent.
+Multica-style runtime registration and its task-execution subprocess boundary
+remain absent.
 
 The local Runtime follow-up deliberately reused existing infrastructure rather
 than adding a parallel host store. A non-empty roster restores the persisted
@@ -571,6 +577,30 @@ their work remains queued instead of failing terminally. The observed restart
 reused host session `f210855f-45ab-4624-a858-bf11785e22d0`, with the heartbeat
 advancing in the browser. This is one real local host; it is not the remote
 Runtime registry, heartbeat transport or placement layer Multica has.
+
+### Original-goal acceptance audit, 2026-09-08
+
+This is a bounded acceptance pass against the original request, not a
+percentage estimate.
+
+| Original requirement | Acceptance evidence on this branch | Result |
+| --- | --- | --- |
+| Declare persistent Agent identities | The roster survives daemon restart; a fresh no-definition Agent applied its own durable instructions and model in its task session | Passed locally |
+| Agent is not a background subagent or Agent Team member | Dispatch creates a top-level ACP session with `sourceType: agent`; the workspace-agent execution path no longer uses `BackgroundTaskRegistry` or Agent Team | Passed; sessions still share one ACP daemon |
+| Assign and orchestrate tasks in a panel | The Web Shell creates root tasks with assignee, priority and acceptance criteria, nests child tasks, shows aggregate status, and lets a person mark work done | Passed locally |
+| Agents collaborate through a shared thread | Live runs covered peer mentions, child delegation, parent reports, waiting, blocking and review | Passed locally |
+| A person can intervene while an Agent is working | A live mid-turn message was persisted in the same run's transcript and consumed window, and changed the submitted review | Passed for the normal path; late-drain crash windows remain open |
+| Reuse Qwen Code conversations | Agent task sessions appear under the existing sidebar's Agents source and open in the ordinary session view; the shared task keeps only cross-Agent coordination state | Passed locally |
+| Multica/Harness-style Host layer | The current daemon exposes one truthful local Runtime with provider, stable host-session id, heartbeat and workload counts; an unknown runtime binding stays offline and queued | Partial: no Host registration, remote heartbeat transport, placement or Agent-to-Host picker |
+| Full Multica tracker breadth | Agent instructions/model/concurrency and task priority/acceptance criteria exist | Partial: labels, projects, inbox, squads, due dates and invocation policy are absent |
+
+The next implementation step is intentionally not started by this audit. The
+recommended next gate is one minimal registered-Host vertical slice: a second
+daemon registers a stable Host id and provider set; its heartbeat drives
+online/offline; an Agent can be bound to that Host; only that Host can claim the
+Agent's queued task; daemon restart preserves the binding; and the existing
+Runtime and Agent-creation views expose the real choice. Cloud scheduling,
+autoscaling and one permanent process per Agent are not part of that gate.
 
 A later source audit found that sessionization alone had not delivered the
 claimed persona: persona fields were assigned after `Config.initialize()` had
