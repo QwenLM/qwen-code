@@ -263,8 +263,10 @@ that has never failed is not evidence.
 What none of it covers: the vitest suites, which are larger and still need CI;
 partial-write recovery, since the file lock means two writers never touch one
 file and killing an idle holder never interrupts a write (`store.test.ts`
-covers that with fault injection); and decisions 4 and 12 of §2, which have no
-executable check here.
+covers that with fault injection). Decisions 4 and 12 of §2 are covered as of
+ae7deeeaf9's successor: an agent has no agent-creating tool in reach and the
+guard refuses it anyway, and a run frame naming another workspace cannot write
+here.
 
 ### Found on this branch, outside this subsystem
 

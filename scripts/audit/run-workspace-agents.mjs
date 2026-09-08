@@ -40,6 +40,8 @@ export { ThreadPostTool, ThreadReviewTool, ThreadReadTool, ThreadCreateTool, Thr
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 export * as view from '${repo}/packages/web-shell/client/components/workspace-agents/agents-view-logic.js';
+export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard } from '${repo}/${src}/capability.js';
+export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
 );
 execFileSync(
@@ -1293,6 +1295,73 @@ ok(
 ok(
   'and charges tokens to the same root',
   inheritor?.rootThreadId === budgetParent.th.rootThreadId,
+);
+
+console.log('\n17c. the two boundaries a person has to take on trust');
+// Decisions 4 and 12. Both are enforced somewhere in the code and neither had
+// an executable check here, which is exactly the pair worth having one for:
+// they are the guarantees a reader cannot verify by looking at a thread.
+
+// 12: an agent may post, mention and delegate, but may not make more agents.
+const ceiling = M.buildAgentToolConfig({ tools: ['*'] });
+ok(
+  'no agent-creating tool is in reach',
+  !ceiling.tools.includes(M.ToolNames.AGENT),
+  JSON.stringify(ceiling.tools.filter((t) => t === M.ToolNames.AGENT)),
+);
+ok(
+  'and it is named as denied rather than merely absent',
+  ceiling.disallowedTools.includes(M.ToolNames.AGENT),
+);
+const guard = M.createAgentToolInvocationGuard();
+ok(
+  'the guard refuses it even if something asks anyway',
+  (await guard({ toolName: M.ToolNames.AGENT })).allowed === false,
+);
+ok(
+  'while a thread tool is allowed through the same guard',
+  (await guard({ toolName: 'thread_post' })).allowed === true,
+);
+
+// 4: a run frame from another workspace must not act on this one. On a fresh
+// live run, so the only thing wrong with the frame is its workspace — an
+// earlier version reused a frame whose run had already been closed, and
+// passed on the closed-run check while proving nothing about workspaces.
+const scoped = await startFor('Workspace scoping');
+const scopedFrame = {
+  workspaceId: ws.workspaceId,
+  agentId: scoped.agentId,
+  runId: scoped.runId,
+  threadId: scoped.th.id,
+  rootThreadId: scoped.th.rootThreadId,
+  attempt: 1,
+};
+ok(
+  'the frame works as itself first',
+  !(
+    await M.runWithAgentRunContext(scopedFrame, () =>
+      new M.ThreadPostTool(cfg).buildAndExecute({ text: 'in scope' }, sig()),
+    )
+  ).error,
+);
+const wrongWorkspace = await M.runWithAgentRunContext(
+  { ...scopedFrame, workspaceId: 'ws_somewhere_else' },
+  () =>
+    new M.ThreadPostTool(cfg).buildAndExecute(
+      { text: 'from the wrong workspace' },
+      sig(),
+    ),
+);
+ok(
+  'a frame naming another workspace cannot post here',
+  Boolean(wrongWorkspace.error),
+  'it should not have been allowed to write across workspaces',
+);
+ok(
+  'and nothing it tried to say landed',
+  !(await M.readThread(ROOT, scoped.th.id)).messages.some((m) =>
+    m.text.includes('from the wrong workspace'),
+  ),
 );
 
 console.log('\n18. concurrency');
