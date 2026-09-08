@@ -421,12 +421,6 @@ const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 
 /**
- * One entry in the unified notification queue. `kind` and `taskId` feed the
- * shared admission rule and name what was lost when overflow discards an
- * entry; `monitor` stays separate because the drain also uses it to prune
- * pulses from monitors that were cancelled while queued.
- */
-/**
  * An overflow summary taken from the tally and awaiting a turn to carry it.
  * `displayed` mirrors the per-notification flag so a re-queued summary is not
  * rendered twice.
@@ -437,6 +431,12 @@ interface PendingDroppedSummary {
   displayed?: boolean;
 }
 
+/**
+ * One entry in the unified notification queue. `kind`, `taskId` and `interim`
+ * feed the shared admission rule and name what was lost when overflow discards
+ * an entry; `monitor` stays separate because the drain also uses it to prune
+ * pulses from monitors that were cancelled while queued.
+ */
 interface QueuedNotification {
   displayText: string;
   modelText: string;

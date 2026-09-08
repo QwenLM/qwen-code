@@ -135,9 +135,9 @@ Use continuation for related follow-up work. Launch a new agent when the task is
 
 Completion notifications from background agents, shells, monitors and workflows share one queue, drained into a model turn once the session is idle. The queue holds at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog.
 
-When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead.
+When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead, and so is an arriving pulse when only terminal results are queued.
 
-Nothing is lost silently. The next drained turn is prefixed with one summary naming how many notifications were discarded and which tasks they came from, both in the transcript and in what the model reads. The tasks themselves keep running: the summary points at `/tasks` and the task output files for their current state.
+Discarded notifications are reported rather than dropped quietly. The next drained turn is prefixed with one summary naming how many went and which tasks they came from, both in the transcript and in what the model reads. The summary rides along with that turn, so it waits until some notification actually drains; it goes unreported only if the session is cleared or switched before then. The tasks themselves keep running: the summary points at `/tasks` and the task output files for their current state.
 
 ## Agent Working Directory
 

@@ -125,6 +125,27 @@ describe('decideNotificationAdmission', () => {
     ).toEqual({ action: 'drop' });
   });
 
+  it('drops an arriving pulse rather than displace a terminal result', () => {
+    const queue = fill(MAX_BACKGROUND_NOTIFICATION_QUEUE, (i) =>
+      shell(`bg_${i}`),
+    );
+
+    // A pulse is superseded by the monitor's next poll, so evicting the only
+    // copy of a shell result to make room for one trades the wrong way.
+    expect(decideNotificationAdmission(queue, pulse('mon_new'))).toEqual({
+      action: 'drop',
+    });
+    // But a queued pulse is still the first thing an arriving pulse displaces.
+    const withPulse = fill(MAX_BACKGROUND_NOTIFICATION_QUEUE, (i) =>
+      i === 4 ? pulse('mon_old') : shell(`bg_${i}`),
+    );
+    expect(decideNotificationAdmission(withPulse, pulse('mon_new'))).toEqual({
+      action: 'evict',
+      index: 4,
+      evicted: pulse('mon_old'),
+    });
+  });
+
   it('honours an explicit max over the shared cap', () => {
     const queue = fill(3, (i) => shell(`bg_${i}`));
 

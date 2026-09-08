@@ -1485,8 +1485,9 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
  * reads. `interim` marks a monitor pulse, which the rule evicts before a
  * terminal result. ACP drops pulses before they are ever queued (see the
  * monitor callback in `#registerBackgroundNotificationCallbacks`), so today it
- * is always false here; the projection stays correct if that filter is ever
- * relaxed.
+ * is always false and eviction is plain oldest-unprotected-first. Both the
+ * admission decision and the dropped tally run on this projection, so pulse
+ * priority takes effect on its own if that filter is ever relaxed.
  */
 function toAdmissibleNotification(
   item: BackgroundNotificationQueueItem,
@@ -9713,14 +9714,21 @@ export class Session implements SessionContext {
       const guardDefersUnrelatedWork =
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
         this.todoStopGuardQueuedPromptPriority;
+      // Decide over the projection, not the raw queue: `interim` lives only on
+      // the projection, so passing raw entries would silently disable pulse
+      // priority if the monitor filter below is ever relaxed. `isProtected`
+      // reads the original entry by index, since the guard predicate needs
+      // fields the projection deliberately drops.
       const admission = decideNotificationAdmission(
-        this.notificationQueue,
-        item,
+        this.notificationQueue.map(toAdmissibleNotification),
+        toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
-          isProtected: (queued) =>
+          isProtected: (_projected, index) =>
             guardDefersUnrelatedWork &&
-            this.#notificationContinuesTodoStopGuardWorkChain(queued),
+            this.#notificationContinuesTodoStopGuardWorkChain(
+              this.notificationQueue[index]!,
+            ),
         },
       );
       if (admission.action === 'drop') {
@@ -10002,6 +10010,13 @@ export class Session implements SessionContext {
           // Report anything overflow discarded on the first turn that follows
           // it, so the model learns what it will never be told about before it
           // acts on the notifications that survived.
+          //
+          // Taken after admission, so a refused turn keeps the tally intact.
+          // Past this point the summary shares the notification's fate: the
+          // paths that can still bail (an aborted signal, a missing response
+          // stream) drop this item without re-queueing it either. That is
+          // deliberately unlike the TUI, whose drain re-queues a rejected
+          // batch and so must park the summary to match it.
           const droppedSummary = this.droppedNotifications.take();
           if (droppedSummary) {
             await this.#emitDroppedNotificationSummary(droppedSummary);

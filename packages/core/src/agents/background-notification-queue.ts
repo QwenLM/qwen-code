@@ -75,11 +75,14 @@ export interface NotificationAdmissionOptions<T> {
  * Decide what to do with `incoming` when it arrives at `queue`.
  *
  * - Below `max`: push.
- * - Full: evict the oldest unprotected interim monitor pulse; failing that,
- *   the oldest unprotected item of any kind; if every queued item is
- *   protected, drop the incoming one — including when the incoming item is
- *   itself protected, since evicting a protected peer to make room would
- *   trade one irreplaceable result for another.
+ * - Full: evict the oldest unprotected interim monitor pulse. Failing that,
+ *   drop `incoming` if it is itself an interim pulse — a pulse is superseded
+ *   by the monitor's next poll, so displacing a terminal result to make room
+ *   for one trades away the only copy of a result for a line that is about to
+ *   be repeated. Otherwise evict the oldest unprotected item.
+ * - If every queued item is protected, drop `incoming` — including when it is
+ *   itself protected, since evicting a protected peer would trade one
+ *   irreplaceable result for another.
  *
  * Never mutates `queue`.
  */
@@ -101,6 +104,7 @@ export function decideNotificationAdmission<T extends AdmissibleNotification>(
   // Oldest interim pulse first — the queue is append-ordered, so the first
   // matching index is the oldest.
   const interimIndex = unprotected.find((index) => queue[index]!.interim);
+  if (interimIndex === undefined && incoming.interim) return { action: 'drop' };
   const evictedIndex = interimIndex ?? unprotected[0]!;
   return {
     action: 'evict',
