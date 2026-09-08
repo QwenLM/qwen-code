@@ -12323,6 +12323,116 @@ describe('Session', () => {
       });
     });
 
+    // The queue is bounded. ACP filters interim monitor pulses before they
+    // are ever queued, so every queued entry here is a terminal result and
+    // eviction stays oldest-first; what changes is that the loss is recorded
+    // instead of vanishing into a debug log.
+    it('records what queue overflow discarded instead of losing it silently', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for overflow test'),
+      );
+
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      // Enqueued synchronously, so all 21 land before any drain runs.
+      for (let index = 0; index < 20; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      debugLoggerWarnSpy.mockClear();
+      shellCallback('shell done', '<shell-20 />', {
+        shellId: 'shell-20',
+        status: 'completed',
+      });
+
+      const internals = session as unknown as {
+        notificationQueue: Array<{ taskId: string }>;
+        notificationProcessing: boolean;
+        droppedNotifications: { count: number };
+      };
+      expect(internals.notificationQueue).toHaveLength(20);
+      expect(internals.notificationQueue[0]?.taskId).toBe('shell-1');
+      expect(
+        internals.notificationQueue.some((item) => item.taskId === 'shell-20'),
+      ).toBe(true);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'Notification queue overflow: evicting task=shell-0 kind=shell',
+      );
+      // The eviction is remembered, so the next turn can report it.
+      expect(internals.droppedNotifications.count).toBe(1);
+
+      internals.notificationQueue = [];
+      internals.notificationProcessing = false;
+    });
+
+    it('tells the model what queue overflow discarded on the next notification turn', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      for (let index = 0; index < 21; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => {
+        expect(sendMessageStream.mock.calls.length).toBeGreaterThanOrEqual(2);
+      });
+
+      // The evicted result never reaches the model, but its loss does — ahead
+      // of the notification that displaced it, so the model reads it first.
+      const notificationCall = sendMessageStream.mock.calls[1];
+      const parts = (
+        notificationCall[1] as { message: Array<{ text: string }> }
+      ).message;
+      expect(parts[0]?.text).toContain('<kind>queue</kind>');
+      expect(parts[0]?.text).toContain('1 shell result (shell-0)');
+      expect(parts[0]?.text).toContain('Their tasks were not stopped.');
+      expect(parts[1]?.text).toBe('<shell-1 />');
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { kind: 'queue', status: 'dropped' },
+          },
+        },
+      });
+    });
+
     it('continues ACP prompt ids after replaying resumed history', async () => {
       mockChat.sendMessageStream = vi
         .fn()

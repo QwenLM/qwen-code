@@ -131,6 +131,14 @@ When a session is restored, compatible background agents are added back to the s
 
 Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
 
+## Notification Queue
+
+Completion notifications from background agents, shells, monitors and workflows share one queue, drained into a model turn once the session is idle. The queue holds at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog.
+
+When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead.
+
+Nothing is lost silently. The next drained turn is prefixed with one summary naming how many notifications were discarded and which tasks they came from, both in the transcript and in what the model reads. The tasks themselves keep running: the summary points at `/tasks` and the task output files for their current state.
+
 ## Agent Working Directory
 
 For a named regular subagent, `working_dir` pins the agent to an existing git worktree of the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git as a linked worktree of this repository.
