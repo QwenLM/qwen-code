@@ -169,17 +169,22 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
   });
 
   it('budgets a pending card below the confirmation dialog footprint', () => {
-    // At 80 rows the ink-parity cap is 320 — 4x past the viewport; the
-    // pending budget must leave room for the dialog rendered beneath the
-    // transcript (mem0 e2e regression).
+    // At 80 rows the ink-parity cap is 320 — 4x past the viewport. The
+    // pending budget is bounded by the collapsed dialog footprint, and by
+    // the payload the dialog renders expanded: a hook-forced confirmation
+    // duplicates the card's description in its body, so a wide payload
+    // shrinks the card or ctrl-s expansion pushes the dialog off screen
+    // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
-    expect(pendingCardMaxRows(80)).toBe(34);
-    expect(pendingCardMaxRows(100)).toBe(54);
+    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
+    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(20);
   });
 
   it('falls back to the settled cap on short terminals', () => {
-    expect(pendingCardMaxRows(24)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
-    expect(pendingCardMaxRows(46)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
   });
 
   it('keeps everything when the content fits', () => {

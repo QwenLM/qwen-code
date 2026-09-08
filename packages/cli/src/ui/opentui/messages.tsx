@@ -239,28 +239,58 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog fits
- * the viewport. The dialog renders in flow under the transcript on a fixed
- * alt-screen viewport (ink scrolls overflow into scrollback; OpenTUI cannot),
- * so a pending card left at maxHistoryItemRows (terminalHeight * 4) pushes
- * the dialog's tail — outcome list, hidden-lines label, ctrl-s hint — off
- * screen. The reserve covers the dialog itself (frame + title/question +
- * 20-row body + outcome list + footer ≈ 36 rows), the transcript rows above
- * the card, and the card's own chrome, with margin.
+ * Rows reserved below a pending tool card so the confirmation dialog's
+ * COLLAPSED body (frame + title/question + 20-row body + outcome list +
+ * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
+ * the dialog only reveals on ctrl-s expansion — that bound lives in
+ * pendingCardMaxRows.
  */
 export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
 
 /**
- * Description budget for a pending tool card: never past the ink-parity
- * history cap, never so tall that the confirmation dialog below it
- * overflows the viewport. Short terminals fall back to the settled cap.
+ * Rows above a pending card's expanded confirmation dialog: the transcript
+ * rows that stay on screen above it (prompt echo plus the card's own
+ * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
+ * title, body margins, outcome list, footer ≈ 11).
  */
-export function pendingCardMaxRows(terminalHeight: number): number {
+export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+
+/**
+ * Measured at a 110-column terminal the card's flex row gives the
+ * description ~79 of the 108 columns capToolCardDescription budgets with
+ * (the name column takes the rest), so a budget of B rows renders about
+ * B / 0.73 rows. Budgeting at 0.7 keeps the estimate on the safe side of
+ * that inflation across plausible name lengths.
+ */
+const CARD_DESC_WRAP_RATIO = 0.7;
+
+/**
+ * Description budget for a pending tool card, bounded three ways: never
+ * past the ink-parity history cap, never so tall that the confirmation
+ * dialog's collapsed body overflows the viewport, and — when the payload
+ * is wide enough that the dialog will render it expanded (hook-forced
+ * confirmations duplicate the card's description) — shrunk so the expanded
+ * body plus chrome still fits. `descriptionWidth` is the display width of
+ * the text the card would print; short terminals fall back to the settled
+ * cap.
+ */
+export function pendingCardMaxRows(
+  terminalHeight: number,
+  descriptionWidth: number,
+  width: number,
+): number {
+  const h = Math.floor(terminalHeight);
+  const payloadRows = Math.ceil(
+    descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
+  );
   return Math.max(
     TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
-      Math.floor(terminalHeight) - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+      h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
+      Math.floor(
+        (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) * CARD_DESC_WRAP_RATIO,
+      ),
     ),
   );
 }

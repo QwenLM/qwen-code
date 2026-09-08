@@ -53,7 +53,10 @@ import {
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
-import { sanitizeTerminalText } from '../utils/textUtils.js';
+import {
+  getCachedStringWidth,
+  sanitizeTerminalText,
+} from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -82,7 +85,6 @@ export function OpenTuiTranscriptView({
   availableTerminalHeight = 24,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const pendingMaxRows = pendingCardMaxRows(availableTerminalHeight);
   return (
     <box flexDirection="column">
       {items.map((item) => (
@@ -90,7 +92,7 @@ export function OpenTuiTranscriptView({
           key={item.id}
           item={item}
           maxRows={maxRows}
-          pendingMaxRows={pendingMaxRows}
+          terminalHeight={availableTerminalHeight}
           width={availableWidth}
         />
       ))}
@@ -101,12 +103,12 @@ export function OpenTuiTranscriptView({
 function TranscriptItem({
   item,
   maxRows,
-  pendingMaxRows,
+  terminalHeight,
   width,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
-  pendingMaxRows: number;
+  terminalHeight: number;
   width: number;
 }) {
   switch (item.kind) {
@@ -121,7 +123,7 @@ function TranscriptItem({
         <ToolCard
           item={item}
           maxRows={maxRows}
-          pendingMaxRows={pendingMaxRows}
+          terminalHeight={terminalHeight}
           width={width}
         />
       );
@@ -248,37 +250,37 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
 function ToolCard({
   item,
   maxRows,
-  pendingMaxRows,
+  terminalHeight,
   width,
 }: {
   item: LiveToolItem;
   maxRows: number;
-  pendingMaxRows: number;
+  terminalHeight: number;
   width: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
-  // The description stays visible while a call awaits approval: the
-  // confirmation dialog does not carry the payload for every type (an MCP
-  // dialog shows only the server and tool names, so hiding here would leave
-  // the arguments nowhere on screen). A pending card therefore keeps the
-  // card's own row budget instead of the settled 5-row cap — that cap would
-  // hide the tail of exactly the payload being approved (R5-9). The budget
-  // is viewport-aware (pendingCardMaxRows): the dialog renders in flow below
-  // the transcript on a fixed viewport, so a card sized to
-  // maxHistoryItemRows pushed the dialog's hint rows off screen.
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
   // Measure on the same basis the render uses: a live description (e.g. a
   // shell command) can carry newlines that each become a physical row while
   // costing zero columns in the cap math, so fold them first like the
   // fallback path does (R6-2).
+  const text = toolCardText(description);
+  // The description stays visible while a call awaits approval: an MCP
+  // confirmation dialog shows only the server and tool names, so the card
+  // is the only surface carrying the arguments (R5-9) — the settled 5-row
+  // cap would hide the tail of exactly the payload being approved. The
+  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
+  // the dialog renders in flow below the transcript, and a hook-forced
+  // confirmation renders this same payload in its body, so the card must
+  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
   const cap = capToolCardDescription(
-    toolCardText(description),
+    text,
     name,
     width,
     item.confirm === 'pending' && !item.done
-      ? pendingMaxRows
+      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);

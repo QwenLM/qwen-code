@@ -892,10 +892,10 @@ export async function* livePromptEvents(
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
         // same callId) must be able to surface its dialog again. Each
         // entrance also marks the transcript card pending (event-adapter
-        // 'confirm' parity): it shows the awaiting marker and hides the
-        // card's duplicated description — the confirmation dialog below is
-        // the payload surface, and an MCP card's full JSON getDescription()
-        // would otherwise flood the column and push the dialog off-screen.
+        // 'confirm' parity): the awaiting marker shows while the card keeps
+        // its description under the viewport- and payload-aware pending
+        // budget — an MCP dialog carries no args, so the card is the only
+        // surface that has them (R5-9).
         const awaiting = new Set(
           calls
             .filter((c) => c.status === 'awaiting_approval')

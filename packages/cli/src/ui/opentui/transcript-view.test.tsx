@@ -157,6 +157,39 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).toContain('awaiting approval');
   });
 
+  it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
+    // The mem0 confirmation duplicates the card's description inside its
+    // dialog body: once ctrl-s expands it, the whole payload plus dialog
+    // chrome must fit the viewport, so a ~4k-char payload must shrink the
+    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
+    // at 110 columns). A marker placed past the yielded budget pins the
+    // shrink — that bound alone would still show it and the e2e expansion
+    // stage would stay red.
+    const description =
+      '{"content":"' +
+      'a'.repeat(2500) +
+      'MID_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('... last');
+    expect(text).not.toContain('MID_MARKER');
+  });
+
   it('folds newlines in a live description before the cap measures it (R6-2)', () => {
     // A live shell command can carry embedded newlines: each renders a
     // physical row while costing zero columns in capToolCardDescription's
