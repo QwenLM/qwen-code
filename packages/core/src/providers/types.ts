@@ -140,6 +140,7 @@ export interface ProviderSetupInputs {
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;

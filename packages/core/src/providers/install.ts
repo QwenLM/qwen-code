@@ -139,6 +139,12 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
+  const serviceOnly = (plan.modelProviders ?? []).flatMap(
+    (patch) => patch.models,
+  );
+  const preserveSelection =
+    serviceOnly.length > 0 &&
+    serviceOnly.every((model) => model.imageOnly || model.voiceOnly);
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
@@ -147,6 +153,25 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
+  if (
+    preserveSelection &&
+    (plan.modelProviders ?? []).some((patch) =>
+      patch.models.some((model) =>
+        (previousRuntimeProviders[patch.authType] ?? []).some(
+          (existing) =>
+            !existing.imageOnly &&
+            !existing.voiceOnly &&
+            isSameModelIdentity(existing, model),
+        ),
+      ),
+    )
+  ) {
+    throw new ProviderInstallError(
+      'This model ID and endpoint are already configured for conversation. Use a different model ID or endpoint for an image or voice model.',
+      'modelPurpose',
+      plan.authType,
+    );
+  }
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -213,7 +238,9 @@ export async function applyProviderInstallPlan(
 
     // Set auth type
     currentStep = 'authType';
-    settings.setValue('security.auth.selectedType', plan.authType);
+    if (!preserveSelection) {
+      settings.setValue('security.auth.selectedType', plan.authType);
+    }
 
     // Legacy credentials
     currentStep = 'legacyCredentials';
@@ -233,7 +260,9 @@ export async function applyProviderInstallPlan(
     // off a model they chose. If the plan still offers the current model, keep
     // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
-    let effectiveModelSelection = plan.modelSelection;
+    let effectiveModelSelection = preserveSelection
+      ? undefined
+      : plan.modelSelection;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
@@ -293,7 +322,7 @@ export async function applyProviderInstallPlan(
         effectiveModelSelection.baseUrl,
       );
     }
-    if (doRefreshAuth && refreshAuth) {
+    if (!preserveSelection && doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';
       await refreshAuth(plan.authType);
     }

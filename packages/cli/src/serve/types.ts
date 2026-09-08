@@ -554,6 +554,7 @@ export interface ServeAuthProviderInstallRequest {
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;

@@ -95,6 +95,23 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it('shows model configuration metadata and only declared input capabilities', () => {
+    const configured = providers();
+    Object.assign(configured[0].models[0], {
+      description: 'A configured model',
+      contextLimit: 131072,
+      modalities: { image: true, audio: true, video: false },
+      envKey: 'CUSTOM_MODEL_KEY',
+    });
+    const { container } = renderSection({ providers: configured });
+    expect(container.textContent).toContain('gpt-4o');
+    expect(container.textContent).toContain('A configured model');
+    expect(container.textContent).toContain('131,072');
+    expect(container.textContent).toContain('Image');
+    expect(container.textContent).toContain('Audio');
+    expect(container.textContent).not.toContain('Video');
+    expect(container.textContent).toContain('CUSTOM_MODEL_KEY');
+  });
   it('lists models grouped by provider', () => {
     const { container } = renderSection();
     expect(container.textContent).toContain('GPT-4o');

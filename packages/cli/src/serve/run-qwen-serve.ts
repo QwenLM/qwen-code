@@ -7617,6 +7617,19 @@ async function runQwenServeImpl(
         sessionArtifactsPersistenceAvailableFromSettings(
           runtimeBootSettings?.merged,
         ),
+      updateModelContextWindow: (workspace, key, size, assertGenerationOpen) =>
+        withSettingsLock(workspace, async () => {
+          assertGenerationOpen();
+          const { updateModelContextWindow } = await import(
+            './model-configuration.js'
+          );
+          return updateModelContextWindow(
+            loadSettingsForPersistence(workspace),
+            key,
+            size,
+            assertGenerationOpen,
+          );
+        }),
       installAuthProvider: (req, assertGenerationOpen) =>
         withSettingsLock(
           boundWorkspace,

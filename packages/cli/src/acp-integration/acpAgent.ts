@@ -13205,19 +13205,21 @@ class QwenAgent implements Agent {
           debugLogger.warn('Model-provider settings reload failed');
           return { configsRefreshed: 0, configsFailed: 1 };
         }
-        this.modelProviderReloadRevision += 1;
+        const reloadRevision = ++this.modelProviderReloadRevision;
         const merged = this.settings.merged;
         reloadEnvironment(merged, cwd);
         const providerProtocol = merged.providerProtocol ?? {};
         let configsRefreshed = 0;
         let configsFailed = 0;
 
-        const reloadConfig = (config: Config, id: string) => {
+        const reloadConfig = async (config: Config, id: string) => {
+          if (reloadRevision !== this.modelProviderReloadRevision) return;
           try {
             config.reloadModelProvidersConfig(
               merged.modelProviders,
               providerProtocol,
             );
+            await config.setImageModel(merged.imageModel);
             configsRefreshed += 1;
           } catch {
             configsFailed += 1;
@@ -13225,15 +13227,15 @@ class QwenAgent implements Agent {
           }
         };
 
-        reloadConfig(this.config, 'bootstrap');
+        await reloadConfig(this.config, 'bootstrap');
         for (const config of this.initializingConfigs) {
           if (config !== this.config) {
-            reloadConfig(config, `initializing:${config.getSessionId()}`);
+            await reloadConfig(config, `initializing:${config.getSessionId()}`);
           }
         }
         for (const [id, session] of this.sessions) {
           try {
-            session.reloadModelProvidersFromDisk();
+            await session.reloadModelProvidersFromDisk();
             configsRefreshed += 1;
           } catch {
             configsFailed += 1;
@@ -14403,6 +14405,7 @@ class QwenAgent implements Agent {
           settings.merged.modelProviders,
           settings.merged.providerProtocol ?? {},
         );
+        await config.setImageModel(settings.merged.imageModel);
         if (options.deferWorkspaceActivation !== true) {
           const envReload = reloadEnvironment(
             settings.merged,

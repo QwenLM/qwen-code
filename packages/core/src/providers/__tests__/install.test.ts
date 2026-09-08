@@ -49,6 +49,117 @@ describe('applyProviderInstallPlan', () => {
     vi.restoreAllMocks();
   });
 
+  it.each(['image', 'voice'] as const)(
+    'installs %s models without changing conversation selection',
+    async (purpose) => {
+      const adapter = createAdapter({ anthropic: [{ id: 'main' }] });
+      const plan = buildInstallPlan(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://media.example/v1',
+        apiKey: 'test-only',
+        modelIds: [purpose === 'voice' ? 'qwen3-asr-flash' : 'image-01'],
+        advancedConfig: { purpose, contextWindowSize: 65536 },
+      });
+      const envKey = Object.keys(plan.env!)[0]!;
+      const previous = process.env[envKey];
+      const refreshAuth = vi.fn();
+      const syncAuthState = vi.fn();
+      try {
+        expect(plan.modelSelection).toBeUndefined();
+        const result = await applyProviderInstallPlan(plan, {
+          settings: adapter,
+          refreshAuth,
+          syncAuthState,
+        });
+        expect(result.updatedModelProviders['openai']?.[0]).toMatchObject({
+          ...(purpose === 'image'
+            ? { imageOnly: true, supportsImageGeneration: true }
+            : { voiceOnly: true }),
+          generationConfig: { contextWindowSize: 65536 },
+        });
+        expect(result.updatedModelProviders['anthropic']).toEqual([
+          { id: 'main' },
+        ]);
+        expect(
+          adapter.setValue.mock.calls.some(
+            ([key]) =>
+              key === 'security.auth.selectedType' ||
+              key === 'model.name' ||
+              key === 'model.baseUrl',
+          ),
+        ).toBe(false);
+        expect(refreshAuth).not.toHaveBeenCalled();
+        expect(syncAuthState).not.toHaveBeenCalled();
+        expect(adapter.persist).toHaveBeenCalledOnce();
+      } finally {
+        if (previous === undefined) delete process.env[envKey];
+        else process.env[envKey] = previous;
+      }
+    },
+  );
+
+  it.each(['image', 'voice'] as const)(
+    'rejects a %s install that would replace a conversation model before any write',
+    async (purpose) => {
+      const existing = {
+        openai: [{ id: 'main', baseUrl: 'https://media.example/v1' }],
+      };
+      const adapter = createAdapter(existing);
+      process.env['TEST_API_KEY'] = 'unchanged';
+      const plan = buildInstallPlan(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://media.example/v1',
+        apiKey: 'test-only',
+        modelIds: ['main'],
+        advancedConfig: { purpose },
+      });
+      plan.env = { TEST_API_KEY: 'must-not-write' };
+      const reloadModelProviders = vi.fn();
+      await expect(
+        applyProviderInstallPlan(plan, {
+          settings: adapter,
+          reloadModelProviders,
+        }),
+      ).rejects.toThrow('already configured for conversation');
+      expect(adapter.setValue).not.toHaveBeenCalled();
+      expect(adapter.backup).not.toHaveBeenCalled();
+      expect(adapter.persist).not.toHaveBeenCalled();
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(process.env['TEST_API_KEY']).toBe('unchanged');
+      expect(existing.openai[0]).not.toHaveProperty('imageOnly');
+      expect(existing.openai[0]).not.toHaveProperty('voiceOnly');
+    },
+  );
+
+  it('updates a service model while preserving the same conversation ID at another endpoint', async () => {
+    const conversation = { id: 'model', baseUrl: 'https://chat.example/v1' };
+    const adapter = createAdapter({
+      openai: [
+        conversation,
+        { id: 'model', baseUrl: 'https://media.example/v1', imageOnly: true },
+      ],
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://media.example/v1',
+      apiKey: 'test-only',
+      modelIds: ['model'],
+      advancedConfig: { purpose: 'image', contextWindowSize: 65536 },
+    });
+    plan.env = {};
+    const result = await applyProviderInstallPlan(plan, { settings: adapter });
+    expect(result.updatedModelProviders['openai']).toHaveLength(2);
+    expect(result.updatedModelProviders['openai']).toContainEqual(conversation);
+    expect(result.updatedModelProviders['openai']).toContainEqual(
+      expect.objectContaining({
+        id: 'model',
+        baseUrl: 'https://media.example/v1',
+        imageOnly: true,
+        generationConfig: { contextWindowSize: 65536 },
+      }),
+    );
+  });
+
   it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {
     const adapter = createAdapter();
     // CI sets NODE_OPTIONS (e.g. --max-old-space-size); snapshot whatever it

@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { registerWorkspaceModelsRoutes } from './workspace-models.js';
+import { updateModelContextWindow } from '../model-configuration.js';
 import { loadSettings } from '../../config/settings.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
@@ -81,6 +82,8 @@ function makeApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSettings,
+    updateModelContextWindow: async (ws, key, size, assertOpen) =>
+      updateModelContextWindow(loadSettings(ws), key, size, assertOpen),
     broadcastSettingsChanged,
     parseAndValidateClientId:
       overrides.parseAndValidateClientId ?? (() => undefined),
@@ -569,5 +572,82 @@ describe('DELETE /workspace/models', () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+});
+
+describe('model configuration routes', () => {
+  it('reads service models and saves a context override with safe invalidation', async () => {
+    writeUserSettings({
+      modelProviders: {
+        openai: [
+          {
+            id: 'asr',
+            voiceOnly: true,
+            apiKey: 'private',
+            generationConfig: { contextWindowSize: 1024 },
+          },
+        ],
+      },
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+    const response = await request(app).get('/workspace/models');
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).not.toContain('private');
+    const key = response.body.models[0].key;
+    const update = await request(app)
+      .patch('/workspace/models')
+      .send({ key, contextWindowSize: 65536 });
+    expect(update.status).toBe(200);
+    expect(update.body).toEqual({ updated: true, requiresRestart: true });
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      undefined,
+      'user',
+      undefined,
+    );
+    const configs = await request(app).get('/workspace/models');
+    expect(configs.body.models[0].contextWindowSize).toBe(65536);
+    const reset = await request(app)
+      .patch('/workspace/models')
+      .send({ key, contextWindowSize: null });
+    expect(reset.status).toBe(200);
+    expect(
+      (await request(app).get('/workspace/models')).body.models[0]
+        .contextWindowSize,
+    ).toBeUndefined();
+  });
+  it.each([0, -1, 1.5, '100', 10000001, undefined])(
+    'rejects invalid context window %s',
+    async (contextWindowSize) => {
+      const { app, broadcastSettingsChanged } = makeApp();
+      const result = await request(app)
+        .patch('/workspace/models')
+        .send({ key: 'a'.repeat(64), contextWindowSize });
+      expect(result.status).toBe(400);
+      expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects stale targets and closed generations', async () => {
+    const { app } = makeApp();
+    expect(
+      (
+        await request(app)
+          .patch('/workspace/models')
+          .send({ key: 'a'.repeat(64), contextWindowSize: 1 })
+      ).status,
+    ).toBe(409);
+    const { app: closed } = makeApp({
+      captureGenerationAssertion: () => () => {
+        throw new WorkspaceGenerationClosedError('closed');
+      },
+    });
+    expect((await request(closed).get('/workspace/models')).status).toBe(503);
+    expect(
+      (
+        await request(closed)
+          .patch('/workspace/models')
+          .send({ key: 'a'.repeat(64), contextWindowSize: 1 })
+      ).status,
+    ).toBe(503);
   });
 });

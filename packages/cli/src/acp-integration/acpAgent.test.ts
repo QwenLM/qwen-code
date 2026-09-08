@@ -2256,6 +2256,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      setImageModel: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -4433,6 +4434,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         syncAfterAuthRefresh: vi.fn(),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      setImageModel: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
@@ -4993,6 +4995,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await sessionPromise;
     expect(settled).toBe(true);
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not apply an older reload snapshot to initializing configs after a newer reload', async () => {
+    const innerConfig = await setupSessionMocks('session-image-reload-race');
+    const { agent, agentPromise } = await bootAcpAgent();
+    let finishRegistration!: () => void;
+    vi.mocked(registerCreateSubSessionTool).mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finishRegistration = resolve;
+      }),
+    );
+    const sessionPromise = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() =>
+      expect(registerCreateSubSessionTool).toHaveBeenCalled(),
+    );
+    let finishOlderReload!: () => void;
+    vi.mocked(mockConfig.setImageModel).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishOlderReload = resolve;
+        }),
+    );
+    innerConfig.setImageModel.mockClear();
+    const older = agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: '/tmp' },
+    );
+    await vi.waitFor(() => expect(finishOlderReload).toBeDefined());
+    await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+      { cwd: '/tmp' },
+    );
+    expect(innerConfig.setImageModel).toHaveBeenCalledOnce();
+    finishOlderReload();
+    await older;
+    expect(innerConfig.setImageModel).toHaveBeenCalledOnce();
+    finishRegistration();
+    await sessionPromise;
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -20926,6 +20968,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     recording: ReturnType<typeof makeRecordingService> | null,
   ) {
     return {
+      setImageModel: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -22786,6 +22829,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       ),
     };
     return {
+      setImageModel: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
@@ -27143,6 +27187,7 @@ describe('sessionLanguage multi-session propagation', () => {
         syncAfterAuthRefresh: vi.fn(),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      setImageModel: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       switchModel: vi.fn().mockResolvedValue(undefined),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),

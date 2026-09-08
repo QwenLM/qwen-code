@@ -3429,6 +3429,24 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export interface DaemonModelConfiguration {
+  key: string;
+  authType: string;
+  modelId: string;
+  name?: string;
+  baseUrl?: string;
+  envKey?: string;
+  contextWindowSize?: number;
+  purpose: 'chat' | 'image' | 'voice';
+  imageModel?: string;
+}
+
+export interface DaemonModelConfigurationUpdateResult {
+  updated: true;
+  requiresRestart: boolean;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+}
+
 /** Identifies a configured model to remove from `modelProviders`. */
 export interface DaemonModelDeleteRequest {
   authType: string;
@@ -4484,6 +4502,7 @@ export interface DaemonAuthProviderInstallRequest {
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: {
       image?: boolean;

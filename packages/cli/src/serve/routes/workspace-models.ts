@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { listModelConfigurations } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
@@ -48,6 +49,12 @@ export interface WorkspaceModelsRouteDeps {
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   persistSettings: PersistSettings;
+  updateModelContextWindow?: (
+    workspace: string,
+    key: string,
+    size: number | null,
+    assertGenerationOpen: () => void,
+  ) => Promise<'user' | 'workspace' | undefined>;
   broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -116,6 +123,90 @@ export function registerWorkspaceModelsRoutes(
     broadcastSettingsChanged,
     parseAndValidateClientId,
   } = deps;
+
+  app.get('/workspace/models', (_req, res) => {
+    try {
+      deps.captureGenerationAssertion?.()?.();
+      const trusted = deps.isWorkspaceTrusted?.();
+      const loaded = loadSettings(boundWorkspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: trusted === false,
+        workspaceTrusted: trusted,
+      });
+      res.json({ models: listModelConfigurations(loaded) });
+    } catch (error) {
+      if (sendGenerationClosedError(res, error)) return;
+      res.status(500).json({ error: 'Unable to load model configurations' });
+    }
+  });
+
+  app.patch('/workspace/models', mutate({ strict: true }), async (req, res) => {
+    const assertGenerationOpen =
+      deps.captureGenerationAssertion?.() ?? (() => {});
+    try {
+      assertGenerationOpen();
+      const body = safeBody(req);
+      const key = body['key'];
+      const size = body['contextWindowSize'];
+      if (
+        typeof key !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(key) ||
+        (size !== null &&
+          (typeof size !== 'number' ||
+            !Number.isInteger(size) ||
+            size < 1 ||
+            size > 10_000_000))
+      ) {
+        res
+          .status(400)
+          .json({ error: 'Invalid model key or context window size' });
+        return;
+      }
+      const clientId = parseAndValidateClientId(req, res);
+      if (clientId === null) return;
+      if (!deps.updateModelContextWindow) {
+        res
+          .status(501)
+          .json({ error: 'Model configuration editing is unavailable' });
+        return;
+      }
+      const scope = await deps.updateModelContextWindow(
+        boundWorkspace,
+        key,
+        size,
+        assertGenerationOpen,
+      );
+      assertGenerationOpen();
+      if (!scope) {
+        res.status(409).json({
+          error:
+            'Model configuration changed or is ambiguous. Reload and try again.',
+        });
+        return;
+      }
+      try {
+        broadcastSettingsChanged('modelProviders', undefined, scope, clientId);
+      } catch {
+        writeStderrLine('qwen serve: model configuration broadcast failed');
+      }
+      let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+      try {
+        runtimeSync = await deps.syncModelProvidersRuntime?.();
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        runtimeSync = { status: 'failed' };
+      }
+      assertGenerationOpen();
+      res.json({
+        updated: true,
+        requiresRestart: true,
+        ...(runtimeSync ? { runtimeSync } : {}),
+      });
+    } catch (error) {
+      if (sendGenerationClosedError(res, error)) return;
+      res.status(500).json({ error: 'Unable to update model configuration' });
+    }
+  });
 
   app.delete(
     '/workspace/models',

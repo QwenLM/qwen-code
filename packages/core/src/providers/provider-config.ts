@@ -190,6 +190,11 @@ function buildModelConfigs(
         name: displayName(id),
         baseUrl: inputs.baseUrl,
         envKey,
+        ...(advCfg?.purpose === 'image'
+          ? { supportsImageGeneration: true, imageOnly: true }
+          : advCfg?.purpose === 'voice'
+            ? { voiceOnly: true }
+            : {}),
         ...(genConfig ? { generationConfig: genConfig } : {}),
       };
     });
@@ -258,7 +263,9 @@ export function buildInstallPlan(
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
-  const firstModel = models[0];
+  const firstModel = models.find(
+    (model) => !model.imageOnly && !model.voiceOnly,
+  );
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
@@ -270,7 +277,7 @@ export function buildInstallPlan(
       ? undefined
       : {
           modelId: firstModelId,
-          ...(config.mergeModelsByIdentity && firstModel.baseUrl
+          ...(config.mergeModelsByIdentity && firstModel?.baseUrl
             ? { baseUrl: firstModel.baseUrl }
             : {}),
         };

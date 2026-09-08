@@ -5,7 +5,13 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast' | 'voice' | 'vision';
+export type ModelDialogMode =
+  | 'main'
+  | 'fast'
+  | 'voice'
+  | 'vision'
+  | 'advisor'
+  | 'image';
 
 interface ModelDialogProps {
   mode?: ModelDialogMode;
@@ -177,7 +183,11 @@ export function ModelDialog({
               ? t('model.setVoice')
               : isVisionMode
                 ? t('model.setVision')
-                : t('model.select')
+                : mode === 'advisor'
+                  ? t('model.setAdvisor')
+                  : mode === 'image'
+                    ? t('model.setImage')
+                    : t('model.select')
         }
         data-web-shell-model-dialog
       >

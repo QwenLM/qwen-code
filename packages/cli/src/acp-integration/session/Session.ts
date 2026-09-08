@@ -3758,7 +3758,7 @@ export class Session implements SessionContext {
     }
   }
 
-  reloadModelProvidersFromDisk(): void {
+  async reloadModelProvidersFromDisk(): Promise<void> {
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -3771,6 +3771,7 @@ export class Session implements SessionContext {
       this.settings.merged.modelProviders,
       this.settings.merged.providerProtocol ?? {},
     );
+    await this.config.setImageModel(this.settings.merged.imageModel);
   }
 
   installPendingManagedConversationBinding(
