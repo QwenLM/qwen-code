@@ -173,6 +173,7 @@ export class PoolEntry {
   private maxIdleTimer?: NodeJS.Timeout;
   private firstIdleAt?: number;
   private restartInFlight?: Promise<void>;
+  private cleanupInFlight?: Promise<void>;
   /**
    * set
    * SYNCHRONOUSLY at the top of `doRestart` (before any side effects).
@@ -441,7 +442,7 @@ export class PoolEntry {
         // already dead via the McpClient.onerror that triggered us).
         // Errors inside the chain log at warn/error via
         // `sweepAndDisconnect`'s own catches.
-        void this.sweepAndDisconnect('silent_drop').then(
+        this.cleanupInFlight = this.sweepAndDisconnect('silent_drop').then(
           (result) => {
             // surface orphan-process
             // pressure to operators. Two failure shapes worth a
@@ -537,6 +538,10 @@ export class PoolEntry {
    */
   isTerminated(): boolean {
     return this.state === 'closed' || this.state === 'failed';
+  }
+
+  waitForCleanup(): Promise<void> | undefined {
+    return this.cleanupInFlight;
   }
 
   /**
@@ -859,6 +864,7 @@ export class PoolEntry {
    */
   private async sweepAndDisconnect(reason: string): Promise<SweepResult> {
     const result: SweepResult = {};
+    debugLogger.debug(`Sweeping pool entry ${this.id} (reason=${reason})`);
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {

@@ -335,6 +335,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly appResourceUri?: string,
     private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
+    private readonly reconnectOnError = true,
   ) {
     super(params);
   }
@@ -528,6 +529,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   private shouldAttemptReconnect(error: unknown): boolean {
+    // Shared transports are recovered by the owning session on its next
+    // model send. A tool's bootstrap Config must not spawn a private client.
+    if (!this.reconnectOnError) return false;
     if (isAbortError(error)) {
       return false;
     }
@@ -975,6 +979,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly allowInvocationContext: boolean = false,
     readonly appResourceUri?: string,
     readonly appResourceUi?: Record<string, unknown>,
+    private readonly reconnectOnError = true,
   ) {
     super(
       nameOverride ??
@@ -1047,6 +1052,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      this.reconnectOnError,
     );
   }
 
@@ -1071,6 +1077,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       appResourceUi,
+      this.reconnectOnError,
     );
   }
 
@@ -1096,8 +1103,14 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   withSessionConfig(
     trust: boolean | undefined,
     alwaysLoad: boolean,
+    reconnectOnError = this.reconnectOnError,
   ): DiscoveredMCPTool {
-    if (trust === this.trust && alwaysLoad === this.alwaysLoad) return this;
+    if (
+      trust === this.trust &&
+      alwaysLoad === this.alwaysLoad &&
+      reconnectOnError === this.reconnectOnError
+    )
+      return this;
     return new DiscoveredMCPTool(
       this.mcpTool,
       this.serverName,
@@ -1119,6 +1132,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      reconnectOnError,
     );
   }
 
@@ -1142,6 +1156,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      0,
+      this.reconnectOnError,
     );
   }
 }

@@ -955,6 +955,45 @@ describe('DiscoveredMCPTool', () => {
     });
   });
 
+  it.each(['original', 'qualified', 'trust', 'app'])(
+    'leaves shared connection recovery to the session (%s copy)',
+    async (copy) => {
+      const discoverToolsForServer = vi.fn();
+      const config = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      } as unknown as Config;
+      const callTool = vi
+        .fn()
+        .mockRejectedValue(new Error('Connection closed'));
+      let tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        config,
+        { callTool },
+        undefined,
+        undefined,
+        { readOnlyHint: true, idempotentHint: true },
+      ).withSessionConfig(true, false, false);
+      if (copy === 'qualified') tool = tool.asFullyQualifiedTool();
+      if (copy === 'trust') tool = tool.withTrust(false).withTrust(true);
+      if (copy === 'app')
+        tool = tool.withAppResourceUi({ resourceUri: 'ui://test' });
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toThrow('Connection closed');
+      expect(callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    },
+  );
+
   describe('getDefaultPermission and getConfirmationDetails', () => {
     it('should return allow when trust is true', async () => {
       const trustedTool = new DiscoveredMCPTool(

@@ -566,6 +566,7 @@ describe('Session', () => {
     get: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
+    getMcpClientManager: ReturnType<typeof vi.fn>;
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
@@ -893,6 +894,9 @@ describe('Session', () => {
     };
 
     mockToolRegistry = {
+      getMcpClientManager: vi.fn().mockReturnValue({
+        recoverFailedConnections: vi.fn().mockResolvedValue([]),
+      }),
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
@@ -16012,6 +16016,59 @@ describe('Session', () => {
             }),
           }),
         );
+      });
+    });
+
+    describe('MCP demand recovery', () => {
+      it.each(['reconnected', 'remains disconnected'])(
+        'refreshes declarations and reports %s before the model send',
+        async (state) => {
+          const notice = `MCP server 'counter' ${state}.`;
+          const recover =
+            mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+          recover.mockResolvedValue([notice]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'use counter' }],
+          });
+          expect(recover).toHaveBeenCalledWith(expect.any(AbortSignal));
+          expect(mockLlmClient.setTools).toHaveBeenCalled();
+          expect(
+            mockLlmClient.setTools.mock.invocationCallOrder[0],
+          ).toBeLessThan(
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock
+              .invocationCallOrder[0],
+          );
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: notice },
+              }),
+            }),
+          );
+        },
+      );
+
+      it('does not send a model request after cancellation during recovery', async () => {
+        const recover =
+          mockToolRegistry.getMcpClientManager().recoverFailedConnections;
+        recover.mockImplementation(async () => {
+          await session.cancelPendingPrompt();
+          return [];
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'use counter' }],
+        });
+        expect(result.stopReason).toBe('cancelled');
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       });
     });
 

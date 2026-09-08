@@ -106,6 +106,8 @@ export class McpTransportPool {
   private readonly entries = new Map<ConnectionId, PoolEntry>();
   private readonly unpooledIds = new Set<ConnectionId>();
   private readonly spawnInFlight = new Map<ConnectionId, Promise<PoolEntry>>();
+  private readonly recoveryRetryAfter = new Map<ConnectionId, number>();
+  private readonly retiringEntries = new Map<ConnectionId, Promise<void>>();
   /** Reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
   /**
@@ -191,6 +193,33 @@ export class McpTransportPool {
       }
     }
     return false;
+  }
+
+  async acquireForRecovery(
+    ...args: Parameters<McpTransportPool['acquire']>
+  ): Promise<PooledConnection> {
+    const id = connectionIdOf(args[0], args[1]);
+    // A transport error can leave a live child being swept. Finish that
+    // teardown before starting its replacement, even across sessions.
+    await this.retiringEntries.get(id);
+    const retryAfter = this.recoveryRetryAfter.get(id) ?? 0;
+    if (
+      retryAfter > Date.now() &&
+      !this.entries.has(id) &&
+      !this.spawnInFlight.has(id)
+    ) {
+      throw new Error(`MCP recovery for '${args[0]}' is cooling down`);
+    }
+    try {
+      const connection = await this.acquire(...args);
+      this.recoveryRetryAfter.delete(id);
+      return connection;
+    } catch (error) {
+      // One attempt per demand, with a workspace-wide cooldown on failure.
+      // Explicit discovery/restart continues to use the normal acquire path.
+      this.recoveryRetryAfter.set(id, Date.now() + 5_000);
+      throw error;
+    }
   }
 
   /**
@@ -720,6 +749,7 @@ export class McpTransportPool {
     // attempting to attach mid-drain doesn't end up holding a handle
     // to an entry that's about to be force-closed.
     this.draining = true;
+    this.recoveryRetryAfter.clear();
     const deadline = Date.now() + timeoutMs;
 
     // Wait for in-flight spawn promises to settle BEFORE taking the
@@ -986,6 +1016,15 @@ export class McpTransportPool {
       current: undefined,
     };
     const onClosedForThisEntry = (closedId: ConnectionId) => {
+      const cleanup = entryRef.current?.waitForCleanup();
+      if (cleanup) {
+        this.retiringEntries.set(closedId, cleanup);
+        void cleanup.finally(() => {
+          if (this.retiringEntries.get(closedId) === cleanup) {
+            this.retiringEntries.delete(closedId);
+          }
+        });
+      }
       this.evictEntry(closedId, entryRef.current);
     };
     const entry = new PoolEntry(

@@ -7734,6 +7734,23 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
+    const mcpRecoveryNotices = await this.config
+      .getToolRegistry()
+      .getMcpClientManager()
+      .recoverFailedConnections(abortSignal);
+    if (abortSignal.aborted) {
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+    if (mcpRecoveryNotices.length > 0) {
+      await llmClient.setTools();
+      for (const notice of mcpRecoveryNotices) {
+        await this.#emitAgentDiagnosticMessageSafely(
+          notice,
+          'Failed to emit MCP recovery status',
+        );
+      }
+    }
+
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
     let compressionFailed = false;

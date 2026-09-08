@@ -545,6 +545,14 @@ export class McpClient {
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
     );
+    const onClose = this.client.onclose;
+    this.client.onclose = () => {
+      onClose?.();
+      if (this.isDisconnecting) return;
+      // EOF/process exit does not invoke the SDK's onerror callback.
+      this.lastTransportError ??= new Error('MCP transport closed');
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+    };
   }
 
   /**

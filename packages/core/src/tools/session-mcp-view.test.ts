@@ -292,9 +292,13 @@ describe('SessionMcpView', () => {
     expect(registered).not.toBe(snapshotTool);
   });
 
-  it('applyTools skips clone when trust matches (allocation pin)', () => {
+  it('applyTools skips clone when metadata and recovery ownership match', () => {
     const { tools, prompts, resources } = mkRegistries();
-    const snapshotTool = mkTool('srv', 'foo', /*trust*/ true);
+    const snapshotTool = mkTool('srv', 'foo', /*trust*/ true).withSessionConfig(
+      true,
+      false,
+      false,
+    );
     const viewA = new SessionMcpView(
       tools,
       prompts,

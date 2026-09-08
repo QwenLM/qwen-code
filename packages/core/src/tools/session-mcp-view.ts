@@ -217,6 +217,7 @@ export class SessionMcpView {
       const sessionTool = tool.withSessionConfig(
         this.cfg.trust,
         this.cfg.alwaysLoadTools === true,
+        false,
       );
       try {
         this.sessionToolRegistry.registerTool(sessionTool);

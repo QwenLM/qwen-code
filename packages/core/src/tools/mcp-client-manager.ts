@@ -546,6 +546,13 @@ export class McpClientManager {
    * caller awaits the same promise and sees the resolved state.
    */
   private discoveryInFlight?: Promise<void>;
+  private pooledRecoveryInFlight?: Promise<void>;
+  private pooledStopGeneration = 0;
+  private readonly recoveryNotices = new Map<string, string>();
+  private readonly failedPooledConnections = new Map<
+    string,
+    { transportId: ConnectionId }
+  >();
 
   /**
    * set true by
@@ -1522,6 +1529,15 @@ export class McpClientManager {
     // instead of triggering a parallel pass that races on
     // `pooledConnections`. Cleanup runs in `.finally` so the next
     // call (after this pass completes) starts fresh.
+    // A recovery pass handles failed entries only. A config refresh must run
+    // its own reconciliation after recovery, including healthy entries.
+    if (this.pooledRecoveryInFlight) {
+      const stopGeneration = this.pooledStopGeneration;
+      return this.pooledRecoveryInFlight.then(() => {
+        if (stopGeneration !== this.pooledStopGeneration) return;
+        return this.discoverAllMcpToolsViaPool(cliConfig);
+      });
+    }
     if (this.discoveryInFlight) return this.discoveryInFlight;
     this.discoveryInFlight = this.runDiscoverAllMcpToolsViaPool(
       cliConfig,
@@ -1677,53 +1693,7 @@ export class McpClientManager {
               promptRegistry,
               resourceRegistry,
             );
-            //
-            // subscribe to entry-level events so a `'failed'` event
-            // (entry's restart hit reconnect-budget exhaustion →
-            // terminal failure → entry removed from `pool.entries`)
-            // evicts our stale handle.
-            //
-            // Keep a NAMED listener and unregister it on
-            // 'failed' BEFORE deleting from `pooledConnections`. Pre-
-            // fix the anonymous arrow stayed attached to the entry's
-            // EventEmitter even after we deleted from
-            // `pooledConnections` — the listener's closure pinned
-            // `this` (manager) and `conn` (PooledConnection wrapper),
-            // making cleanup depend on whole-object GC. With named +
-            // self-unregister, the listener detaches as soon as the
-            // 'failed' event fires.
-            //
-            // Idempotent — a second 'failed' event on the same id
-            // is a no-op via `get(name) === conn` guard;
-            // `releaseAllPooledConnections` / `stop` also call
-            // `conn.release()` independently.
-            const onFailed = (e: import('./mcp-pool-events.js').PoolEvent) => {
-              if (e.kind !== 'failed') return;
-              if (this.pooledConnections.get(name) === conn) {
-                this.pooledConnections.delete(name);
-              }
-              conn.off('event', onFailed);
-            };
-            conn.on('event', onFailed);
-            // skip
-            // the set if shutdown already passed its 5s grace cap and
-            // released pool connections. A late-resolving pool.acquire
-            // (whose own 30s stdio timeout exceeds the shutdown cap)
-            // would otherwise repopulate `pooledConnections` AFTER
-            // `releaseAllPooledConnections` cleared it — orphan entry
-            // (refcount never reaches 0, drain timer never fires).
-            // Release the just-acquired connection so the pool's
-            // refcount drops back to where it would have been if the
-            // acquire had been refused.
-            if (this.stopTimedOut) {
-              try {
-                conn.release();
-              } catch {
-                /* best effort — shutdown in progress */
-              }
-              return;
-            }
-            this.pooledConnections.set(name, conn);
+            this.trackPooledConnection(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
             // siblings (matches the legacy `discoverMcpToolsForServer`
@@ -1766,7 +1736,128 @@ export class McpClientManager {
     }
   }
 
+  private trackPooledConnection(
+    name: string,
+    conn: import('./mcp-pool-entry.js').PooledConnection,
+  ): void {
+    if (this.stopTimedOut) {
+      conn.release();
+      return;
+    }
+    const onFailed = (event: import('./mcp-pool-events.js').PoolEvent) => {
+      if (event.kind !== 'failed') return;
+      if (this.pooledConnections.get(name) === conn) {
+        this.pooledConnections.delete(name);
+        this.failedPooledConnections.set(name, {
+          transportId: conn.transportId,
+        });
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+      }
+      conn.off('event', onFailed);
+    };
+    conn.on('event', onFailed);
+    this.pooledConnections.set(name, conn);
+    this.failedPooledConnections.delete(name);
+  }
+
+  /** Restore session registrations before a new model send; never call a tool. */
+  async recoverFailedConnections(signal: AbortSignal): Promise<string[]> {
+    if (!this.pool || signal.aborted || !this.cliConfig.isTrustedFolder()) {
+      return [];
+    }
+    const recover = async () => {
+      if (this.failedPooledConnections.size === 0) return;
+      while (this.discoveryInFlight) await this.discoveryInFlight;
+      if (signal.aborted || this.failedPooledConnections.size === 0) return;
+      const servers = this.getEffectiveMcpServers();
+      const recovery = Promise.all(
+        [...this.failedPooledConnections].map(async ([name, failure]) => {
+          const config = servers[name];
+          const stillWanted = () =>
+            this.failedPooledConnections.get(name) === failure &&
+            this.cliConfig.isTrustedFolder() &&
+            !this.cliConfig.isMcpServerDisabled(name) &&
+            !this.cliConfig.isMcpServerPendingApproval?.(name) &&
+            connectionIdOf(name, this.getEffectiveMcpServers()[name] ?? {}) ===
+              failure.transportId;
+          if (!config || !stillWanted()) return;
+          try {
+            const conn = await this.pool!.acquireForRecovery(
+              name,
+              config,
+              this.cliConfig.getSessionId(),
+              this.toolRegistry,
+              this.cliConfig.getPromptRegistry(),
+              this.cliConfig.getResourceRegistry(),
+            );
+            // Disconnect/stop/config revocation wins over a late acquire.
+            if (!stillWanted() || this.stopTimedOut) {
+              conn.release();
+              return;
+            }
+            if (conn.client.getStatus() !== MCPServerStatus.CONNECTED) {
+              conn.release();
+              throw new Error('MCP connection closed during recovery');
+            }
+            // Transport identity excludes trust and tool filters. Apply the
+            // current session policy before exposing a recovered connection.
+            try {
+              conn.updateConfig(this.getEffectiveMcpServers()[name]!);
+            } catch (error) {
+              conn.release();
+              throw error;
+            }
+            this.trackPooledConnection(name, conn);
+            this.recoveryNotices.set(
+              name,
+              `MCP server '${name}' reconnected. Cancelled calls were not replayed.`,
+            );
+          } catch (error) {
+            if (!stillWanted()) return;
+            debugLogger.error(
+              `MCP recovery failed for ${name}: ${getErrorMessage(error)}`,
+            );
+            this.recoveryNotices.set(
+              name,
+              `MCP server '${name}' remains disconnected. Recovery failed or is cooling down; retry a later turn after 5 seconds or check MCP configuration and authentication.`,
+            );
+          }
+        }),
+      ).then(() => {
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+      });
+      this.discoveryInFlight = recovery;
+      this.pooledRecoveryInFlight = recovery;
+      try {
+        await recovery;
+      } finally {
+        if (this.discoveryInFlight === recovery)
+          this.discoveryInFlight = undefined;
+        if (this.pooledRecoveryInFlight === recovery)
+          this.pooledRecoveryInFlight = undefined;
+      }
+    };
+    // A turn cancellation stops waiting, not the workspace's shared connect.
+    // The background work only restores connections and registrations.
+    let onAbort: () => void = () => {};
+    const cancelled = new Promise<void>((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([recover(), cancelled]);
+      if (signal.aborted) return [];
+      const notices = [...this.recoveryNotices.values()];
+      this.recoveryNotices.clear();
+      return notices;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
   private releaseAllPooledConnections(): void {
+    this.failedPooledConnections.clear();
+    this.recoveryNotices.clear();
     for (const conn of this.pooledConnections.values()) {
       try {
         conn.release();
@@ -1784,6 +1875,8 @@ export class McpClientManager {
    * This is the cleanup method to be called on application exit.
    */
   async stop(): Promise<void> {
+    this.pooledStopGeneration++;
+    this.failedPooledConnections.clear();
     // Stop all health checks first
     this.stopAllHealthChecks();
 
@@ -1909,6 +2002,8 @@ export class McpClientManager {
    * @param serverName The name of the server to disconnect.
    */
   async disconnectServer(serverName: string): Promise<void> {
+    this.failedPooledConnections.delete(serverName);
+    this.recoveryNotices.delete(serverName);
     // Stop health check for this server
     this.stopHealthCheck(serverName);
 
@@ -3101,7 +3196,7 @@ export class McpClientManager {
           promptRegistry,
           resourceRegistry,
         );
-        this.pooledConnections.set(name, conn);
+        this.trackPooledConnection(name, conn);
         toolCount = conn.toolsSnapshot.length;
       } else {
         // Standalone mode: create a per-session McpClient
