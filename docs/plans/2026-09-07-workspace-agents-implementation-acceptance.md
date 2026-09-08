@@ -374,6 +374,15 @@ The Web Shell also surfaces a background-processing failure after a durable
 mutation as "saved, but background processing failed"; periodic refreshes no
 longer erase that action error a second later. These paths were source-inspected
 only.
+The daemon's ordinary session catalog already returned agent sessions, but the
+sidebar exposed only Tasks and Channels and therefore hid them behind the
+default-source filter. The existing source switch now includes Agents and
+feeds `sourceType: agent` into the same `WorkspaceSection`; it does not add a
+second conversation list or renderer. In the live Web Shell that tab listed
+the existing `demo-leader` and `demo-worker` sessions, and opening
+`demo-leader` loaded session `63465788-a16b-5328-92fc-8020330969a9` in the
+ordinary conversation page with its full ten-turn transcript. A hard reload
+preserved that transcript. No test suite, build, lint, typecheck, or CI ran.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.

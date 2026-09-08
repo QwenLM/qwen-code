@@ -530,12 +530,14 @@ in the daemon, where the sessions are. Multica-style runtime registration and
 process isolation remain absent.
 
 Stage B turned out to be smaller than written. Agent sessions were already in
-the ordinary session list — only the hidden host type is filtered anywhere —
-so the work was making them legible: a session is titled with its agent's
-name, written once and never over a person's `/rename`. A run row links to the
-agent's session. The thread-scoped transcript slice was kept rather than
-replaced: a session serving several threads cannot answer "what did this agent
-do _here_", which is the narrower question the slice exists for.
+the ordinary session catalog, but the sidebar's Tasks filter hid them. The
+existing session-source switch now has an Agents tab backed by the same
+`WorkspaceSection` and ordinary session page; no second conversation list was
+added. A session is titled with its agent's name, written once and never over a
+person's `/rename`, and a run row links to it. The thread-scoped transcript
+slice was kept rather than replaced: a session serving several threads cannot
+answer "what did this agent do _here_", which is the narrower question the
+slice exists for.
 
 Stage C landed items 1 and 2 of the four. Labels, project and due date are
 still display-only work and are not done.
