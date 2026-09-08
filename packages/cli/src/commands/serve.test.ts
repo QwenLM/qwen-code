@@ -10,7 +10,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
@@ -1043,9 +1042,12 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
-  const ecs = isSlowTestHost();
-  const startupMs = ecs ? 90_000 : 30_000;
-  const testMs = ecs ? 110_000 : 40_000;
+  // The dev entrypoint pays a cold tsx transform before the daemon can listen,
+  // so this wait is CPU-bound, not a fixed cost: measured 12s on an idle host
+  // and 88s on a shared one running several jobs at once. RUNNER_NAME is unset
+  // on some shared pools, so the budget cannot be keyed to it.
+  const startupMs = 180_000;
+  const testMs = 200_000;
 
   it(
     'reaches listening through the dev entrypoint without loading interactive Ink internals first',

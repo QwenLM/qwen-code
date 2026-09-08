@@ -44,6 +44,19 @@ import {
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 
+// dispose() stops the next tick but does not await the sweep already in
+// flight, so a sweep can still be writing under the temp tree while teardown
+// walks it — recursive rm then fails with ENOTEMPTY when a file lands between
+// its readdir and rmdir. Retry so cleanup waits the writer out instead of
+// failing a test that already passed.
+const removeTempTree = (dir: string) =>
+  fsp.rm(dir, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 50,
+  });
+
 // Delegating spy: the Aone tests seed a real repository, so resolution must
 // really run — the spy only makes its per-sweep cost observable.
 const aoneMocks = vi.hoisted(() => ({
@@ -1927,7 +1940,7 @@ describe('startSessionPrRefreshTimer', () => {
     vi.useRealTimers();
     delete process.env['QWEN_RUNTIME_DIR'];
     for (const dir of [baseDir, trustedCwd, untrustedCwd]) {
-      await fsp.rm(dir, { recursive: true, force: true });
+      await removeTempTree(dir);
     }
   });
 

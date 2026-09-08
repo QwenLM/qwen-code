@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -26,6 +27,7 @@ import {
   setNestedPropertyForce,
   validateSettingValue,
 } from './settingsUtils.js';
+import { GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
@@ -252,6 +254,31 @@ describe('SettingsUtils', () => {
         expect(validateSettingValue(definition!, 11)).toBe(
           'Value must be <= 10',
         );
+      });
+
+      it('refuses out-of-range model.goalCheckpointTimeoutSeconds values', async () => {
+        // This file mocks getSettingsSchema, so read the production
+        // definition straight from the module: removing the declared bounds
+        // must turn this red, closing the /config write path that persists a
+        // value the next CLI start rejects.
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+        expect(validateSettingValue(definition, 0)).toBe('Value must be >= 1');
+        expect(
+          validateSettingValue(
+            definition,
+            GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+          ),
+        ).toBe(`Value must be <= ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}`);
+        expect(validateSettingValue(definition, 1)).toBeUndefined();
+        expect(
+          validateSettingValue(definition, GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP),
+        ).toBeUndefined();
       });
     });
 
@@ -1033,5 +1060,58 @@ describe('setNestedProperty prototype-pollution guards', () => {
       assertNoPollution();
       expect(Object.keys(obj)).toEqual([]);
     });
+  });
+});
+
+describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
+  it('lists the cross-session keys, and the restricted list no longer does', () => {
+    const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
+      ({ section, key }) => `${section}.${key}`,
+    );
+    expect(keys).toEqual([
+      'agents.crossSessionMessaging',
+      'agents.crossSessionInbound',
+    ]);
+    for (const key of keys) {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
+    }
+  });
+
+  it('ranks the policy values in order, with parity between accept and hold', () => {
+    const inbound = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionInbound',
+    )!;
+    const ranks = ['accept', undefined, 'hold', 'refuse'].map(
+      inbound.strictness,
+    );
+    expect([...ranks].sort((a, b) => a - b)).toEqual(ranks);
+    expect(new Set(ranks).size).toBe(ranks.length);
+  });
+
+  it('ranks unrecognized values by their fail-closed behavior', () => {
+    const inbound = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionInbound',
+    )!;
+    const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMessaging',
+    )!;
+    expect(inbound.strictness('definitely-not-a-value')).toBe(
+      inbound.strictness('hold'),
+    );
+    expect(inbound.strictness({})).toBe(inbound.strictness('hold'));
+    expect(messaging.strictness('definitely-not-a-value')).toBe(
+      messaging.strictness(false),
+    );
+    expect(messaging.strictness({})).toBe(messaging.strictness(false));
+  });
+
+  it('ranks the switch off as stricter than on, and unset as off', () => {
+    const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMessaging',
+    )!;
+    expect(messaging.strictness(true)).toBeLessThan(
+      messaging.strictness(false),
+    );
+    expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
   });
 });

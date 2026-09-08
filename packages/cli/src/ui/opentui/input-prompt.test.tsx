@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/react */
+// @vitest-environment jsdom
 /**
  * @license
  * Copyright 2026 Qwen
@@ -23,7 +24,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
 import {
@@ -930,6 +933,70 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(submitted).toEqual(['/help']);
   });
 
+  it('Enter submits the live exact command when the dropdown trails the buffer', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'model',
+          description: 'Set the model',
+          kind: 'built-in',
+          action: () => undefined,
+          completionPriority: 1,
+        },
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    // Publish the dropdown for the `/` prefix alone: `/model` highlighted, no
+    // perfect match. This is the state Enter would read if it trusted it.
+    await typeText('/');
+    // Then move the buffer without a flush — what a render loop busy with a
+    // streaming turn does to the last keystrokes before an Enter.
+    editor.setText('/quit');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    // Counterfactual (mutation-checked): trusting the stale row splices it
+    // into the live buffer instead — the range still describes `/`, so
+    // `/quit` comes out as `/model quit` and nothing is ever submitted.
+    expect(submitted).toEqual(['/quit']);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('Enter does not submit a partial command the trailing dropdown called perfect', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+        { name: 'clear', description: 'Clear', kind: 'built-in' },
+      ],
+      (text) => submitted.push(text),
+    );
+    // The mirror image: a perfect match published for `/quit`, then the buffer
+    // moves back to a partial. The stale verdict must not submit it as text.
+    const editor = currentEditor();
+    await typeText('/quit');
+    editor.setText('/cle');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual([]);
+    // Non-vacuity: Enter took the accept path instead of doing nothing at all.
+    expect(editor.plainText).not.toBe('/cle');
+  });
+
   it('after navigating, Enter fills the highlighted sub-command', async () => {
     const submitted: string[] = [];
     await renderWithCommands(
@@ -1024,4 +1091,38 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(submitted).toEqual(['/skills']);
     expect(editor.plainText).toBe('');
   });
+});
+
+describe('OpenTuiInputPrompt approval-mode indicator', () => {
+  // The mode text is the only on-screen proof an auto-accept mode took
+  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
+  // terminal for it. Asserted through the same translation call the component
+  // makes, so a non-English locale cannot flip the pin.
+  const renderWithMode = (approvalMode: ApprovalMode) =>
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        approvalMode={approvalMode}
+      />,
+    );
+
+  it.each<[ApprovalMode, string]>([
+    [ApprovalMode.YOLO, 'YOLO mode'],
+    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
+    [ApprovalMode.AUTO, 'Auto mode'],
+  ])('draws the %s status text', (approvalMode, key) => {
+    renderWithMode(approvalMode);
+    expect(screen.getByText(t(key))).toBeTruthy();
+  });
+
+  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
+    'draws no status text for %s, matching ink',
+    (approvalMode) => {
+      renderWithMode(approvalMode);
+      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
+        expect(screen.queryByText(t(key))).toBeNull();
+      }
+    },
+  );
 });

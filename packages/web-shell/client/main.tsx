@@ -108,8 +108,8 @@ function replaceStandaloneSessionUrl(
   const url = new URL(window.location.href);
   url.pathname = buildSessionPathname(url.pathname, sessionId);
   if (
-    sessionContext?.kind === 'standalone' ||
-    sessionContext?.kind === 'live'
+    sessionId &&
+    (sessionContext?.kind === 'standalone' || sessionContext?.kind === 'live')
   ) {
     url.searchParams.set('context', sessionContext.kind);
     url.searchParams.delete('workspace');
@@ -210,15 +210,27 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             language,
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
-            sidebar: true,
+            sidebar: { enabled: true, showLive: true },
             header: {
-              items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
+              items: [
+                'title',
+                'environment',
+                'rightPanel',
+                'tokenUsage',
+                'contextUsage',
+              ],
             },
             rightPanel: {
               items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
-              items: ['environment', 'subagents', 'backgroundTasks'],
+              items: [
+                'environment',
+                'subagents',
+                'backgroundTasks',
+                'attachments',
+                'artifacts',
+              ],
             },
             compactThinking: true,
             markdownTableMode: 'advanced',

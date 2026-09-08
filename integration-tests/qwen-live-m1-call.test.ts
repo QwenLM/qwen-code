@@ -88,7 +88,7 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
     expect(record['url']).toBe(stack.live.url);
     expect(typeof record['token']).toBe('string');
     expect(String(record['token']).length).toBeGreaterThan(0);
-    expect(record['protocolVersion']).toBe(6);
+    expect(record['protocolVersion']).toBe(7);
     expect(record['pid']).toBe(stack.live.proc.pid);
     expect(String(record['instanceNonce'])).toMatch(/^[A-Za-z0-9_-]{16,256}$/);
   });

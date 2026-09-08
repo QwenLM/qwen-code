@@ -380,9 +380,22 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        const displayName = getString(data, 'displayName');
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : // A metadata event that echoes the unchanged name without an
+                // explicit provenance (the bridge's pr-only publish) does not
+                // change the title, so it must not strip the provenance the
+                // `/clear` carry reads. Only a changed name of unknown
+                // provenance resets it.
+                displayName && displayName === current.displayName
+                ? current.titleSource
+                : undefined,
         }));
       }
       break;
@@ -632,6 +645,8 @@ function getGoalState(
   const recordId = evidenceCursor?.['recordId'];
   const turnCount = getNumber(source, 'turnCount');
   const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const tokensUsed = getNumber(source, 'tokensUsed');
+  const tokenBudget = getNumber(source, 'tokenBudget');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -670,6 +685,8 @@ function getGoalState(
       evidenceCursor: { recordId },
       turnCount,
       activeTimeMs,
+      ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),
@@ -836,11 +853,17 @@ function mapAvailableCommandsUpdate(
 
 function mapCommandMeta(
   meta: Record<string, unknown> | null | undefined,
-): Pick<DaemonCommandInfo, 'source'> {
+): Pick<DaemonCommandInfo, 'source' | 'altNames'> {
   const record = meta ?? undefined;
   const source = getString(record, 'source');
+  const altNames = Array.isArray(record?.['altNames'])
+    ? record['altNames'].filter(
+        (name): name is string => typeof name === 'string',
+      )
+    : [];
   return {
     ...(source ? { source } : {}),
+    ...(altNames.length > 0 ? { altNames } : {}),
   };
 }
 

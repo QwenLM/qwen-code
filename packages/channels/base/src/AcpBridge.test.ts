@@ -10,6 +10,7 @@ import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_META_KEY,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
@@ -354,6 +355,89 @@ describe('AcpBridge', () => {
       claimed: false,
       hasQueuedPrompt: false,
     });
+  });
+
+  it('forwards BTW through the ACP extension method for an owned session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn().mockResolvedValue({
+      sessionId: 's-1',
+      answer: 'side answer',
+    });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+
+    await expect(bridge.btw('s-1', 'what changed?')).resolves.toEqual({
+      sessionId: 's-1',
+      answer: 'side answer',
+    });
+    expect(extMethod).toHaveBeenCalledWith(CHANNEL_BTW_METHOD, {
+      sessionId: 's-1',
+      question: 'what changed?',
+    });
+  });
+
+  it('rejects BTW for unowned sessions and mismatched responses', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn().mockResolvedValue({
+      sessionId: 'other',
+      answer: null,
+    });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Unknown ACP session',
+    );
+    bridge.knownSessionIds.add('s-1');
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Invalid BTW response',
+    );
+  });
+
+  it('accepts null BTW answers and rejects invalid answer types', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: null })
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: 42 });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+
+    await expect(bridge.btw('s-1', 'question')).resolves.toEqual({
+      sessionId: 's-1',
+      answer: null,
+    });
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Invalid BTW response',
+    );
+  });
+
+  it('stops waiting for an ACP BTW response when aborted', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn(() => new Promise(() => {}));
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+    const controller = new AbortController();
+
+    const result = bridge.btw('s-1', 'question', controller.signal);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it('keeps a cancelled session claimable but rejects it after discard', async () => {
@@ -821,9 +905,9 @@ describe('AcpBridge', () => {
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     }) as unknown as TestableAcpBridge;
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
+    const backgroundResponses: unknown[][] = [];
+    bridge.on('backgroundResponse', (sessionId, text, context) => {
+      backgroundResponses.push([sessionId, text, context]);
     });
     const textChunks: Array<[string, string]> = [];
     bridge.on('textChunk', (sessionId, text) => {
@@ -838,11 +922,82 @@ describe('AcpBridge', () => {
         _meta: {
           source: 'background_notification_response',
           qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnId: 'notification-turn-1',
+            turnComplete: false,
+          },
         },
       },
     });
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: true,
+            partial: true,
+          },
+        },
+      },
+    });
+    for (const backgroundTask of [
+      undefined,
+      { taskId: '', status: 'completed', kind: 'agent' },
+    ]) {
+      bridge.handleSessionUpdate({
+        sessionId: 's-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Legacy background answer.' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            ...(backgroundTask ? { backgroundTask } : {}),
+          },
+        },
+      });
+    }
 
-    expect(backgroundResponses).toEqual([['s-1', 'Background final answer.']]);
+    expect(backgroundResponses).toEqual([
+      [
+        's-1',
+        'Background final answer.',
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          label: 'dependency check',
+          turnId: 'notification-turn-1',
+          turnComplete: false,
+        },
+      ],
+      [
+        's-1',
+        '',
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          label: 'dependency check',
+          turnComplete: true,
+          partial: true,
+        },
+      ],
+      ['s-1', 'Legacy background answer.', undefined],
+      ['s-1', 'Legacy background answer.', undefined],
+    ]);
     expect(textChunks).toEqual([]);
   });
 

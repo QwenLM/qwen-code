@@ -208,6 +208,16 @@ describe('qwen serve Live Host discovery', () => {
       })}\n`,
       { mode: 0o600 },
     );
+    const stableDiscoveryPath = getLiveDiscoveryPath(stable);
+    await fs.mkdir(path.dirname(stableDiscoveryPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await fs.writeFile(
+      stableDiscoveryPath,
+      await fs.readFile(runtimeDiscoveryPath),
+      { mode: 0o600 },
+    );
     let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       handle = await runQwenServe(

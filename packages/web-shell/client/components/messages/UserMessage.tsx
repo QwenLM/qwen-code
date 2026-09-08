@@ -11,9 +11,13 @@ import {
 } from 'react';
 import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
@@ -30,12 +34,9 @@ import type {
   WebShellComposerTagIconMap,
 } from '../../customization';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
-import {
-  getComposerTagDisplay,
-  getComposerTagLabel,
-  getComposerTagValue,
-} from '../../hooks/useComposerCore';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -43,6 +44,7 @@ import styles from './UserMessage.module.css';
 interface UserMessageImage {
   data: string;
   mimeType: string;
+  attachmentId?: string;
 }
 
 interface UserMessageFile {
@@ -63,7 +65,7 @@ interface UserMessageProps {
   onRetrySend?: () => void;
   onEdit?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
-  onImagePreview?: (src: string, alt?: string) => void;
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }
 
@@ -226,6 +228,7 @@ export const UserMessage = memo(function UserMessage({
   onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -370,6 +373,12 @@ export const UserMessage = memo(function UserMessage({
                           onImagePreview(
                             src,
                             t('user.uploadedImage', { index: index + 1 }),
+                            img.attachmentId
+                              ? {
+                                  kind: 'attachment',
+                                  attachmentId: img.attachmentId,
+                                }
+                              : undefined,
                           )
                       : undefined
                   }
@@ -408,14 +417,10 @@ export const UserMessage = memo(function UserMessage({
                     }
                   }}
                 >
-                  <FileTypeIcon
+                  <FileAttachmentContent
                     name={file.name}
                     mimeType={file.mimeType}
-                    size={16}
-                    className={styles.chatFileIcon}
-                    aria-hidden="true"
                   />
-                  <span className={styles.chatFileName}>{file.name}</span>
                 </span>
               );
             })}
@@ -431,14 +436,14 @@ export const UserMessage = memo(function UserMessage({
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !expanded
+                heightOverflowing && !documentMode && !expanded
                   ? styles.chatContentCollapsed
                   : ''
               }`}
             >
               {renderedContent}
             </div>
-            {heightOverflowing && (
+            {heightOverflowing && !documentMode && (
               <button
                 type="button"
                 className={styles.toggleButton}
@@ -551,7 +556,7 @@ export function ReadonlyComposerTag({
       : undefined;
   return (
     <span
-      className={`${styles.messageTag}${
+      className={`${styles.messageTag}${isPreviewableFileComposerTag(tag) ? ` ${styles.fileTag}` : ''}${
         clickable ? ` ${styles.messageTagClickable}` : ''
       }`}
       role={clickable ? 'button' : undefined}
@@ -577,13 +582,22 @@ export function ReadonlyComposerTag({
     >
       {custom ?? (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.messageTagIcon}
               style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && (
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}

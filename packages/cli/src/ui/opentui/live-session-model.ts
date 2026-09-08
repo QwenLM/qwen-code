@@ -19,6 +19,7 @@ import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
+import { formatTokenCount } from '../statusLinePresets.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
@@ -163,12 +164,16 @@ function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
 export function foldLiveEvent(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
-): LiveHistoryItem[] {
+): readonly LiveHistoryItem[] {
   const items = [...prev];
   const last = items[items.length - 1];
 
   switch (ev.type) {
     case 'user': {
+      // Both `addItem` implementations collapse a user item identical to the
+      // one before it, and this is the chokepoint the projected and live
+      // echoes share: two identical steers in a row are one row.
+      if (last?.kind === 'user' && last.text === ev.text) return prev;
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({
@@ -609,6 +614,15 @@ export function describeGoalCard(
   const activeTimeMs = goal.activeTimeMs ?? 0;
   if (activeTimeMs > 0)
     stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
+  const tokensUsed = goal.tokensUsed ?? 0;
+  if (tokensUsed > 0) {
+    const used = formatTokenCount(tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
+  }
   const reason =
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()

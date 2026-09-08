@@ -28,6 +28,11 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
+  groupParallelAgents as groupParallelAgentsBase,
+  isAgentOnlyToolGroup,
+  type ParallelAgentDisplayItem,
+} from '../adapters/parallelAgentGrouping';
+import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
   isTerminalBackgroundAgentStatus,
@@ -76,8 +81,9 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 // lost notification cannot hide the final footer forever.
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
-interface MessageListProps {
+export interface MessageListProps {
   messages: Message[];
+  frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -233,28 +239,15 @@ function getLastTurnStartMessageId(messages: Message[]): string | null {
 }
 
 export type DisplayItem =
-  | {
-      type: 'message';
-      key: string;
-      message: Message;
+  | (Extract<ParallelAgentDisplayItem, { type: 'message' }> & {
       /** Metrics info for the final answer assistant message. */
       turnCollapse?: TurnCollapseHead;
-    }
+    })
+  | Extract<ParallelAgentDisplayItem, { type: 'parallel_agents' }>
   | {
       type: 'turn_collapse';
       key: string;
       turnCollapse: TurnCollapseHead;
-    }
-  | {
-      type: 'parallel_agents';
-      key: string;
-      turnId: string;
-      agents: ACPToolCall[];
-      /**
-       * Wall-clock time of the first grouped launch, carried so the grouped
-       * box reveals its time on hover exactly like a standalone message row.
-       */
-      timestamp?: number;
     }
   | {
       type: 'turn_outputs';
@@ -298,36 +291,6 @@ export interface SessionTimelineRange {
   startIndex: number;
   endIndex: number;
   currentIndex: number;
-}
-
-// Synthetic compact summaries carry a folded thought next to their single
-// tool; the parallel-agent path must never swallow that row, so agent-only
-// detection excludes them.
-function isAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    summaryRunFirstMemberId(msg.id) === undefined &&
-    msg.tools.length === 1 &&
-    isSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    summaryRunFirstMemberId(msg.id) === undefined &&
-    msg.tools.length === 1 &&
-    isBackgroundSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundLaunchNarration(msg: Message): boolean {
-  // The daemon often streams short main-agent thought text between background
-  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
-  // those as internal launch narration and shows a single Parallel agents box.
-  // Only skip thought-only messages here; any user-facing assistant content
-  // still breaks the group and remains visible.
-  return msg.role === 'thinking';
 }
 
 function isForceExpandGroup(
@@ -515,81 +478,9 @@ function updateCompactStreamingThinkingTail(
 }
 
 export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
-  const messages = normalizeTerminalBackgroundAgentTools(sourceMessages);
-  const items: DisplayItem[] = [];
-  let i = 0;
-  while (i < messages.length) {
-    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
-      const grouped: Message[] = [];
-      let j = i;
-      while (j < messages.length) {
-        const current = messages[j];
-        if (isBackgroundAgentOnlyToolGroup(current)) {
-          grouped.push(current);
-          j++;
-          continue;
-        }
-        if (isBackgroundLaunchNarration(current)) {
-          let nextAgentIdx = j + 1;
-          while (
-            nextAgentIdx < messages.length &&
-            isBackgroundLaunchNarration(messages[nextAgentIdx])
-          ) {
-            nextAgentIdx++;
-          }
-          if (
-            nextAgentIdx < messages.length &&
-            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
-          ) {
-            j = nextAgentIdx;
-            continue;
-          }
-        }
-        break;
-      }
-
-      if (grouped.length >= 2) {
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-        i = j;
-        continue;
-      }
-    }
-
-    if (isAgentOnlyToolGroup(messages[i])) {
-      const start = i;
-      while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
-      if (i - start >= 2) {
-        const grouped = messages.slice(start, i);
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-      } else {
-        items.push({
-          type: 'message',
-          key: messages[start].id,
-          message: messages[start],
-        });
-      }
-    } else {
-      items.push({
-        type: 'message',
-        key: messages[i].id,
-        message: messages[i],
-      });
-      i++;
-    }
-  }
-  return items;
+  return groupParallelAgentsBase(
+    normalizeTerminalBackgroundAgentTools(sourceMessages),
+  );
 }
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
@@ -2270,6 +2161,32 @@ function displayItemMatchesLocateTarget(
   return false;
 }
 
+function displayItemSourceBlockIds(
+  item: DisplayItem | undefined,
+  messages: readonly Message[],
+): string | undefined {
+  if (!item) return undefined;
+  if (item.type === 'message') return item.message.sourceBlockIds?.join(',');
+  const sources = messages.filter((message) => {
+    if (item.type === 'parallel_agents') {
+      return (
+        message.role === 'tool_group' &&
+        item.agents.some((agent) =>
+          message.tools.some((tool) => toolContainsCallId(tool, agent.callId)),
+        )
+      );
+    }
+    return (
+      message.id ===
+      (item.type === 'turn_outputs' ? item.turnId : item.turnCollapse.turnId)
+    );
+  });
+  return (
+    sources.flatMap((message) => message.sourceBlockIds ?? []).join(',') ||
+    undefined
+  );
+}
+
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
@@ -2900,6 +2817,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
@@ -2951,6 +2869,8 @@ export const MessageList = memo(
     },
     ref,
   ) {
+    const frozenViewportRef = useRef(frozenViewport);
+    frozenViewportRef.current = frozenViewport;
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
@@ -2966,6 +2886,13 @@ export const MessageList = memo(
       }
       return { lastId, turnIndexById };
     }, [messages]);
+    const historicalEdgeTurns = useMemo(() => {
+      if (!frozenViewport) return undefined;
+      const ids = [...editableUserTurn.turnIndexById.keys()];
+      return new Set(
+        ids.filter((_, index) => index === 0 || index === ids.length - 1),
+      );
+    }, [editableUserTurn, frozenViewport]);
     // Render-phase caches below are reusable only against this post-commit
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
@@ -3473,6 +3400,7 @@ export const MessageList = memo(
     const turnLayoutAnimationTimer = useRef<number | undefined>(undefined);
     const turnLayoutAnimations = useRef<Animation[]>([]);
     const shouldFollow = useRef(true);
+    if (frozenViewport) shouldFollow.current = false;
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
@@ -3480,6 +3408,9 @@ export const MessageList = memo(
     const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const locateScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
@@ -3521,7 +3452,8 @@ export const MessageList = memo(
     const transcriptBlockCountRef = useRef(transcriptBlockCount);
     const transcriptReloadPausedRef = useRef(transcriptReloadPaused);
     transcriptBlockCountRef.current = transcriptBlockCount;
-    transcriptReloadPausedRef.current = transcriptReloadPaused;
+    transcriptReloadPausedRef.current =
+      transcriptReloadPaused || frozenViewport;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -3599,6 +3531,7 @@ export const MessageList = memo(
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
+        if (frozenViewportRef.current) value = false;
         if (shouldFollow.current === value) return;
         shouldFollow.current = value;
         scheduleScrollOverflowReport();
@@ -3618,6 +3551,7 @@ export const MessageList = memo(
     const visibleItems = useMemo(() => {
       reusedVisibleStreamingTailRef.current = false;
       const dependencies = [
+        historicalEdgeTurns,
         collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3675,7 +3609,7 @@ export const MessageList = memo(
           }
         }
       }
-      const collapsedItems = applyTurnCollapse(displayItems, {
+      const turnItems = applyTurnCollapse(displayItems, {
         overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3688,9 +3622,26 @@ export const MessageList = memo(
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
-        paginatedExpanded: paginatedExpandedTurns,
+        paginatedExpanded: historicalEdgeTurns
+          ? new Set([...paginatedExpandedTurns, ...historicalEdgeTurns])
+          : paginatedExpandedTurns,
         enabled: collapseEnabled,
       });
+      const collapsedItems = historicalEdgeTurns
+        ? turnItems.map((item) => {
+            if (
+              !('turnCollapse' in item) ||
+              !item.turnCollapse ||
+              !historicalEdgeTurns.has(item.turnCollapse.turnId)
+            )
+              return item;
+            const { turnId, collapsed, hiddenCount } = item.turnCollapse;
+            return {
+              ...item,
+              turnCollapse: { turnId, collapsed, hiddenCount },
+            };
+          })
+        : turnItems;
       let metricsApplied = false;
       const itemsWithMetrics = firstTurnMetrics
         ? collapsedItems.map((item) => {
@@ -3758,6 +3709,7 @@ export const MessageList = memo(
       unmatchedCompletionGraceExpired,
       orderedSummaryGraceExpired,
       collapseEnabled,
+      historicalEdgeTurns,
       hideFirstUserMessage,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics,
@@ -4212,6 +4164,7 @@ export const MessageList = memo(
     // Rule 6: skip if content doesn't overflow (no scrollbar).
     const scrollToBottom = useCallback(
       (behavior: ScrollBehavior = 'auto') => {
+        if (frozenViewportRef.current) return;
         const el = getScrollElement();
         if (!el) return;
         if (el.scrollHeight <= el.clientHeight) return;
@@ -4537,6 +4490,10 @@ export const MessageList = memo(
 
     useEffect(
       () => () => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+          locateScrollTimer.current = null;
+        }
         if (sessionTimelineFrame.current !== null) {
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
@@ -4584,7 +4541,15 @@ export const MessageList = memo(
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
         if (useVirtualScroll) {
-          virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          if (frozenViewportRef.current) {
+            // The viewport restores its own pixel anchor; index reconciliation
+            // would keep recentering it after a later user scroll.
+            const offset = virtualizer.getOffsetForIndex(rowIndex, 'center');
+            if (offset && containerRef.current)
+              containerRef.current.scrollTop = offset[0];
+          } else {
+            virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          }
         } else {
           containerRef.current
             ?.querySelector(`[data-index="${rowIndex}"]`)
@@ -4592,7 +4557,11 @@ export const MessageList = memo(
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
         // a frame or two later after measuring the target row).
-        setTimeout(() => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+        }
+        locateScrollTimer.current = setTimeout(() => {
+          locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
@@ -5470,7 +5439,8 @@ export const MessageList = memo(
             | undefined;
           if (
             displayItem.message.role === 'assistant' &&
-            finalAssistantTurnId
+            finalAssistantTurnId &&
+            !frozenViewport
           ) {
             assistantTurnFooterInfo = {
               turnId: finalAssistantTurnId,
@@ -5586,6 +5556,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        frozenViewport,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
@@ -5720,6 +5691,10 @@ export const MessageList = memo(
                   ),
                 )}
                 data-message-row-key={String(getItemKey(virtualRow.index))}
+                data-source-block-ids={displayItemSourceBlockIds(
+                  visibleItems[virtualRow.index - headerOffset],
+                  messages,
+                )}
                 data-web-shell-message-row
                 style={{
                   position: 'absolute',
@@ -5742,6 +5717,10 @@ export const MessageList = memo(
                 data-index={index}
                 className={getRowClassName(item)}
                 data-message-row-key={String(key)}
+                data-source-block-ids={displayItemSourceBlockIds(
+                  item,
+                  messages,
+                )}
                 data-web-shell-message-row
               >
                 {renderVirtualItem(index)}

@@ -80,12 +80,14 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
 
 interface FakeSession extends DaemonChannelSessionClient {
   prompt: ReturnType<typeof vi.fn>;
+  btw: ReturnType<typeof vi.fn>;
   uploadAttachment: ReturnType<typeof vi.fn>;
   removeAttachment: ReturnType<typeof vi.fn>;
   events: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   respondToPermission: ReturnType<typeof vi.fn>;
+  respondToSessionPermission: ReturnType<typeof vi.fn>;
 }
 
 function createFakeSession(
@@ -97,6 +99,7 @@ function createFakeSession(
     workspaceCwd: '/repo',
     lastEventId: undefined,
     prompt: vi.fn().mockImplementation(async () => ({})),
+    btw: vi.fn().mockResolvedValue({ sessionId, answer: 'side answer' }),
     uploadAttachment: vi.fn(),
     removeAttachment: vi.fn().mockResolvedValue(true),
     events: vi.fn((opts?: { signal?: AbortSignal }) => {
@@ -108,6 +111,7 @@ function createFakeSession(
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
+    respondToSessionPermission: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -140,6 +144,158 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('forwards BTW to the exact daemon session with its abort signal', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const controller = new AbortController();
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.btw('session-1', 'what changed?', controller.signal),
+    ).resolves.toEqual({ sessionId: 'session-1', answer: 'side answer' });
+    expect(session.btw).toHaveBeenCalledWith('what changed?', {
+      signal: controller.signal,
+    });
+    events.close();
+    bridge.stop();
+  });
+
+  it('fails closed when the daemon session has no BTW method', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    delete (session as Partial<FakeSession>).btw;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.btw('session-1', 'question')).rejects.toThrow(
+      'not supported',
+    );
+    events.close();
+    bridge.stop();
+  });
+
+  it('rejects worktree creation before calling an unsupported daemon factory', async () => {
+    const factory = vi.fn();
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreePersistence: false,
+    });
+
+    await expect(bridge.newSession('/repo', { worktree: {} })).rejects.toThrow(
+      'does not support durable Channel worktree sessions',
+    );
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('forwards and lists an attested worktree session', async () => {
+    const events = new EventQueue();
+    const session = {
+      ...createFakeSession(events),
+      worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+      worktreeState: 'persisted-v1' as const,
+    };
+    const factory = vi.fn().mockResolvedValue(session);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreePersistence: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', { worktree: {} });
+
+    expect(factory).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/repo', worktree: {} }),
+    );
+    expect(bridge.listSessions()[0]).toMatchObject({
+      sessionId: 'session-1',
+      worktree: session.worktree,
+      worktreeState: 'persisted-v1',
+    });
+    events.close();
+    bridge.stop();
+  });
+
+  it('rejects worktree reset before calling an unsupported daemon factory', async () => {
+    const factory = vi.fn();
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: false,
+    });
+
+    await expect(
+      bridge.resetWorktreeSession('session-1', '/repo'),
+    ).rejects.toThrow('does not support worktree reset');
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('transfers a worktree session through the factory and registers loop tools for the replacement', async () => {
+    const events = new EventQueue();
+    const session = {
+      ...createFakeSession(events, 'session-2'),
+      worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+      worktreeState: 'persisted-v1' as const,
+    };
+    const factory = vi.fn().mockResolvedValue(session);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn().mockResolvedValue(undefined),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: true,
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create: vi.fn(async () => ({ text: 'created' })),
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    const replacementId = await bridge.resetWorktreeSession(
+      'session-1',
+      '/repo',
+      { sourceId: 'feishu-main' },
+    );
+
+    expect(replacementId).toBe('session-2');
+    expect(factory).toHaveBeenCalledWith({
+      workspaceCwd: '/repo',
+      modelServiceId: undefined,
+      sessionScope: 'thread',
+      sourceId: 'feishu-main',
+      worktreeReset: { sessionId: 'session-1' },
+    });
+    expect(bridge.listSessions()[0]).toMatchObject({
+      sessionId: 'session-2',
+      worktree: session.worktree,
+      worktreeState: 'persisted-v1',
+    });
+    // The replacement must get the same loop-tool registration a loaded
+    // session gets, or channel loops silently stop working after a reset.
+    await waitFor(() =>
+      expect(host.register).toHaveBeenCalledWith(
+        'session-2',
+        expect.any(Function),
+      ),
+    );
+    events.close();
+    bridge.stop();
+  });
+
   it('deletes an internal session through its owning workspace', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -571,6 +727,64 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('surfaces the parent Agent tool call when a compacted frame carries subagentProgress', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'parent-call-1',
+            status: 'completed',
+            kind: 'other',
+            title: 'Agent',
+            _meta: {
+              toolName: 'agent',
+              provenance: 'builtin',
+              subagentType: 'Explore',
+              subagentProgress: true,
+            },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const toolCalls: Array<{ toolCallId: string }> = [];
+    bridge.on('toolCall', (e) => toolCalls.push(e as { toolCallId: string }));
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.prompt('session-1', 'run')).resolves.toBe('Done.');
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].toolCallId).toBe('parent-call-1');
+
+    events.close();
+    bridge.stop();
+  });
+
   it('binds a daemon session and collects assistant chunks during prompt', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -852,6 +1066,63 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('drops kind-less in_progress subagent progress without flagging the session as malformed', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'parent-call-1',
+            status: 'in_progress',
+            _meta: {
+              subagentType: 'Explore',
+              provenance: 'subagent',
+              subagentProgress: true,
+            },
+          },
+        },
+      });
+      events.push({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Done.' },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const errors: Error[] = [];
+    const toolCalls: unknown[] = [];
+    bridge.on('error', (err) => errors.push(err));
+    bridge.on('toolCall', (event) => toolCalls.push(event));
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
+    expect(errors).toHaveLength(0);
+    expect(toolCalls).toHaveLength(0);
+
+    events.close();
+    bridge.stop();
+  });
+
   it('flags a kind-less in_progress frame WITHOUT shellProgress as malformed', async () => {
     // The heartbeat drop is scoped to frames carrying _meta.shellProgress, so
     // a genuinely malformed kind-less tool_call still reaches emitProtocolError
@@ -1034,9 +1305,9 @@ describe('DaemonChannelBridge', () => {
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
     });
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
+    const backgroundResponses: unknown[][] = [];
+    bridge.on('backgroundResponse', (sessionId, text, context) => {
+      backgroundResponses.push([sessionId, text, context]);
     });
 
     await bridge.start();
@@ -1057,14 +1328,89 @@ describe('DaemonChannelBridge', () => {
           _meta: {
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              label: 'dependency check',
+              turnComplete: false,
+            },
           },
         },
       },
     });
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              label: 'dependency check',
+              turnComplete: true,
+            },
+          },
+        },
+      },
+    });
+    for (const [id, backgroundTask] of [
+      [4, undefined],
+      [5, { taskId: '', status: 'completed', kind: 'agent' }],
+    ] as const) {
+      events.push({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Legacy background answer.' },
+            _meta: {
+              source: 'background_notification_response',
+              qwenDiscreteMessage: true,
+              ...(backgroundTask ? { backgroundTask } : {}),
+            },
+          },
+        },
+      });
+    }
 
     await vi.waitFor(() => {
       expect(backgroundResponses).toEqual([
-        ['session-1', 'Background final answer.'],
+        [
+          'session-1',
+          'Background final answer.',
+          {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: false,
+          },
+        ],
+        [
+          'session-1',
+          '',
+          {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: true,
+          },
+        ],
+        ['session-1', 'Legacy background answer.', undefined],
+        ['session-1', 'Legacy background answer.', undefined],
       ]);
     });
 
@@ -1882,12 +2228,43 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('routes permission responses back through the owning daemon session', async () => {
+  it.each([
+    {
+      name: 'uses session-scoped permission voting when supported',
+      sessionPermissionVote: true,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older daemons',
+      sessionPermissionVote: false,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older clients',
+      sessionPermissionVote: true,
+      sessionMethod: false,
+    },
+  ])('$name', async ({ sessionPermissionVote, sessionMethod }) => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    const scopedVote = session.respondToSessionPermission;
+    if (!sessionMethod) {
+      delete (session as { respondToSessionPermission?: unknown })
+        .respondToSessionPermission;
+    }
+    if (sessionPermissionVote && sessionMethod) {
+      session.respondToPermission.mockResolvedValue(false);
+    }
+    const expectedVote =
+      sessionPermissionVote && sessionMethod
+        ? scopedVote
+        : session.respondToPermission;
+    const unexpectedVote =
+      expectedVote === scopedVote ? session.respondToPermission : scopedVote;
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote,
     });
     const permissionRequest = vi.fn();
     bridge.on('permissionRequest', permissionRequest);
@@ -1929,7 +2306,8 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       true,
     );
-    expect(session.respondToPermission).toHaveBeenCalledWith('req-1', response);
+    expect(expectedVote).toHaveBeenCalledWith('req-1', response);
+    expect(unexpectedVote).not.toHaveBeenCalled();
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       false,
     );
@@ -3771,6 +4149,84 @@ describe('DaemonChannelBridge', () => {
     ).rejects.toThrow('permission failed');
     await expect(
       bridge.respondToPermission('req-fail', response),
+    ).resolves.toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('passes refused and failed session-scoped permission votes through', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote: true,
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-refused',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    session.respondToSessionPermission.mockResolvedValueOnce(false);
+    await expect(
+      bridge.respondToPermission('req-refused', response),
+    ).resolves.toBe(false);
+    expect(session.respondToSessionPermission).toHaveBeenCalledWith(
+      'req-refused',
+      response,
+    );
+
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-failed',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(2));
+
+    session.respondToSessionPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    await expect(
+      bridge.respondToPermission('req-failed', response),
+    ).rejects.toThrow('permission failed');
+    await expect(
+      bridge.respondToPermission('req-failed', response),
     ).resolves.toBe(false);
 
     events.close();

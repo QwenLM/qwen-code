@@ -7,13 +7,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTranscriptReplayMachine,
+  createTranscriptToolCallResultUpdate,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
 import type { TranscriptRecordInput } from '@qwen-code/qwen-code-core/transcriptRecords';
-import type {
-  GoalRecord,
-  GoalStateCause,
+import {
+  GOAL_PAUSE_REASON_COMMAND,
+  type GoalRecord,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
 
 const GOAL: GoalRecord = {
@@ -78,6 +80,58 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('stamps stable segment identity across replayed text parts', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'first' },
+            { text: 'second' },
+            { text: 'thinking', thought: true },
+          ],
+        },
+      }),
+    );
+    const segmentIds = projected.map(
+      (update) =>
+        (
+          update._meta as
+            | { qwenTranscript?: { segmentId?: string } }
+            | undefined
+        )?.qwenTranscript?.segmentId,
+    );
+
+    expect(segmentIds).toEqual([
+      'assistant-1:0',
+      'assistant-1:0',
+      'assistant-1:2',
+    ]);
+  });
+
+  it('keeps raw function responses out of the safe result preview', () => {
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: 'read',
+      callId: 'read-1',
+      success: true,
+      contentPrefix: [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'Visible prefix' },
+        },
+      ],
+      message: [{ text: 'Visible result' }],
+    });
+
+    expect(update._meta).toMatchObject({
+      qwenTranscript: {
+        resultPreviewText: 'Visible prefix',
+      },
+    });
+    expect(JSON.stringify(update._meta)).not.toContain('Visible result');
+  });
+
   it('does not replay internal Goal runtime prompts as user messages', () => {
     expect(
       updates(
@@ -103,6 +157,59 @@ describe('createTranscriptReplayMachine', () => {
         source: 'goal_control',
         'qwen.session.recordId': 'goal-create',
       },
+    });
+  });
+
+  it('replays only a typed pause as the user typing it', () => {
+    // The runtime writes `pause` records of its own (the no-progress bound
+    // stops an idle Goal with nobody at the keyboard). Replaying those as a
+    // `/goal pause` the user typed would attribute the stop to the person
+    // who was away; the paused card that follows carries the reason.
+    const typed = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-typed', 'pause', {
+        ...GOAL,
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_COMMAND,
+      }),
+    );
+    expect(typed).toHaveLength(2);
+    expect(typed[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '/goal pause' },
+      _meta: { source: 'goal_control' },
+    });
+
+    const autonomous = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-idle', 'pause', {
+        ...GOAL,
+        status: 'paused',
+        lastReason:
+          'Three Goal turns in a row recorded nothing to judge and no proposal.',
+      }),
+    );
+    expect(autonomous).toHaveLength(1);
+    expect(autonomous[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      _meta: {
+        goalStatus: { kind: 'paused' },
+        'qwen.session.recordId': 'goal-pause-idle',
+      },
+    });
+
+    // A record from before pauses carried reasons keeps its projection.
+    const { lastReason: _reason, ...unreasoned } = GOAL;
+    const legacy = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-legacy', 'pause', {
+        ...unreasoned,
+        status: 'paused',
+      }),
+    );
+    expect(legacy[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '/goal pause' },
     });
   });
 
@@ -1275,6 +1382,113 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().pendingToolCalls).toEqual([]);
   });
 
+  it('prefers filePath over the fileName basename when replaying an edit diff', () => {
+    const machine = createTranscriptReplayMachine();
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'edit_file', args: {}, id: 'call-1' } },
+          ],
+        },
+      }),
+    );
+    const result = updates(
+      machine,
+      record('result-1', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'edit_file',
+                response: { output: 'edited' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: {
+            fileDiff: '--- a\n+++ b\n',
+            fileName: 'Foo.kt',
+            filePath: '/workspace/app/src/main/java/com/example/Foo.kt',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+        },
+      }),
+    );
+
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      content: [
+        {
+          type: 'diff',
+          path: '/workspace/app/src/main/java/com/example/Foo.kt',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    });
+  });
+
+  it('falls back to the fileName basename when filePath is absent (pre-fix persisted sessions)', () => {
+    const machine = createTranscriptReplayMachine();
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'edit_file', args: {}, id: 'call-1' } },
+          ],
+        },
+      }),
+    );
+    const result = updates(
+      machine,
+      record('result-1', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'edit_file',
+                response: { output: 'edited' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: {
+            fileDiff: '--- a\n+++ b\n',
+            fileName: 'Foo.kt',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+        },
+      }),
+    );
+
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      content: [
+        {
+          type: 'diff',
+          path: 'Foo.kt',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    });
+  });
+
   it('reports ambiguous same-name result correlation', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });
@@ -1409,6 +1623,18 @@ describe('createTranscriptReplayMachine', () => {
       'agent_message_chunk',
       'agent_message_chunk',
     ]);
+    expect(
+      assistant
+        .slice(0, 2)
+        .map(
+          (update) =>
+            (
+              update._meta as
+                | { qwenTranscript?: { segmentId?: string } }
+                | undefined
+            )?.qwenTranscript?.segmentId,
+        ),
+    ).toEqual(['assistant-1:0', 'assistant-1:1']);
 
     const plan = updates(
       machine,

@@ -59,6 +59,10 @@ import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import {
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+} from './workspace-skill-management.js';
+import {
   mountAcpHttp,
   type AcpHttpHandle,
   type ExtraWsRoute,
@@ -288,6 +292,8 @@ import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
+import { registerWorkspaceMcpConfigRoutes } from './routes/workspace-mcp-config.js';
+import { registerWorkspaceRuntimeMcpRoutes } from './routes/workspace-runtime-mcp.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
 import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
@@ -330,11 +336,11 @@ import {
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { StandaloneDeletionJournal } from './conversations/standalone-deletion-journal.js';
+import { checkLegacyConversationRuntimeOwner } from './conversations/conversation-runtime-ownership.js';
 import {
-  createConversationRuntimeOwnership,
-  type ConversationRuntimeOwnership,
-} from './conversations/conversation-runtime-ownership.js';
-import { getStableLiveDiscoveryBaseDir } from './live/discovery.js';
+  assertLiveDiscoveryPublisher,
+  getStableLiveDiscoveryBaseDir,
+} from './live/discovery.js';
 import {
   installServeAppLifecycle,
   type ServeAppLifecycleController,
@@ -674,11 +680,7 @@ export interface ServeAppDeps {
     readonly DurableCronTask[]
   >;
   liveDiscoveryStableBaseDir?: string;
-  conversationRuntimeOwnershipFactory?: (
-    pid: number,
-    instanceNonce: string,
-    stableBaseDir: string,
-  ) => ConversationRuntimeOwnership;
+  checkLegacyConversationOwner?: () => Promise<void>;
   serveAppLifecycle?: ServeAppLifecycleController;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
@@ -944,6 +946,23 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: true,
+  });
+  const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    workspaceTrusted: false,
+    includeUntrustedSkills: true,
+  });
+  const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const provider = trusted
+      ? trustedSkillsConfigStatus
+      : untrustedSkillsConfigStatus;
+    return provider(workspaceCwd);
+  };
+  const invalidateSkillsConfigStatus = (workspaceCwd: string) => {
+    trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+    untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
+  };
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -1444,25 +1463,9 @@ export function createServeApp(
         }
       },
     });
-  const conversationRuntimeOwnership = deps.liveConversationWorkspace
-    ? (deps.conversationRuntimeOwnershipFactory?.(
-        process.pid,
-        liveCoordinator.daemonInstanceNonce,
-        path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      ) ??
-      createConversationRuntimeOwnership({
-        pid: process.pid,
-        instanceNonce: liveCoordinator.daemonInstanceNonce,
-        stableBaseDir: path.resolve(
-          deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
-        ),
-      }))
-    : undefined;
-  if (conversationRuntimeOwnership) {
-    serveAppLifecycle.setOwnership(conversationRuntimeOwnership);
-  }
+  const stableLiveDiscoveryBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? getStableLiveDiscoveryBaseDir(),
+  );
   liveCoordinator.setAppshotReadiness(
     liveVoiceEnabled && deps.liveConversationWorkspace
       ? {
@@ -1477,7 +1480,12 @@ export function createServeApp(
   let standaloneSessionService: StandaloneSessionService | undefined;
   const conversationRuntimeManager = deps.liveConversationWorkspace
     ? new ConversationRuntimeManager({
-        ownership: conversationRuntimeOwnership!,
+        checkLegacyOwner:
+          deps.checkLegacyConversationOwner ??
+          (() =>
+            checkLegacyConversationRuntimeOwner({
+              stableBaseDir: stableLiveDiscoveryBaseDir,
+            })),
         workspace: deps.liveConversationWorkspace,
         registry: workspaceRegistry,
         publishRuntime: async (canonicalRoot, validate) => {
@@ -1807,6 +1815,14 @@ export function createServeApp(
         liveTaskService.interruptWait(callerSessionId),
     });
   liveCoordinator.setHandlers({
+    beforeStart: async () => {
+      await ensureConversationRuntimeWithLifecycle();
+      await publishLiveVoiceEnabled(true);
+      await assertLiveDiscoveryPublisher(stableLiveDiscoveryBaseDir, {
+        pid: process.pid,
+        instanceNonce: liveCoordinator.daemonInstanceNonce,
+      });
+    },
     onHostReady: () => {
       if (!liveVoiceEnabled) return;
       void verifyLiveAppshotChannel();
@@ -2252,10 +2268,6 @@ export function createServeApp(
   if (liveVoiceSurfaceAvailable) {
     registerLiveRoutes(app, {
       coordinator: liveCoordinator,
-      ensureRuntimeReady: async () => {
-        await ensureConversationRuntimeWithLifecycle();
-        await publishLiveVoiceEnabled(true);
-      },
       mutate,
       ...(deps.persistSetting
         ? {
@@ -2631,6 +2643,7 @@ export function createServeApp(
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
+    onWorkspaceRemoved: invalidateSkillsConfigStatus,
     ...(deps.liveConversationWorkspace
       ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
       : {}),
@@ -2761,6 +2774,17 @@ export function createServeApp(
           primaryBridge,
           ...workspaceRegistry.list().map((runtime) => runtime.bridge),
         ]),
+    });
+    registerWorkspaceMcpConfigRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      sendBridgeError,
+      invalidateServeFeaturesCache,
+      broadcastSettingsChanged,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -2920,6 +2944,12 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  registerWorkspaceRuntimeMcpRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
   const channelWorkerControl =
     deps.getChannelWorkerControl ??
     (deps.getChannelWorkerSnapshot
@@ -3023,9 +3053,30 @@ export function createServeApp(
   });
   registerWorkspaceSkillsRoutes(app, {
     workspaceRuntime: primaryRuntime,
+    workspaceRegistry,
     mutate,
     safeBody,
     sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
+    installSkillConfig: (workspaceCwd, request) =>
+      installWorkspaceSkill(
+        workspaceCwd,
+        request,
+        primaryEffectiveEnv?.['GH_TOKEN'] ??
+          primaryEffectiveEnv?.['GITHUB_TOKEN'] ??
+          daemonEnvAtBoot['GH_TOKEN'] ??
+          daemonEnvAtBoot['GITHUB_TOKEN'],
+        capturePrimaryGenerationAssertion(),
+      ),
+    deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
+      deleteWorkspaceSkill(
+        workspaceCwd,
+        scope,
+        skillName,
+        installedPath,
+        capturePrimaryGenerationAssertion(),
+      ),
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -3034,6 +3085,8 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    getSkillsConfigStatus,
+    invalidateSkillsConfigStatus,
   });
 
   // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).

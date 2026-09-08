@@ -105,6 +105,32 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
+### Background Agent Responses
+
+Background Agent output is sent as soon as each response segment is available.
+Every message is labeled with the Agent name so concurrent work remains
+attributable.
+
+To buffer each Agent's notification turn and send it as one labeled message,
+enable aggregation for the DingTalk channel in `settings.json`:
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "aggregateBackgroundAgentResponses": true
+    }
+  }
+}
+```
+
+Aggregation is disabled by default. A partial labeled message is sent if the
+Agent turn is interrupted, fails before producing a final response, or does
+not finish within ten minutes.
+
 ## Running
 
 ```bash
@@ -171,6 +197,8 @@ You can send photos and documents to the bot, not just text.
 **Photos:** Send an image (screenshot, diagram, etc.) and the agent will analyze it using its vision capabilities. This requires a multimodal model — add `"model": "qwen3.5-plus"` (or another vision-capable model) to your channel config. DingTalk supports sending images directly or as part of rich text messages (mixed text + images).
 
 **Files:** Send a PDF, code file, or any document. The bot downloads it from DingTalk's servers and saves it locally so the agent can read it with its file tools. Audio and video files are also supported. This works with any model.
+
+**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Outbound file attachments are unavailable when `blockStreaming` is set to `"on"`; upload or delivery failures are reported in the final text instead.
 
 ## Forwarded Chat Records
 
