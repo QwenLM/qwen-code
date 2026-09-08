@@ -154,13 +154,15 @@ async function buildWorkspaceSkillsStatus(
             if (error.code === 'ENOENT') return undefined;
             throw error;
           });
-        if (entry) await fs.readdir(directory);
-        extensionManager = new ExtensionManager({
-          workspaceDir: workspaceCwd,
-          isWorkspaceTrusted: workspaceTrusted,
-          locale,
-        });
-        await extensionManager.refreshCache();
+        if (entry) {
+          await fs.readdir(directory);
+          extensionManager = new ExtensionManager({
+            workspaceDir: workspaceCwd,
+            isWorkspaceTrusted: workspaceTrusted,
+            locale,
+          });
+          await extensionManager.refreshCache();
+        }
       }
       const shim: SkillManagerConfigShim = {
         // Honor the safe-mode env the same way `Config` does when no explicit
@@ -207,12 +209,14 @@ async function buildWorkspaceSkillsStatus(
         extensionManager && extension
           ? extensionManager.getExtensionSkillState(extension.id, skill.name)
           : undefined;
-      const localizedSkill = extension?.config._rawLocalizable?.displayName
-        ? {
-            ...skill,
-            extensionDisplayName: getExtensionDisplayName(extension, locale),
-          }
-        : skill;
+      // Preserve missing display names; the helper otherwise falls back to the name.
+      const localizedSkill =
+        extension?.displayName !== undefined
+          ? {
+              ...skill,
+              extensionDisplayName: getExtensionDisplayName(extension, locale),
+            }
+          : skill;
       return mapSkillConfigToStatus(localizedSkill, disablements, {
         enabled:
           !state ||
@@ -232,10 +236,10 @@ async function buildWorkspaceSkillsStatus(
               ...skill,
               level: 'extension',
               extensionName: extension.name,
-              extensionDisplayName: extension.config._rawLocalizable
-                ?.displayName
-                ? getExtensionDisplayName(extension, locale)
-                : extension.displayName,
+              extensionDisplayName:
+                extension.displayName === undefined
+                  ? undefined
+                  : getExtensionDisplayName(extension, locale),
             },
             disablements,
             { disabled: true },

@@ -490,6 +490,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
           status: 'disabled',
           disabledReason: 'inactive_extension',
           extensionName: 'inactive',
+          extensionDisplayName: 'inactive display',
         }),
       ]),
     );
@@ -841,7 +842,9 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       JSON.stringify({ inactive: { overrides: ['!*'] } }),
     );
     const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-    expect(status.skills.filter((s) => s.name === 'dup')).toHaveLength(1);
+    const duplicates = status.skills.filter((s) => s.name === 'dup');
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]).not.toHaveProperty('extensionDisplayName');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -875,6 +878,49 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       } finally {
         await fsp.chmod(extensionsRoot, 0o755);
       }
+    },
+  );
+
+  it('does not create an extension store when no extensions directory exists', async () => {
+    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+    expect(status.initialized).toBe(true);
+    expect(status.skills.some((skill) => skill.name === 'review')).toBe(true);
+    expect(refresh).not.toHaveBeenCalled();
+    await expect(
+      fsp.stat(path.join(qwenHome, 'extensions')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fsp.stat(path.join(qwenHome, 'extension-store')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the shared loader behavior for malformed extension manifests', async () => {
+    await writeExtension('healthy', ['healthy-skill']);
+    const broken = await writeExtension('broken', ['broken-skill']);
+    await fsp.writeFile(path.join(broken, 'qwen-extension.json'), '{invalid');
+    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+    expect(status.initialized).toBe(true);
+    expect(status.errors).toBeUndefined();
+    expect(
+      status.skills
+        .filter((skill) => skill.level === 'extension')
+        .map((skill) => skill.name),
+    ).toEqual(['healthy-skill']);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports propagated errors for a dangling extension entry',
+    async () => {
+      await writeExtension('healthy', ['healthy-skill']);
+      await fsp.symlink(
+        path.join(qwenHome, 'missing'),
+        path.join(qwenHome, 'extensions', 'dangling'),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(false);
+      expect(status.skills).toEqual([]);
+      expect(status.errors?.[0]?.error).toContain('ENOENT');
     },
   );
 });

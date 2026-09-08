@@ -34,8 +34,12 @@ Discovery-level disabling suppresses active extension Skills through
 `SkillManager`; inactive extension management entries are still appended, as in
 the child producer. Safe mode and untrusted contexts never load extensions.
 
-Enumeration errors, including extension-store faults, return
-`initialized: false` with explicit errors. This stage does not certify an
-incomplete extension inventory as a successful response. Existing facade
-caching, source preference and invalidation behavior remain unchanged; the
-tracking issue assigns cache lifecycle and concurrency changes to stage 4.
+An absent extensions root is an empty inventory; no extension store is created.
+Unreadable roots and errors propagated by the shared store/loader return
+`initialized: false` with explicit errors. Individual artifact handling remains
+owned by the shared loader: malformed manifests are skipped with its diagnostic,
+whereas a dangling extension entry propagates an error. This stage does not add
+per-artifact diagnostics to the response or change the loader's failure policy.
+Existing facade caching, source preference and invalidation behavior remain
+unchanged; the tracking issue assigns cache lifecycle and concurrency changes
+to stage 4.
