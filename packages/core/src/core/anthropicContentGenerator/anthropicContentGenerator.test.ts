@@ -3394,17 +3394,15 @@ describe('AnthropicContentGenerator', () => {
         const client = new ActualAnthropic({
           apiKey: 'test-key',
           maxRetries: 0,
-          fetch: vi
-            .fn()
-            .mockResolvedValue(
-              new Response(
-                `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`,
-                {
-                  status: 200,
-                  headers: { 'content-type': 'text/event-stream' },
-                },
-              ),
+          fetch: vi.fn().mockResolvedValue(
+            new Response(
+              `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`,
+              {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' },
+              },
             ),
+          ),
         });
         const stream = await client.messages.create({
           model: 'test-model',
