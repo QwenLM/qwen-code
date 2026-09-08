@@ -24,9 +24,17 @@ import {
   GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  normalizeGoalCheckpointTimeoutSeconds,
+  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import {
+  createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+} from '../goals/goal-checkpoint-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -431,6 +439,16 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
+vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import('../goals/goal-checkpoint-verifier.js')
+    >();
+  return {
+    ...original,
+    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
+  };
+});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -3570,6 +3588,76 @@ describe('Server Config (config.ts)', () => {
       expect(isValidGoalTokenBudget(30_000_000)).toBe(true);
     });
 
+    it('arms the checkpoint verifier with the configured timeout', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 45,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
+
+      config.getGoalRuntime();
+
+      // Assert the call, not only the getter: the options argument is the
+      // one line that carries the setting into the verifier, and the
+      // getter-only checks above stay green if it is dropped.
+      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[0]).toBe(config);
+      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+    });
+
+    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
+      // The checkpoint call is streamed, so past the stream lifetime guard it
+      // is the guard that ends the call and the verifier's own timer never
+      // fires. A cap above it would let the setting validate, and the getter
+      // report, a ceiling no default deployment can reach.
+      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
+      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
+      // The cap is a typo guard, accepted itself and refused one past.
+      expect(
+        normalizeGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ),
+      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
+      expect(
+        isValidGoalCheckpointTimeoutSeconds(
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+        ),
+      ).toBe(false);
+      for (const invalid of [
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        '30',
+        null,
+        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      ]) {
+        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
+        expect(
+          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
+        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
+      }
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        goalCheckpointTimeoutSeconds: 0,
+      });
+      expect(config.getGoalCheckpointTimeoutMs()).toBe(
+        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
+      );
+    });
+
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -3642,6 +3730,115 @@ describe('Server Config (config.ts)', () => {
           expect(appendFileSpy).toHaveBeenCalledWith(
             Storage.getDebugLogPath(sessionId),
             expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringMatching(
+              new RegExp(
+                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
+              ),
+            ),
+            'utf8',
+          ),
+        );
+      } finally {
+        mkdirSpy.mockRestore();
+        appendFileSpy.mockRestore();
+        resetDebugLoggingState();
+        setDebugLogSession(null);
+        if (previousDebugLogFileEnv === undefined) {
+          delete process.env['QWEN_DEBUG_LOG_FILE'];
+        } else {
+          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+        }
+      }
+    });
+
+    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
+      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+      const sessionId = 'goal-checkpoint-warning-session';
+      const mkdirSpy = vi
+        .spyOn(fs.promises, 'mkdir')
+        .mockResolvedValue(undefined);
+      const appendFileSpy = vi
+        .spyOn(fs.promises, 'appendFile')
+        .mockResolvedValue(undefined);
+
+      try {
+        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+        resetDebugLoggingState();
+
+        for (const goalCheckpointTimeoutSeconds of [
+          undefined,
+          1,
+          180,
+          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        ]) {
+          new Config({
+            ...baseParams,
+            sessionId,
+            goalCheckpointTimeoutSeconds,
+          });
+          // Let any fire-and-forget debug write settle before the next case.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(
+          appendFileSpy.mock.calls.filter((call) =>
+            String(call[1]).includes(
+              'Ignoring invalid goalCheckpointTimeoutSeconds',
+            ),
+          ),
+        ).toHaveLength(0);
+
+        // Control case: the channel is live in this test, so the silence
+        // above is meaningful.
+        new Config({
+          ...baseParams,
+          sessionId,
+          goalCheckpointTimeoutSeconds: 0,
+        });
+        await vi.waitFor(() =>
+          expect(appendFileSpy).toHaveBeenCalledWith(
+            Storage.getDebugLogPath(sessionId),
+            expect.stringContaining(
+              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
+            ),
             'utf8',
           ),
         );
