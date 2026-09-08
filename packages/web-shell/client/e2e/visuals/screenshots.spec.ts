@@ -208,10 +208,12 @@ for (const theme of THEMES) {
           touchErrorRow.locator('[data-web-shell-message-actions]'),
         ).toHaveCSS('opacity', '1');
         await expect(touchCopyButton).toBeVisible();
-        await captureScreenshot(
-          touchPage,
-          `terminal-turn-error-copy-touch-${theme}`,
-        );
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
       } finally {
         await touchContext.close();
       }
