@@ -266,7 +266,7 @@ describe('WebTerminalRegistry', () => {
     expect(registry.readSnapshot('terminal:release')).toBeUndefined();
   });
 
-  it('releases an exited session\'s conout worker, never by signalling the pid', async () => {
+  it("releases an exited session's conout worker, never by signalling the pid", async () => {
     osPlatform.mockReturnValue('win32');
     const registry = new WebTerminalRegistry();
     await registry.create({
