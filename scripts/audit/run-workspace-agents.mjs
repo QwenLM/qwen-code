@@ -1545,6 +1545,74 @@ ok(
   ).usageByRound.length === 0,
 );
 
+console.log('\n17f. every way assigning can be refused');
+// Each of these guards survived a mutation campaign, meaning nothing here
+// built the case it exists for. Two of them are the retirement work from
+// 521b212cd0: that commit fixed admission and the assign path together, and
+// only the admission half was ever exercised.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_off', name: 'off', createdAt: 1, enabled: false },
+  { id: 'ag_gone', name: 'gone', createdAt: 1, retiredAt: 99 },
+  { id: 'ag_ok', name: 'okay', createdAt: 1 },
+]);
+const assignable = await M.createThread(ROOT, { title: 'Assignable' });
+
+ok(
+  'assigning to a thread that does not exist is refused',
+  (await M.assignThread(ROOT, 'th_no_such_thread', 'okay')).kind ===
+    'thread_not_found',
+);
+ok(
+  'assigning a name nobody has is refused',
+  (await M.assignThread(ROOT, assignable.id, 'nobody')).kind ===
+    'agent_unknown',
+);
+ok(
+  'assigning to a disabled agent is refused as disabled',
+  (await M.assignThread(ROOT, assignable.id, 'off')).kind === 'agent_disabled',
+);
+ok(
+  'assigning to a retired agent is refused as retired, not as disabled',
+  (await M.assignThread(ROOT, assignable.id, 'gone')).kind === 'agent_retired',
+  JSON.stringify(await M.assignThread(ROOT, assignable.id, 'gone')),
+);
+ok(
+  'an ordinary assignment still works',
+  (await M.assignThread(ROOT, assignable.id, 'okay')).kind === 'updated',
+);
+const doneThread = await M.createThread(ROOT, { title: 'Finished' });
+await M.updateThread(ROOT, doneThread.id, (t) => ({ ...t, status: 'done' }));
+ok(
+  'assigning to a finished thread is refused',
+  (await M.assignThread(ROOT, doneThread.id, 'okay')).kind === 'thread_done',
+);
+
+// claimRun's own addressability check, the third site of the same rule.
+const claimable = await M.createThread(ROOT, {
+  title: 'Claim after retirement',
+  assigneeAgentId: 'ag_ok',
+});
+const claimBooked = await M.postMessage(ROOT, claimable.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'go',
+});
+// Disabled rather than retired: retiring refuses while a run is still queued
+// — the guard from 8d6e199cc4 — so retirement cannot produce this state at
+// all. Disabling can, and claimRun has to notice before it starts the run.
+ok(
+  'retiring an agent with queued work is refused, so it cannot reach here',
+  (await M.retireWorkspaceAgent(ROOT, 'ag_ok')) === 'has_live_work',
+);
+await M.setWorkspaceAgentEnabled(ROOT, 'ag_ok', false);
+ok(
+  'a run booked before an agent was disabled cannot then be claimed',
+  (await M.claimRun(ROOT, {
+    threadId: claimable.id,
+    runId: claimBooked.dispatched[0].id,
+  })) === undefined,
+);
+
 console.log('\n18. concurrency');
 // Everything above ran one operation at a time, which is the one shape a
 // store with a mutation lock is guaranteed to survive. These run together.
