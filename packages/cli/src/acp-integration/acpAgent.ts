@@ -14083,7 +14083,7 @@ class QwenAgent implements Agent {
           persona.toolConfig.executionAllowedTools,
         );
         const currentAuthType = config.getModelsConfig().getCurrentAuthType();
-        const model = resolveModelId(persona.definition.model, {
+        const model = resolveModelId(persona.model, {
           ...buildModelIdContext(config),
           currentModel: undefined,
           currentAuthType,
@@ -14097,6 +14097,7 @@ class QwenAgent implements Agent {
         } else if (model) {
           await config.setModel(model.modelId, { reason: 'workspace-agent' });
         }
+        await config.getLlmClient().refreshSystemInstruction();
       }
       this.assertManagedSessionAdmission();
     } catch (error) {

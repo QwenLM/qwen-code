@@ -134,6 +134,22 @@ finished with the root `in_review`, the attributed result visible, and the two
 Alice runs collapsed as history. The tree accounted 186,317 of 200,000 tokens.
 This is a demo-path observation, not the full step-9 acceptance gate.
 
+**Verified after correcting the session persona path (2026-09-08).** Source
+review found that the child applied `Config.systemPrompt` only after
+`Config.initialize()` had already bound the live chat's system instruction.
+The default create path also loaded the built-in `general-purpose` definition,
+whose prompt explicitly describes a subagent working for a parent. The child
+now refreshes the live system instruction after persona and model resolution;
+an Agent with no linked definition starts from its own workspace-Agent identity
+instead of a subagent definition. A fresh Agent created in Web Shell with the
+durable marker `PERSISTENT-ORCHID` received a new task-scoped session and
+submitted: “My runtime role is an independent workspace Agent (not a
+subagent), with the durable role marker PERSISTENT-ORCHID.” The person then
+marked that task done. This proves the primary no-definition path; a linked
+legacy definition is still treated as an optional behaviour template and its
+identity contract is appended last, but that compatibility path has not been
+separately exercised with a live model.
+
 An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
 peer mentions in result prose, and each mention correctly booked another run.
 That tree reached 253,320 accounted tokens and blocked before the parent could

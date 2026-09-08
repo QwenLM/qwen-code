@@ -19,6 +19,10 @@ import type { WorkspaceAgent } from './types.js';
 
 const PROJECT_ROOT = '/agent-persona-test';
 const ALICE: WorkspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
+const ALICE_WITH_DEFINITION: WorkspaceAgent = {
+  ...ALICE,
+  agentType: 'general-purpose',
+};
 
 /**
  * The three things persona resolution asks a Config for. Faking exactly those
@@ -68,20 +72,24 @@ describe('resolveAgentPersona', () => {
 
   it('resolves a roster entry into the persona its process runs as', async () => {
     await seed([ALICE]);
-    const { config } = makeConfig();
+    const { config, loadSubagent } = makeConfig();
 
     const result = await resolveAgentPersona(config, ALICE.id);
 
     expect(result.status).toBe('resolved');
     if (result.status !== 'resolved') return;
     expect(result.agent.name).toBe('alice');
-    expect(result.systemPrompt).toContain('You are a careful reviewer.');
+    expect(result.systemPrompt).toContain(
+      'an independent persistent workspace Agent',
+    );
+    expect(result.systemPrompt).not.toContain('subagent');
+    expect(loadSubagent).not.toHaveBeenCalled();
   });
 
   it('refuses an id with no roster entry', async () => {
     // The agent was deleted while its session was starting. Booting a generic
     // assistant here would still post under this agent's name.
-    await seed([ALICE]);
+    await seed([ALICE_WITH_DEFINITION]);
     const { config } = makeConfig();
 
     const result = await resolveAgentPersona(config, 'ag_nobody');
@@ -100,7 +108,7 @@ describe('resolveAgentPersona', () => {
 
   it('refuses when the definition will not load', async () => {
     // A misconfigured workspace fails closed in this direction too.
-    await seed([ALICE]);
+    await seed([ALICE_WITH_DEFINITION]);
     const { config } = makeConfig({
       loadSubagent: vi.fn().mockResolvedValue(undefined),
     });
@@ -111,7 +119,7 @@ describe('resolveAgentPersona', () => {
   });
 
   it('refuses when converting the definition throws', async () => {
-    await seed([ALICE]);
+    await seed([ALICE_WITH_DEFINITION]);
     const { config } = makeConfig({
       convertToRuntimeConfig: vi.fn().mockRejectedValue(new Error('boom')),
     });
@@ -124,19 +132,24 @@ describe('resolveAgentPersona', () => {
   it("lets the roster's model override the shared definition's", async () => {
     // The definition is shared across identities; the model is what a person
     // set for this one.
-    await seed([{ ...ALICE, model: 'from-roster' }]);
-    const { config, convertToRuntimeConfig } = makeConfig();
+    await seed([{ ...ALICE_WITH_DEFINITION, model: 'from-roster' }]);
+    const { config } = makeConfig();
 
-    await resolveAgentPersona(config, ALICE.id);
+    const result = await resolveAgentPersona(config, ALICE.id);
 
-    expect(convertToRuntimeConfig.mock.calls[0]?.[0]).toMatchObject({
-      model: 'from-roster',
-    });
+    expect(result.status).toBe('resolved');
+    if (result.status !== 'resolved') return;
+    expect(result.model).toBe('from-roster');
   });
 
   it("appends this identity's own instructions after the definition", async () => {
     // After, so where the two disagree the identity wins.
-    await seed([{ ...ALICE, instructions: 'Always check the changelog.' }]);
+    await seed([
+      {
+        ...ALICE_WITH_DEFINITION,
+        instructions: 'Always check the changelog.',
+      },
+    ]);
     const { config } = makeConfig();
 
     const result = await resolveAgentPersona(config, ALICE.id);
@@ -152,7 +165,7 @@ describe('resolveAgentPersona', () => {
     // A definition asking for everything still cannot get an editing tool: the
     // boundary is applied here, so a session cannot start wider and be
     // narrowed afterwards.
-    await seed([ALICE]);
+    await seed([ALICE_WITH_DEFINITION]);
     const { config } = makeConfig();
 
     const result = await resolveAgentPersona(config, ALICE.id);

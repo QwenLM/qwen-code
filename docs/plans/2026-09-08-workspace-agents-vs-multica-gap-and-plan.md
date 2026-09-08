@@ -4,8 +4,10 @@
 
 The previous implementation score confused a working collaboration engine with
 the requested Multica-shaped product. Against that product the branch is about
-45% complete: routing and shared-thread mechanics are substantial, while Agent
-creation, Runtime and task presentation remain partial or absent.
+one working collaboration kernel, not a mostly complete product: routing and
+shared-thread mechanics are substantial, while Agent creation, Runtime and task
+presentation remain partial or absent. No percentage is meaningful until those
+different layers have one explicit acceptance checklist.
 
 One implementation decision was wrong, not merely incomplete. A deterministic
 session keyed only by agent made every task share one transcript and left
@@ -559,14 +561,27 @@ in the daemon, where the sessions are. The follow-up correction scopes those
 sessions to `(agent, thread)` instead of one transcript per identity.
 Multica-style runtime registration and process isolation remain absent.
 
+A later source audit found that sessionization alone had not delivered the
+claimed persona: persona fields were assigned after `Config.initialize()` had
+already bound the live chat, and an Agent with no linked definition fell back
+to the built-in `general-purpose` subagent prompt. The correction refreshes the
+live system instruction after persona/model resolution and gives the primary
+no-definition path its own independent workspace-Agent identity. A fresh Web
+Shell task reproduced a durable marker found only in that Agent's instructions
+and explicitly identified itself as an independent workspace Agent, then
+reached human acceptance. This overturns the earlier inference that writing
+`Config.systemPrompt` before the first task prompt was sufficient.
+
 Stage B turned out to be smaller than written. Agent sessions were already in
 the ordinary session catalog, but the sidebar's Tasks filter hid them. The
 existing session-source switch now has an Agents tab backed by the same
 `WorkspaceSection` and ordinary session page; no second conversation list was
-added. A session is titled with its agent's name, written once and never over a
-person's `/rename`, and a run row links to it. The thread-scoped transcript
-slice was kept rather than replaced: it answers which run inside this task
-session produced the visible result.
+added. A run row links to the ordinary task session. The current automatic title
+is only the Agent name, so two task sessions owned by the same Agent are not
+distinguishable in the list; it must become `Agent · Task` without overwriting a
+person's `/rename`. The store carries transcript-offset fields, but the session
+adapter does not produce them and the REST/UI path does not consume them, so a
+run row currently opens the whole task session rather than a proven run slice.
 
 Stage C landed items 1 and 2 of the four. Labels, project and due date are
 still display-only work and are not done.
