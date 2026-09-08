@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -609,13 +610,14 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
   });
 
   it('retries a failed checkout once, behind a workspace reset', () => {
-    // The pool's two transient checkout killers outlast the action's own
-    // three fetch retries: minutes-long github.com outages (runs
-    // 34088422718 and 34098892239, each losing one shard after ~8 minutes
-    // of connect timeouts) and a corrupt object in the reused workspace's
-    // .git (run 33851931669, #11016). The retry must stay bounded (one),
-    // gated on the primary's real outcome, and must be the step that fails
-    // the job when the failure is real.
+    // What the retry can and cannot fix, per the cited runs: a corrupt
+    // object in the reused workspace's .git (run 33851931669, #11016) is
+    // healed by the wipe below; a host whose egress to github.com is dead
+    // (runs 34088422718 and 34098892239 — one host each, while peer hosts
+    // checked out fine, both recovered by re-dispatch) is not, because
+    // the job's runner is fixed at pickup. The retry must stay bounded
+    // (one), gated on the primary's real outcome, and must be the step
+    // that fails the job when the failure is real.
     const checkouts = job.steps.filter((s) =>
       String(s.uses || '').startsWith('actions/checkout'),
     );
@@ -637,6 +639,13 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       retry.uses,
       'both attempts must pin the same actions/checkout revision',
     );
+    // The equality check passes for ANY shared value, so a coordinated
+    // drift of both steps ships green; pin this lane's absolute revision
+    // (web-shell-browser-regression in this workflow pins another).
+    assert.equal(
+      primary.uses,
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10', // v6.0.3
+    );
     assert.deepEqual(
       primary.with,
       retry.with,
@@ -648,48 +657,50 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     const step = job.steps[reset];
     assert.equal(step.if, "${{ steps.checkout.outcome == 'failure' }}");
     // The reset aims a root-capable recursive delete at the shared pool
-    // workspace, so it must carry the path guard every other pool wipe in
-    // this repo carries (qwen-code-pr-review.yml, serve-ab.yml,
-    // qwen-triage.yml — ported there after #9220 and #9265): the `:?`
-    // abort, the symlink/plain-directory refusal, the suspicious-path
-    // denylist and the $RUNNER_WORKSPACE allowlist. A refusal must stay a
-    // hard job failure, never degrade to a warning.
+    // workspace, so it carries the pool-wipe guard set: the `:?` aborts
+    // and the symlinked-component refusal from qwen-code-pr-review.yml's
+    // reset step, plus the suspicious-path denylist and the
+    // $RUNNER_WORKSPACE allowlist from serve-ab.yml / qwen-triage.yml /
+    // release.yml. Unlike qwen-code-pr-review.yml — which refuses a
+    // symlinked workspace leaf and so wedges the runner on it (#9480) —
+    // this step heals the leaf first, the way serve-ab.yml and
+    // release.yml do. A refusal must stay a hard job failure, never
+    // degrade to a warning. The guards themselves are exec-witnessed
+    // below; only what no exec case can reach stays text-pinned here.
     assert.ok(
       !('continue-on-error' in step),
       'a guard refusal must fail the job, not downgrade to a warning',
     );
-    assert.match(step.run, /WS="\$\{GITHUB_WORKSPACE:\?\}"/);
-    assert.match(step.run, /RWS="\$\{RUNNER_WORKSPACE:\?\}"/);
-    assert.match(
-      step.run,
-      /::error::workspace is not a plain directory or resolves through symlinks/,
-    );
-    assert.match(step.run, /refusing to wipe suspicious workspace path/);
-    assert.match(step.run, /"\$RWS"\/\*/);
-    assert.match(
-      step.run,
-      /refusing to wipe workspace outside the runner workspace/,
+    // The exec harness below reproduces `bash -e`, so the step must run
+    // under the default bash wrapper — a `shell:` override would change
+    // the lane the exec cases witness. scripts/tests/e2e-workflow.test.js
+    // pins the workflow- and job-level `defaults:` absence; the step's
+    // effective shell is pinned here by resolution.
+    const shell =
+      step.shell ?? job.defaults?.run?.shell ?? e2eDoc.defaults?.run?.shell;
+    assert.ok(
+      shell === undefined || shell === 'bash',
+      'the reset must run under the default bash wrapper the exec harness reproduces',
     );
     // Contents-only, like the siblings: the runner owns the directory
-    // node, so the wipe empties it in place — it never removes and
-    // re-creates the node (a mkdir failure would hard-fail the step the
-    // retry depends on).
+    // node, so the wipe empties it in place and never removes the node
+    // itself; the heal branch recreates the leaf only when it was a
+    // symlink or a non-directory, never a healthy node.
+    assert.doesNotMatch(
+      step.run,
+      /rm -rf -- "\$(GITHUB_WORKSPACE|WS)"/,
+      'stands in for the exec-witnessed contract that the wipe keeps the workspace node',
+    );
     assert.match(
       step.run,
-      /find "\$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- \{\} \+/,
+      /if \[ -L "\$WS" \] \|\| \[ ! -d "\$WS" \]/,
+      'a symlinked or non-directory leaf must be healed, not refused (#9480)',
     );
-    assert.doesNotMatch(step.run, /rm -rf -- "\$(GITHUB_WORKSPACE|WS)"/);
-    assert.doesNotMatch(step.run, /mkdir/);
-    // Loud on every path: the heal names the machine (a silently healing
-    // host hides a degrading pool for weeks), a failed wipe warns, and
-    // survivors are enumerated — the only diagnosability the
-    // corrupt-object half of this fix has.
-    assert.match(
+    assert.doesNotMatch(
       step.run,
-      /::warning::checkout failed on \$\{RUNNER_NAME:-this runner\}/,
+      /mkdir -p/,
+      'only the heal branch may recreate the leaf, never a healthy node',
     );
-    assert.match(step.run, /could not clear the workspace/);
-    assert.match(step.run, /workspace wipe left survivors/);
     const primaryIdx = job.steps.indexOf(primary);
     const retryIdx = job.steps.indexOf(retry);
     assert.ok(
@@ -699,12 +710,13 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
   });
 
   // Executes the REAL reset script under GitHub's default Linux step
-  // shell (`bash -e` — the step carries no `shell:` override and e2e.yml
-  // no `defaults:` block, both pinned in
-  // scripts/tests/e2e-workflow.test.js) plus the pipefail the script
-  // sets for itself: the implicit errexit is what would kill a heal step
-  // ending on a nonzero status in production, so the exec tests
-  // reproduce it instead of asserting the script's shape.
+  // shell (`bash -e`) plus the pipefail the script sets for itself: the
+  // implicit errexit is what would kill a heal step ending on a nonzero
+  // status in production, so the exec tests reproduce it instead of
+  // asserting the script's shape. The shell premise has two pinned
+  // halves: the workflow- and job-level `defaults:` absence in
+  // scripts/tests/e2e-workflow.test.js, and this step's effective shell
+  // (unset or bash) in the test above.
   const resetStep = job.steps.find(
     (s) => s.name === 'Reset workspace after failed checkout',
   );
@@ -747,6 +759,35 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         rmSync(rws, { recursive: true, force: true });
       }
     }
+    // Heal: a previous job replaced the workspace leaf with a symlink.
+    // Refusing it removes nothing and wedges every later job on this
+    // runner (#9480), so the step unlinks and recreates the leaf — the
+    // link's target keeps its content — and wipes as usual.
+    {
+      const { rws, ws } = makePool();
+      try {
+        rmSync(ws, { recursive: true });
+        mkdirSync(join(rws, 'target'));
+        writeFileSync(join(rws, 'target', 'keep.txt'), 'x');
+        symlinkSync(join(rws, 'target'), ws);
+        const r = runReset({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: rws });
+        assert.equal(r.status, 0, r.stderr);
+        assert.ok(existsSync(ws), 'the heal must recreate the leaf');
+        assert.equal(
+          lstatSync(ws).isSymbolicLink(),
+          false,
+          'the leaf must be a real directory after the heal',
+        );
+        assert.deepEqual(readdirSync(ws), []);
+        assert.match(r.stdout, /::warning::healing workspace /);
+        assert.ok(
+          existsSync(join(rws, 'target', 'keep.txt')),
+          'rm -f on the link must never follow it',
+        );
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+      }
+    }
     // Refusal: a symlinked INTERMEDIATE path component redirects the
     // delete outside the runner workspace (the threat the guard exists
     // for). The step must fail loud and delete nothing.
@@ -767,7 +808,7 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         assert.equal(r.status, 1, `expected a loud refusal: ${r.stdout}`);
         assert.match(
           r.stdout,
-          /::error::workspace is not a plain directory or resolves through symlinks/,
+          /::error::refusing to wipe: workspace resolves through a symlinked component/,
         );
         assert.ok(
           existsSync(join(outside, 'ws', 'keep.txt')),
@@ -802,6 +843,42 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         rmSync(foreign, { recursive: true, force: true });
       }
     }
+    // Refusal: the denylist arm comes first, so a known root is refused
+    // even when it sits inside the claimed runner workspace. The
+    // PATH-fronted find stub keeps a regressed guard from ever reaching
+    // a real wipe of /var.
+    {
+      const bin = mkdtempSync(join(tmpdir(), 'e2e-checkout-reset-bin-'));
+      writeFileSync(join(bin, 'find'), '#!/bin/sh\nexit 0\n');
+      chmodSync(join(bin, 'find'), 0o755);
+      try {
+        const r = runReset({
+          GITHUB_WORKSPACE: '/var',
+          RUNNER_WORKSPACE: '/var',
+          PATH: `${bin}:${process.env.PATH}`,
+        });
+        assert.equal(r.status, 1, `expected a loud refusal: ${r.stdout}`);
+        assert.match(
+          r.stdout,
+          /::error::refusing to wipe suspicious workspace path: \/var/,
+        );
+      } finally {
+        rmSync(bin, { recursive: true, force: true });
+      }
+    }
+    // Abort: `:?` fails the step on a null GITHUB_WORKSPACE even though
+    // the variable is set — an empty expansion must never reach the
+    // guard cases as "".
+    {
+      const { rws } = makePool();
+      try {
+        const r = runReset({ GITHUB_WORKSPACE: '', RUNNER_WORKSPACE: rws });
+        assert.notEqual(r.status, 0, 'an empty GITHUB_WORKSPACE must abort');
+        assert.match(r.stderr, /GITHUB_WORKSPACE/);
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+      }
+    }
   });
 
   it(
@@ -815,10 +892,20 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       // real pool splits between members with passwordless sudo and
       // members without.
       const bin = mkdtempSync(join(tmpdir(), 'e2e-checkout-reset-bin-'));
-      writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nexit 1\n');
+      // The stub answers with the real sudo's refusal text so the test
+      // also pins that the leg's stderr reaches the log.
+      writeFileSync(
+        join(bin, 'sudo'),
+        "#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n",
+      );
       chmodSync(join(bin, 'sudo'), 0o755);
       try {
         writeFileSync(join(ws, 'leftover'), 'x');
+        // A survivor whose name carries a CR: the runner splits step
+        // stdout on \r as well as \n, so an unflattened CR would let a
+        // leftover filename begin a new line with `::` and forge a
+        // workflow command.
+        writeFileSync(join(ws, 'x\r::error::forged'), 'x');
         chmodSync(ws, 0o500);
         const r = runReset({
           GITHUB_WORKSPACE: ws,
@@ -832,10 +919,70 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         // what turns the job red, not the heal step.
         assert.equal(r.status, 0, r.stderr);
         assert.ok(existsSync(ws));
-        assert.deepEqual(readdirSync(ws), ['leftover']);
+        assert.deepEqual(readdirSync(ws).sort(), [
+          'leftover',
+          'x\r::error::forged',
+        ]);
         assert.match(r.stdout, /could not clear the workspace/);
         assert.match(r.stdout, /workspace wipe left survivors/);
         assert.match(r.stdout, /leftover/);
+        assert.doesNotMatch(
+          r.stdout,
+          /\r/,
+          'the survivors line must flatten CR as well as LF',
+        );
+        // A failed wipe must stay diagnosable: the sudo leg keeps its
+        // stderr instead of sinking it to /dev/null, so the log names
+        // the cause (EACCES, missing passwordless sudo, ENOSPC), not
+        // just the survivors.
+        assert.match(r.stderr, /Permission denied|password is required/);
+      } finally {
+        chmodSync(ws, 0o755);
+        rmSync(rws, { recursive: true, force: true });
+        rmSync(bin, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'executes the reset: the sudo leg clears what the user cannot',
+    // Root bypasses the 0o500 lock (CAP_DAC_OVERRIDE), so the user-mode
+    // leg would succeed there and the escalation would never run.
+    { skip: process.getuid?.() === 0 },
+    () => {
+      // The failure case above stubs sudo to fail; this case pins the
+      // success branch — the leg's presence, its target, and its
+      // effect — so deleting or repointing the leg cannot ship green.
+      // The stub records its argv (compared as exact entries: a drifted
+      // target like "$WS/nope" still CONTAINS the workspace path as a
+      // substring), then lifts the 0o500 lock and re-execs the wipe the
+      // way passwordless sudo would.
+      const { rws, ws } = makePool();
+      const bin = mkdtempSync(join(tmpdir(), 'e2e-checkout-reset-bin-'));
+      const marker = join(bin, 'sudo-argv');
+      writeFileSync(
+        join(bin, 'sudo'),
+        `#!/bin/sh\nprintf '%s\\n' "$@" > '${marker}'\nshift\nchmod u+rwx "$2"\nexec "$@"\n`,
+      );
+      chmodSync(join(bin, 'sudo'), 0o755);
+      try {
+        writeFileSync(join(ws, 'leftover'), 'x');
+        chmodSync(ws, 0o500);
+        const r = runReset({
+          GITHUB_WORKSPACE: ws,
+          RUNNER_WORKSPACE: rws,
+          PATH: `${bin}:${process.env.PATH}`,
+        });
+        assert.equal(r.status, 0, r.stderr);
+        assert.ok(existsSync(ws));
+        assert.deepEqual(readdirSync(ws), []);
+        assert.doesNotMatch(r.stdout, /could not clear the workspace/);
+        assert.doesNotMatch(r.stdout, /workspace wipe left survivors/);
+        assert.ok(existsSync(marker), 'the sudo leg must have been reached');
+        assert.ok(
+          readFileSync(marker, 'utf8').split('\n').includes(ws),
+          'the sudo leg must target the workspace itself',
+        );
       } finally {
         chmodSync(ws, 0o755);
         rmSync(rws, { recursive: true, force: true });

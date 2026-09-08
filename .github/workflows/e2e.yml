@@ -179,21 +179,21 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         continue-on-error: true
 
-      # The pool fails checkout in two transient shapes the action's own
-      # three fetch retries cannot ride out: github.com unreachable for
-      # minutes at a time (runs 34088422718 and 34098892239 each lost a
-      # shard after ~8 minutes of connect timeouts), and a corrupt object
-      # in the reused workspace's .git (run 33851931669, #11016). Nothing
-      # this job needs lives in the workspace yet — the npm cache and the
-      # docker locks are under $HOME — so wipe it and let the retry fetch
-      # into an empty root: no corrupt object survives, and the outage has
-      # had one attempt's span to clear. The wipe follows the guarded pool
-      # idiom of qwen-code-pr-review.yml and serve-ab.yml: validate the
-      # path before any rm — a symlinked component would redirect the
-      # delete, and the root sudo leg with it, outside the runner
-      # workspace — empty the directory but keep the node itself (the
-      # runner owns the mount point), and announce both the heal and any
-      # survivors, or a sick host heals silently for weeks.
+      # Two pool checkout killers outlast the action's own three fetch
+      # retries. A corrupt object in the reused workspace's .git (run
+      # 33851931669, #11016) is what the wipe heals: nothing this job
+      # needs lives in the workspace yet, so the retry fetches into an
+      # empty root. A dead-egress host (runs 34088422718, 34098892239:
+      # one host down ~8 minutes while peer hosts checked out fine,
+      # both recovered by re-dispatch to another host) CANNOT be
+      # escaped by a retry — the job's runner is fixed at pickup — so
+      # there it is a cheap bet on the host recovering within one
+      # attempt. The wipe follows the guarded pool idiom of
+      # qwen-code-pr-review.yml and serve-ab.yml: validate the path
+      # before any rm (a symlinked component would redirect the delete
+      # outside the runner workspace), keep the directory node, and
+      # announce the heal and any survivors, or a sick host heals
+      # silently for weeks.
       - name: 'Reset workspace after failed checkout'
         if: "${{ steps.checkout.outcome == 'failure' }}"
         run: |-
@@ -201,8 +201,29 @@ jobs:
           echo "::warning::checkout failed on ${RUNNER_NAME:-this runner}; wiping the workspace and retrying once (#11292)"
           WS="${GITHUB_WORKSPACE:?}"
           RWS="${RUNNER_WORKSPACE:?}"
-          if [ "$(realpath -- "$WS")" != "$WS" ] || [ -L "$WS" ] || [ ! -d "$WS" ]; then
-            echo "::error::workspace is not a plain directory or resolves through symlinks: $WS"
+          # Heal a leaf a previous job replaced with a symlink (or any
+          # non-directory) — a refusal removes nothing and wedges every
+          # later job on this runner (#9480). Judge the PARENT,
+          # canonicalized: resolving $WS would follow the very link.
+          if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")")"
+            case "$HEAL_PARENT" in
+              "$RWS"|"$RWS"/*) ;;
+              *) echo "::error::refusing to heal workspace outside the runner workspace: $WS"; exit 1 ;;
+            esac
+            if [ -L "$WS" ]; then
+              heal_target="$(readlink -- "$WS" || printf '%s' '<unreadable>')"
+              heal_target="$(printf '%s' "$heal_target" | tr -d '\r\n' | cut -c1-200)"
+              echo "::warning::healing workspace $WS: it was a symlink"
+              printf 'heal: %s pointed at %s\n' "$WS" "$heal_target"
+            else
+              echo "::warning::healing workspace $WS: it was not a directory"
+            fi
+            rm -f -- "$WS" || exit 1
+            mkdir -- "$WS" || exit 1
+          fi
+          if [ "$(realpath -- "$WS")" != "$WS" ]; then
+            echo "::error::refusing to wipe: workspace resolves through a symlinked component: $WS"
             exit 1
           fi
           case "$WS" in
@@ -211,9 +232,9 @@ jobs:
             *) echo "::error::refusing to wipe workspace outside the runner workspace: $WS"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null ||
-            sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null ||
+            sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + ||
             echo "::warning::could not clear the workspace; the checkout retry proceeds in place"
-          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
+          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\r\n' ' ' | cut -c1-500)"
           if [ -n "$survivors" ]; then
             echo "::warning::workspace wipe left survivors: ${survivors}; the retry runs against them"
           fi
