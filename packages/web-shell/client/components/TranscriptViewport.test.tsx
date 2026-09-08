@@ -212,9 +212,6 @@ describe('TranscriptViewport', () => {
       hasOlder: true,
       hasMore: false,
     });
-    await click('history.loadEarlier');
-    expect(store.getViewportSnapshot().ranges[0]?.pageIds).toHaveLength(2);
-    const pin = vi.spyOn(store, 'setViewportAnchor');
     const list = container!.querySelector<HTMLElement>(
       '[data-web-shell-message-list]',
     )!;
@@ -246,6 +243,9 @@ describe('TranscriptViewport', () => {
         };
       },
     );
+    await click('history.loadEarlier');
+    expect(store.getViewportSnapshot().ranges[0]?.pageIds).toHaveLength(2);
+    const pin = vi.spyOn(store, 'setViewportAnchor');
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
       list.dispatchEvent(new Event('scroll', { bubbles: true }));
