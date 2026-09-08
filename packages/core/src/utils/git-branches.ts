@@ -478,7 +478,7 @@ export async function gitCreateBranch(
           () => '',
         )
       ).trim();
-      if (newHead && startCommit && newHead !== startCommit) {
+      if (newHead && newHead !== startCommit) {
         debugLogger.warn(
           `gitCreateBranch: keeping branch "${name}" because it contains commits created after checkout (likely by a failing post-checkout hook)`,
         );

@@ -8,7 +8,20 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => true),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import {
   fetchGitBranches,
   gitCheckout,
@@ -36,6 +49,7 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'tag.gpgsign', 'false');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
@@ -579,6 +593,10 @@ describe('gitCreateBranch', () => {
 });
 
 describe('gitCreateBranch rollback (R12)', () => {
+  beforeEach(() => {
+    mockDebugLogger.warn.mockClear();
+  });
+
   it('rolls back a branch created before a failing post-checkout hook', async () => {
     const dir = makeRepo();
     const before = currentBranch(dir);
@@ -598,6 +616,9 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(currentBranch(dir)).toBe(before);
     const branches = git(dir, 'branch', '--format=%(refname:short)');
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
   });
 
   it('rolls back a branch created from an annotated tag before a failing post-checkout hook', async () => {
@@ -623,6 +644,9 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(currentBranch(dir)).toBe(before);
     const branches = git(dir, 'branch', '--format=%(refname:short)');
     expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
   });
 
   it('keeps a branch that a failing post-checkout hook committed to', async () => {
@@ -646,6 +670,9 @@ describe('gitCreateBranch rollback (R12)', () => {
     // The hook-created commit is still reachable from the branch.
     const topicLog = git(dir, 'log', '--oneline', 'topic');
     expect(topicLog).toContain('hook-created commit');
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
   });
 
   it('keeps hook commits when an empty start point defaults to HEAD', async () => {
@@ -666,7 +693,41 @@ describe('gitCreateBranch rollback (R12)', () => {
     expect(branches.split('\n').map((s) => s.trim())).toContain('topic');
     const topicLog = git(dir, 'log', '--oneline', 'topic');
     expect(topicLog).toContain('hook-created commit');
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping branch "topic"'),
+    );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps hook commits when resolving the start commit fails',
+    async () => {
+      const dir = makeRepo();
+      const before = currentBranch(dir);
+      const hookDir = path.join(dir, '.git', 'hooks');
+      fs.mkdirSync(hookDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hookDir, 'post-checkout'),
+        '#!/bin/sh\necho hook-change >> file.txt\ngit add file.txt\ngit commit --no-verify -qm "hook-created commit"\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const env = gitShim(hermeticEnv(), [
+        { match: '"rev-parse --verify "*', script: 'exit 128' },
+      ]);
+
+      await expect(
+        gitCreateBranch(dir, 'topic', undefined, env),
+      ).rejects.toThrow();
+
+      expect(currentBranch(dir)).toBe(before);
+      const branches = git(dir, 'branch', '--format=%(refname:short)');
+      expect(branches.split('\n').map((s) => s.trim())).toContain('topic');
+      const topicLog = git(dir, 'log', '--oneline', 'topic');
+      expect(topicLog).toContain('hook-created commit');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('keeping branch "topic"'),
+      );
+    },
+  );
 });
 
 describe('gitPush', () => {
