@@ -20,6 +20,10 @@
     "./export": {
       "types": "./dist/src/export/index.d.ts",
       "import": "./dist/src/export/index.js"
+    },
+    "./serve": {
+      "types": "./dist/src/serve/index.d.ts",
+      "import": "./dist/src/serve/index.js"
     }
   },
   "scripts": {

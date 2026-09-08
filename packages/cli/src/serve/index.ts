@@ -5,6 +5,7 @@
  */
 
 export { createServeApp, type ServeAppDeps } from './server.js';
+export { API_PROFILES, type ApiProfile } from './api-profile.js';
 export {
   getServeAppLifecycle,
   type ServeAppLifecycle,

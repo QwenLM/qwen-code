@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ApiProfile } from './api-profile.js';
 import {
   SERVE_FEATURES,
   type ServeFeature,
@@ -217,6 +218,13 @@ export interface ServeOptions {
    */
   serveWebShell?: boolean;
   /**
+   * How much of the HTTP surface to expose (the CLI's `--api-profile`).
+   * `full` (default) keeps every route; `minimal` serves only the
+   * partner-facing REST subset in `docs/developers/qwen-serve-openapi.yaml`
+   * and answers 404 everywhere else. See `serve/api-profile.ts`.
+   */
+  apiProfile?: ApiProfile;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
@@ -416,6 +424,18 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
+  /**
+   * How much of the HTTP surface this daemon exposes. Optional because this is
+   * additive to v=1; older v=1 daemons omit it (read an absent value as
+   * `'full'`).
+   *
+   * **Under `'minimal'` the "tag present means behavior present" invariant in
+   * `docs/developers/daemon/11-capabilities-versioning.md` does not hold** —
+   * `features` still lists every tag the build supports, but routes outside
+   * the minimal subset answer 404. `docs/developers/qwen-serve-openapi.yaml`
+   * is the authority on what is reachable.
+   */
+  apiProfile?: ApiProfile;
   /**
    * Configured model services advertised over HTTP. **Stage 1 always
    * returns `[]`** — the agent uses its single default service and

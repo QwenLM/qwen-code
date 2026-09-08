@@ -6,6 +6,7 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { DEFAULT_API_PROFILE } from '../api-profile.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
@@ -34,6 +35,7 @@ interface RegisterCapabilitiesRoutesDeps {
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
+  apiProfile: ServeOptions['apiProfile'];
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
 }
@@ -80,6 +82,11 @@ export function registerCapabilitiesRoutes(
         : {}),
       mode: deps.mode,
       features,
+      // Always emitted from this version on. Clients that predate the field
+      // read its absence as 'full'; under 'minimal' it is the signal that
+      // `features` over-reports what is actually routable (see the field docs
+      // on CapabilitiesEnvelope).
+      apiProfile: deps.apiProfile ?? DEFAULT_API_PROFILE,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.
