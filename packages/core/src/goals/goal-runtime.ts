@@ -61,7 +61,10 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
-import type { GoalContinuationUsage } from './goal-continuation-prompt.js';
+import type {
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -119,29 +122,9 @@ export class GoalPersistenceUnavailableError extends Error {
 }
 
 export interface GoalTurnHost {
-  startGoalTurn(input: {
-    permit: GoalTurnPermit;
-    continuationContext: string;
-    /**
-     * Set on the first continuation carrying an objective the model has not
-     * been handed before, when it had been handed an earlier one. Hosts pass
-     * it straight to `renderGoalContinuationPrompt`.
-     */
-    objectiveUpdated?: boolean;
-    /**
-     * Set on the one continuation a spent budget still grants: the model is
-     * to hand off, not to keep working. Hosts pass it straight to
-     * `renderGoalContinuationPrompt`.
-     */
-    windDown?: boolean;
-    /**
-     * The Goal's spend and cadence when the turn was scheduled, for the
-     * prompt's budget line. Hosts pass it straight to
-     * `renderGoalContinuationPrompt`.
-     */
-    usage?: GoalContinuationUsage;
-    verifierFeedback?: string;
-  }): Promise<void>;
+  startGoalTurn(
+    input: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  ): Promise<void>;
   preemptGoalTurn(reason: string): void;
 }
 

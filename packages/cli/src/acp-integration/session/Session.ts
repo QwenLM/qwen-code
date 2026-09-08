@@ -41,7 +41,7 @@ import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnHost,
-  GoalContinuationUsage,
+  GoalContinuationTurn,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -616,16 +616,11 @@ type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
 
-interface AcpGoalTurn {
+interface AcpGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   controller: AbortController;
   origin: 'runtime' | 'user';
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  usage?: GoalContinuationUsage;
-  verifierFeedback?: string;
   modelStarted: boolean;
 }
 
@@ -2307,20 +2302,13 @@ export class Session implements SessionContext {
           ) {
             return;
           }
+          const { permit, ...continuation } = input;
           this.goalQueue.push({
-            permit: { ...input.permit },
-            turnKey: `goal-runtime:${input.permit.turnId}`,
+            permit: { ...permit },
+            turnKey: `goal-runtime:${permit.turnId}`,
             controller: new AbortController(),
             origin: 'runtime',
-            continuationContext: input.continuationContext,
-            ...(input.objectiveUpdated
-              ? { objectiveUpdated: input.objectiveUpdated }
-              : {}),
-            ...(input.windDown ? { windDown: true } : {}),
-            ...(input.usage ? { usage: input.usage } : {}),
-            ...(input.verifierFeedback
-              ? { verifierFeedback: input.verifierFeedback }
-              : {}),
+            ...continuation,
             modelStarted: false,
           });
           void this.#drainGoalQueue();

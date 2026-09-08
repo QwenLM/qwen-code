@@ -13,17 +13,7 @@ export type GoalContinuationUsage = Pick<
   'tokensUsed' | 'tokenBudget' | 'turnCount'
 >;
 
-/**
- * The prompt a host sends when `runtime.finishTurn` schedules another Goal
- * turn. Every host renders it from here so that a new line lands in one place
- * instead of drifting across the hosts that assemble it.
- */
-export interface GoalContinuationPromptInput {
-  /** Goal identity from the runtime permit that admitted this turn. */
-  goalId: string;
-  revision: number;
-  /** The authoritative objective the runtime holds right now. */
-  objective: string;
+interface GoalContinuationHints {
   /**
    * True on the first continuation carrying an objective the model has not
    * been handed before. See `OBJECTIVE_UPDATED_LINE` for why this is
@@ -43,6 +33,23 @@ export interface GoalContinuationPromptInput {
    */
   usage?: GoalContinuationUsage;
   verifierFeedback?: string;
+}
+
+export interface GoalContinuationTurn extends GoalContinuationHints {
+  continuationContext: string;
+}
+
+/**
+ * The prompt a host sends when `runtime.finishTurn` schedules another Goal
+ * turn. Every host renders it from here so that a new line lands in one place
+ * instead of drifting across the hosts that assemble it.
+ */
+export interface GoalContinuationPromptInput extends GoalContinuationHints {
+  /** Goal identity from the runtime permit that admitted this turn. */
+  goalId: string;
+  revision: number;
+  /** The authoritative objective the runtime holds right now. */
+  objective: string;
 }
 
 /** Delimiters of the untrusted Goal data block. */
@@ -202,26 +209,22 @@ export function renderGoalContinuationPrompt(
   return lines.join('\n');
 }
 
+/** Renders a runtime-scheduled Goal continuation turn. */
+export function renderGoalContinuationTurn(
+  turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+): string {
+  const { permit, continuationContext, ...hints } = turn;
+  return renderGoalContinuationPrompt({
+    goalId: permit.goalId,
+    revision: permit.revision,
+    objective: continuationContext,
+    ...hints,
+  });
+}
+
 /** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
-export function buildGoalContinuationParts(turn: {
-  permit: GoalTurnPermit;
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  usage?: GoalContinuationUsage;
-  verifierFeedback?: string;
-}): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        goalId: turn.permit.goalId,
-        revision: turn.permit.revision,
-        objective: turn.continuationContext,
-        objectiveUpdated: turn.objectiveUpdated,
-        windDown: turn.windDown,
-        usage: turn.usage,
-        verifierFeedback: turn.verifierFeedback,
-      }),
-    },
-  ];
+export function buildGoalContinuationParts(
+  turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+): Part[] {
+  return [{ text: renderGoalContinuationTurn(turn) }];
 }
