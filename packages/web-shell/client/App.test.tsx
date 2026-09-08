@@ -9901,6 +9901,7 @@ describe('App plan todos', () => {
   });
 
   it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
@@ -10072,11 +10073,21 @@ describe('App plan todos', () => {
     const { container, rerender } = renderApp();
     await flush();
 
-    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
 
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
+
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
 
     await act(async () => {
       testState.latestTodoPanelOnOpen?.();
@@ -10757,7 +10768,7 @@ describe('App session workflow', () => {
     ).not.toBeNull();
   });
 
-  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+  it('keeps Todo progress non-interactive when Session Workflow is off', async () => {
     testState.messages = [
       {
         id: 'plan',
@@ -10780,18 +10791,11 @@ describe('App session workflow', () => {
     const { container } = renderApp();
     await flush();
 
-    await act(async () => {
-      testState.latestTodoPanelOnOpen?.();
-      await Promise.resolve();
-    });
-
-    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
-    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
-    expect(
-      container
-        .querySelector('[data-testid="dialog-shell"]')
-        ?.getAttribute('data-dialog-title'),
-    ).toBe('Background tasks');
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
   });
 
   it('keeps workflow agent tools mounted behind the tasks dialog', async () => {
