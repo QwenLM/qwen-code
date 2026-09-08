@@ -52,6 +52,7 @@ let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
 let scopedSessionsOptions: { pollIntervalMs?: number };
 let workspaceLiveStateOptions: {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds?: string[];
 };
 let statusReportOptions: { autoLoad?: boolean; detail?: string };
@@ -120,7 +121,11 @@ vi.mock('../hooks/useScopedSessions', () => ({
 vi.mock('../session-catalog/workspace-session-live-state', () => ({
   useWorkspaceSessionLiveState: (
     _client: unknown,
-    options: { enabled: boolean; workspaceCwds?: string[] },
+    options: {
+      enabled: boolean;
+      workspaceCwds?: string[];
+      pollIntervalMs?: number;
+    },
   ) => {
     workspaceLiveStateOptions = options;
     return new Map();
@@ -2552,6 +2557,21 @@ describe('SessionOverviewPanel', () => {
 });
 
 describe('SessionOverviewPanel polling', () => {
+  it('uses the polling interval advertised by the workspace daemon', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+    };
+    workspaceCapabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      sessionLiveStatePollIntervalMs: 10_000,
+    };
+    render();
+    expect(workspaceLiveStateOptions.enabled).toBe(true);
+    expect(workspaceLiveStateOptions.pollIntervalMs).toBe(10_000);
+  });
+
   it('keeps the old status-report details fresh', async () => {
     sessionsState.sessions = [session('s')];
     vi.useFakeTimers();

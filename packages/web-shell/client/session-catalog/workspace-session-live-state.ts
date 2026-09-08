@@ -9,8 +9,9 @@ import {
   getSessionCatalogStore,
   type StagedWorkspaceSessionCatalog,
 } from './session-catalog-store';
+import { resolveSessionLiveStatePollInterval } from './session-live-state-poll-interval';
 
-export const SESSION_LIVE_STATE_POLL_MS = 2_000;
+export { SESSION_LIVE_STATE_POLL_MS } from './session-live-state-poll-interval';
 export const SESSION_LIVE_STATE_ERROR_RETRY_MS = 30_000;
 /**
  * Consecutive live-state request failures before the retained snapshot is
@@ -39,6 +40,7 @@ interface WorkspacePollState {
 
 interface WorkspaceSessionLiveStateOptions {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds: readonly string[];
   groupWorkspaceCwds: readonly string[];
 }
@@ -79,11 +81,16 @@ export function useWorkspaceSessionLiveState(
   client: DaemonClient,
   {
     enabled,
+    pollIntervalMs: configuredPollIntervalMs,
     workspaceCwds,
     groupWorkspaceCwds,
   }: WorkspaceSessionLiveStateOptions,
 ): ReadonlyMap<string, DaemonSessionGroupCatalog> {
   const catalogStore = useMemo(() => getSessionCatalogStore(client), [client]);
+  const pollIntervalMs = resolveSessionLiveStatePollInterval(
+    configuredPollIntervalMs,
+  );
+  const pollAllRef = useRef<(() => void) | undefined>(undefined);
   const targetsKey = [...new Set(workspaceCwds)].sort().join('\n');
   const targets = useMemo(
     () => targetsKey.split('\n').filter(Boolean),
@@ -388,7 +395,7 @@ export function useWorkspaceSessionLiveState(
     // Interactive refresh requests (explicit refresh(), expiring
     // maxAgeMs subscriptions, group-membership growth) and recorded turn
     // completions wake the loop immediately instead of waiting for the
-    // next 2s tick.
+    // next periodic tick.
     const stopWake = catalogStore.onLiveStateWake(
       (workspaceCwd, bypassRetry) => {
         const state = states.find(
@@ -406,20 +413,27 @@ export function useWorkspaceSessionLiveState(
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityWake);
     }
+    pollAllRef.current = onVisibilityWake;
     for (const state of states) void poll(state);
-    const interval = window.setInterval(() => {
-      for (const state of states) void poll(state);
-    }, SESSION_LIVE_STATE_POLL_MS);
     return () => {
       disposed = true;
+      pollAllRef.current = undefined;
       stopWake();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityWake);
       }
-      window.clearInterval(interval);
       for (const release of releaseLiveState) release();
     };
   }, [catalogStore, client, enabled, targets]);
+
+  useEffect(() => {
+    if (!enabled || targets.length === 0) return;
+    const interval = window.setInterval(
+      () => pollAllRef.current?.(),
+      pollIntervalMs,
+    );
+    return () => window.clearInterval(interval);
+  }, [client, enabled, pollIntervalMs, targets]);
 
   return groupCatalogs;
 }
