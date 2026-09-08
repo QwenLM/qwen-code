@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatDisclosureText,
+  formatKeyframeTimestampLabel,
   formatResourceHandleText,
   formatResourcePathText,
   isDisclosureText,
@@ -15,6 +16,7 @@ import {
   parseResourceHandleText,
   parseResourcePathText,
 } from './disclosure.js';
+import { formatClockLabel } from './media-extraction.js';
 
 describe('isKeyframeTimestampLabel', () => {
   it('matches bare MM:SS and H:MM:SS markers only', () => {
@@ -31,6 +33,24 @@ describe('isKeyframeTimestampLabel', () => {
     expect(isKeyframeTimestampLabel('<00:11> 关键帧')).toBe(false);
     expect(isKeyframeTimestampLabel('00:11')).toBe(false);
     expect(isKeyframeTimestampLabel('<scene>')).toBe(false);
+  });
+});
+
+describe('formatKeyframeTimestampLabel', () => {
+  // A label the recognizer rejects is not merely ugly: it gets flattened
+  // into the tool result's summary string and its frame arrives anonymous.
+  // The failure is silent, so the round trip is pinned here.
+  it('produces labels the recognizer accepts, tenths and hours included', () => {
+    for (const seconds of [
+      0, 0.5, 9.4, 11, 59.9, 60, 599.5, 3599, 3600, 45296.7,
+    ]) {
+      for (const withHours of [false, true]) {
+        const label = formatKeyframeTimestampLabel(
+          formatClockLabel(seconds, withHours),
+        );
+        expect(isKeyframeTimestampLabel(label)).toBe(true);
+      }
+    }
   });
 });
 

@@ -8350,6 +8350,31 @@ export class Config {
               await import('../omni/policy/tools/understand-video-segments.js')
             ).OmniUnderstandVideoSegmentsTool(this),
         ],
+        // These three deliver their result INTO the model's context rather
+        // than writing a file it has to read back. They own no output
+        // directory, so they are model-access only — a fixed policy has
+        // nothing to collect from them.
+        [
+          ToolNames.SAMPLE_FRAMES,
+          async () =>
+            new (
+              await import('../omni/policy/tools/sample-frames.js')
+            ).SampleFramesTool(this),
+        ],
+        [
+          ToolNames.GET_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/get-audio.js')
+            ).GetAudioTool(this),
+        ],
+        [
+          ToolNames.GET_CLIP,
+          async () =>
+            new (await import('../omni/policy/tools/get-clip.js')).GetClipTool(
+              this,
+            ),
+        ],
       ];
       for (const [name, factory] of omniPolicyToolFactories) {
         await registerLazy(name, factory);

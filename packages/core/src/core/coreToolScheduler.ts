@@ -23,6 +23,7 @@ import type {
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
+import { isKeyframeTimestampLabel } from '../omni/disclosure.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -790,7 +791,15 @@ export function convertToFunctionResponse(
 
     for (const part of toParts(contentToProcess)) {
       if (part.text !== undefined) {
-        textParts.push(part.text);
+        if (isKeyframeTimestampLabel(part.text)) {
+          // A bare per-frame timestamp belongs to the media part behind it and
+          // has no meaning anywhere else: adjacency is its only binding. Every
+          // other text is flattened into one output string, which would leave
+          // the frames anonymous.
+          mediaParts.push({ text: part.text } as FunctionResponsePart);
+        } else {
+          textParts.push(part.text);
+        }
       } else if (part.inlineData) {
         mediaParts.push({ inlineData: part.inlineData });
       } else if (part.fileData) {

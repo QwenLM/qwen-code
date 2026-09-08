@@ -18,6 +18,13 @@ Use `agent` to launch a specialized subagent to handle complex, multi-step tasks
 - `isolation` (string, optional): Set to `"worktree"` to run an explicitly named, non-fork agent in an isolated git worktree that Qwen Code creates and manages.
 - `working_dir` (string, optional): Pin an explicitly named, non-fork agent to an existing registered git worktree inside the current repository. The caller owns the worktree lifecycle, so this mode runs in the foreground. If both `working_dir` and `isolation` are provided, `working_dir` takes precedence.
 
+The next five arguments are valid **only** with the media subagent types (`sample_frames`, `get_audio`, `get_clip`) and are rejected for every other type. Those types always run in the foreground and reject `run_in_background: true`, because the parent has already paid to extract and upload the window and is waiting to be told what is in it.
+
+- `inputPath` (string): Absolute path to the media file. Required by the media types.
+- `start`, `end` (string): The window to analyze, as `HH:MM:SS`, `MM:SS`, or plain seconds. Both required by the media types.
+- `fps` (number): Frames per second, where `1.0` means one frame per second. Required by `sample_frames` and `get_clip`; rejected by `get_audio`.
+- `resolution` (string, optional): Long-edge cap — a tier such as `720p`, a bare integer, or `WxH`. Defaults to 768. Rejected by `get_audio`.
+
 ## How to use `agent` with Qwen Code
 
 The Agent tool dynamically loads available subagents from your configuration and delegates tasks to them. Each subagent runs independently and can use its own set of tools, allowing for specialized expertise and parallel execution.

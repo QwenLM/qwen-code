@@ -272,10 +272,10 @@ export class AgentHeadless {
           timestamp: Date.now(),
         });
       }
-    } else if (
-      !initialMessagesOverride ||
-      initialMessagesOverride.length === 0
-    ) {
+    } else {
+      // Pushed even when an override supplies the first turn: the override's
+      // non-text parts (seeded media) have no transcript form, and skipping
+      // the push would leave the first round blank in the detail view.
       this.core.pushMessage('user', initialTaskText);
     }
 

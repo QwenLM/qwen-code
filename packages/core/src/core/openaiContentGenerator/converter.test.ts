@@ -1625,6 +1625,68 @@ describe('OpenAIContentConverter', () => {
       expect(userContent[1].text).toBe('<00:34>');
     });
 
+    it('interleaves a whole frame roll, each marker before its own frame', () => {
+      // The shape sample_frames actually delivers: every frame preceded by
+      // its handle annotation and its own marker. The handle is not a
+      // disclosure, so it stays behind — the markers must still come out
+      // alternating with the images, or the model has to join a list against
+      // a position.
+      const frame = (label: string, data: string): Part[] =>
+        [
+          { text: `【媒体资源】frame-${data}.jpg：media-1-abcd` },
+          { text: label },
+          { fileData: { mimeType: 'image/jpeg', fileUri: `oss://b/${data}` } },
+        ] as Part[];
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'sample_frames',
+                  response: { output: 'Sampled 3 frame(s)' },
+                  parts: [
+                    ...frame('<00:10.5>', 'a'),
+                    ...frame('<00:11.5>', 'b'),
+                    ...frame('<00:12.5>', 'c'),
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      const userContent = messages.find((m) => m.role === 'user')
+        ?.content as Array<{ type: string; text?: string }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+        'text',
+        'image_url',
+        'text',
+        'image_url',
+      ]);
+      expect([1, 3, 5].map((i) => userContent[i].text)).toEqual([
+        '<00:10.5>',
+        '<00:11.5>',
+        '<00:12.5>',
+      ]);
+    });
+
     it('gives a disclosure only to the media part directly following it', () => {
       // Two media parts after one disclosure: only the adjacent one owns
       // it — the second media part must not pull the disclosure past the

@@ -23,6 +23,7 @@ import {
   videoFrameDimensionsForTokenBudget,
   type TokenBudgetTier,
 } from '../../smart-resize.js';
+import { sampleFramesUniform, scaleFilter } from '../../media-extraction.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
@@ -209,18 +210,6 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
 };
 
 /**
- * Fit-inside scale expression: longest edge capped at `maxDimension`,
- * aspect ratio preserved, small inputs never enlarged (the min() box is
- * the input's own size when it is already within the ceiling).
- */
-function scaleFilter(maxDimension: number): string {
-  return (
-    `scale='min(${maxDimension},iw)':'min(${maxDimension},ih)'` +
-    `:force_original_aspect_ratio=decrease`
-  );
-}
-
-/**
  * Parse per-frame presentation timestamps from ffmpeg's showinfo stderr
  * lines (`[Parsed_showinfo…] n: 3 … pts_time:12.4 …`), in output order.
  */
@@ -297,9 +286,6 @@ interface ExtractionContext {
   remainingTimeoutMs: () => number;
   signal: AbortSignal;
 }
-
-/** How many uniform-strategy seek extractions run concurrently. */
-const SEEK_CONCURRENCY = 4;
 
 class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKeyframesParams> {
   constructor(
@@ -672,71 +658,30 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         `the sampling window [${windowStart}–${windowEnd}] is empty`,
       );
     }
-    const windowSeconds = windowEnd - windowStart;
-    // compute_dynamic_fps: nframes = clamp(duration × fps, min, max).
-    const nframes = Math.max(
-      1,
-      Math.min(maxFrames, Math.floor(windowSeconds * fps)),
-    );
-    // Evenly spaced timestamps across the window (midpoints of equal
-    // slices: the first frame is not always t=0 and the last not t=end,
-    // so the sample set covers the window symmetrically).
-    const slice = windowSeconds / nframes;
-    const timestamps = Array.from(
-      { length: nframes },
-      (_, i) => windowStart + (i + 0.5) * slice,
-    );
-
-    const outcomes: Array<ExtractedFrame | undefined> = new Array(nframes);
-    let nextIndex = 0;
-    const worker = async (): Promise<void> => {
-      while (!signal.aborted) {
-        const index = nextIndex++;
-        if (index >= nframes) return;
-        if (remainingTimeoutMs() <= 1) return;
-        const timestamp = timestamps[index];
-        const fileName = policyOutputFileName({
+    const sampled = await sampleFramesUniform({
+      inputPath: this.params.inputPath,
+      outputDir: this.params.outputDir,
+      windowStartSec: windowStart,
+      windowEndSec: windowEnd,
+      fps,
+      maxFrames,
+      scaleVf,
+      fileNameFor: (index) =>
+        policyOutputFileName({
           inputPath: this.params.inputPath,
           operation: 'keyframe',
-          variant: String(index + 1).padStart(4, '0'),
+          variant: String(index).padStart(4, '0'),
           extension: '.jpg',
-        });
-        const outputPath = path.join(this.params.outputDir, fileName);
-        // One seek per timestamp (the plugin's extract_frames_by_seeking
-        // shape): input-side -ss jumps straight to the position; a single
-        // frame is decoded.
-        const run = await runFfmpeg(
-          [
-            '-y',
-            '-ss',
-            formatSeconds(timestamp),
-            '-i',
-            this.params.inputPath,
-            '-vf',
-            scaleVf,
-            '-frames:v',
-            '1',
-            '-q:v',
-            '4',
-            '-update',
-            '1',
-            outputPath,
-          ],
-          { signal, timeoutMs: remainingTimeoutMs() },
-        );
-        if (signal.aborted) return;
-        if (run.code === 0 && (await fileExists(outputPath))) {
-          outcomes[index] = { fileName, timeSeconds: timestamp };
-        }
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.min(SEEK_CONCURRENCY, nframes) }, worker),
-    );
-    if (signal.aborted) {
+        }),
+      remainingTimeoutMs,
+      signal,
+    });
+    if (sampled.aborted) {
       return mediaPolicyToolError('keyframe extraction aborted');
     }
-    const frames = outcomes.filter((f): f is ExtractedFrame => f !== undefined);
+    const frames: ExtractedFrame[] = sampled.frames.map(
+      ({ fileName, timeSeconds }) => ({ fileName, timeSeconds }),
+    );
     if (frames.length === 0) {
       return mediaPolicyToolError(
         `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,

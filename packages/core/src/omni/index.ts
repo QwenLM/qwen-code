@@ -112,10 +112,12 @@ export {
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   formatDisclosureText,
+  formatKeyframeTimestampLabel,
   formatOmissionText,
   formatResourceHandleText,
   formatTranscriptText,
   isDisclosureText,
+  isKeyframeTimestampLabel,
 } from './disclosure.js';
 export {
   runFixedPolicies,

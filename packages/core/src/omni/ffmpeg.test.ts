@@ -143,7 +143,22 @@ describe('probeMediaMetadata (video)', () => {
       height: 720,
       frameRate: 30000 / 1001,
       codec: 'h264',
+      hasAudioStream: true,
     });
+  });
+
+  it('reports a silent video as false, not as undefined', async () => {
+    // get_audio refuses on `=== false` alone, so this branch must state the
+    // absence rather than leave the field out (which means "did not say").
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp4', duration: '5' },
+        streams: [{ codec_type: 'video', codec_name: 'h264' }],
+      }),
+    }));
+    await expect(
+      probeMediaMetadata('/silent.mp4', 'video'),
+    ).resolves.toMatchObject({ hasAudioStream: false });
   });
 
   it('falls back to r_frame_rate when avg is 0/0', async () => {
@@ -206,6 +221,7 @@ describe('probeMediaMetadata per-modality branches', () => {
       codec: 'aac',
       sampleRateHz: 44_100,
       channels: 2,
+      hasAudioStream: true,
     });
   });
 

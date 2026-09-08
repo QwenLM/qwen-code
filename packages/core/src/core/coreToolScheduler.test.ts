@@ -5626,6 +5626,35 @@ describe('convertToFunctionResponse', () => {
     ]);
   });
 
+  it('keeps bare keyframe timestamp markers beside their frames instead of flattening them', () => {
+    // Flattening is right for every other text part, but a marker's only
+    // meaning is which frame follows it: joined into response.output it
+    // would leave the frames anonymous.
+    const llmContent: PartListUnion = [
+      { text: 'Sampled 2 frame(s)' },
+      { text: '<00:10.5>' },
+      { inlineData: { mimeType: 'image/jpeg', data: 'first' } },
+      { text: '<00:11.5>' },
+      { inlineData: { mimeType: 'image/jpeg', data: 'second' } },
+    ];
+    const result = convertToFunctionResponse(toolName, callId, llmContent);
+    expect(result).toEqual([
+      {
+        functionResponse: {
+          name: toolName,
+          id: callId,
+          response: { output: 'Sampled 2 frame(s)' },
+          parts: [
+            { text: '<00:10.5>' },
+            { inlineData: { mimeType: 'image/jpeg', data: 'first' } },
+            { text: '<00:11.5>' },
+            { inlineData: { mimeType: 'image/jpeg', data: 'second' } },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('should handle llmContent as an array with a single inlineData Part', () => {
     const llmContent: PartListUnion = [
       { inlineData: { mimeType: 'image/gif', data: 'gifdata...' } },

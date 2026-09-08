@@ -52,7 +52,8 @@ import {
   type ResolvedModelId,
 } from '../utils/modelId.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
-import { BuiltinAgentRegistry } from './builtin-agents.js';
+import { BuiltinAgentRegistry, isMediaSubagentType } from './builtin-agents.js';
+import { resolveMediaPolicyModelAccess } from '../omni/policy/model-access.js';
 import {
   COLOR_VALUES,
   isColor,
@@ -193,15 +194,31 @@ export class SubagentManager {
     );
   }
 
+  /**
+   * A media subagent type is one more surface of the tool it is named after:
+   * the parent extracts and uploads through that very tool before the child
+   * exists. So it follows the same `modelAccess.enabled` switch — otherwise
+   * an operator who left the tool fixed-policy-only would still get its
+   * delivery, by way of `agent`.
+   */
+  private isGatedMediaSubagent(name: string): boolean {
+    const type = name.toLowerCase();
+    return (
+      isMediaSubagentType(type) &&
+      !resolveMediaPolicyModelAccess(this.config, type).enabled
+    );
+  }
+
   private getBuiltinAgent(name: string): SubagentConfig | null {
+    if (this.isGatedMediaSubagent(name)) return null;
     const config = BuiltinAgentRegistry.getBuiltinAgent(name);
     return config ? this.applyBuiltinSettings(config) : null;
   }
 
   private getBuiltinAgents(): SubagentConfig[] {
-    return BuiltinAgentRegistry.getBuiltinAgents().map((config) =>
-      this.applyBuiltinSettings(config),
-    );
+    return BuiltinAgentRegistry.getBuiltinAgents()
+      .filter((config) => !this.isGatedMediaSubagent(config.name))
+      .map((config) => this.applyBuiltinSettings(config));
   }
 
   /**

@@ -123,7 +123,8 @@ import {
  * The daemon doesn't have a full `Config` instance, so we instantiate
  * `SubagentManager` against a CRUD-scoped `Config` stub that
  * implements only `getSdkMode / getProjectRoot / getActiveExtensions /
- * isSafeMode / getAgentsSettings` — the methods the manager's CRUD paths
+ * isSafeMode / getAgentsSettings / getOmniPolicyToolsSettings` — the methods
+ * the manager's CRUD paths
  * actually touch. A `Proxy` makes any future use of an unimplemented method
  * throw immediately so a silent dependency creep can't ship as a 500.
  */
@@ -2212,12 +2213,12 @@ export function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
 
 /**
  * Build a CRUD-scoped `SubagentManager` for the daemon. The
- * underlying manager only touches five `Config` methods on its
- * read/write paths (`getSdkMode`, `getProjectRoot`,
- * `getActiveExtensions`, `isSafeMode`, `getAgentsSettings`); a `Proxy` makes
- * any future expansion of that surface throw immediately rather than silently
- * produce incorrect data. The CRUD catalog has no session settings context,
- * so built-in agents use their registry defaults here.
+ * underlying manager only touches six `Config` methods on its
+ * read/write paths (`getSdkMode`, `getProjectRoot`, `getActiveExtensions`,
+ * `isSafeMode`, `getAgentsSettings`, `getOmniPolicyToolsSettings`); a `Proxy`
+ * makes any future expansion of that surface throw immediately rather than
+ * silently produce incorrect data. The CRUD catalog has no session settings
+ * context, so built-in agents use their registry defaults here.
  */
 export function createDaemonSubagentManager(
   boundWorkspace: string,
@@ -2229,6 +2230,10 @@ export function createDaemonSubagentManager(
     getActiveExtensions: () => [],
     isSafeMode: () => safeMode,
     getAgentsSettings: () => ({}),
+    // Same stance as the built-in defaults above: no session settings here,
+    // so the media subagent types resolve to their fail-closed default and
+    // stay out of the catalog.
+    getOmniPolicyToolsSettings: () => ({}),
   } as unknown as Record<string | symbol, unknown>;
   const guarded = new Proxy(stub, {
     get(target, prop) {

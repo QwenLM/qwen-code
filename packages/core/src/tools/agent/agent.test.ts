@@ -10,7 +10,7 @@ import {
   type AgentParams,
   resolveSubagentApprovalMode,
 } from './agent.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
@@ -72,6 +72,13 @@ function escapeRegExp(value: string): string {
 // Mock dependencies
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
+
+// Only reached on the media-subagent path; every other test in this file
+// leaves it untouched because the import is dynamic.
+const mockBuildMediaSubagentSeed = vi.hoisted(() => vi.fn());
+vi.mock('../../omni/subagent-media.js', () => ({
+  buildMediaSubagentSeed: mockBuildMediaSubagentSeed,
+}));
 
 // Spies for the subagent-span layer so tests can assert what status taxonomy
 // was published. The real runInSubagentSpanContext sets up OTel context-with,
@@ -1033,6 +1040,84 @@ describe('AgentTool', () => {
         }),
       ).toBeNull();
     });
+
+    describe('media subagent parameters', () => {
+      const media = (overrides: Partial<AgentParams> = {}): AgentParams => ({
+        description: 'Scan the intro',
+        prompt: 'What is on screen?',
+        subagent_type: ToolNames.SAMPLE_FRAMES,
+        inputPath: '/videos/clip.mp4',
+        start: '00:10',
+        end: '00:15',
+        fps: 1,
+        ...overrides,
+      });
+
+      it('accepts a fully specified visual request', () => {
+        expect(agentTool.validateToolParams(media())).toBeNull();
+      });
+
+      it.each(['inputPath', 'start', 'end', 'fps'] as const)(
+        'requires %s',
+        (key) => {
+          expect(
+            agentTool.validateToolParams(media({ [key]: undefined })),
+          ).toMatch(new RegExp(`"${key}" is required`));
+        },
+      );
+
+      it('requires an absolute inputPath', () => {
+        expect(
+          agentTool.validateToolParams(media({ inputPath: 'clip.mp4' })),
+        ).toMatch(/absolute path/);
+      });
+
+      it('does not ask get_audio for fps or resolution', () => {
+        expect(
+          agentTool.validateToolParams(
+            media({ subagent_type: ToolNames.GET_AUDIO, fps: undefined }),
+          ),
+        ).toBeNull();
+        expect(
+          agentTool.validateToolParams(
+            media({ subagent_type: ToolNames.GET_AUDIO }),
+          ),
+        ).toMatch(/"fps" is not used/);
+        expect(
+          agentTool.validateToolParams(
+            media({
+              subagent_type: ToolNames.GET_AUDIO,
+              fps: undefined,
+              resolution: '720p',
+            }),
+          ),
+        ).toMatch(/"resolution" is not used/);
+      });
+
+      // Silently ignoring them would leave the caller believing it had asked
+      // for a window that nothing ever looked at.
+      it('rejects media parameters on a non-media type', () => {
+        expect(
+          agentTool.validateToolParams(
+            media({ subagent_type: 'general-purpose' }),
+          ),
+        ).toMatch(/only valid with subagent_type/);
+      });
+
+      it('treats the empty placeholders a strict provider sends as absent', () => {
+        expect(
+          agentTool.validateToolParams({
+            description: 'Search files',
+            prompt: 'Find all TypeScript files',
+            subagent_type: 'file-search',
+            inputPath: '',
+            start: '  ',
+            end: '',
+            resolution: '',
+          }),
+        ).toBeNull();
+      });
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -1617,6 +1702,93 @@ describe('AgentTool', () => {
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
+    });
+
+    describe('media subagent seeding', () => {
+      const mediaParams: AgentParams = {
+        description: 'Scan the intro',
+        prompt: 'What is on screen?',
+        subagent_type: ToolNames.SAMPLE_FRAMES,
+        inputPath: '/videos/clip.mp4',
+        start: '00:10',
+        end: '00:15',
+        fps: 1,
+      };
+
+      beforeEach(() => {
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          name: ToolNames.SAMPLE_FRAMES,
+          description: 'Frame sampler',
+          systemPrompt: 'You analyze frames.',
+          level: 'builtin',
+          filePath: `<builtin:${ToolNames.SAMPLE_FRAMES}>`,
+          isBuiltin: true,
+        });
+        mockBuildMediaSubagentSeed.mockResolvedValue([
+          { text: 'Sampled 2 frames' },
+          { fileData: { fileUri: 'oss://bucket/f1', mimeType: 'image/jpeg' } },
+        ]);
+      });
+
+      it('makes the extracted media the child first user message', async () => {
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(mediaParams);
+        await invocation.execute();
+
+        expect(mockBuildMediaSubagentSeed).toHaveBeenCalledWith(
+          {
+            subagentType: ToolNames.SAMPLE_FRAMES,
+            inputPath: '/videos/clip.mp4',
+            start: '00:10',
+            end: '00:15',
+            fps: 1,
+            resolution: undefined,
+          },
+          expect.anything(),
+          expect.any(AbortSignal),
+        );
+        const override = vi
+          .mocked(mockContextState.set)
+          .mock.calls.find(
+            ([key]) => key === 'initial_messages_override',
+          )?.[1] as Content[];
+        expect(override).toHaveLength(1);
+        expect(override[0].role).toBe('user');
+        expect(override[0].parts).toEqual([
+          { text: mediaParams.prompt },
+          { text: 'Sampled 2 frames' },
+          { fileData: { fileUri: 'oss://bucket/f1', mimeType: 'image/jpeg' } },
+        ]);
+      });
+
+      // An empty-handed media subagent would answer from its prompt alone and
+      // the report would read like a real analysis.
+      it('fails the call when extraction fails, rather than spawn a blind child', async () => {
+        mockBuildMediaSubagentSeed.mockRejectedValue(
+          new Error('clip.mp4 has no audio track'),
+        );
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(mediaParams);
+        const result = await invocation.execute();
+
+        expect(result.error?.message).toContain('no audio track');
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      });
+
+      it('runs in the foreground even though a top-level subagent defaults to background', async () => {
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(mediaParams);
+        const result = await invocation.execute();
+
+        expect(mockAgent.execute).toHaveBeenCalled();
+        expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+          'completed',
+        );
+      });
     });
 
     it('rejects working_dir when the resolved subagent config runs in the background', async () => {

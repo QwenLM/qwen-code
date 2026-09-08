@@ -34,25 +34,32 @@ export type { MediaPolicyToolConfigView };
  * is not configured (mapping doc §6). */
 export const DEFAULT_POLICY_TOOL_TIMEOUT_MS = 600_000;
 
-/** Parameters every media-policy degradation tool shares: one input file,
- * one harness-injected output directory (the invocation's staging dir —
- * the tool's ONLY permitted output location). `inputPath` is guaranteed
- * present by the time an invocation is built: fixed-policy calls always
- * carry it, and gated model/client calls that passed `resourceId` instead
- * had it resolved by the call gate (model-access.ts) before validation. */
-export interface MediaPolicyIoParams {
+/** The input half every media-policy tool shares. `inputPath` is
+ * guaranteed present by the time an invocation is built: fixed-policy calls
+ * always carry it, and gated model/client calls that passed `resourceId`
+ * instead had it resolved by the call gate (model-access.ts) before
+ * validation. */
+export interface MediaPolicyInputParams {
   /** Absolute path of the source media file. */
   inputPath: string;
+}
+
+/** Parameters a media-policy tool that WRITES A FILE shares: the input
+ * plus one harness-injected output directory (the invocation's staging
+ * dir — the tool's ONLY permitted output location). Tools that deliver
+ * their result straight into the model's context take
+ * {@link MediaPolicyInputParams} instead. */
+export interface MediaPolicyIoParams extends MediaPolicyInputParams {
   /** Absolute path of the directory the tool must write into. */
   outputDir: string;
 }
 
-/** JSON-schema fragments for the shared io parameters. `resourceId` is
+/** JSON-schema fragments for the shared input parameters. `resourceId` is
  * the model-facing alternative to `inputPath` (memory design M §5.2):
  * the model references delivered media by its opaque session handle and
  * the call gate resolves the handle to the real locator — it never
  * appears in the arguments an invocation is built with. */
-export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
+export const MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES = {
   inputPath: {
     type: 'string',
     description:
@@ -66,6 +73,12 @@ export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
       'recall result) naming the source media. Provide exactly one of ' +
       'inputPath or resourceId.',
   },
+} as const;
+
+/** {@link MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES} plus the output directory,
+ * for the tools that write a file. */
+export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
+  ...MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES,
   outputDir: {
     type: 'string',
     description:
@@ -164,7 +177,7 @@ export abstract class BaseMediaPolicyToolInvocation<
  * orchestrator key off.
  */
 export abstract class BaseMediaPolicyTool<
-  TParams extends MediaPolicyIoParams,
+  TParams extends MediaPolicyInputParams,
 > extends BaseDeclarativeTool<TParams, ToolResult> {
   constructor(
     name: string,
@@ -240,6 +253,15 @@ export abstract class BaseMediaPolicyTool<
     return validateMediaPolicyIoParams(params);
   }
 
+  /** `outputDir` view of the params for the two members below: tools that
+   * deliver into the model's context declare no such parameter. */
+  private optionalOutputDir(params: TParams): string | undefined {
+    const { outputDir } = params as MediaPolicyInputParams & {
+      outputDir?: string;
+    };
+    return outputDir;
+  }
+
   /**
    * The other half of the Write/Edit permission posture these tools adopt:
    * without this override, the AUTO-mode classifier sees the empty-string
@@ -248,7 +270,10 @@ export abstract class BaseMediaPolicyTool<
    * key on — the two filesystem paths carry no secrets.
    */
   override toAutoClassifierInput(params: TParams): Record<string, unknown> {
-    return { inputPath: params.inputPath, outputDir: params.outputDir };
+    const outputDir = this.optionalOutputDir(params);
+    return outputDir === undefined
+      ? { inputPath: params.inputPath }
+      : { inputPath: params.inputPath, outputDir };
   }
 }
 
@@ -325,8 +350,8 @@ export function policyOutputFileName(params: {
  * `required` list: the model-facing alternative is `resourceId`, which
  * the call gate resolves into `inputPath` BEFORE validation — so a
  * missing inputPath at this point means the caller supplied neither. */
-export function validateMediaPolicyIoParams(
-  params: MediaPolicyIoParams,
+export function validateMediaPolicyInputParams(
+  params: MediaPolicyInputParams,
 ): string | null {
   if ((params.inputPath as string | undefined) === undefined) {
     return (
@@ -337,7 +362,21 @@ export function validateMediaPolicyIoParams(
   if (!path.isAbsolute(params.inputPath)) {
     return `inputPath must be an absolute path (got ${JSON.stringify(params.inputPath)})`;
   }
-  if (!path.isAbsolute(params.outputDir)) {
+  return null;
+}
+
+/** {@link validateMediaPolicyInputParams} plus the output directory. An
+ * absent `outputDir` reads as "this tool declares none" — the tools that
+ * do declare one list it in their schema's `required`, which is checked
+ * before this runs. */
+export function validateMediaPolicyIoParams(
+  params: MediaPolicyInputParams & { outputDir?: string },
+): string | null {
+  const inputError = validateMediaPolicyInputParams(params);
+  if (inputError) {
+    return inputError;
+  }
+  if (params.outputDir !== undefined && !path.isAbsolute(params.outputDir)) {
     return `outputDir must be an absolute path (got ${JSON.stringify(params.outputDir)})`;
   }
   return null;
@@ -356,8 +395,8 @@ export function validateMediaPolicyIoParams(
  * displayName the model already saw at delivery. `outputDir` errors keep
  * the full path (the caller chose it).
  */
-export async function assertMediaPolicyIo(
-  params: MediaPolicyIoParams,
+export async function assertMediaPolicyInput(
+  params: MediaPolicyInputParams,
 ): Promise<{ inputSizeBytes: number }> {
   let inputStat;
   try {
@@ -370,6 +409,14 @@ export async function assertMediaPolicyIo(
       `input is not a regular file: ${path.basename(params.inputPath)}`,
     );
   }
+  return { inputSizeBytes: inputStat.size };
+}
+
+/** {@link assertMediaPolicyInput} plus the output directory. */
+export async function assertMediaPolicyIo(
+  params: MediaPolicyIoParams,
+): Promise<{ inputSizeBytes: number }> {
+  const { inputSizeBytes } = await assertMediaPolicyInput(params);
   let outStat;
   try {
     outStat = await fs.lstat(params.outputDir);
@@ -379,7 +426,7 @@ export async function assertMediaPolicyIo(
   if (!outStat.isDirectory()) {
     throw new Error(`output path is not a real directory: ${params.outputDir}`);
   }
-  return { inputSizeBytes: inputStat.size };
+  return { inputSizeBytes };
 }
 
 /** Compact human-readable byte count for disclosure texts ("8.2MB",

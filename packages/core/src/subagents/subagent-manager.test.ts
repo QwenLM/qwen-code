@@ -1858,7 +1858,10 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
+      // File agents first (agent1 from the project level, which takes
+      // precedence), then the builtins in registry order. The three media
+      // types are absent: they follow their tool's modelAccess switch, and
+      // nothing enabled it here.
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -1867,6 +1870,18 @@ System prompt 3`);
         'Explore',
         'statusline-setup',
       ]);
+    });
+
+    it('lists a media type only once its tool is model-accessible', async () => {
+      vi.spyOn(mockConfig, 'getOmniPolicyToolsSettings').mockReturnValue({
+        sample_frames: { modelAccess: { enabled: true } },
+        get_audio: { modelAccess: { enabled: false } },
+      });
+
+      const names = (await manager.listSubagents()).map((s) => s.name);
+      expect(names).toContain('sample_frames');
+      expect(names).not.toContain('get_audio');
+      expect(names).not.toContain('get_clip');
     });
 
     it('should prioritize project level over user level', async () => {
@@ -1891,6 +1906,8 @@ System prompt 3`);
         sortOrder: 'asc',
       });
 
+      // Spelled out rather than derived: deriving the expected order with the
+      // same comparator the code uses would assert nothing.
       const names = subagents.map((s) => s.name);
       expect(names).toEqual([
         'agent1',
@@ -1910,7 +1927,6 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
@@ -1926,7 +1942,6 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',

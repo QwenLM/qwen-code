@@ -34,7 +34,8 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { getErrorMessage } from '../../utils/errors.js';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -87,6 +88,10 @@ import type {
 import {
   BuiltinAgentRegistry,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
+  MEDIA_SUBAGENT_TYPES,
+  VISUAL_MEDIA_SUBAGENT_TYPES,
+  isMediaSubagentType,
+  isVisualMediaSubagentType,
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
@@ -245,6 +250,84 @@ export interface AgentParams {
    * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
+  /**
+   * The five media parameters, valid only for the media subagent types
+   * (sample_frames / get_audio / get_clip). The parent extracts this window
+   * and seeds the result into the child's first message, so the child never
+   * has to locate its own subject.
+   */
+  inputPath?: string;
+  start?: string;
+  end?: string;
+  fps?: number;
+  resolution?: string;
+}
+
+const MEDIA_PARAM_KEYS = [
+  'inputPath',
+  'start',
+  'end',
+  'fps',
+  'resolution',
+] as const;
+
+/**
+ * Cross-validates the media parameters against `subagent_type`.
+ *
+ * Structural only, and deliberately so: `validateToolParams` is synchronous
+ * and cannot reach the omni module, so the clock strings and the resolution
+ * are parsed by the extraction tool instead — still before the child is
+ * spawned, which is what makes a malformed window cheap.
+ */
+function validateMediaParams(params: AgentParams): string | null {
+  // Providers that require every advertised property send empty placeholders
+  // for the ones they are not using; same normalization as `working_dir`.
+  for (const key of ['inputPath', 'start', 'end', 'resolution'] as const) {
+    const value = params[key];
+    if (value === null || (typeof value === 'string' && value.trim() === '')) {
+      params[key] = undefined;
+    }
+  }
+  if (params.fps === null) {
+    params.fps = undefined;
+  }
+
+  const type = params.subagent_type ?? '';
+  if (!isMediaSubagentType(type)) {
+    const supplied = MEDIA_PARAM_KEYS.filter(
+      (key) => params[key] !== undefined,
+    );
+    if (supplied.length > 0) {
+      return `Parameter(s) ${supplied.join(', ')} are only valid with subagent_type ${MEDIA_SUBAGENT_TYPES.join(', ')}.`;
+    }
+    return null;
+  }
+
+  for (const key of ['inputPath', 'start', 'end'] as const) {
+    if (typeof params[key] !== 'string') {
+      return `Parameter "${key}" is required by subagent_type "${type}", which analyzes one window of one media file.`;
+    }
+  }
+  if (!path.isAbsolute(params.inputPath as string)) {
+    return 'Parameter "inputPath" must be an absolute path.';
+  }
+  // The parent already paid to extract and upload the window and is waiting
+  // for the reading of it, so a task handle is not an acceptable answer here.
+  if (params.run_in_background === true) {
+    return `Parameter "run_in_background" cannot be used with subagent_type "${type}": it returns its analysis inline, in this turn.`;
+  }
+  if (isVisualMediaSubagentType(type)) {
+    if (typeof params.fps !== 'number') {
+      return `Parameter "fps" is required by subagent_type "${type}".`;
+    }
+  } else {
+    for (const key of ['fps', 'resolution'] as const) {
+      if (params[key] !== undefined) {
+        return `Parameter "${key}" is not used by subagent_type "${type}".`;
+      }
+    }
+  }
+  return null;
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -818,6 +901,29 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
         },
+        inputPath: {
+          type: 'string',
+          description: `Absolute path to the media file to analyze. Required by the media agent types (${MEDIA_SUBAGENT_TYPES.join(', ')}) and rejected for any other type.`,
+        },
+        start: {
+          type: 'string',
+          description:
+            'Start of the window to analyze, as HH:MM:SS, MM:SS or seconds. Required by the media agent types.',
+        },
+        end: {
+          type: 'string',
+          description:
+            'End of the window to analyze, same format as start. Required by the media agent types.',
+        },
+        fps: {
+          type: 'number',
+          description: `Frames sampled per second of the window. Required by ${VISUAL_MEDIA_SUBAGENT_TYPES.join(' and ')}; 1 means one frame per second.`,
+        },
+        resolution: {
+          type: 'string',
+          description:
+            'Optional picture quality: a cost tier ("low" ~64, "normal" ~128, "high" ~384 visual tokens per frame), a ladder step ("480p", "720p"), a long-edge pixel count ("768") or WxH. Aspect ratio is preserved and the media is never enlarged. Defaults to "normal".',
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -894,7 +1000,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. The media agent types (${MEDIA_SUBAGENT_TYPES.join(', ')}) are the exception: they always return their analysis inline, in this turn, and reject \`run_in_background\`. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -1165,6 +1271,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "working_dir" requires an explicit subagent_type (and cannot be "fork").';
       }
+    }
+
+    const mediaError = validateMediaParams(params);
+    if (mediaError) {
+      return mediaError;
     }
 
     if (params.plan_mode_required !== undefined) {
@@ -2506,8 +2617,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Implicit background requests downgrade to an awaited foreground run
       // instead of orphaning the child's results. The runtime spawn guard
       // above rejects an explicit run_in_background: true request.
-      const backgroundRequested =
-        isFork && !this.config.isInteractive()
+      // A media agent is spawned because the parent wants the analysis in this
+      // turn, and the parent already paid to extract and upload its subject.
+      // Backgrounding it would return a task handle where an answer belongs.
+      const isMediaAgent = isMediaSubagentType(subagentConfig.name);
+      const backgroundRequested = isMediaAgent
+        ? false
+        : isFork && !this.config.isInteractive()
           ? true
           : (this.params.run_in_background ??
             (subagentConfig.background === true ||
@@ -2535,6 +2651,40 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,
         );
+      }
+
+      // ── Media seeding ─────────────────────────────────────────────
+      // Extract and upload the window here, in the parent, so the child's
+      // first message already carries its subject: one round trip less, and a
+      // child that cannot forget to fetch what it was asked about. Ahead of
+      // every spawn step so a bad window costs this error alone — no runtime
+      // config, no worktree, no agent to dispose of. Imported dynamically to
+      // keep the omni graph out of the ACP/serve bundle.
+      let seededMedia: Part[] | undefined;
+      if (isMediaAgent) {
+        const { buildMediaSubagentSeed } = await import(
+          '../../omni/subagent-media.js'
+        );
+        try {
+          seededMedia = await buildMediaSubagentSeed(
+            {
+              subagentType: subagentConfig.name.toLowerCase(),
+              inputPath: this.params.inputPath as string,
+              start: this.params.start as string,
+              end: this.params.end as string,
+              fps: this.params.fps,
+              resolution: this.params.resolution,
+            },
+            this.config,
+            signal ?? new AbortController().signal,
+          );
+        } catch (error) {
+          const message = getErrorMessage(error);
+          return this.buildSpawnBlockedResult(
+            `Error: ${subagentConfig.name} could not be given its media: ${message}`,
+            `Media extraction failed: ${message}`,
+          );
+        }
       }
 
       if (shouldRunInBackground) {
@@ -2928,6 +3078,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      if (seededMedia) {
+        contextState.set('initial_messages_override', [
+          { role: 'user', parts: [{ text: taskPrompt }, ...seededMedia] },
+        ]);
+      }
       // Always set hook_context so ${hook_context} in systemPrompt does not
       // throw when no hook is configured or the hook returns no additional context.
       contextState.set('hook_context', '');

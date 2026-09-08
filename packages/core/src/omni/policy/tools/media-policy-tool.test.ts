@@ -11,13 +11,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaPolicyToolDescriptor } from '../../../tools/tools.js';
 import { Kind, type ToolResult } from '../../../tools/tools.js';
 import {
+  assertMediaPolicyInput,
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
   createPolicyToolTimeoutBudget,
   DEFAULT_POLICY_TOOL_TIMEOUT_MS,
   formatBytesShort,
+  MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES,
+  MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   resolvePolicyToolTimeoutMs,
   policyOutputFileName,
+  validateMediaPolicyInputParams,
   validateMediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
@@ -103,6 +107,45 @@ describe('createPolicyToolTimeoutBudget', () => {
   });
 });
 
+describe('media-policy schema fragments', () => {
+  it('composes the io fragment out of the input fragment plus outputDir', () => {
+    expect(MEDIA_POLICY_IO_SCHEMA_PROPERTIES).toEqual({
+      ...MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES,
+      outputDir: expect.objectContaining({ type: 'string' }),
+    });
+  });
+
+  it('keeps outputDir out of the input fragment', () => {
+    // A tool that delivers straight into the model's context must not be
+    // able to advertise a parameter it never writes to.
+    expect(MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES).not.toHaveProperty(
+      'outputDir',
+    );
+  });
+});
+
+describe('validateMediaPolicyInputParams', () => {
+  it('accepts an absolute inputPath with no output directory in sight', () => {
+    expect(
+      validateMediaPolicyInputParams({ inputPath: '/a/in.mp4' }),
+    ).toBeNull();
+  });
+
+  it('rejects a relative inputPath', () => {
+    expect(validateMediaPolicyInputParams({ inputPath: 'in.mp4' })).toMatch(
+      /inputPath must be an absolute/,
+    );
+  });
+
+  it('asks for inputPath or resourceId when neither was supplied', () => {
+    expect(
+      validateMediaPolicyInputParams(
+        {} as unknown as Parameters<typeof validateMediaPolicyInputParams>[0],
+      ),
+    ).toMatch(/inputPath.*or resourceId/);
+  });
+});
+
 describe('validateMediaPolicyIoParams', () => {
   it('accepts absolute paths', () => {
     expect(
@@ -131,6 +174,14 @@ describe('validateMediaPolicyIoParams', () => {
         outputDir: '/b/staging',
       } as unknown as Parameters<typeof validateMediaPolicyIoParams>[0]),
     ).toMatch(/inputPath.*or resourceId/);
+  });
+
+  it('tolerates an absent outputDir so one default fits both param shapes', () => {
+    // BaseMediaPolicyTool.validateToolParamValues runs this for EVERY
+    // policy tool, including the ones that declare no outputDir. For the
+    // tools that do declare one, the schema's `required` has already
+    // rejected a missing value before this runs.
+    expect(validateMediaPolicyIoParams({ inputPath: '/a/in.mp4' })).toBeNull();
   });
 });
 
@@ -191,6 +242,44 @@ describe('policyOutputFileName', () => {
         extension: '.wav',
       }),
     ).toBe('media-audio.wav');
+  });
+});
+
+describe('assertMediaPolicyInput', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-mp-in-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('returns the input size with no output directory involved', async () => {
+    const inputPath = path.join(root, 'in.bin');
+    await fs.writeFile(inputPath, Buffer.alloc(77));
+    await expect(assertMediaPolicyInput({ inputPath })).resolves.toEqual({
+      inputSizeBytes: 77,
+    });
+  });
+
+  it('names only the basename of a missing input', async () => {
+    const error = await assertMediaPolicyInput({
+      inputPath: path.join(root, 'nope.bin'),
+    }).catch((err: Error) => err);
+    expect((error as Error).message).toMatch(/input file not found: nope\.bin/);
+    expect((error as Error).message).not.toContain(root);
+  });
+
+  it('rejects a symlinked input (never reads through a link)', async () => {
+    const real = path.join(root, 'real.bin');
+    await fs.writeFile(real, 'x');
+    const link = path.join(root, 'link.bin');
+    await fs.symlink(real, link);
+    await expect(assertMediaPolicyInput({ inputPath: link })).rejects.toThrow(
+      /not a regular file/,
+    );
   });
 });
 
@@ -404,6 +493,91 @@ describe('BaseMediaPolicyTool validation', () => {
           level: 3,
         }),
       ).toBeNull();
+    });
+  });
+
+  describe('a tool that declares no outputDir', () => {
+    interface InputOnlyParams {
+      inputPath: string;
+      start: string;
+    }
+
+    class InputOnlyInvocation extends BaseToolInvocation<
+      InputOnlyParams,
+      ToolResult
+    > {
+      getDescription(): string {
+        return 'input only';
+      }
+      async execute(): Promise<ToolResult> {
+        return { llmContent: 'ok', returnDisplay: 'ok' };
+      }
+    }
+
+    class InputOnlyTool extends BaseMediaPolicyTool<InputOnlyParams> {
+      constructor() {
+        super(
+          'input_only_tool',
+          'InputOnlyTool',
+          'test',
+          Kind.Read,
+          {
+            type: 'object',
+            properties: {
+              ...MEDIA_POLICY_INPUT_SCHEMA_PROPERTIES,
+              start: { type: 'string' },
+            },
+            required: ['start'],
+            additionalProperties: false,
+          },
+          {},
+        );
+      }
+      override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+        return {
+          kind: 'media_policy',
+          inputMediaTypes: ['video'],
+          outputs: [],
+        };
+      }
+      protected createInvocation(params: InputOnlyParams): InputOnlyInvocation {
+        return new InputOnlyInvocation(params);
+      }
+    }
+
+    const inputOnly = new InputOnlyTool();
+
+    it('validates params that carry no outputDir at all', () => {
+      expect(
+        inputOnly.validateToolParams({ inputPath: '/a/in.mp4', start: '0' }),
+      ).toBeNull();
+    });
+
+    it('still enforces the absolute inputPath rule', () => {
+      expect(
+        inputOnly.validateToolParams({ inputPath: 'in.mp4', start: '0' }),
+      ).toMatch(/absolute/);
+    });
+
+    it('leaves outputDir out of the AUTO-classifier projection', () => {
+      // The classifier's path rules key on the fields present; projecting
+      // an undefined outputDir would make a parameter the tool does not
+      // have look like an empty path.
+      expect(
+        inputOnly.toAutoClassifierInput({
+          inputPath: '/a/in.mp4',
+          start: '0',
+        }),
+      ).toEqual({ inputPath: '/a/in.mp4' });
+    });
+
+    it('keeps projecting outputDir for a tool that does declare one', () => {
+      expect(
+        tool.toAutoClassifierInput({
+          inputPath: '/a/in.png',
+          outputDir: '/b/staging',
+        }),
+      ).toEqual({ inputPath: '/a/in.png', outputDir: '/b/staging' });
     });
   });
 });

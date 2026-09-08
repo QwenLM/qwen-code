@@ -85,6 +85,12 @@ export const ToolNames = {
   OMNI_CAPTION_AUDIO: 'omni_caption_audio',
   OMNI_OCR_IMAGE: 'omni_ocr_image',
   OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'omni_understand_video_segments',
+  // Media-policy tools that deliver their result INTO the model's context
+  // instead of writing a file the model has to read back. Unprefixed on
+  // purpose: the tool name is also its policyTools settings key.
+  SAMPLE_FRAMES: 'sample_frames',
+  GET_AUDIO: 'get_audio',
+  GET_CLIP: 'get_clip',
   // Omni memory recall (registered only when omni is enabled AND
   // `omni.memory.recall.mode === 'active'` — D10 mutual exclusion).
   OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
@@ -156,6 +162,9 @@ export const ToolDisplayNames = {
   OMNI_CAPTION_AUDIO: 'CaptionAudio',
   OMNI_OCR_IMAGE: 'OcrImage',
   OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'UnderstandVideoSegments',
+  SAMPLE_FRAMES: 'SampleFrames',
+  GET_AUDIO: 'GetAudio',
+  GET_CLIP: 'GetClip',
   OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
 } as const;
 

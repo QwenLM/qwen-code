@@ -135,8 +135,19 @@ Subagents are stored as Markdown files in multiple locations:
 - **Project-level**: `.qwen/agents/` (highest precedence)
 - **User-level**: `~/.qwen/agents/` (fallback)
 - **Extension-level**: Provided by installed extensions
+- **Builtin**: Compiled in, lowest precedence — a file agent of the same name shadows it
 
 This allows you to have project-specific agents, personal agents that work across all projects, and extension-provided agents that add specialized capabilities.
+
+### Media Subagents
+
+Three builtin types — `sample_frames`, `get_audio`, and `get_clip` — analyze one window of one media file. They are unusual in two ways. Each is restricted to the single matching media tool (no shell, so it cannot hand-roll ffmpeg and silently drop an audio track), and the parent extracts and uploads the window itself, seeding the media into the child's first message. The child therefore never has to locate its own subject, and a malformed window fails at the call site instead of wasting a whole child session.
+
+They require `inputPath`, `start`, and `end` (plus `fps` for the two visual ones), always run in the foreground, and reject `run_in_background: true`. Launch several in one message to analyze several windows at once. See [Agent Tool](../../developers/tools/task.md) for the argument reference.
+
+Because the parent uploads the window rather than inlining it, these types need omni media delivery enabled for the modality being sent — see [Omni Media Policies](omni-media-policies.md). If the media is extracted but cannot be uploaded, the call fails loudly rather than falling back to a base64 payload.
+
+Each type also follows the `modelAccess.enabled` switch of the tool it is named after, since seeding the window is a call of that very tool. With the switch off the type is not listed and cannot be launched — otherwise leaving a tool fixed-policy-only would still hand the model its delivery, by way of `agent`.
 
 ### Extension Subagents
 

@@ -173,6 +173,10 @@ export interface MediaProbeResult {
   sampleRateHz?: number;
   /** Channel count of the first audio stream (audio only). */
   channels?: number;
+  /** Whether an audio stream is present (audio/video). Callers must test
+   * `=== false`: absent means the probe reached no conclusion, which is not
+   * the same as a confirmed silent file. */
+  hasAudioStream?: boolean;
 }
 
 /** Parse an ffprobe rational like "30000/1001" (or plain "25") into fps. */
@@ -359,6 +363,7 @@ export async function probeMediaMetadata(
         bitRate: bitRateFor(audioStream),
         sampleRateHz: parsePositiveInt(audioStream?.sample_rate),
         ...(typeof channels === 'number' && channels > 0 ? { channels } : {}),
+        hasAudioStream: audioStream !== undefined,
       };
     }
     case 'video':
@@ -373,6 +378,7 @@ export async function probeMediaMetadata(
           parseFrameRate(videoStream?.r_frame_rate),
         codec: videoStream?.codec_name,
         bitRate: bitRateFor(videoStream),
+        hasAudioStream: audioStream !== undefined,
       };
   }
 }

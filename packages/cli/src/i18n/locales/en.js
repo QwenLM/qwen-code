@@ -236,6 +236,9 @@ export default {
   'toolDisplayName.OcrImage': 'toolDisplayName.OcrImage',
   'toolDisplayName.UnderstandVideoSegments':
     'toolDisplayName.UnderstandVideoSegments',
+  'toolDisplayName.SampleFrames': 'toolDisplayName.SampleFrames',
+  'toolDisplayName.GetAudio': 'toolDisplayName.GetAudio',
+  'toolDisplayName.GetClip': 'toolDisplayName.GetClip',
   'toolDisplayName.ConvertImage': 'toolDisplayName.ConvertImage',
   'toolDisplayName.TranscribeAudio': 'toolDisplayName.TranscribeAudio',
   'toolDisplayName.RecallMediaMemory': 'toolDisplayName.RecallMediaMemory',

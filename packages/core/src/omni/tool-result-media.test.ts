@@ -147,6 +147,144 @@ describe('processToolResultOmniMedia', () => {
     expect(keptInline).toBe(4);
   });
 
+  describe('context-media tool budgets', () => {
+    /** The production funnel shape, with the tool name the budget keys on. */
+    const funnel = (name: string, media: Part[]): Part[] => [
+      {
+        functionResponse: {
+          id: 'call_1',
+          name,
+          response: { output: 'ok' },
+          parts: media,
+        },
+      } as Part,
+    ];
+
+    const run = async (name: string, count: number): Promise<Part[]> => {
+      const result = await processToolResultOmniMedia(
+        funnel(
+          name,
+          Array.from({ length: count }, () =>
+            inlinePart('image/png', PNG_BYTES),
+          ),
+        ),
+        cfg({ image: true }),
+        signal,
+      );
+      return result[0]!.functionResponse?.parts as Part[];
+    };
+
+    it('gives sample_frames room for a full frame roll', async () => {
+      // 12 frames would lose 4 to the default budget of 8.
+      const nested = await run('sample_frames', 12);
+      expect(deliverMock).toHaveBeenCalledTimes(12);
+      expect(nested.filter((p) => p.fileData)).toHaveLength(12);
+      expect(nested.some((p) => p.inlineData)).toBe(false);
+    });
+
+    it.each([
+      ['sample_frames', 64],
+      ['get_audio', 8],
+      ['get_clip', 8],
+    ])(
+      'withholds an over-budget %s part instead of inlining it',
+      async (name, budget) => {
+        // Inline base64 is the one outcome that looks like success while
+        // breaking the delivery contract these tools exist for.
+        const nested = await run(name as string, (budget as number) + 1);
+        expect(deliverMock).toHaveBeenCalledTimes(budget as number);
+        expect(nested.filter((p) => p.fileData)).toHaveLength(budget as number);
+        expect(nested.some((p) => p.inlineData)).toBe(false);
+        expect(nested.at(-1)!.text).toMatch(
+          /withheld: this result's upload budget is exhausted/,
+        );
+      },
+    );
+
+    it('leaves a tool outside the map on the default inline fallback', async () => {
+      const nested = await run('read_file', 9);
+      expect(deliverMock).toHaveBeenCalledTimes(8);
+      expect(nested.filter((p) => p.inlineData)).toHaveLength(1);
+    });
+
+    describe('keyframe timestamp labels', () => {
+      const labelled = (...labels: string[]): Part[] =>
+        funnel(
+          'sample_frames',
+          labels.flatMap((label) => [
+            { text: label } as Part,
+            inlinePart('image/png', PNG_BYTES),
+          ]),
+        );
+
+      const nestedOf = async (parts: Part[]): Promise<Part[]> =>
+        (
+          await processToolResultOmniMedia(parts, cfg({ image: true }), signal)
+        )[0]!.functionResponse?.parts as Part[];
+
+      it('re-seats each label after the handle, still touching its own frame', async () => {
+        // The handle leads every replacement group, so a label left where the
+        // tool put it would end up separated from the media — and converters
+        // that relocate media carry only the part IMMEDIATELY before it.
+        deliverMock.mockResolvedValue({
+          fileUri: 'oss://bucket/key',
+          mimeType: 'image/png',
+          sha256: 'a'.repeat(64),
+          recognized: { modality: 'image' },
+          tokenEstimate: {
+            estimatedTokenCount: 1,
+            method: 'raw-resource-v1',
+            status: 'ok',
+          },
+          deduped: false,
+          resourceId: 'media-4-ab12',
+        });
+        const nested = await nestedOf(labelled('<00:11>', '<00:12>'));
+        expect(nested.map(tagPart)).toEqual([
+          'handle',
+          'text',
+          'media',
+          'handle',
+          'text',
+          'media',
+        ]);
+        expect(nested[1]!.text).toBe('<00:11>');
+        expect(nested[4]!.text).toBe('<00:12>');
+      });
+
+      it('keeps the label leading the group when the frame was withheld', async () => {
+        deliverMock.mockResolvedValue({
+          fileUri: '',
+          mimeType: 'image/png',
+          sha256: '',
+          recognized: { modality: 'image' },
+          tokenEstimate: {
+            estimatedTokenCount: 1,
+            method: 'raw-resource-v1',
+            status: 'ok',
+          },
+          deduped: false,
+          omission: { reason: 'over the upload limit' },
+        });
+        const nested = await nestedOf(labelled('<00:11>'));
+        // No media to sit before, but the label still names whose slot the
+        // notice is about — dropping it would make the omission anonymous.
+        expect(nested.map(tagPart)).toEqual(['text', 'omission']);
+        expect(nested[0]!.text).toBe('<00:11>');
+      });
+
+      it('leaves a label alone when no media follows it', async () => {
+        const nested = await nestedOf(
+          funnel('sample_frames', [
+            inlinePart('image/png', PNG_BYTES),
+            { text: '<00:11>' } as Part,
+          ]),
+        );
+        expect(nested.map(tagPart)).toEqual(['media', 'text']);
+      });
+    });
+  });
+
   it('keeps parts inline when a single delivery fails, without failing the batch', async () => {
     deliverMock
       .mockRejectedValueOnce(new Error('upload exploded'))

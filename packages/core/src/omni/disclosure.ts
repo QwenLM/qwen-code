@@ -66,16 +66,26 @@ export function splitAnnotationBody(
 }
 
 /**
- * A bare keyframe timestamp label like `<00:11>` or `<1:02:03>` — the
- * adjacent text for one sampled frame (mirrors read_video's per-frame
- * `<timestamp>`). It deliberately carries NO 【媒体降质】<name>： prefix: the
- * shared degradation notice is stated once on the first frame's header, and
- * repeating the prefix on every one of N frames is pure noise. Anchored so
- * only a lone marker matches — the first frame's header (which begins with
- * 原视频…) does not.
+ * A bare keyframe timestamp label like `<00:11>`, `<03:14.3>` or
+ * `<1:02:03>` — the adjacent text for one sampled frame (mirrors
+ * read_video's per-frame `<timestamp>`). It deliberately carries NO
+ * 【媒体降质】<name>： prefix: the shared degradation notice is stated once on
+ * the first frame's header, and repeating the prefix on every one of N frames
+ * is pure noise. Anchored so only a lone marker matches — the first frame's
+ * header (which begins with 原视频…) does not.
  */
 export function isKeyframeTimestampLabel(text: string): boolean {
-  return /^<\d{1,2}:\d{2}(?::\d{2})?>$/.test(text);
+  return /^<\d{1,2}:\d{2}(?::\d{2})?(?:\.\d)?>$/.test(text);
+}
+
+/**
+ * The one producer for {@link isKeyframeTimestampLabel}. A label that fails
+ * that predicate is not merely ugly: it gets flattened into the tool result's
+ * summary string and its frame is left anonymous, so the round trip is
+ * pinned by unit test rather than trusted.
+ */
+export function formatKeyframeTimestampLabel(clockLabel: string): string {
+  return `<${clockLabel}>`;
 }
 
 /** Model-facing disclosure text for one degraded resource. */

@@ -9,7 +9,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { MAX_CONTEXT_MEDIA_FRAMES } from './policy/tools/context-media-tool.js';
 import {
   buildAdditionalMediaParts,
   buildTranscriptParts,
@@ -20,6 +22,7 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
+  isKeyframeTimestampLabel,
 } from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
@@ -31,6 +34,20 @@ const debugLogger = createDebugLogger('omni:tool-result');
 const MAX_UPLOADS_PER_TOOL_RESULT = 8;
 /** Aggregate upload-byte budget per tool result. */
 const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
+
+/**
+ * Tools whose entire result IS media delivered into the model's context.
+ * They get their own upload-count budget, and an over-budget part of
+ * theirs is WITHHELD rather than left inline: inline base64 is the one
+ * outcome that looks like success while breaking the very delivery
+ * contract these tools exist to satisfy, and a frame's worth of base64
+ * costs more request body than the upload it replaced.
+ */
+const CONTEXT_MEDIA_UPLOAD_BUDGET: Record<string, number> = {
+  [ToolNames.SAMPLE_FRAMES]: MAX_CONTEXT_MEDIA_FRAMES,
+  [ToolNames.GET_AUDIO]: MAX_UPLOADS_PER_TOOL_RESULT,
+  [ToolNames.GET_CLIP]: MAX_UPLOADS_PER_TOOL_RESULT,
+};
 
 /**
  * Second normalization trigger point (design §5.2/§8.2): tool-result media
@@ -64,11 +81,16 @@ export async function processToolResultOmniMedia(
 
   const modalities = config.getContentGeneratorConfig?.()?.modalities ?? {};
   let changed = false;
+  const toolName = responseParts.find((p) => p.functionResponse?.name)
+    ?.functionResponse?.name;
   // Per-tool-result upload budget: a malicious/compromised tool must not
   // be able to fan out an unbounded number of uploads (cost/quota burn,
   // multi-minute stalls) from a single result. Parts over budget stay
-  // inline (safe: they were produced locally and already fit in memory).
-  let uploadsRemaining = MAX_UPLOADS_PER_TOOL_RESULT;
+  // inline (safe: they were produced locally and already fit in memory)
+  // unless the tool is one of the context-media ones, which withhold.
+  const contextMediaBudget =
+    toolName === undefined ? undefined : CONTEXT_MEDIA_UPLOAD_BUDGET[toolName];
+  let uploadsRemaining = contextMediaBudget ?? MAX_UPLOADS_PER_TOOL_RESULT;
   let uploadBytesRemaining = MAX_UPLOAD_BYTES_PER_TOOL_RESULT;
 
   /** Returns the replacement Parts for one Part: `[part]` (unchanged),
@@ -90,11 +112,24 @@ export async function processToolResultOmniMedia(
     const sniffed = sniffMediaType(bytes.subarray(0, 4096));
     if (!sniffed) return [part];
     if (!modalities[sniffed.modality]) return [part];
+    // Bound before the budget check: the withhold notice below names the
+    // part, and the guard-rejection path further down needs it too.
+    const displayName = inline.displayName ?? `tool-media.${top}`;
     if (uploadsRemaining <= 0 || bytes.length > uploadBytesRemaining) {
       debugLogger.debug(
-        `tool-result media budget exhausted; keeping part inline (${bytes.length} bytes)`,
+        `tool-result media budget exhausted for ${toolName ?? 'tool'}; ${
+          contextMediaBudget === undefined
+            ? 'keeping part inline'
+            : 'withholding part'
+        } (${bytes.length} bytes)`,
       );
-      return [part];
+      if (contextMediaBudget === undefined) return [part];
+      changed = true;
+      return [
+        {
+          text: `[Tool media part ${displayName} withheld: this result's upload budget is exhausted]`,
+        },
+      ];
     }
 
     // Everything from staging-dir setup onward sits inside the try: mkdir
@@ -104,9 +139,6 @@ export async function processToolResultOmniMedia(
     // which would report a tool that succeeded as failed.
     const store = new OmniObjectStore(config.storage.getQwenDir());
     let tempPath: string | undefined;
-    // Hoisted out of the try: the guard-rejection path below names the part
-    // in the handle annotation it emits.
-    const displayName = inline.displayName ?? `tool-media.${top}`;
     try {
       // Symlink-guarded (fail closed → this part stays inline): a link
       // planted at downloads/ would redirect the write outside the store.
@@ -252,9 +284,35 @@ export async function processToolResultOmniMedia(
   for (const part of responseParts) {
     const nested = part.functionResponse?.parts;
     if (Array.isArray(nested) && nested.length > 0) {
+      const nestedParts = nested as Part[];
       const convertedNested: Part[] = [];
       let nestedChanged = false;
-      for (const nestedPart of nested as Part[]) {
+      for (let i = 0; i < nestedParts.length; i++) {
+        const nestedPart = nestedParts[i];
+        const media = nestedParts[i + 1];
+        if (
+          nestedPart.text !== undefined &&
+          isKeyframeTimestampLabel(nestedPart.text) &&
+          media?.inlineData !== undefined
+        ) {
+          // The label must end up IMMEDIATELY before its media part, and the
+          // resource handle that leads the replacement group would otherwise
+          // sit between them — after which converters relocating the media
+          // leave the label behind and the frame is anonymous again.
+          const converted = await convertPart(media);
+          if (converted.length !== 1 || converted[0] !== media) {
+            nestedChanged = true;
+          }
+          const mediaAt = converted.findIndex(
+            (p) => p.inlineData !== undefined || p.fileData !== undefined,
+          );
+          // Nothing was delivered (withheld / omitted): the label still marks
+          // whose slot the notice is about, so it leads the group instead.
+          converted.splice(mediaAt < 0 ? 0 : mediaAt, 0, nestedPart);
+          convertedNested.push(...converted);
+          i++;
+          continue;
+        }
         const converted = await convertPart(nestedPart);
         if (converted.length !== 1 || converted[0] !== nestedPart) {
           nestedChanged = true;

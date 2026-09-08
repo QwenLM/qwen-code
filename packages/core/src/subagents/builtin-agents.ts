@@ -17,6 +17,38 @@ import type { SubagentConfig } from './types.js';
 export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
 
 /**
+ * The three subagent types whose subject media is extracted and uploaded by
+ * the parent, then seeded into the child's first message. They are named
+ * after the tools that do the extracting.
+ */
+export const MEDIA_SUBAGENT_TYPES: readonly string[] = [
+  ToolNames.SAMPLE_FRAMES,
+  ToolNames.GET_AUDIO,
+  ToolNames.GET_CLIP,
+];
+
+/** Types that need a frame rate, i.e. the two that deliver picture. */
+export const VISUAL_MEDIA_SUBAGENT_TYPES: readonly string[] = [
+  ToolNames.SAMPLE_FRAMES,
+  ToolNames.GET_CLIP,
+];
+
+/**
+ * Synchronous so the `agent` tool can cross-validate its media parameters in
+ * `validateToolParams`, which cannot await the omni module. Case-insensitive
+ * to match how the registry resolves a type name, so validation and dispatch
+ * cannot disagree about whether a call is a media call.
+ */
+export function isMediaSubagentType(subagentType: string): boolean {
+  return MEDIA_SUBAGENT_TYPES.includes(subagentType.toLowerCase());
+}
+
+/** Whether a media subagent type delivers picture, and so needs a frame rate. */
+export function isVisualMediaSubagentType(subagentType: string): boolean {
+  return VISUAL_MEDIA_SUBAGENT_TYPES.includes(subagentType.toLowerCase());
+}
+
+/**
  * Registry of built-in subagents that are always available to all users.
  * These agents are embedded in the codebase and cannot be modified or deleted.
  */
@@ -258,6 +290,48 @@ Guidelines:
 - If the script includes git commands, prefix them with GIT_OPTIONAL_LOCKS=0 to avoid index.lock contention (e.g. GIT_OPTIONAL_LOCKS=0 git branch --show-current)
 - IMPORTANT: At the end of your response, remind the user that they can ask Qwen Code to make further changes to the status line at any time.
 `,
+    },
+    {
+      name: ToolNames.SAMPLE_FRAMES,
+      description:
+        'Analyzes a window of a video as evenly sampled still frames. Requires inputPath, start, end and fps; the caller extracts the frames and attaches them, so this agent starts with the images in hand. Use it to scan or locate something across a stretch of video without spending the parent context on every frame.',
+      tools: [ToolNames.SAMPLE_FRAMES],
+      color: 'cyan',
+      systemPrompt: `You are a visual analysis subagent. The frames you are asked about are already attached to your first message; the text there enumerates their timestamps in the order they appear. You do not need to look for them, open them, or call a tool to fetch them.
+
+They are stills sampled from one window of one video. Motion between consecutive frames is not shown and there is no sound — do not narrate action you cannot see in a single frame, and do not describe audio.
+
+You may call ${ToolNames.SAMPLE_FRAMES} on the absolute path named in your first message to re-sample a narrower window at a higher frame rate, when the attached frames are too coarse to answer.
+
+Report only what the parent asked for, and answer it directly. Cite the frame timestamps that support each claim. When the frames do not settle the question, say so instead of filling the gap with a guess.`,
+    },
+    {
+      name: ToolNames.GET_AUDIO,
+      description:
+        'Analyzes the audio of a video window: speech, speaker turns, music, and other sound. Requires inputPath, start and end; the caller extracts the audio and attaches it. Use it when the answer is in what is heard rather than what is seen.',
+      tools: [ToolNames.GET_AUDIO],
+      color: 'magenta',
+      systemPrompt: `You are an audio analysis subagent. The audio you are asked about is already attached to your first message. You do not need to look for it, open it, or call a tool to fetch it.
+
+It is one window of one video's soundtrack, and it is the only thing you can perceive — you cannot see the picture. Do not describe anything visual.
+
+You may call ${ToolNames.GET_AUDIO} on the absolute path named in your first message to hear a different window, when the attached audio does not cover what the parent asked about.
+
+Report only what the parent asked for, and answer it directly. Quote speech verbatim when the wording matters, and give times relative to the window you were handed. When something is inaudible or ambiguous, say so rather than inventing it.`,
+    },
+    {
+      name: ToolNames.GET_CLIP,
+      description:
+        'Analyzes a short video window with its audio track intact, as one clip. Requires inputPath, start, end and fps; the caller cuts the clip and attaches it. Use it when the answer needs picture and sound together — lip sync, who spoke, what a sound came from — rather than frames alone.',
+      tools: [ToolNames.GET_CLIP, ToolNames.SAMPLE_FRAMES],
+      color: 'blue',
+      systemPrompt: `You are an audio-visual analysis subagent. The clip you are asked about is already attached to your first message. You do not need to look for it, open it, or call a tool to fetch it.
+
+It is one continuous window of one video, picture and sound together, so you can attribute a sound to what produced it and tell who is speaking.
+
+On the absolute path named in your first message you may call ${ToolNames.GET_CLIP} for a different window, or ${ToolNames.SAMPLE_FRAMES} when you need a denser look at the picture alone.
+
+Report only what the parent asked for, and answer it directly. Give times relative to the clip you were handed, and state which of picture or sound each claim rests on. When the clip does not settle the question, say so instead of guessing.`,
     },
   ];
 

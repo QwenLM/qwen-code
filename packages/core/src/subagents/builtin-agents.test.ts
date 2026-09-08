@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
-import { BuiltinAgentRegistry } from './builtin-agents.js';
+import {
+  BuiltinAgentRegistry,
+  MEDIA_SUBAGENT_TYPES,
+  isMediaSubagentType,
+} from './builtin-agents.js';
 
 describe('BuiltinAgentRegistry', () => {
   describe('getBuiltinAgents', () => {
@@ -80,6 +84,39 @@ describe('BuiltinAgentRegistry', () => {
 
       expect(exploreAgent?.tools).toBeDefined();
       expect(exploreAgent?.tools).not.toContain('ask_user_question');
+    });
+  });
+
+  describe('media subagent types', () => {
+    it('registers all three, each named after its extraction tool', () => {
+      for (const type of MEDIA_SUBAGENT_TYPES) {
+        expect(BuiltinAgentRegistry.getBuiltinAgent(type)).toBeDefined();
+        expect(isMediaSubagentType(type)).toBe(true);
+      }
+      expect(isMediaSubagentType('general-purpose')).toBe(false);
+    });
+
+    it('never grants the shell — a subagent given it hand-rolls ffmpeg, which drops the audio track', () => {
+      for (const type of MEDIA_SUBAGENT_TYPES) {
+        const agent = BuiltinAgentRegistry.getBuiltinAgent(type);
+        expect(agent?.tools).toBeDefined();
+        expect(agent?.tools).not.toContain(ToolNames.SHELL);
+        expect(agent?.tools).toContain(type);
+      }
+    });
+
+    it('tells each type its media is already in hand, and to answer only what was asked', () => {
+      for (const type of MEDIA_SUBAGENT_TYPES) {
+        const prompt = BuiltinAgentRegistry.getBuiltinAgent(type)?.systemPrompt;
+        expect(prompt).toContain('already attached to your first message');
+        expect(prompt).toContain('Report only what the parent asked for');
+      }
+    });
+
+    it('gives the clip type frame sampling as well, for a denser look at the picture', () => {
+      expect(
+        BuiltinAgentRegistry.getBuiltinAgent(ToolNames.GET_CLIP)?.tools,
+      ).toEqual([ToolNames.GET_CLIP, ToolNames.SAMPLE_FRAMES]);
     });
   });
 
