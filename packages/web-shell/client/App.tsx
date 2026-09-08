@@ -17998,7 +17998,7 @@ export function App({
                               sessionActiveWorkState === 'active'
                             }
                             onOpen={
-                              showFloatingTodos
+                              sessionWorkflowEnabled && showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
                                   ? openWorkflowInspector
                                   : openTasksPanel
