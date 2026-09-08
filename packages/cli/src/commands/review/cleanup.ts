@@ -703,7 +703,18 @@ function pruneWorktrees(): string | null {
   // not a git call and still runs. A genuine prune failure stays swallowed —
   // it must not mask the error that got us here — but a refusal is the one
   // cause a user can act on, and `gitOpt` answered null for both.
-  return gitProbe('worktree', 'prune').refusal;
+  const probe = gitProbe('worktree', 'prune');
+  if (probe.refusal !== null) return probe.refusal;
+  // `{out: null, status: null, refusal: null}` is the probe's third shape:
+  // git could not be run AT ALL (a spawn failure, the timeout kill, a deleted
+  // cwd), so the prune did not happen and the registration outlives the link
+  // — while the caller above announced "Removed ... link" and released the
+  // lease, and the next `worktree add` met "missing but already registered"
+  // with nobody told why. Only a genuine non-zero exit stays swallowed.
+  if (probe.status === null) {
+    return 'git could not be run at all (a spawn failure or the timeout kill)';
+  }
+  return null;
 }
 
 export function runCleanup(target: string): void {

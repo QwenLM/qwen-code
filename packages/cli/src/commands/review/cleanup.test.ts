@@ -509,6 +509,43 @@ describe('runCleanup', () => {
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
   });
 
+  it('keeps the lease when the symlink arm cannot even ASK git to prune (R23-8)', () => {
+    // The probe's third shape — `{out: null, status: null, refusal: null}`,
+    // "the command could not be run at all" — used to read as a successful
+    // prune: the arm announced `Removed … link`, wrote no stderr line, and
+    // released the lease over a registration git never swept, so the next
+    // `worktree add` met "missing but already registered" with nobody told
+    // why. Only a genuine non-zero exit stays swallowed. Removing the
+    // `status === null` arm in pruneWorktrees turns this red.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-123'),
+      isDirectory: () => !String(p).includes('review-pr-123'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'worktree'
+          ? { out: null, status: null, refusal: null }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to prune after removing worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not be run at all'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
   it('clears the lease when cleanup succeeds', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
 
