@@ -2311,6 +2311,12 @@ describe('worktreeCreateFailureDetail', () => {
 
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
+// One case below plants a name holding a raw invalid-UTF-8 byte, which only a
+// filesystem that stores such names allows — NTFS is UTF-16 and APFS rejects
+// invalid UTF-8 with EILSEQ, so the shape the case pins cannot exist there
+// (and neither can the attack: the plant itself is uncreateable).
+const itWhereRawByteNamesExist = it.skipIf(process.platform !== 'linux');
+
 // Every case in this block builds a layout under `.qwen/tmp` and asks a
 // question that only has an answer where containment can exist. On Windows
 // `mountRootFor` refuses every absolute path (a drive letter is a colon), so
@@ -2415,6 +2421,42 @@ describe('untrustedGitfile', () => {
       expect(untrustedGitfile(tree, mount)).toContain(
         "a different tree's admin entry",
       );
+    },
+  );
+
+  itWhereRawByteNamesExist(
+    'refuses a gitfile whose target git prints and JS cannot read alike (invalid UTF-8, R8-2)',
+    () => {
+      // The gitfile names a planted entry under a RAW 0xFF byte in its path.
+      // Node's `encoding: 'utf8'` render of git's byte-exact answer maps that
+      // byte to U+FFFD — and the decoy planted under the U+FFFD spelling, a
+      // symlink to the tree's REAL admin entry (outside the mount), is what
+      // the location question would then judge: outside, admitted, while
+      // every gated command resolves the raw-byte plant inside the mount.
+      // A lossy answer counts as not given, so the gate refuses; without the
+      // U+FFFD guard every question below passes (the round-trip included —
+      // the decoy's backpointer is the real entry's) and this returns null.
+      const { repo, tree, mount } = pipelineTree();
+      const tmpRoot = join(repo, '.qwen', 'tmp');
+      const common = join(tmpRoot, '.evil-common');
+      execFileSync('git', ['init', '-q', common]);
+      const evil = Buffer.concat([
+        Buffer.from(`${tmpRoot}/ent`),
+        Buffer.from([0xff]),
+        Buffer.from('ry'),
+      ]);
+      mkdirSync(evil);
+      writeFileSync(
+        Buffer.concat([evil, Buffer.from('/commondir')]),
+        `${common}\n`,
+      );
+      const decoy = join(tmpRoot, 'ent�ry');
+      symlinkSync(adminEntryOf(tree), decoy);
+      writeFileSync(
+        join(tree, '.git'),
+        Buffer.concat([Buffer.from('gitdir: '), evil, Buffer.from('\n')]),
+      );
+      expect(untrustedGitfile(tree, mount)).toContain('could not resolve');
     },
   );
 

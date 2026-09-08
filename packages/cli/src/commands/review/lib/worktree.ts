@@ -340,16 +340,25 @@ function revParse(cwd: string, ...flags: string[]): RevParse {
       env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
     },
   );
+  const value =
+    resolved.error || resolved.status !== 0 || !resolved.stdout
+      ? null
+      : resolved.stdout.replace(/\n$/, '');
   return {
     // `\n` only, not `\r?\n`: git plumbing terminates with `\n` on every
     // platform, so a `\r` in that regex is a `\r` that was the LAST BYTE OF
     // THE PATH — and the judgment then landed on the twin of a plant named
     // `evil\r`, symlinked outside the mount, while every gated command
     // resolved through the plant.
-    value:
-      resolved.error || resolved.status !== 0 || !resolved.stdout
-        ? null
-        : resolved.stdout.replace(/\n$/, ''),
+    //
+    // U+FFFD is the lossy-decode class, failed closed the same way:
+    // `encoding: 'utf8'` maps an undecodable byte in git's byte-exact answer
+    // to U+FFFD, so a path holding an invalid UTF-8 byte is judged at the
+    // U+FFFD spelling while git acts on the original bytes — a plant under
+    // the raw-byte name and a decoy under the U+FFFD one, symlinked outside
+    // the mount, is exactly what the location question is for. No gate may
+    // judge a spelling git never printed, so the answer counts as not given.
+    value: value !== null && value.includes('�') ? null : value,
     notARepository:
       resolved.status === 128 &&
       resolved.stderr.includes('not a git repository'),
