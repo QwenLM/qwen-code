@@ -4,6 +4,22 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Post-send routing visibility
+
+Thread details now expose each message's stored admission outcomes, and the
+panel renders them below the message. Skip explanations use the same mapping
+as draft preview. Running coalescence explicitly says it is not a read receipt.
+Chrome on the source daemon displayed the persisted leader/worker bookings in
+the completed acceptance task below; no new model run was needed for this check.
+To repeat: open Shared threads, select that completed task, and check its Routing
+lines against the stored message outcomes. Skip/coalescence rendering still needs
+a browser scenario; only dispatch outcomes were observed in this pass.
+
+This does not implement immediate mid-turn steering. The existing bridge queue
+acceptance is not a durable model-consumption receipt, so it must not be used to
+mark consumedMessageIds. The current dispatcher retains its durable follow-up
+path; the live-delivery acknowledgment remains outstanding.
+
 #### Session capability wiring follow-up
 
 The replacement session path previously applied only the resolved prompt.

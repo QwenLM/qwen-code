@@ -560,6 +560,14 @@ export function registerWorkspaceAgentRoutes(
             !agents.some((agent) => agent.id === message.from),
           text: message.text,
           at: message.at,
+          outcomes: message.outcomes.map((outcome) => ({
+            ...outcome,
+            agentName:
+              outcome.targetAgentName ??
+              (outcome.targetAgentId
+                ? agentName(agents, outcome.targetAgentId)
+                : undefined),
+          })),
         })),
         runs: thread.runs.map((run) => runView(thread, run, agents)),
         children: threads

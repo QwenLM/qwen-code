@@ -251,6 +251,12 @@
   white-space: pre-wrap;
 }
 
+.postOutcome {
+  grid-column: 2 / span 2;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 /* A system trigger is a ledger entry, not somebody talking: one verb phrase,
    no body, quieter than a post. */
 .systemPost .author {

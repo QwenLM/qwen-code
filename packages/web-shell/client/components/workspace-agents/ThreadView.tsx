@@ -27,6 +27,12 @@ export interface ThreadPostView {
   authorDeleted?: boolean;
   text: string;
   at: number;
+  outcomes?: readonly {
+    agentName?: string;
+    kind: 'dispatch' | 'coalesce' | 'skip';
+    reason?: string;
+    into?: 'queued' | 'running';
+  }[];
 }
 
 export interface ThreadDetailView {
@@ -374,6 +380,26 @@ export function ThreadView({
                 </span>
                 <span className={styles.time}>{formatTime(post.at)}</span>
                 <p className={styles.postText}>{post.text}</p>
+                {post.outcomes?.map((outcome, index) => {
+                  const skipped =
+                    outcome.kind === 'skip'
+                      ? explainSkip(outcome.reason ?? '', outcome.agentName ?? '')
+                      : undefined;
+                  const result = skipped
+                    ? `${skipped.what}. ${skipped.fix}`
+                    : outcome.kind === 'dispatch'
+                      ? 'Booked for execution'
+                      : outcome.into === 'running'
+                        ? 'Added to a running task; not a read receipt'
+                        : 'Added to queued work';
+                  return (
+                    <p className={styles.postOutcome} key={index}>
+                      Routing:{' '}
+                      {outcome.agentName ? `@${outcome.agentName} · ` : ''}
+                      {result}
+                    </p>
+                  );
+                })}
               </article>
             ))}
           </div>
