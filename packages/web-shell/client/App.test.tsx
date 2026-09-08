@@ -247,7 +247,7 @@ const {
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
-  mockUseDaemonActivePromptBridge,
+  mockUseDaemonSessionActivityBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -722,7 +722,7 @@ const {
     mockReleaseWebTerminal: vi.fn(),
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
-    mockUseDaemonActivePromptBridge: vi.fn(),
+    mockUseDaemonSessionActivityBridge: vi.fn(),
   };
 });
 
@@ -1000,6 +1000,7 @@ vi.mock('./components/ChatEditor', async () => {
             'data-artifact-image-renderer': String(
               Boolean(customization.artifact?.renderImage),
             ),
+            'data-file-drop-action': customization.fileDropAction,
           },
           React.createElement(
             'button',
@@ -1618,7 +1619,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     hasActivePrompt: testState.sessionHasActivePrompt,
     authoritative: true,
   }),
-  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -9674,10 +9675,11 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockUseWorkspaceSessionLiveState.mockClear();
-  mockUseDaemonActivePromptBridge.mockReset();
-  mockUseDaemonActivePromptBridge.mockImplementation(
-    () => testState.sessionHasActivePrompt,
-  );
+  mockUseDaemonSessionActivityBridge.mockReset();
+  mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
+    hasActivePrompt: testState.sessionHasActivePrompt,
+    activeWorkState: undefined,
+  }));
   mockWorkspace.status = 'connected';
   mockWorkspace.refreshCapabilities.mockReset();
   mockWorkspace.refreshCapabilities.mockResolvedValue(
@@ -10197,6 +10199,7 @@ describe('App plan todos', () => {
   });
 
   it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
@@ -10368,11 +10371,21 @@ describe('App plan todos', () => {
     const { container, rerender } = renderApp();
     await flush();
 
-    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
 
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
+
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
 
     await act(async () => {
       testState.latestTodoPanelOnOpen?.();
@@ -11053,7 +11066,7 @@ describe('App session workflow', () => {
     ).not.toBeNull();
   });
 
-  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+  it('keeps Todo progress non-interactive when Session Workflow is off', async () => {
     testState.messages = [
       {
         id: 'plan',
@@ -11076,18 +11089,11 @@ describe('App session workflow', () => {
     const { container } = renderApp();
     await flush();
 
-    await act(async () => {
-      testState.latestTodoPanelOnOpen?.();
-      await Promise.resolve();
-    });
-
-    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
-    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
-    expect(
-      container
-        .querySelector('[data-testid="dialog-shell"]')
-        ?.getAttribute('data-dialog-title'),
-    ).toBe('Background tasks');
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
   });
 
   it('keeps workflow agent tools mounted behind the tasks dialog', async () => {
@@ -11319,7 +11325,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseDaemonActivePromptBridge).toHaveBeenCalledWith(
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalledWith(
       mockWorkspace.client,
       '/tmp/live',
       'session-1',
@@ -11329,6 +11335,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
   it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
+      sessionLiveStatePollIntervalMs: 10_000,
       workspaces: [
         {
           id: 'primary',
@@ -11353,6 +11360,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: true,
+        pollIntervalMs: 10_000,
         workspaceCwds: ['/tmp/project', '/tmp/live'],
         groupWorkspaceCwds: [],
       },
@@ -11375,6 +11383,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: false,
+        pollIntervalMs: undefined,
         workspaceCwds: [],
         groupWorkspaceCwds: [],
       },
@@ -35255,6 +35264,18 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
 });
 
 describe('fileUploadEnabled customization plumbing', () => {
+  it.each(['upload', 'attach'] as const)(
+    'passes the %s drop preference to composers',
+    (fileDropAction) => {
+      const { container } = renderApp({ fileDropAction });
+      expect(
+        container
+          .querySelector('[data-web-shell-composer]')
+          ?.getAttribute('data-file-drop-action'),
+      ).toBe(fileDropAction);
+    },
+  );
+
   it('reaches the composer customization when the host disables upload', () => {
     const { container } = renderApp({ fileUploadEnabled: false });
     const composer = container.querySelector('[data-web-shell-composer]');

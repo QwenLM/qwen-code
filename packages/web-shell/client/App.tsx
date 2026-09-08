@@ -118,7 +118,7 @@ import {
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   useSessionCatalogController,
-  useDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
@@ -1192,12 +1192,17 @@ export interface WebShellProps {
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: `false` force-
    * disables upload even when the daemon advertises the capability, while
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
@@ -2914,6 +2919,7 @@ export function App({
   fileUploadEnabled,
   fileUploadDirectory,
   artifact,
+  fileDropAction,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3196,6 +3202,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     }),
     [
       artifact,
@@ -3225,6 +3232,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     ],
   );
   const mainChatCustomization = useMemo(
@@ -3287,6 +3295,7 @@ export function App({
       .map((entry) => entry.cwd);
   }, [sidebarOptions.enabled, workspaces]);
   useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
       sidebarlessLiveStateWorkspaceCwds.length > 0 &&
         connection.capabilities?.features?.includes(
@@ -3310,7 +3319,10 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const {
+    hasActivePrompt: sessionHasActivePrompt,
+    activeWorkState: sessionActiveWorkState,
+  } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
@@ -18086,8 +18098,13 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            hasLiveActivity={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
                             onOpen={
-                              showFloatingTodos
+                              sessionWorkflowEnabled && showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
                                   ? openWorkflowInspector
                                   : openTasksPanel

@@ -1653,7 +1653,7 @@ const EN: Messages = {
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
-    'A running session cannot be archived; archiving would end its turn',
+    'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -1674,6 +1674,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.activeWork': 'Active work',
+  'sidebar.activityUnknown': 'Background activity unknown',
   'sidebar.waitingForApproval': 'Waiting for approval',
   'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
@@ -3424,6 +3426,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -5179,7 +5184,7 @@ const ZH: Messages = {
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
-    '不能归档运行中的会话，归档会终止其当前回合',
+    '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -5199,6 +5204,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.activeWork': '有活动任务',
+  'sidebar.activityUnknown': '后台活动状态未知',
   'sidebar.waitingForApproval': '等待批准',
   'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
@@ -6819,6 +6826,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',

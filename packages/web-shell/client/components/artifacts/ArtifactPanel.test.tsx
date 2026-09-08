@@ -927,7 +927,7 @@ describe('ArtifactPanel code review artifacts', () => {
     await flush();
 
     expect(
-      container.querySelector('[role="tab"] .lucide-file-text'),
+      container.querySelector('[role="tab"] [data-file-type-icon="md"]'),
     ).not.toBeNull();
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));

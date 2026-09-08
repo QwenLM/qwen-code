@@ -359,7 +359,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       return {
-        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
+        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary. There is no inline reply: whatever it does with your message shows up in its completion notification for this task_id. Do not relaunch the task while waiting.`,
         returnDisplay: `Message queued for ${entry.description}`,
       };
     }

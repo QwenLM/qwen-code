@@ -948,10 +948,7 @@ describe('AskUserQuestion multiple questions', () => {
       ctrlKey: true,
       cancelable: true,
     });
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': '',
-      '1': 'Small',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('submits directly when Enter is pressed on the last question', () => {
@@ -977,7 +974,7 @@ describe('AskUserQuestion multiple questions', () => {
     });
   });
 
-  it('submits incomplete answers with Command/Ctrl+Enter', () => {
+  it('does not submit incomplete answers with Command/Ctrl+Enter', () => {
     render(undefined, multipleQuestionsRequest);
 
     const event = pressKey(optionButtons()[0]!, 'Enter', {
@@ -986,17 +983,14 @@ describe('AskUserQuestion multiple questions', () => {
     });
 
     expect(event.defaultPrevented).toBe(true);
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': 'Red',
-      '1': '',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it.each([
     ['Control', { ctrlKey: true }],
     ['Command', { metaKey: true }],
   ] as const)(
-    'submits from an intermediate custom input with %s+Enter',
+    'does not submit incomplete answers from custom input with %s+Enter',
     (_modifier, modifierInit) => {
       render(undefined, multipleQuestionsRequest);
       act(() => optionButtons()[2]!.click());
@@ -1015,10 +1009,7 @@ describe('AskUserQuestion multiple questions', () => {
       });
 
       expect(event.defaultPrevented).toBe(true);
-      expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-        '0': 'Purple',
-        '1': '',
-      });
+      expect(onConfirm).not.toHaveBeenCalled();
     },
   );
 
@@ -1266,7 +1257,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(false);
+    expect(submitButton()!.disabled).toBe(true);
     expect(opts[0]!.hasAttribute('aria-checked')).toBe(false);
     expect(opts[0]!.getAttribute('role')).not.toBe('radio');
   });
@@ -1292,7 +1283,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(false);
+    expect(submitButton()!.disabled).toBe(true);
   });
 
   it('toggles options and submits the joined selection', () => {
@@ -1459,7 +1450,7 @@ describe('AskUserQuestion multi-select', () => {
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('submits from the final multi-select question when an earlier answer is missing', () => {
+  it('does not submit from the final question when an earlier answer is missing', () => {
     const requestWithMultiFinal: PermissionRequest = {
       ...multipleQuestionsRequest,
       rawInput: {
@@ -1484,10 +1475,7 @@ describe('AskUserQuestion multi-select', () => {
     pressKey(optionButtons()[0]!, 'Enter');
 
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': '',
-      '1': 'Option A',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
     expect(submitButton()!.disabled).toBe(true);
   });
 });
