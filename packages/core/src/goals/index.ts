@@ -69,6 +69,8 @@ export * from './goal-checkpoint.js';
 export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
+export { applyPendingGoalProposal, ProposeGoalTool } from './goal-tools.js';
+export type { PendingGoalProposal } from './goal-tools.js';
 export { goalTurnContext } from './goal-turn-context.js';
 export {
   buildGoalContinuationParts,

@@ -396,6 +396,23 @@ describe('ToolRegistry', () => {
       expect(names).toEqual(['alpha', 'middle', 'zeta']);
     });
 
+    it('only declares Goal proposals during an ACP turn with a responder', () => {
+      const acpConfig = new Config({
+        ...baseConfigParams,
+        experimentalZedIntegration: true,
+      });
+      acpConfig.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(acpConfig);
+      registry.registerTool(new MockTool({ name: 'propose_goal' }));
+      expect(registry.getFunctionDeclarations()).toEqual([]);
+      acpConfig.setGoalProposalTurnKey('user-turn');
+      expect(
+        registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['propose_goal']);
+      acpConfig.setGoalProposalTurnKey(undefined);
+      expect(registry.getFunctionDeclarations()).toEqual([]);
+    });
+
     it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {
       toolRegistry.registerTool(new MockTool({ name: 'visible' }));
       toolRegistry.registerTool(

@@ -185,6 +185,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  applyPendingGoalProposal,
   goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
@@ -1508,6 +1509,11 @@ interface PromptChannelDelivery {
 }
 
 interface AgentResponseCapture {
+  goalProposalTurn?: {
+    turnKey: string;
+    controller: AbortController;
+    completedNormally: boolean;
+  };
   channelDelivery?: {
     finalText: string;
   };
@@ -1968,6 +1974,7 @@ export async function buildAvailableCommandsSnapshot(
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -2061,6 +2068,7 @@ export class Session implements SessionContext {
   private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
+  private heldGoalProposal?: Pick<GoalRecord, 'goalId' | 'revision'>;
   private goalProcessing = false;
   private activeGoalTurn: AcpGoalTurn | undefined;
   private goalHostUnbind?: () => void;
@@ -2286,6 +2294,15 @@ export class Session implements SessionContext {
       this.goalRuntimeUnsubscribe = runtime.subscribe((snapshot, cause) => {
         const previousGoal = this.lastGoalSnapshot?.goal ?? null;
         this.lastGoalSnapshot = snapshot;
+        if (
+          this.heldGoalProposal &&
+          (snapshot.goal?.goalId !== this.heldGoalProposal.goalId ||
+            snapshot.goal.revision !== this.heldGoalProposal.revision ||
+            snapshot.goal.status !== 'active' ||
+            cause === 'resume')
+        ) {
+          this.heldGoalProposal = undefined;
+        }
         void this.#queueGoalState(snapshot, cause, previousGoal).catch(
           (error) =>
             debugLogger.warn(
@@ -2526,6 +2543,14 @@ export class Session implements SessionContext {
       this.notificationProcessing ||
       this.notificationAbortController ||
       this.#isAutomaticWorkHeld()
+    ) {
+      return;
+    }
+    const next = this.goalQueue[0];
+    if (
+      this.heldGoalProposal &&
+      next?.permit.goalId === this.heldGoalProposal.goalId &&
+      next.permit.revision === this.heldGoalProposal.revision
     ) {
       return;
     }
@@ -4929,6 +4954,7 @@ export class Session implements SessionContext {
           }
         : result;
       promptResult = completedResult;
+      await this.#settleGoalProposal(responseCapture);
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -4958,6 +4984,24 @@ export class Session implements SessionContext {
       rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
+      const proposalTurn = responseCapture.goalProposalTurn;
+      if (proposalTurn) {
+        this.config.takePendingGoalProposal(proposalTurn.turnKey);
+        if (this.activeGoalProposalTurn === proposalTurn) {
+          this.activeGoalProposalTurn = undefined;
+        }
+      }
+      if (this.config.getGoalProposalHostSupported()) {
+        this.config.setGoalProposalTurnKey(undefined);
+        try {
+          await this.config.getLlmClient().setTools();
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to refresh Goal proposal availability',
+            error,
+          );
+        }
+      }
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
@@ -5212,6 +5256,66 @@ export class Session implements SessionContext {
       : goalTurnContext.exit(execute);
   }
 
+  async #settleGoalProposal(capture: AgentResponseCapture): Promise<void> {
+    const turn = capture.goalProposalTurn;
+    if (!turn) return;
+    const proposal = this.config.takePendingGoalProposal(turn.turnKey);
+    if (!proposal) return;
+    const ownsTurn = () =>
+      turn.completedNormally &&
+      !turn.controller.signal.aborted &&
+      this.pendingPrompt === turn.controller &&
+      this.activeGoalProposalTurn === turn &&
+      !this.disposed &&
+      !this.closing;
+    if (!ownsTurn()) return;
+    try {
+      const runtime = await this.config.getGoalRuntimeReady();
+      if (!ownsTurn()) return;
+      const result = await applyPendingGoalProposal(runtime, proposal);
+      // The automatic queue remains blocked until this prompt releases its
+      // completion. Cancellation during persistence must pause before then.
+      if (result.applied && !ownsTurn()) {
+        try {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: result.goal.goalId,
+            expectedRevision: result.goal.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+          });
+        } catch (error) {
+          const current = runtime.getSnapshot().goal;
+          if (
+            current?.goalId === result.goal.goalId &&
+            current.revision === result.goal.revision &&
+            current.status === 'active'
+          ) {
+            this.heldGoalProposal = {
+              goalId: current.goalId,
+              revision: current.revision,
+            };
+            debugLogger.warn(
+              'Failed to pause the cancelled Goal proposal',
+              error,
+            );
+            await this.messageEmitter.emitAgentMessage(
+              'The Goal was created, but its cancellation could not be saved. Automatic execution is held in this session. Run /goal pause, then /goal resume when ready.',
+            );
+          }
+        }
+      } else if (!result.applied) {
+        await this.messageEmitter.emitAgentMessage(
+          `The approved Goal could not be started: ${result.reason}`,
+        );
+      }
+    } catch (error) {
+      debugLogger.warn('Failed to apply an approved Goal proposal', error);
+      await this.messageEmitter.emitAgentMessage(
+        'The approved Goal could not be started. Check /goal before trying again.',
+      );
+    }
+  }
+
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
@@ -5234,6 +5338,24 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        if (
+          !goalTurn &&
+          !channelTurn &&
+          params._meta?.['qwen.goalProposalApproval'] === true
+        ) {
+          responseCapture.goalProposalTurn = {
+            turnKey: promptId,
+            controller: pendingSend,
+            completedNormally: false,
+          };
+          this.activeGoalProposalTurn = responseCapture.goalProposalTurn;
+        }
+        if (this.config.getGoalProposalHostSupported()) {
+          this.config.setGoalProposalTurnKey(
+            responseCapture.goalProposalTurn?.turnKey,
+          );
+          await this.config.getLlmClient().setTools();
+        }
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
         const continuesCurrentWorkChain =
@@ -6600,6 +6722,9 @@ export class Session implements SessionContext {
       }
 
       if (!externalReason && !guardContinuation) {
+        if (responseCapture?.goalProposalTurn?.turnKey === promptId) {
+          responseCapture.goalProposalTurn.completedNormally = true;
+        }
         return { stopReason: 'end_turn' };
       }
 
@@ -8595,6 +8720,13 @@ export class Session implements SessionContext {
       preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
+    const proposalTurn = this.activeGoalProposalTurn;
+    if (
+      messages.length > 0 &&
+      proposalTurn?.controller.signal === abortSignal
+    ) {
+      this.config.takePendingGoalProposal(proposalTurn.turnKey);
+    }
     const parts: Part[] = [];
     for (const message of messages) {
       const displayText =
@@ -11934,6 +12066,22 @@ export class Session implements SessionContext {
       return await runInToolSpanContext(toolSpan, async () => {
         const entryCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (entryCancellation) return entryCancellation;
+
+        if (
+          policyToolName === ToolNames.PROPOSE_GOAL &&
+          (this.activeGoalProposalTurn?.turnKey !== promptId ||
+            this.activeGoalProposalTurn.controller.signal.aborted)
+        ) {
+          return earlyErrorResponse(
+            new Error('Goal proposals require an interactive user turn.'),
+            toolName,
+            {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            },
+          );
+        }
 
         // ---- L1: Tool enablement check ----
         const isTrustedLiveScreenContextTool =

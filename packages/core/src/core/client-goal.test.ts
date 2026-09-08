@@ -315,7 +315,11 @@ describe('LlmClient Goal admission', () => {
     const takePendingGoalProposal = vi
       .fn()
       .mockReturnValueOnce(undefined) // the new-query discard
-      .mockReturnValueOnce({ objective: 'ship it', turnKey: 'real-user-key' });
+      .mockReturnValueOnce({
+        objective: 'ship it',
+        turnKey: 'real-user-key',
+        reviewedGoal: null,
+      });
     Object.assign(config, {
       takePendingGoalProposal,
       getUsageStatisticsEnabled: vi.fn(() => false),
@@ -344,7 +348,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -356,7 +360,11 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'default-exit-key' };
+      pending = {
+        objective: 'ship it',
+        turnKey: 'default-exit-key',
+        reviewedGoal: null,
+      };
       return emptyStream();
     });
 
@@ -383,7 +391,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -403,7 +411,11 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'stop-cap-key' };
+      pending = {
+        objective: 'ship it',
+        turnKey: 'stop-cap-key',
+        reviewedGoal: null,
+      };
       return emptyStream();
     });
 
@@ -436,7 +448,7 @@ describe('LlmClient Goal admission', () => {
       tokensAtStart: 1,
       hookId: 'old-goal-hook',
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -463,7 +475,11 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'stop-clear-key' };
+      pending = {
+        objective: 'ship it',
+        turnKey: 'stop-clear-key',
+        reviewedGoal: null,
+      };
       return emptyStream();
     });
     const getSteerInput = vi
@@ -496,9 +512,10 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     controller.abort();
-    let pending: { objective: string; turnKey: string } | undefined = {
+    let pending: PendingGoalProposal | undefined = {
       objective: 'ship it',
       turnKey: 'settle-key',
+      reviewedGoal: null,
     };
     const loadGoalRuntime = vi.fn(async () => runtime);
     Object.assign(config, {
@@ -529,7 +546,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -543,7 +560,11 @@ describe('LlmClient Goal admission', () => {
     turnMocks.pendingToolCalls.push([{ name: 'read_file' }], []);
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it', turnKey: 'pending-tool-key' };
+        pending = {
+          objective: 'ship it',
+          turnKey: 'pending-tool-key',
+          reviewedGoal: null,
+        };
         return emptyStream();
       })
       .mockImplementation(emptyStream);
@@ -562,6 +583,7 @@ describe('LlmClient Goal admission', () => {
     expect(pending).toEqual({
       objective: 'ship it',
       turnKey: 'pending-tool-key',
+      reviewedGoal: null,
     });
 
     await drain(
@@ -591,7 +613,7 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
     nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
-    let pending: { objective: string; turnKey: string } | undefined;
+    let pending: PendingGoalProposal | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -628,7 +650,11 @@ describe('LlmClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it', turnKey: 'real-user-key' };
+        pending = {
+          objective: 'ship it',
+          turnKey: 'real-user-key',
+          reviewedGoal: null,
+        };
         return emptyStream();
       })
       .mockImplementationOnce(() => {
@@ -680,6 +706,7 @@ describe('LlmClient Goal admission', () => {
         store.set({
           objective: 'stale proposal',
           turnKey: 'failed-user-key',
+          reviewedGoal: null,
         });
         yield {
           type: LlmEventType.Error,
@@ -719,9 +746,10 @@ describe('LlmClient Goal admission', () => {
       goal: null,
     });
     const controller = new AbortController();
-    let pending: { objective: string; turnKey: string } | undefined = {
+    let pending: PendingGoalProposal | undefined = {
       objective: 'ship it',
       turnKey: 'settle-key',
+      reviewedGoal: null,
     };
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
@@ -754,6 +782,7 @@ describe('LlmClient Goal admission', () => {
       takePendingGoalProposal: vi.fn(() => ({
         objective: 'ship it',
         turnKey: 'settle-key',
+        reviewedGoal: null,
       })),
     });
     const appliedGoal = {
@@ -820,6 +849,7 @@ describe('LlmClient Goal admission', () => {
       const store = pendingGoalProposalStore({
         objective: 'approved earlier',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       Object.assign(config, {
         takePendingGoalProposal: store.take,
@@ -866,6 +896,7 @@ describe('LlmClient Goal admission', () => {
       expect(store.get()).toEqual({
         objective: 'approved earlier',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       expect(runtime.dispatch).not.toHaveBeenCalled();
 
@@ -889,6 +920,7 @@ describe('LlmClient Goal admission', () => {
     const store = pendingGoalProposalStore({
       objective: 'stale approval',
       turnKey: 'cancelled-key',
+      reviewedGoal: null,
     });
     Object.assign(config, { takePendingGoalProposal: store.take });
     vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
@@ -932,6 +964,7 @@ describe('LlmClient Goal admission', () => {
     const store = pendingGoalProposalStore({
       objective: 'stale approval',
       turnKey: 'cancelled-key',
+      reviewedGoal: null,
     });
     Object.assign(config, {
       takePendingGoalProposal: store.take,
@@ -965,6 +998,7 @@ describe('LlmClient Goal admission', () => {
       const store = pendingGoalProposalStore({
         objective: 'ship it',
         turnKey: 'owner-key',
+        reviewedGoal: null,
       });
       Object.assign(config, {
         takePendingGoalProposal: store.take,
@@ -1062,7 +1096,11 @@ describe('LlmClient Goal admission', () => {
         nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'model' });
       }
       turnMocks.run.mockImplementationOnce(() => {
-        store.set({ objective: 'ship it', turnKey: 'owner-key' });
+        store.set({
+          objective: 'ship it',
+          turnKey: 'owner-key',
+          reviewedGoal: null,
+        });
         return emptyStream();
       });
 
@@ -1099,6 +1137,7 @@ describe('LlmClient Goal admission', () => {
       .mockReturnValueOnce({
         objective: 'stale',
         turnKey: 'cancelled-turn-key',
+        reviewedGoal: null,
       })
       .mockReturnValue(undefined);
     Object.assign(config, {

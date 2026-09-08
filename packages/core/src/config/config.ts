@@ -2376,6 +2376,8 @@ export class Config {
   private sessionWorkflowEnabledProvider?: () => boolean;
   private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
+  private goalProposalHostSupported = false;
+  private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -7918,6 +7920,25 @@ export class Config {
     return this.modelProposedGoals;
   }
 
+  setGoalProposalHostSupported(supported: boolean): void {
+    this.goalProposalHostSupported = supported;
+  }
+
+  getGoalProposalHostSupported(): boolean {
+    return this.goalProposalHostSupported;
+  }
+
+  setGoalProposalTurnKey(turnKey: string | undefined): void {
+    this.goalProposalTurnKey = turnKey;
+  }
+
+  isGoalProposalAvailable(): boolean {
+    return (
+      resolveInteractionMode(this) === 'interactive' ||
+      (this.goalProposalHostSupported && this.goalProposalTurnKey !== undefined)
+    );
+  }
+
   hasPendingGoalProposal(): boolean {
     return this.pendingGoalProposal !== undefined;
   }
@@ -9440,7 +9461,8 @@ export class Config {
       // keep the text hand-off (`/goal set …`) that /goal-draft prints.
       if (
         this.getModelProposedGoals() !== 'disabled' &&
-        resolveInteractionMode(this) === 'interactive'
+        (resolveInteractionMode(this) === 'interactive' ||
+          this.goalProposalHostSupported)
       ) {
         await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
           const { ProposeGoalTool } = await import('../goals/goal-tools.js');

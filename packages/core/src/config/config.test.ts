@@ -3311,12 +3311,14 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'first',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(
         config.setPendingGoalProposal({
           objective: 'second',
           turnKey: 'turn-1',
+          reviewedGoal: null,
         }),
       ).toBe(false);
       expect(config.hasPendingGoalProposal()).toBe(true);
@@ -3325,6 +3327,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.takePendingGoalProposal('turn-1')).toEqual({
         objective: 'first',
         turnKey: 'turn-1',
+        reviewedGoal: null,
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
       expect(config.takePendingGoalProposal()).toBeUndefined();
@@ -3333,11 +3336,13 @@ describe('Server Config (config.ts)', () => {
         config.setPendingGoalProposal({
           objective: 'explicitly cleared',
           turnKey: 'turn-3',
+          reviewedGoal: null,
         }),
       ).toBe(true);
       expect(config.takePendingGoalProposal()).toEqual({
         objective: 'explicitly cleared',
         turnKey: 'turn-3',
+        reviewedGoal: null,
       });
       expect(config.hasPendingGoalProposal()).toBe(false);
     });
@@ -3347,6 +3352,7 @@ describe('Server Config (config.ts)', () => {
       config.setPendingGoalProposal({
         objective: 'stale approval',
         turnKey: 'turn-1',
+        reviewedGoal: null,
       });
 
       config.startNewSession('replacement-session');
@@ -5465,6 +5471,24 @@ describe('Server Config (config.ts)', () => {
         expect(registeredNames).toContain(ToolNames.GET_GOAL);
         expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
         expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+      },
+    );
+    it.each(['alwaysAsk', 'disabled'] as const)(
+      'honors %s for an ACP host with explicit Goal proposal support',
+      async (modelProposedGoals) => {
+        const config = new Config({
+          ...baseParams,
+          experimentalZedIntegration: true,
+          modelProposedGoals,
+        });
+        config.setGoalProposalHostSupported(true);
+        await config.initialize();
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames.includes(ToolNames.PROPOSE_GOAL)).toBe(
+          modelProposedGoals === 'alwaysAsk',
+        );
       },
     );
     it('does not register propose_goal when goals.modelProposed is disabled', async () => {
