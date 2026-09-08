@@ -1592,7 +1592,9 @@ describe('release workflow', () => {
       (step) => step.id === 'vars',
     );
     expect(vars.run).toContain('run-release-step.sh set-flags');
-    expect(releaseStepScript).toContain('promote_nightly ignores the ref input');
+    expect(releaseStepScript).toContain(
+      'promote_nightly ignores the ref input',
+    );
   });
 
   // The promotion check matches these by display name, so a rename would
