@@ -19,15 +19,41 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function setup() {
+function tailPages(count: number) {
+  const start = Math.max(0, count - 200);
+  return new Map(
+    count
+      ? [
+          [
+            start,
+            {
+              start,
+              end: count,
+              snapshot: 'tail-snapshot',
+              retainedBytes: 100,
+              turns: Array.from({ length: count - start }, (_, index) => ({
+                ordinal: start + index,
+                turnId: `turn-${start + index}`,
+                kind: 'prompt' as const,
+                label: `Turn ${start + index + 1}`,
+              })),
+            },
+          ],
+        ]
+      : [],
+  );
+}
+
+async function setup(count = 5000, cachedTail = true) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const store = createDaemonTurnNavigationStore();
   const state = {
     ...store.getSnapshot(),
     sessionId: 'session',
     mode: 'ready' as const,
-    totalTurns: 5000,
-    effectiveTurnCount: 5000,
+    totalTurns: count,
+    effectiveTurnCount: count,
+    indexPages: tailPages(cachedTail ? count : 0),
   };
   const load = vi.spyOn(store, 'loadOrdinal').mockResolvedValue();
   const select = vi.fn();
@@ -107,15 +133,82 @@ it('represents all turns while bounding DOM rows and loading only visible metada
   );
   expect(container.querySelector('[aria-setsize="5000"]')).not.toBeNull();
   expect(container.querySelector('[data-turn-ordinal="4999"]')).not.toBeNull();
-  // The initial render and the jump to the tail can each request one metadata page.
-  expect(load.mock.calls.length).toBeLessThanOrEqual(2);
-  expect(
-    load.mock.calls.every(([ordinal]) => ordinal < 200 || ordinal >= 4800),
-  ).toBe(true);
+  expect(load).not.toHaveBeenCalled();
+});
+
+it('initializes an empty session at its cached tail when the count arrives', async () => {
+  const { state, store, select, load } = await setup(0);
+  expect(load).not.toHaveBeenCalled();
+  await act(async () =>
+    root.render(
+      <GlobalTurnNavigation
+        state={{
+          ...state,
+          totalTurns: 5000,
+          effectiveTurnCount: 5000,
+          indexPages: tailPages(5000),
+        }}
+        store={store}
+        onSelect={select}
+      />,
+    ),
+  );
+  expect(container.querySelector('[data-turn-ordinal="4999"]')).not.toBeNull();
+  expect(load).not.toHaveBeenCalled();
+});
+
+it.each([5000, 10000])(
+  'initializes a different %i-turn session at its tail without loading the prior viewport',
+  async (count) => {
+    const { state, store, select, load } = await setup();
+    const scroll = container.querySelector<HTMLElement>('nav > div')!;
+    await act(async () => {
+      scroll.scrollTop = 0;
+      scroll.dispatchEvent(new Event('scroll'));
+    });
+    load.mockClear();
+    await act(async () =>
+      root.render(
+        <GlobalTurnNavigation
+          state={{
+            ...state,
+            sessionId: 'next-session',
+            totalTurns: count,
+            effectiveTurnCount: count,
+            indexPages: tailPages(count),
+          }}
+          store={store}
+          onSelect={select}
+        />,
+      ),
+    );
+    expect(
+      container.querySelector(`[data-turn-ordinal="${count - 1}"]`),
+    ).not.toBeNull();
+    expect(load).not.toHaveBeenCalled();
+  },
+);
+
+it('loads the displayed tail metadata when it is missing', async () => {
+  const { load } = await setup(5000, false);
+  expect(container.querySelector('[data-turn-ordinal="4999"]')).not.toBeNull();
+  expect(load).toHaveBeenCalledExactlyOnceWith(4800);
+});
+
+it('loads the first page on demand when the reader scrolls there', async () => {
+  const { load } = await setup();
+  load.mockClear();
+  const scroll = container.querySelector<HTMLElement>('nav > div')!;
+  await act(async () => {
+    scroll.scrollTop = 0;
+    scroll.dispatchEvent(new Event('scroll'));
+  });
+  expect(load).toHaveBeenCalledExactlyOnceWith(0);
 });
 
 it('moves keyboard focus to unloaded first and last turns and selects on click', async () => {
   const { select, load } = await setup();
+  load.mockClear();
   const last = container.querySelector<HTMLButtonElement>(
     '[data-turn-ordinal="4999"]',
   )!;
@@ -130,7 +223,7 @@ it('moves keyboard focus to unloaded first and last turns and selects on click',
   expect(document.activeElement).toBe(first);
   await act(async () => first.click());
   expect(select).toHaveBeenLastCalledWith(0);
-  expect(load.mock.calls.some(([ordinal]) => ordinal < 200)).toBe(true);
+  expect(load).toHaveBeenCalledExactlyOnceWith(0);
   await act(async () =>
     first.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
