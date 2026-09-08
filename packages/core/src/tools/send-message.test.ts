@@ -290,6 +290,12 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Message queued');
+    // The caller must not sit waiting for an inline answer, nor start a
+    // replacement task while the original is still holding the message.
+    expect(result.llmContent).toContain('There is no inline reply');
+    expect(result.llmContent).toContain(
+      'Do not relaunch the task while waiting',
+    );
     expect(registry.get('agent-1')!.pendingMessages).toEqual(['do more work']);
   });
 
