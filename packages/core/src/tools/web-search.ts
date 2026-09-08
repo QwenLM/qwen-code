@@ -13,6 +13,7 @@ import {
   resolveRequestTimeout,
 } from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
 import {
   buildRuntimeFetchOptions,
   preloadRuntimeFetchModule,
@@ -649,6 +650,10 @@ class WebSearchToolInvocation extends BaseToolInvocation<
 
     const startedAt = Date.now();
     const apiKey = process.env[backend.apiKeyEnvKey];
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.config.getProxy(),
+    );
     const client = new OpenAI({
       apiKey,
       baseURL: backend.baseUrl,
@@ -659,7 +664,12 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         // Entry-declared headers win, matching the providers' merge order.
         ...(backend.customHeaders ?? {}),
       },
-      ...(buildRuntimeFetchOptions('openai', this.config.getProxy()) || {}),
+      ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.config,
+        backend.customHeaders,
+      ),
     });
 
     // One total timeout across both attempts, combined with the caller's
