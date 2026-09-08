@@ -107,7 +107,14 @@ export async function evaluatePermissionFlow(
       const ruleInfo = matchingRule
         ? ` Matching deny rule: "${matchingRule}".`
         : '';
-      result.denyMessage = `Tool "${toolName}" is denied by permission rules.${ruleInfo}`;
+      // A specifier-scoped deny (e.g. `Bash(npm view *)`) blocks only this
+      // invocation, not the whole tool. Say so explicitly so the model does
+      // not abandon the tool entirely (issue #11405). Bare tool-level rules
+      // carry no `(...)` specifier and are intentionally not scoped this way.
+      const stillPermitted = matchingRule?.includes('(')
+        ? ' Other uses of this tool are still permitted.'
+        : '';
+      result.denyMessage = `This "${toolName}" invocation was denied by permission rules.${ruleInfo}${stillPermitted}`;
     }
   }
 
