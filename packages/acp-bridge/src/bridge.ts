@@ -1106,6 +1106,11 @@ interface ChannelInfo {
     categories: readonly ActiveWorkHoldCategory[];
     /** Highest snapshot sequence applied; guards against reordering only. */
     seq: number;
+    /** Latest report, retained for Sessions registered after it arrived. */
+    snapshot?: {
+      receivedAt: number;
+      sessions: Map<string, Map<string, ActiveWorkHoldCategory>>;
+    };
   };
   channelLiveness?: ChannelLivenessMonitor;
   handshakeComplete: boolean;
@@ -3165,6 +3170,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
 
+  function entryActiveWorkState(
+    entry: SessionEntry,
+  ): NonNullable<BridgeSessionSummary['activeWorkState']> {
+    if (entryHasLocalWork(entry) || childReportsHeldWork(entry)) {
+      return 'active';
+    }
+    const capability = channelInfoForEntry(entry)?.activeWork;
+    if (!capability) return 'unsupported';
+    if (
+      childWorkIsUnknown(entry) ||
+      ACTIVE_WORK_HOLD_CATEGORIES.some(
+        (category) => !capability.categories.includes(category),
+      )
+    ) {
+      return 'unknown';
+    }
+    return 'idle';
+  }
+
   /**
    * The guards every automatic teardown shares, whichever policy decided it
    * was time to look. Each caller adds its own policy on top (the reaper its
@@ -3576,6 +3600,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       for (const hold of session.holds) holds.set(hold.id, hold.category);
       reported.set(session.sessionId, holds);
     }
+    info.activeWork.snapshot = { receivedAt: now, sessions: reported };
     // Iterate what the channel owns rather than what the snapshot named: a
     // Session the child did not mention holds nothing on the child side.
     // Because reports are complete, silence about a Session this channel owns
@@ -4237,6 +4262,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: hasInFlightPromptActivity(entry),
+      activeWorkState: entryActiveWorkState(entry),
       isWaitingForPermission,
       isWaitingForUserQuestion,
       pendingInteractionCount: entry.pendingInteractions.size,
@@ -7049,6 +7075,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       branch?: { name: string; baseBranch: string };
     } = {},
   ): SessionEntry => {
+    const childSnapshot = ci.activeWork?.snapshot;
+    const reportedChildHolds = childSnapshot?.sessions.get(sessionId);
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
@@ -7106,8 +7134,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachRefs: new Map(),
       spawnOwnerWantedKill: false,
       promptActive: false,
-      childHolds: null,
-      childHoldsAt: null,
+      childHolds: reportedChildHolds ?? null,
+      childHoldsAt:
+        childSnapshot && reportedChildHolds !== undefined
+          ? childSnapshot.receivedAt
+          : null,
       activeWorkCloseInFlight: false,
       activeWorkCloseFailures: 0,
       activeWorkCloseRetryAt: null,
