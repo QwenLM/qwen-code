@@ -441,12 +441,18 @@ describe('createAcpSessionBridge', () => {
       // than idle, and graded `partial` — the channel did negotiate, it just
       // has not spoken yet, which is not the same as `none`.
       expect(bridge.activeWork).toBe(true);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'unknown',
+      );
       expect(reportingGrade(bridge)).toBe('partial');
 
       await sendActiveWorkSnapshot(handle, 1, [
         { sessionId: session.sessionId, holds: [] },
       ]);
       expect(bridge.activeWork).toBe(false);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'idle',
+      );
       expect(reportingGrade(bridge)).toBe('full');
 
       // Prompts are a daemon-owned fact: no child report is involved.
@@ -455,6 +461,9 @@ describe('createAcpSessionBridge', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
       expect(bridge.activeWork).toBe(true);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
       prompt.resolve({ stopReason: 'end_turn' });
       await running;
       expect(bridge.activeWork).toBe(false);
@@ -470,11 +479,47 @@ describe('createAcpSessionBridge', () => {
       // Unsupported must not behave like unknown: an older child would
       // otherwise pin every session as permanently busy and unreapable.
       expect(bridge.activeWork).toBe(false);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'unsupported',
+      );
       expect(reportingGrade(bridge)).toBe('none');
       expect(bridge.activeWorkCoverage.oldestCoveredReportAt).toBeNull();
 
       await bridge.detachClient(session.sessionId, session.clientId);
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('applies a snapshot received before session registration', async () => {
+      const newSessionStarted = deferred<void>();
+      const releaseNewSession = deferred<void>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        newSessionImpl: async () => {
+          newSessionStarted.resolve();
+          await releaseNewSession.promise;
+          return { sessionId: 'registering' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const spawning = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await newSessionStarted.promise;
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: 'registering', holds: [agentHold('a1')] },
+      ]);
+      releaseNewSession.resolve();
+      const session = await spawning;
+
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
+      await sendActiveWorkSnapshot(handle, 2, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'idle',
+      );
 
       await bridge.shutdown();
     });
