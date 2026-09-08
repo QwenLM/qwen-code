@@ -4,6 +4,32 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Same-thread peer handoff — clean first-attempt demo
+
+Chrome task `th_00df8e71-3a7f-4c83-876c-290a7a22d878` reused demo-leader and
+demo-worker, with no child threads. Leader posted one addressed request; worker
+returned 31 × 37 = 1147 addressed to leader. Leader independently posted
+41 × 43 = 1763, closed with thread_wait, then automatically resumed and submitted
+both results plus `PEER-HANDOFF-5931` through thread_review. Chrome Mark done
+succeeded, and a store read confirmed done, three completed runs, all attempt 1,
+zero child threads, and no manual retry or extra human message.
+
+Leader run `rn_3d9be992-e39b-4c11-a5d6-c132595651c8` ran from 1788848276487
+to 1788848297506; worker `rn_a4c2bf69-fc1e-4c29-a032-e391711b8f22` ran from
+1788848288507 to 1788848299517: 8,999 ms overlap. Leader's continuation
+`rn_8c7ba977-9320-4c4f-bd34-a8fe5a5649f6` ran from 1788848297506 to
+1788848305513. Both leader runs used session `63465788-a16b-5328-92fc-8020330969a9`;
+worker used `b48bad11-6e7c-5110-92a1-e560bf56eec6`, also reused from the earlier
+demo. The panel displayed 636.3k tokens. Overlap proves concurrent run lifetimes,
+not separate OS processes or simultaneous provider computation.
+
+The browser exposed a wording defect: a same-thread wait was described as
+"waiting on a sub-thread" although closeKind carries no such distinction.
+The shared run-label helper now says "waiting for other work". A direct source
+assertion checked that label along with the persisted task/run evidence above.
+No build, lint, typecheck, test suite, or new PR was needed. This is a clean
+shared-thread orchestration demo, not a crash/restart reliability sign-off.
+
 #### ACP same-run input — live evidence
 
 The session adapter now uses the existing queue-only mid-turn channel, carrying

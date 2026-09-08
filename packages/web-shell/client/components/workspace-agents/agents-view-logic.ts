@@ -161,7 +161,7 @@ export function describeRun(run: RunView): string {
     case 'review':
       return 'submitted for review';
     case 'waiting':
-      return 'waiting on a sub-thread';
+      return 'waiting for other work';
     case 'unclosed':
       return 'ended without a hand-off';
     default:
