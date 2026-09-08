@@ -321,8 +321,23 @@ export function registerWorkspaceAgentRoutes(
     await current.owner.dispatch();
   };
 
+  /**
+   * A writer killed while holding the workspace lock wedges writes until the
+   * lock goes stale — measured at about ten seconds, since the retry window is
+   * well under a second and the staleness window is ten. Nothing is lost and
+   * it clears itself, so this is a wait, not a fault: it answers 503 with a
+   * Retry-After a caller can act on rather than a 500 quoting a lock file at
+   * someone who never asked about one.
+   */
   const fail = (res: Response, error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
+    if (/lock file is already being held/i.test(message)) {
+      res
+        .set('Retry-After', '11')
+        .status(503)
+        .json({ error: 'workspace_busy' });
+      return;
+    }
     res.status(500).json({ error: message });
   };
 
