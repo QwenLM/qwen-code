@@ -70,6 +70,12 @@ export function isGoalCheckpointStalled(
   );
 }
 
+/**
+ * An unusable checkpoint verifier result. Nothing in production branches on
+ * the class -- the stall breaker counts by window state, not error class --
+ * so it is a diagnostic carrier: its name and message are what an
+ * investigation into a stalled Goal gets to see.
+ */
 export class InvalidGoalCheckpointError extends Error {
   constructor(message: string) {
     super(message);
