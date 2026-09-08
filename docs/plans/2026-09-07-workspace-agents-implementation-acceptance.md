@@ -409,6 +409,18 @@ the existing Agents session tab displayed its ordinary conversation as
 titles, and manual-title preservation is enforced by the adapter but was not
 changed in this browser pass. No local test suite, build, lint, typecheck or CI
 ran.
+
+**Local Runtime observation (2026-09-08).** The Runtime view now reads the
+selected workspace Runtime, persisted host-session claim and bridge heartbeat;
+it no longer fills a constant `local` card in the browser. After a daemon
+restart, the non-empty roster restored the host without a task mutation and
+reused host session `f210855f-45ab-4624-a858-bf11785e22d0`. The browser showed
+provider `Qwen Code ACP`, three Agents, zero restored task sessions, zero
+running/queued tasks, and a heartbeat advancing from 20:29:10 to 20:29:19.
+Bindings not registered in this daemon read offline and remain queued with a
+typed `runtime_unavailable` dispatch observation. No remote registration,
+placement, build, lint, typecheck, test suite or CI was run.
+
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.

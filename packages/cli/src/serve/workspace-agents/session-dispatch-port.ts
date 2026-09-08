@@ -19,7 +19,11 @@
  * returns is one of the outcomes the dispatcher already knows.
  */
 
-import { getErrorMessage, SessionService } from '@qwen-code/qwen-code-core';
+import {
+  getErrorMessage,
+  LOCAL_AGENT_RUNTIME_ID,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import type {
   AgentBodyState,
   AgentDispatchPort,
@@ -125,6 +129,15 @@ export function createSessionDispatchPort(
 
   return {
     async inspect({ agent, threadId, sessionId }): Promise<AgentBodyState> {
+      if (
+        agent.runtimeId !== undefined &&
+        agent.runtimeId !== LOCAL_AGENT_RUNTIME_ID
+      ) {
+        return {
+          kind: 'unavailable',
+          error: `Runtime "${agent.runtimeId}" is not registered in this daemon.`,
+        };
+      }
       const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
       const execution = executions.get(expected);
       if (execution) return execution;

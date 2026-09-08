@@ -164,6 +164,19 @@ ordinary conversation appeared in the existing Agents session list as
 sessions remain untouched. This is local-daemon product-path evidence, not a
 claim of a Multica-compatible remote Runtime.
 
+**Verified through the existing local Runtime owner (2026-09-08).** Runtime is
+not represented by a second invented registry for the demo. The Agent surface
+now projects Qwen Code's selected `WorkspaceRuntime`, the workspace's durable
+`hostSessionId`, and the bridge's real heartbeat. Restarting the daemon kept
+host session `f210855f-45ab-4624-a858-bf11785e22d0`; the non-empty roster
+restored its owner without a task mutation, and the displayed heartbeat moved
+from 20:29:10 to 20:29:19. The Runtime view also showed provider, Agent/session
+counts, and running/queued task counts. A binding unknown to this daemon is
+reported offline and the dispatcher leaves its work queued as
+`runtime_unavailable`; it is not converted into a terminal launch failure.
+This proves the one local host and its restart continuity, not remote
+registration or placement.
+
 An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
 peer mentions in result prose, and each mention correctly booked another run.
 That tree reached 253,320 accounted tokens and blocked before the parent could
@@ -1239,10 +1252,12 @@ remain genuinely open:
 
 Runtime shape is settled: an Agent carries a runtime binding rather than being
 the runtime. V1 produces and enforces the single local binding and exposes it in
-the roster; the ACP bridge is its implementation. A runtime registry with
-remote/cloud/foreign adapters, health heartbeats and placement remains outside
-the demo. This settles the former schema dependency without pretending the
-registry already exists or deciding whether #9402 seeds a later adapter.
+the roster; Qwen Code's existing `WorkspaceRuntime`, durable host-session claim
+and ACP bridge heartbeat are its implementation. The Runtime view now reads
+those facts rather than presenting a constant local card. A second registry for
+remote/cloud/foreign adapters and placement remains outside the demo. This
+settles the former schema dependency without pretending remote registration
+already exists or deciding whether #9402 seeds a later adapter.
 
 ## 10. Out of scope
 

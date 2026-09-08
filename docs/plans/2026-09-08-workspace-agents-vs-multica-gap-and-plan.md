@@ -372,8 +372,10 @@ it survives the change below.
 top-level ACP session with its own persona, model setting and transcript. It is
 no longer a background subagent, and work on another task gets another session.
 The ACP bridge still multiplexes those sessions in one process. The produced
-`local` binding and Runtime view are real, but there is no remote registry,
-placement or heartbeat protocol.
+`local` binding resolves through Qwen Code's existing workspace Runtime. Its
+durable host-session claim, provider, bridge heartbeat and live workload now
+appear in the Runtime view, but there is no remote registry or placement
+protocol.
 
 **Missing entirely.** Remote Runtime registry and placement; labels and due date
 on the work item; squads; inbox; projects. Priority, acceptance criteria,
@@ -560,6 +562,15 @@ Stage A's initial sessionization is complete: `launcher.ts`, `dispatch-port.ts` 
 in the daemon, where the sessions are. The follow-up correction scopes those
 sessions to `(agent, thread)` instead of one transcript per identity.
 Multica-style runtime registration and process isolation remain absent.
+
+The local Runtime follow-up deliberately reused existing infrastructure rather
+than adding a parallel host store. A non-empty roster restores the persisted
+host-session owner after daemon restart, and the page reads the bridge heartbeat
+plus live Agent/session/run counts. Unknown runtime bindings stay offline and
+their work remains queued instead of failing terminally. The observed restart
+reused host session `f210855f-45ab-4624-a858-bf11785e22d0`, with the heartbeat
+advancing in the browser. This is one real local host; it is not the remote
+Runtime registry, heartbeat transport or placement layer Multica has.
 
 A later source audit found that sessionization alone had not delivered the
 claimed persona: persona fields were assigned after `Config.initialize()` had

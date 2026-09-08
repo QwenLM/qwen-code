@@ -79,6 +79,10 @@
   border-radius: var(--radius);
 }
 
+.runtimeHeader {
+  min-width: 0;
+}
+
 .runtimeTitle {
   margin: 0 0 4px;
   font-size: 14px;
@@ -91,8 +95,35 @@
   text-transform: capitalize;
 }
 
-.runtimeId {
+.runtimeFacts {
+  display: grid;
   grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin: 10px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.runtimeFacts div {
+  min-width: 0;
+}
+
+.runtimeFacts dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.runtimeFacts dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtimeFacts code {
   color: var(--muted-foreground);
   font-size: 12px;
 }

@@ -397,15 +397,27 @@ export function registerWorkspaceAgentRoutes(
         if (recoveryStopped) return;
         if (!runtime.trusted || runtime.generationGuard?.closed) continue;
         try {
-          const { threads } = await listThreads(runtime.workspaceCwd);
+          const [agents, { threads }] = await Promise.all([
+            readWorkspaceAgents(runtime.workspaceCwd),
+            listThreads(runtime.workspaceCwd),
+          ]);
+          const hasRoster = agents.some(
+            (agent) => agent.retiredAt === undefined,
+          );
+          const hasWork = threads.some(
+            (thread) =>
+              thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
+              thread.outbox.some((event) => event.status === 'pending'),
+          );
+          if (!hasRoster && !hasWork) continue;
+          const owner = owners.get(runtime.workspaceCwd);
           if (
-            !threads.some(
-              (thread) =>
-                thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
-                thread.outbox.some((event) => event.status === 'pending'),
-            )
-          )
+            !hasWork &&
+            owner?.bridge === runtime.bridge &&
+            owner.generationGuard === runtime.generationGuard
+          ) {
             continue;
+          }
           if (recoveryStopped) return;
           const error = await startBookedRuns(runtime);
           if (error)
@@ -437,16 +449,41 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime) return;
     const root = runtime.workspaceCwd;
     try {
-      const [agents, { threads }] = await Promise.all([
+      const [agents, { threads }, workspace] = await Promise.all([
         readWorkspaceAgents(root),
         listThreads(root),
+        readAgentWorkspace(root),
       ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
+      const agentSessions = sessions.filter(
+        (candidate) => candidate.sourceType === AGENT_SESSION_SOURCE_TYPE,
+      );
+      const lastSeenAt = workspace.hostSessionId
+        ? runtime.bridge.getHeartbeatState(workspace.hostSessionId)
+            ?.sessionLastSeenAt
+        : undefined;
       const localRuntime = {
         id: LOCAL_AGENT_RUNTIME_ID,
         kind: 'local' as const,
         label: 'Local daemon',
+        provider: 'Qwen Code ACP',
         status: 'online' as const,
+        workspaceId: runtime.workspaceId,
+        ...(workspace.hostSessionId
+          ? { hostSessionId: workspace.hostSessionId }
+          : {}),
+        ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+        agentCount: agents.filter((agent) => agent.retiredAt === undefined)
+          .length,
+        sessionCount: agentSessions.length,
+        runningTaskCount: threads.filter((thread) =>
+          thread.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)),
+        ).length,
+        queuedTaskCount: threads.reduce(
+          (count, thread) =>
+            count + thread.runs.filter((run) => run.status === 'queued').length,
+          0,
+        ),
       };
       res.json({
         agents: agents.map((agent) => {
@@ -468,11 +505,12 @@ export function registerWorkspaceAgentRoutes(
               ).length,
             0,
           );
-          const agentSessions = sessions.filter(
+          const sessionsForAgent = agentSessions.filter(
             (candidate) =>
-              candidate.sourceType === AGENT_SESSION_SOURCE_TYPE &&
               candidate.sourceId === agent.id,
           );
+          const runtimeId = agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID;
+          const runtimeAvailable = runtimeId === LOCAL_AGENT_RUNTIME_ID;
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -492,13 +530,17 @@ export function registerWorkspaceAgentRoutes(
             ),
           );
           const status =
-            agent.retiredAt !== undefined || agent.enabled === false
+            agent.retiredAt !== undefined ||
+            agent.enabled === false ||
+            !runtimeAvailable
               ? 'offline'
-              : active || agentSessions.some((entry) => entry.hasActivePrompt)
+              : active ||
+                  sessionsForAgent.some((entry) => entry.hasActivePrompt)
                 ? 'working'
                 : blocked
                   ? 'blocked'
-                  : failed || agentSessions.some((entry) => entry.hasTurnError)
+                  : failed ||
+                      sessionsForAgent.some((entry) => entry.hasTurnError)
                     ? 'error'
                     : 'idle';
           return {
@@ -512,10 +554,15 @@ export function registerWorkspaceAgentRoutes(
             maxConcurrentRuns: maxConcurrentRunsFor(agent),
             enabled: agent.enabled !== false,
             status,
-            runtime: {
-              ...localRuntime,
-              id: agent.runtimeId ?? LOCAL_AGENT_RUNTIME_ID,
-            },
+            runtime: runtimeAvailable
+              ? localRuntime
+              : {
+                  id: runtimeId,
+                  kind: 'external' as const,
+                  label: runtimeId,
+                  provider: 'Unregistered',
+                  status: 'offline' as const,
+                },
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
             // look it up. `enabled` stays a separate answer: a retired agent

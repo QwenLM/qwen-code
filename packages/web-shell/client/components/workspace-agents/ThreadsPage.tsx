@@ -85,9 +85,17 @@ export interface WorkspaceAgentSummaryView {
 
 export interface WorkspaceAgentRuntimeView {
   id: string;
-  kind: 'local';
+  kind: 'local' | 'external';
   label: string;
+  provider: string;
   status: 'online' | 'offline';
+  workspaceId?: string;
+  hostSessionId?: string;
+  lastSeenAt?: number;
+  agentCount?: number;
+  sessionCount?: number;
+  runningTaskCount?: number;
+  queuedTaskCount?: number;
 }
 
 export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
@@ -643,11 +651,11 @@ export function ThreadsPage({
           ))
         )}
 
-        {view === 'runtime' ? (
+        {view === 'runtime' && runtime ? (
           <section className={styles.runtimeCard}>
-            <div>
+            <div className={styles.runtimeHeader}>
               <h2 className={styles.runtimeTitle}>
-                {runtime?.label ?? 'Local daemon'}
+                {runtime.label}
               </h2>
               <p className={styles.configNote}>
                 Hosts top-level Agent sessions for this workspace. Conversation
@@ -655,10 +663,56 @@ export function ThreadsPage({
               </p>
             </div>
             <strong className={styles.runtimeStatus}>
-              {runtime?.status ?? 'offline'}
+              {runtime.status}
             </strong>
-            <code className={styles.runtimeId}>{runtime?.id ?? 'local'}</code>
+            <dl className={styles.runtimeFacts}>
+              <div>
+                <dt>Runtime</dt>
+                <dd>
+                  <code>{runtime.id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Provider</dt>
+                <dd>{runtime.provider}</dd>
+              </div>
+              {runtime.hostSessionId ? (
+                <div>
+                  <dt>Host session</dt>
+                  <dd>
+                    <code>{runtime.hostSessionId}</code>
+                  </dd>
+                </div>
+              ) : null}
+              {runtime.lastSeenAt ? (
+                <div>
+                  <dt>Last heartbeat</dt>
+                  <dd>{new Date(runtime.lastSeenAt).toLocaleTimeString()}</dd>
+                </div>
+              ) : null}
+              <div>
+                <dt>Agents</dt>
+                <dd>{runtime.agentCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Sessions</dt>
+                <dd>{runtime.sessionCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Running tasks</dt>
+                <dd>{runtime.runningTaskCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Queued tasks</dt>
+                <dd>{runtime.queuedTaskCount ?? 0}</dd>
+              </div>
+            </dl>
           </section>
+        ) : view === 'runtime' ? (
+          <div className={styles.emptyState}>
+            <p className={styles.emptyLead}>Runtime unavailable.</p>
+            <p>This workspace has no active Agent host.</p>
+          </div>
         ) : null}
       </div>
     </div>

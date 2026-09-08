@@ -55,6 +55,7 @@ import { threadPriorityRank } from './types.js';
 /** What the runtime says about one agent's session on one thread. */
 export type AgentBodyState =
   | { kind: 'absent' }
+  | { kind: 'unavailable'; error: string }
   | { kind: 'paused' }
   | { kind: 'completed' }
   | { kind: 'failed'; runId: string; attempt: number; error: string }
@@ -163,6 +164,7 @@ export type DispatchResultKind =
   | 'recovery_failed'
   | 'busy_other_thread'
   | 'capacity_wait'
+  | 'runtime_unavailable'
   | 'launch_failed'
   | 'agent_unavailable'
   | 'runtime_divergence';
@@ -783,9 +785,15 @@ export async function dispatchOnce(
       records.push({
         ...base,
         kind:
-          state.kind === 'running' ? 'busy_other_thread' : 'runtime_divergence',
+          state.kind === 'running'
+            ? 'busy_other_thread'
+            : state.kind === 'unavailable'
+              ? 'runtime_unavailable'
+              : 'runtime_divergence',
         ...(state.kind === 'running' && state.threadId
           ? { detail: state.threadId }
+          : state.kind === 'unavailable'
+            ? { detail: state.error }
           : {}),
       });
       continue;
