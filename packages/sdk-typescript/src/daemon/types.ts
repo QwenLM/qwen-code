@@ -55,6 +55,19 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal's own turns, as the daemon's Goal meter
+   * counts them: subagent work and the verifier's own checks are not
+   * included. Optional because a daemon older than the field sends a snapshot
+   * without it.
+   */
+  tokensUsed?: number;
+  /**
+   * The ceiling `tokensUsed` may reach before the Goal stops and waits for
+   * the user. Absent means the Goal is unbounded, which is also what an older
+   * daemon's snapshot looks like.
+   */
+  tokenBudget?: number;
   createdAt: number;
   updatedAt: number;
   lastReason?: string;
@@ -461,6 +474,11 @@ export interface DaemonCapabilities {
    * additive to v=1; older v=1 daemons omit it.
    */
   qwenCodeVersion?: string;
+  /**
+   * Process-wide live-state polling interval in milliseconds. Older daemons
+   * omit it; polling consumers should default to 5000 ms.
+   */
+  sessionLiveStatePollIntervalMs?: number;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,
@@ -1152,6 +1170,24 @@ export interface DaemonSession {
   worktree?: DaemonWorktreeInfo;
   /** Durable worktree metadata/ownership attestation from the daemon. */
   worktreeState?: 'persisted-v1';
+  /**
+   * Present on a worktree-reset response when the superseded session survived
+   * the sever step because its child refused the conditional idle close (it
+   * holds work — a background shell inside the worktree, for example). The
+   * transfer itself committed and `worktreeState` still attests the
+   * replacement, but the old session is still live inside that checkout, so
+   * the daemon keeps its reset barrier armed: prompts and the other writers
+   * that reach the checkout keep failing with `worktree_reset_active` until
+   * the survivor is discarded.
+   *
+   * Diagnostic only: no first-party caller reads it, and nothing depends
+   * on one doing so. The channel worker reports the same success message
+   * either way, and what actually keeps the survivor out of the checkout is
+   * the armed barrier plus the on-disk sidecar link, not this flag. An
+   * external caller that needs to tell "the old id is gone" from "still
+   * live but fenced" should read it, since a `200` alone does not say which.
+   */
+  supersededSessionLive?: boolean;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
 }
@@ -1342,6 +1378,8 @@ export interface DaemonSessionSummary {
   sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  /** Per-session active-work observation from the owning runtime. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   isWaitingForPermission?: boolean;
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
@@ -1566,6 +1604,8 @@ export interface DaemonSessionLiveState {
   sessionId: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Absent when talking to an older daemon. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
   /**
@@ -4003,6 +4043,8 @@ export interface DaemonChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -4011,6 +4053,7 @@ export interface DaemonChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -4019,6 +4062,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -4028,6 +4072,7 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -4037,16 +4082,21 @@ export interface DaemonChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
 }
 
 export type DaemonChannelConfigNestedFieldDescriptor =
-  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      DaemonChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         DaemonChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';

@@ -9,6 +9,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_MAX_CHARACTERS,
+  GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -34,6 +35,7 @@ describe('goal pause reasons', () => {
       GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
       GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       GOAL_PAUSE_REASON_SESSION_DISPOSED,
+      GOAL_PAUSE_REASON_NO_PROGRESS,
     ]) {
       expect(validateGoalPauseReason(reason)).toBeNull();
     }
@@ -96,10 +98,12 @@ describe('goal pause reasons', () => {
     // so none of them may point at a slash command.
     for (const reason of [
       GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+      GOAL_PAUSE_REASON_NO_PROGRESS,
       goalPauseReasonForRunBudget('wall-time'),
       goalPauseReasonForHeadlessFailure('the model stream broke'),
     ]) {
       expect(reason).not.toContain('/goal resume');
+      expect(reason).not.toContain('/goal ');
     }
     expect(
       goalPauseReasonForHeadlessFailure('the model stream broke'),

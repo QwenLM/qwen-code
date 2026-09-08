@@ -192,6 +192,7 @@ function mount(
     notify?: (text: string) => void;
     onClose?: () => void;
     fillInput?: (text: string) => void;
+    onSelectSetting?: (name: string, scope: unknown) => void;
   } = {},
 ) {
   return render(
@@ -204,6 +205,7 @@ function mount(
       onClose={overrides.onClose ?? (() => {})}
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
+      onSelectSetting={overrides.onSelectSetting}
     />,
   );
 }
@@ -286,6 +288,16 @@ describe('OpenTuiDialogMount routing', () => {
     expect(notices).toEqual([
       "'ui.theme' opens a dialog this shell does not mount.",
     ]);
+  });
+
+  it('hands a settings sub-dialog row to the owner without closing (U-9)', () => {
+    // The owner replaces the dialog request; a close here would clobber it.
+    const onSelectSetting = vi.fn();
+    const onClose = vi.fn();
+    mount({ dialog: 'settings' }, { onSelectSetting, onClose });
+    dialogProp('settings', 'onSelect')('ui.theme', 'user');
+    expect(onSelectSetting).toHaveBeenCalledWith('ui.theme', 'user');
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('sends the arena start command through the composer owner', () => {
