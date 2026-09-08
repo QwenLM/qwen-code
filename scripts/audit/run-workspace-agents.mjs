@@ -40,7 +40,8 @@ export { ThreadPostTool, ThreadReviewTool, ThreadReadTool, ThreadCreateTool, Thr
 export * from '${repo}/${src}/types.js';
 export { Storage } from '${repo}/packages/core/src/config/storage.js';
 export * as view from '${repo}/packages/web-shell/client/components/workspace-agents/agents-view-logic.js';
-export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard } from '${repo}/${src}/capability.js';
+export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard, THREAD_TOOL_NAMES } from '${repo}/${src}/capability.js';
+export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo}/${src}/thread-status.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
 );
@@ -1362,6 +1363,104 @@ ok(
   !(await M.readThread(ROOT, scoped.th.id)).messages.some((m) =>
     m.text.includes('from the wrong workspace'),
   ),
+);
+
+console.log('\n17d. the paths a mutation campaign found untested');
+// Every assertion here exists because disabling the guard behind it changed
+// nothing in this script. A guard nothing notices is a guard nothing checks.
+
+// capability.ts: the table is an allow-list, so a name that is not in it at
+// all must be denied rather than falling through as unclassified.
+ok(
+  'a tool nobody classified is denied, not ignored',
+  M.classifyAgentTool('some_tool_invented_later') === 'deny',
+  M.classifyAgentTool('some_tool_invented_later'),
+);
+ok(
+  'and the guard refuses it too',
+  (await guard({ toolName: 'some_tool_invented_later' })).allowed === false,
+);
+ok(
+  'an upstream refusal is not overridden by this guard',
+  (
+    await M.createAgentToolInvocationGuard(async () => ({
+      allowed: false,
+      reason: 'upstream said no',
+    }))({ toolName: 'thread_post', signal: sig() })
+  ).allowed === false,
+);
+
+// thread-tools: an empty title is refused rather than making a nameless
+// sub-thread nobody can find again.
+const emptyTitle = await M.runWithAgentRunContext(scopedFrame, () =>
+  new M.ThreadCreateTool(cfg).buildAndExecute({ title: '   ' }, sig()),
+);
+ok('a blank sub-thread title is refused', Boolean(emptyTitle.error));
+
+// thread-status: the close obligations a thread still owes.
+const obligThread = thr('ob', undefined, [
+  run('r_live', 1, { status: 'running' }),
+  run('r_blocked', 2, {
+    status: 'completed',
+    closeKind: 'blocked',
+    endedAt: 5,
+  }),
+  run('r_plain', 3, { status: 'completed', endedAt: 6 }),
+]);
+const outstanding = M.outstandingCloseObligations(obligThread);
+ok(
+  'a live run owes nothing yet',
+  !outstanding.some((o) => o.runId === 'r_live'),
+  JSON.stringify(outstanding.map((o) => [o.runId, o.kind])),
+);
+// A `finishing` run carries a close kind and is still live, so it owes
+// nothing *yet* — the obligation appears when the dispatcher writes the
+// terminal status. This is the case that distinguishes the liveness guard
+// from the close-kind one; without it, disabling liveness changed nothing
+// because every live fixture also lacked a close kind.
+ok(
+  'a finishing run owes nothing until it is terminal',
+  !M.outstandingCloseObligations(
+    thr('ob_fin', undefined, [
+      run('r_fin', 1, { status: 'finishing', closeKind: 'review' }),
+    ]),
+  ).length,
+);
+ok(
+  'a blocked close is outstanding',
+  outstanding.some((o) => o.runId === 'r_blocked' && o.kind === 'blocked'),
+);
+// A completed run that recorded no close kind owes nothing: `unclosed` is a
+// close kind an agent can record, not the absence of one. An earlier version
+// of this assertion conflated the two and the code was right.
+ok(
+  'a completed run with no close kind owes nothing',
+  !outstanding.some((o) => o.runId === 'r_plain'),
+  JSON.stringify(outstanding.map((o) => [o.runId, o.kind])),
+);
+ok(
+  'while one that ended without a hand-off does owe',
+  M.outstandingCloseObligations(
+    thr('ob2', undefined, [
+      run('r_unclosed', 1, {
+        status: 'completed',
+        closeKind: 'unclosed',
+        endedAt: 5,
+      }),
+    ]),
+  ).some((o) => o.kind === 'unclosed'),
+);
+ok(
+  'a failed run outranks whatever it recorded first',
+  M.outstandingCloseObligations(
+    thr('ob3', undefined, [
+      run('r_failed', 1, {
+        status: 'failed',
+        closeKind: 'review',
+        endedAt: 5,
+      }),
+    ]),
+  ).some((o) => o.kind === 'failure'),
 );
 
 console.log('\n18. concurrency');
