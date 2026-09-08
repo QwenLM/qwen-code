@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { APIUserAbortError } from 'openai';
+import { APIError, APIUserAbortError } from 'openai';
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
 import {
   classifyRetryError,
   isFallbackEligible,
+  isRetryableUpstreamError,
 } from './retryErrorClassification.js';
 
 describe('classifyRetryError', () => {
@@ -455,13 +456,52 @@ describe('classifyRetryError', () => {
     expect(classification).not.toHaveProperty('statusCode');
   });
 
+  it('classifies the SDK error a mid-stream gateway frame actually produces', () => {
+    // The fixtures above hand-build the shape, so a dependency bump that
+    // renames `requestID` would silently reintroduce the incident with the
+    // whole suite green. This drives the real constructor the SDK throws from
+    // inside its SSE iterator, with real headers, as the oracle.
+    const error = new APIError(
+      undefined,
+      { code: 'KeyError', message: "'id'" },
+      undefined,
+      new Headers({ 'x-request-id': 'cd7f37f3-d38a-9dec-804f-f70dda5650eb' }),
+    );
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+      providerCode: 'KeyError',
+      requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+    });
+    expect(isRetryableUpstreamError(error)).toBe(true);
+
+    // The same producer with a present-but-empty header: `Headers.get` returns
+    // '' rather than null, and an id the provider never set must not open the
+    // gate.
+    const untraced = new APIError(
+      undefined,
+      { code: 'KeyError', message: "'id'" },
+      undefined,
+      new Headers({ 'x-request-id': '' }),
+    );
+    expect(untraced.requestID).toBe('');
+    expect(classifyRetryError(untraced)).toMatchObject({
+      kind: 'unknown',
+      diagnosis: 'unknown',
+      reason: 'unclassified',
+    });
+    expect(isRetryableUpstreamError(untraced)).toBe(false);
+  });
+
   it('classifies a status-less provider body embedded in the message as retryable', () => {
     // The same upstream failure can arrive with the provider's JSON body pasted
     // into the message rather than on SDK properties. With no `:HTTP_STATUS/`
     // marker there is no status to classify on, so the request id in the body
-    // is the only evidence that the provider traced the failure. It arrives
-    // inside an SSE frame, so it carries the same kind the sibling branches give
-    // an SSE-delivered provider error.
+    // is the only evidence that the provider traced the failure. Raw SSE
+    // framing surviving into the message is what earns the `sse-provider` kind
+    // here; the SDK strips that framing, so the case above is plain `provider`.
     const error = new Error(
       'id:1\nevent:error\ndata:{"request_id":"req-stream","code":"KeyError","message":"upstream failed"}',
     );
@@ -485,10 +525,20 @@ describe('classifyRetryError', () => {
       'data_inspection_failed',
       // The same rejection the pipeline re-throws out of the provider's body.
       'DataInspectionFailed',
+      // DashScope spells output moderation with a prefix.
+      'ResponseDataInspectionFailed',
       'InvalidApiKey',
       'Arrearage',
+      // Billing exhaustion that neither quota fast-fail intercepts: one needs a
+      // 429 status plus the free-tier wording, the other a reset time.
+      'insufficient_quota',
+      'Model.AccessDenied',
       'invalid_request_error',
       'InvalidParameter',
+      // OpenAI's `.type` spelling for a malformed request.
+      'invalid_parameter_error',
+      // Recoverable by compaction, never by re-sending the identical payload.
+      'context_length_exceeded',
     ];
 
     for (const code of codes) {
@@ -498,6 +548,34 @@ describe('classifyRetryError', () => {
         providerCode: code,
       });
     }
+  });
+
+  it('fails fast on a permanent provider type when the body carries no code', () => {
+    // The canonical OpenAI malformed-request body puts `invalid_request_error`
+    // on `.type` and sets `code` to null, so reading permanence off `code`
+    // alone never fires for it and the request id would open the retry gate on
+    // a rejection that cannot succeed.
+    expect(
+      classifyRetryError({
+        type: 'invalid_request_error',
+        code: null,
+        requestID: 'req-1',
+      }),
+    ).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+    });
+  });
+
+  it('does not treat every provider type as permanent', () => {
+    // `.type` also carries transient values; matching it against the same
+    // anchored list is what keeps a server-side fault retryable.
+    expect(
+      classifyRetryError({ type: 'server_error', requestID: 'req-1' }),
+    ).toMatchObject({
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+    });
   });
 
   it('keeps an unrecognised upstream code retryable', () => {

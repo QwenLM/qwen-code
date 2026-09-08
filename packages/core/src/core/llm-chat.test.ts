@@ -4807,6 +4807,78 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('compacts a status-less upstream overflow instead of replaying it', async () => {
+      // A gateway can relay an input-length rejection into an already-200
+      // stream with no HTTP status and a request id attached, and `Range` is
+      // not a code the permanence list knows — so this classifies as a
+      // retryable upstream failure. Re-sending cannot shrink the request, and
+      // the continuation arm would re-send it strictly larger, so the recovery
+      // gate has to let it fall through to the one-shot compaction below.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 128_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+
+      const overflowError = Object.assign(
+        new Error(
+          "This model's maximum context length is 128000 tokens. " +
+            'However, your messages resulted in 135000 tokens.',
+        ),
+        { code: 'Range', requestID: 'req-1' },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            throw overflowError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        )
+        .mockResolvedValueOnce(makeStreamResponse('answer after compact'));
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-statusless-overflow-compacts',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Compaction ran, and it came first. A replay would have emitted a plain
+      // RETRY with no COMPRESSED event at all and never called compress.
+      expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(events[1]?.type).toBe(StreamEventType.RETRY);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'answer after compact',
+        ),
+      ).toBe(true);
+    });
+
     it('uses the configured context window when reactive overflow has no token counts', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
@@ -11186,6 +11258,18 @@ describe('LlmChat', async () => {
                 'Recovered from upstream KeyError',
           ),
         ).toBe(true);
+        // The recovery log has to carry the classifier's own fields: the label
+        // still says "Transport", `transportCode` is absent for this class, and
+        // the provider's request id is the only handle a gateway ticket can be
+        // filed against.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry scheduled',
+          expect.objectContaining({
+            classificationReason: 'upstream-error-without-status',
+            providerCode: 'KeyError',
+            requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }

@@ -117,11 +117,11 @@ function defaultShouldRetry(
   if (status !== undefined && status >= 500 && status < 600) {
     return true;
   }
-  // The shared verdict below already covers HTTP 429 (and 503) through
-  // isRateLimitError's RATE_LIMIT_ERROR_CODES, so an explicit `status === 429`
-  // check here would be redundant. Sharing it with LlmChat's inline stream
-  // predicate is what keeps a change to the status-less policy from landing on
-  // one path and not the other.
+  // HTTP 429/503 and the provider rate-limit codes reach the retry through the
+  // shared verdict's rate-limit term. There is no other 429 path left in this
+  // function, so that term is load-bearing here rather than redundant. Sharing
+  // the verdict with LlmChat's inline stream predicate is what keeps a change
+  // to the status-less policy from landing on one path and not the other.
   return isRetryableUpstreamError(error, extraRetryErrorCodes);
 }
 

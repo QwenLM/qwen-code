@@ -35,7 +35,10 @@ export function isRetryableStreamTransportError(
  * code. This needs its own predicate instead of a wider
  * `RETRYABLE_STREAM_TRANSPORT_CODES`: that set is socket-only by contract, and
  * the Anthropic generator shares the predicate over it to decide whether
- * deferred tool-call chunks may be released.
+ * deferred tool-call chunks may be released. That release gate deliberately
+ * stays transport-only, so it is narrower than LlmChat's replay boundary, which
+ * admits this class too; the comment at its call site in the Anthropic
+ * generator records why releasing there would disable the recovery.
  */
 export function isRetryableStatuslessUpstreamError(
   classification: RetryErrorClassification,

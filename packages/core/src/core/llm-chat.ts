@@ -552,14 +552,16 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
   /**
-   * Budget for *continuation* recovery after a socket-level cut that already
-   * delivered output (issue #7832). This is a different mechanism from the
-   * `maxRetries` replay above and therefore has its own budget: a replay
-   * re-sends the request from scratch and is only legal before any chunk
-   * reached callers, while a continuation keeps the delivered output and asks
-   * the model to resume from it. A single long generation can be cut more than
-   * once by the same gateway idle timeout, so this is sized like
-   * {@link MAX_OUTPUT_RECOVERY_ATTEMPTS} rather than like the replay budget.
+   * Budget for *continuation* recovery after a mid-stream cut that already
+   * delivered output (issue #7832) — a socket-level failure, or a status-less
+   * upstream failure the provider traced with its own request id. This is a
+   * different mechanism from the `maxRetries` replay above and therefore has
+   * its own budget: a replay re-sends the request from scratch and is only
+   * legal before any chunk reached callers, while a continuation keeps the
+   * delivered output and asks the model to resume from it. A single long
+   * generation can be cut more than once by the same gateway idle timeout, so
+   * this is sized like {@link MAX_OUTPUT_RECOVERY_ATTEMPTS} rather than like
+   * the replay budget.
    */
   maxContinuationRetries: 3,
 };
@@ -3472,15 +3474,30 @@ export class LlmChat {
               });
             }
 
+            // Computed above the recovery gates because a status-less upstream
+            // failure that is really an oversized-payload rejection has to
+            // reach the one-shot compaction below instead of being re-sent:
+            // re-sending cannot shrink a request, and the continuation arm
+            // would re-send it strictly larger. A reverse proxy in front of the
+            // endpoint can reject the serialized request with a bare HTTP 413
+            // (no token wording) even below the token-based compaction
+            // threshold; it recovers through the same one-shot path (#10380).
+            const contextOverflow = getContextLengthExceededInfo(error);
+            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+
             // Both stream-recovery mechanisms below admit a curated
             // socket-level failure and a status-less upstream failure the
             // provider traced with its own request id. The latter is what a
             // gateway error frame pushed into an already-200 stream produces,
             // and it can only be decided here: retryWithBackoff resolved when
             // the stream was established, before a single frame was parsed.
+            // The overflow exclusion narrows only that new class, so a socket
+            // cut keeps the verdict it had before this branch existed.
             const isRetryableStreamCut =
               isRetryableStreamTransportError(classification) ||
-              isRetryableStatuslessUpstreamError(classification);
+              (isRetryableStatuslessUpstreamError(classification) &&
+                !contextOverflow.isExceeded &&
+                !requestPayloadOverflow.isTooLarge);
 
             // Replay only those failures before any
             // content (non-thought output) has reached callers.
@@ -3521,6 +3538,9 @@ export class LlmChat {
                 yieldedNonContentChunks: streamYieldedChunk,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
+                classificationReason: classification.reason,
+                providerCode: classification.providerCode,
+                requestId: classification.requestId,
               });
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
@@ -3581,6 +3601,9 @@ export class LlmChat {
                 retryDelayMs: delayMs,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
+                classificationReason: classification.reason,
+                providerCode: classification.providerCode,
+                requestId: classification.requestId,
                 deliveredChars: transportContinuationText.length,
               });
               // `isContinuation` keeps the UI's text buffer, so the next
@@ -3611,15 +3634,14 @@ export class LlmChat {
                   TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
+                classificationReason: classification.reason,
+                providerCode: classification.providerCode,
+                requestId: classification.requestId,
               });
             }
 
-            const contextOverflow = getContextLengthExceededInfo(error);
-            // A reverse proxy in front of the endpoint can reject the
-            // serialized request with a bare HTTP 413 (no token wording)
-            // even below the token-based compaction threshold; recover it
-            // through this same one-shot reactive path (#10380).
-            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            // Both detectors were computed above the recovery gates, so that a
+            // status-less upstream failure could be kept out of them.
             if (
               contextOverflow.isExceeded ||
               requestPayloadOverflow.isTooLarge

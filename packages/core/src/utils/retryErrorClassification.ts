@@ -184,18 +184,25 @@ export function classifyRetryError(
     };
   }
 
-  // Mirrors the two returns above: an error that arrived inside an SSE frame
-  // carries the same kind whichever branch classifies it, so triage can filter
-  // on one label for "delivered by the stream".
+  // Mirrors the transport-mapping branches above, which label by
+  // `details.transport`. That field records whether raw SSE framing survived
+  // into `.message`, not whether the error came out of a stream: the SDK strips
+  // the framing from a mid-stream APIError, so the canonical gateway error
+  // frame is labelled 'provider' and only a body pasted into the message reads
+  // 'sse-provider'.
   const statuslessKind: RetryErrorKind =
     details.transport === 'sse' ? 'sse-provider' : 'provider';
 
   // With no status left to read, permanence has to come off the provider body:
   // a moderation rejection necessarily arrives after the 200, and a gateway can
-  // relay a credential or malformed-request rejection the same way. Nothing
-  // above can fail fast on them, and re-sending the identical request can never
-  // succeed.
-  if (isPermanentProviderCode(providerCode)) {
+  // relay a credential, billing or malformed-request rejection the same way.
+  // Nothing above can fail fast on them, and re-sending the identical request
+  // can never succeed. `.type` is checked alongside `code` because that is
+  // where the SDK puts `invalid_request_error`, with `code` null.
+  if (
+    isPermanentProviderCode(providerCode) ||
+    isPermanentProviderCode(providerFields.providerType)
+  ) {
     return {
       kind: statuslessKind,
       diagnosis: 'fail-fast',
@@ -291,15 +298,23 @@ function isAllocatedQuotaExceeded(providerCode?: string): boolean {
   return providerCode === 'Throttling.AllocationQuota';
 }
 
-// Provider codes that mean "this exact request can never succeed": content
-// moderation, credentials/billing, and a malformed request. Moderation
-// necessarily happens after the provider has already sent 200, so there is no
-// HTTP status to fail fast on, and a gateway can relay the other two the same
-// way. Separators are optional and case is ignored because the same rejection
-// reaches this classifier both ways — `data_inspection_failed` and
-// `DataInspectionFailed`.
+// Provider codes meaning "re-sending this exact request can never succeed":
+// content moderation, credentials/billing, a malformed request, and a payload
+// refused for its size. Moderation necessarily happens after the provider has
+// already sent 200, so there is no HTTP status to fail fast on, and a gateway
+// can relay the others the same way. The oversized-payload codes belong here
+// for the same reason: their recovery is compaction, and re-sending the
+// identical payload cannot reach it.
+//
+// Separators are optional and case is ignored because one rejection reaches
+// this classifier in several spellings (`data_inspection_failed`,
+// `DataInspectionFailed`, `ResponseDataInspectionFailed`). The anchors are
+// deliberate: under-matching costs a wasted retry ladder, over-matching costs a
+// transient failure that is never retried — the bug this branch exists to fix —
+// so open-ended sub-code qualifiers such as `InvalidParameter.Range` are left
+// out on purpose.
 const PERMANENT_PROVIDER_CODE_PATTERN =
-  /^(?:data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|invalid[_-]?request[_-]?error|invalid[_-]?parameter)$/i;
+  /^(?:response[_-]?data[_-]?inspection[_-]?failed|data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|insufficient[_-]?quota|model[._-]?access[_-]?denied|invalid[_-]?request[_-]?error|invalid[_-]?parameter(?:[_-]?error)?|context[_-]?length[_-]?exceeded)$/i;
 
 function isPermanentProviderCode(providerCode?: string): boolean {
   return (
@@ -310,6 +325,7 @@ function isPermanentProviderCode(providerCode?: string): boolean {
 
 interface ProviderFields {
   providerCode?: string;
+  providerType?: string;
   providerMessage?: string;
   requestId?: string;
 }
@@ -321,6 +337,7 @@ function getProviderFields(error: unknown): ProviderFields {
 
   const source = error as {
     code?: unknown;
+    type?: unknown;
     message?: unknown;
     request_id?: unknown;
     requestId?: unknown;
@@ -356,9 +373,15 @@ function getProviderFields(error: unknown): ProviderFields {
       requestId !== undefined)
       ? source.message
       : undefined;
+  // `.type` is where the OpenAI SDK puts `invalid_request_error` — for that
+  // body it sets `code` to null — so permanence cannot be read off `code`
+  // alone. Kept out of the classification struct: it feeds the permanence
+  // guard only, and `providerCode` is compared by exact equality elsewhere.
+  const providerType = firstNonEmptyString(source.type);
 
   return {
     ...(providerCode !== undefined ? { providerCode } : {}),
+    ...(providerType !== undefined ? { providerType } : {}),
     ...(providerMessage !== undefined ? { providerMessage } : {}),
     ...(requestId !== undefined ? { requestId } : {}),
   };
@@ -386,15 +409,21 @@ export function isFallbackEligible(
 }
 
 /**
- * The retry verdict for an error the callers' own HTTP-status checks cannot
- * decide: provider rate-limit codes with no status, transport failures, and
- * status-less upstream bodies.
+ * The retry verdict for everything a caller does not already short-circuit on
+ * an HTTP status of its own: HTTP 429/503 and provider rate-limit codes,
+ * transport failures, 5xx and 529, and status-less upstream bodies the provider
+ * traced with a request id.
  *
- * Both retry gates end here — `defaultShouldRetry` for the non-streaming and
- * drain-inside-the-call paths, and LlmChat's inline stream predicate — so the
- * status-less policy is written once. Kept in this module rather than in
- * `retry.ts` because the package barrel re-exports that file, and this policy
- * is not public API.
+ * The rate-limit term is load-bearing rather than a convenience:
+ * `defaultShouldRetry` keeps only an explicit 5xx check above its call here, so
+ * deleting that term would silently stop retrying throttling on every
+ * non-streaming and drain-inside-the-call path. LlmChat's inline predicate does
+ * still have its own `status === 429` line, which makes the term redundant
+ * there and nowhere else.
+ *
+ * Both gates end here so the status-less policy is written once. Kept in this
+ * module rather than in `retry.ts` because the package barrel re-exports that
+ * file, and this policy is not public API.
  */
 export function isRetryableUpstreamError(
   error: unknown,

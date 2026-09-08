@@ -1591,8 +1591,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (upstreamStreamFailed) {
       const upstreamErrorClassification =
         classifyRetryError(upstreamStreamError);
-      // Match LlmChat's replay boundary: only known mid-SSE socket cuts
-      // may release an already closed batch before the error is propagated.
+      // Narrower than LlmChat's replay boundary on purpose. LlmChat also
+      // admits a status-less upstream failure the provider traced with its own
+      // request id; releasing a closed batch here would flip what LlmChat then
+      // sees as already delivered (`streamYieldedContentChunk`,
+      // `streamYieldedFunctionCall`) and shut both of its recovery gates, so
+      // for that class the batch stays withheld and the error propagates,
+      // leaving LlmChat free to replay or continue — which is also what this
+      // path did before that class was classified at all. Only known mid-SSE
+      // socket cuts release.
       if (
         isRetryableStreamTransportError(upstreamErrorClassification) &&
         deferredToolCalls.length > 0 &&
