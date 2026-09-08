@@ -39,6 +39,9 @@ import {
 } from './test-utils.js';
 import {
   adminEntryInsideReviewTmp,
+  insideReviewTmpLexically,
+  mountRootFor,
+  unmountableRootSpelling,
   untrustedGitfile,
   untrustedRepositoryFrom,
   discardWorktree,
@@ -587,10 +590,15 @@ describe('worktreeResidue', () => {
       const got = worktreeResidue(tree);
 
       expect(got.paths).toEqual([]);
-      // The walk refuses it: the territory's common dir is no ancestor of
-      // the spelled path, so the walk lstats every component up to the
-      // root and finds the planted link on the way.
-      expect(got.unmeasured).toContain('resolves through a symlink');
+      // The location gate answers this shape FIRST now: a symlinked
+      // `.qwen/tmp` is a REFUSED mount, and "inside the review temp dir by
+      // spelling with no mount root" fails closed — reading the refusal as
+      // "nothing to police" was the fail-open inversion that let the
+      // measurement run through the redirect. (The walk below refuses it
+      // too, one check later; the intermediate-ancestor case keeps that arm
+      // witnessed, where the mount answers and only the walk can see the
+      // link.)
+      expect(got.unmeasured).toContain('review temp dir');
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -626,16 +634,17 @@ describe('worktreeResidue', () => {
   });
 
   it('says UNMEASURED when an INTERMEDIATE ancestor is a symlink the earlier gates cannot see', () => {
-    // The walk's own witness: the sibling redirect shape refuses at the
-    // walk itself (its common dir is no ancestor, so the walk climbs to
-    // the root and meets the link), the leaf-link shape refuses at the
-    // leaf lstat, and deleting the walk turns the redirect test red —
-    // before the containment refusal was removed it shipped green
-    // (measured). This shape passes every gate above it: the leaf is a
-    // real directory, the self-equality holds because both sides resolve
-    // through the same link, and the moved tree's gitfile still names the
-    // REAL repo's admin entry, so the common dir is the repo and the
-    // tree's literal path runs under it. Only the walk can refuse it.
+    // The walk's own witness. The sibling redirect shape (a link AT
+    // `.qwen/tmp`) is now refused by the location gate before the walk runs —
+    // a refused mount fails closed — and the leaf-link shape refuses at the
+    // leaf lstat. What remains the walk's alone is a link BETWEEN the mount
+    // root and the leaf: `.qwen/tmp` itself stays real, so the mount answers
+    // and the gate passes, and deleting the walk turns this test red. The
+    // shape passes every other check: the leaf is a real directory, the
+    // self-equality holds because both sides resolve through the same link,
+    // and the moved tree's gitfile still names the REAL repo's admin entry,
+    // so the common dir is the repo and the tree's literal path runs under
+    // it. Only the walk can refuse it.
     expect(worktreeResidue(tree, 12, git('rev-parse', 'HEAD'))).toEqual({
       paths: [],
       total: 0,
@@ -643,19 +652,19 @@ describe('worktreeResidue', () => {
 
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-walk-')));
     try {
-      // Move the worktree out and plant a link at its parent pointing after
-      // it. The moved tree keeps naming its original admin entry — spelled
-      // absolutely, because its old relative spelling no longer resolves from
-      // outside the repo.
+      // Move the worktree out and re-hang it one level deeper, behind a link
+      // planted INSIDE the mount. The moved tree keeps naming its original
+      // admin entry — spelled absolutely, because its old relative spelling
+      // no longer resolves from outside the repo.
       renameSync(tree, join(outside, 'review-wt'));
       overwriteGitfile(
         join(outside, 'review-wt', '.git'),
         `gitdir: ${join(repo, '.git', 'worktrees', 'review-wt')}\n`,
       );
-      rmSync(dirname(tree), { recursive: true, force: true });
-      symlinkSync(outside, dirname(tree));
+      symlinkSync(outside, join(dirname(tree), 'link'));
+      const spelled = join(dirname(tree), 'link', 'review-wt');
 
-      const got = worktreeResidue(tree);
+      const got = worktreeResidue(spelled);
 
       expect(got.paths).toEqual([]);
       expect(got.unmeasured).toContain('resolves through a symlink');
@@ -2575,6 +2584,52 @@ describe('untrustedGitfile', () => {
     execFileSync('git', ['init', '-q'], { cwd: repo });
     expect(untrustedGitfile(repo, () => null)).toBeNull();
   });
+
+  itWhereContainmentExists(
+    'REFUSES a tree whose mount was refused — a refusal is not "nothing to police"',
+    () => {
+      // `mountRootFor`'s null is overloaded: "outside any temp dir" and
+      // "inside one but REFUSED" were the same value, and every gate read
+      // both as "nothing to police" — the fail-open inversion, measured
+      // end-to-end with a symlinked `.qwen/tmp`. Lexically inside plus no
+      // mount root is fail-closed, at each gate that consumes the mount.
+      // Asked with the REAL `mountRootFor`, because an injected root can
+      // only ever answer one of the two nulls.
+      const { repo, tree } = pipelineTree();
+      const elsewhere = join(repo, 'elsewhere');
+      renameSync(join(repo, '.qwen', 'tmp'), elsewhere);
+      symlinkSync(elsewhere, join(repo, '.qwen', 'tmp'));
+      // The tree still resolves — through the link the mount refuses.
+      expect(existsSync(tree)).toBe(true);
+      expect(mountRootFor(tree)).toBeNull();
+
+      expect(untrustedGitfile(tree)).toContain('review temp dir');
+      expect(untrustedRepositoryFrom(tree)).toContain('review temp dir');
+      const residue = worktreeResidue(tree);
+      expect(residue.paths).toEqual([]);
+      expect(residue.unmeasured).toContain('review temp dir');
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a launch directory that no longer exists at its spelling inside the review temp dir',
+    () => {
+      // The rename attack's other half: `mv .qwen .qwen-real` from inside the
+      // outer mount leaves the stale spelling matching lexically while the
+      // directory is gone. "No objection" there is what the launch-dir memo
+      // recorded TRUSTED over, so inside the spelling a non-existent cwd is
+      // a refusal — while outside it absence stays the caller's own error
+      // path, exactly as before.
+      const { repo, mount } = pipelineTree();
+      const gone = join(repo, '.qwen', 'tmp', 'review-pr-2');
+      expect(untrustedRepositoryFrom(gone, mount)).toContain(
+        'no directory exists',
+      );
+      expect(
+        untrustedRepositoryFrom(join(repo, 'gone'), () => repo),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('adminEntryInsideReviewTmp', () => {
@@ -2660,4 +2715,106 @@ describe('adminEntryInsideReviewTmp', () => {
     const repo = tmp();
     expect(adminEntryInsideReviewTmp(repo, () => null, repo)).toBe(false);
   });
+});
+
+describe('unmountableRootSpelling', () => {
+  it('refuses the drive-letter colon AND the colon-less UNC shape, and mounts a POSIX root', () => {
+    // Pure cases, because a UNC path cannot be constructed off Windows and a
+    // colon in a repository name is legal but rare: the refusal class is
+    // pinned arm by arm here. Removing the colon arm turns the first and
+    // third cases red; removing the UNC arm turns the second.
+    expect(unmountableRootSpelling('C:\\repo\\.qwen\\tmp')).toBe(true);
+    expect(unmountableRootSpelling('\\\\server\\share\\repo\\.qwen\\tmp')).toBe(
+      true,
+    );
+    expect(unmountableRootSpelling('/repo/my:checkout/.qwen/tmp')).toBe(true);
+    expect(unmountableRootSpelling('/repo/.qwen/tmp')).toBe(false);
+  });
+});
+
+describe('insideReviewTmpLexically', () => {
+  it('answers containment from the spelling alone, for a path nothing created', () => {
+    // NO filesystem access is the whole point: the gates pair this with
+    // `mountRootFor`'s overloaded null to tell "outside any temp dir" from
+    // "inside one, but refused" without paying a syscall outside.
+    const base = join(tmpdir(), 'qwen-lexical-no-such');
+    expect(insideReviewTmpLexically(join(base, '.qwen', 'tmp', 'wt'))).toBe(
+      true,
+    );
+    // The review temp dir ITSELF is inside, matching `mountRootFor`'s
+    // `+ sep`.
+    expect(insideReviewTmpLexically(join(base, '.qwen', 'tmp'))).toBe(true);
+    expect(insideReviewTmpLexically(join(base, 'checkout'))).toBe(false);
+    // A marker that is not a whole component is not containment.
+    expect(insideReviewTmpLexically(join(base, '.qwen', 'tmpl'))).toBe(false);
+  });
+});
+
+describe('mountRootFor — the walk bound is geometry-aware', () => {
+  const made: string[] = [];
+  const tmp = () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-bound-')));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
+
+  itWhereContainmentExists(
+    'mounts a checkout whose DIRECT parent is a symlink',
+    () => {
+      // The bound used to sit one component ABOVE the checkout, and
+      // `redirectedAncestor` lstats the stop directory before the stop test
+      // fires — so a link at the checkout's direct parent (a checkout one
+      // hop below a linked directory) was read as a redirect in a path the
+      // pipeline owns, and `--sandbox=auto` silently degraded to unsandboxed
+      // execution over the false refusal. Bounded at the repository root,
+      // the walk never looks at the user's own layout above the checkout.
+      const anchor = tmp();
+      const realParent = tmp();
+      symlinkSync(realParent, join(anchor, 'link'));
+      const repo = join(anchor, 'link', 'repo');
+      const tree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+      mkdirSync(tree, { recursive: true });
+      expect(mountRootFor(tree)).toBe(realpathSync(join(repo, '.qwen', 'tmp')));
+    },
+  );
+
+  itWhereContainmentExists(
+    'still refuses a NESTED root whose OUTER review temp dir is a symlink',
+    () => {
+      // The nested bound is the outermost enclosing review temp root, and it
+      // stays INSIDE the walk: the outer review's containerized phase held
+      // that directory read-write, so a link planted there is a redirect in
+      // a writable surface, not the user's own layout.
+      const anchor = tmp();
+      const elsewhere = tmp();
+      mkdirSync(join(elsewhere, 'tmp', 'outer-wt', '.qwen', 'tmp', 'wt2'), {
+        recursive: true,
+      });
+      const repo = join(anchor, 'repo');
+      mkdirSync(join(repo, '.qwen'), { recursive: true });
+      symlinkSync(join(elsewhere, 'tmp'), join(repo, '.qwen', 'tmp'));
+      const inner = join(repo, '.qwen', 'tmp', 'outer-wt', '.qwen', 'tmp');
+      expect(mountRootFor(join(inner, 'wt2'))).toBeNull();
+
+      // ...and the same nested shape without the link mounts at the DEEPEST
+      // temp dir, so the refusal is about the redirect and not the geometry.
+      const honest = tmp();
+      const honestInner = join(
+        honest,
+        '.qwen',
+        'tmp',
+        'outer-wt',
+        '.qwen',
+        'tmp',
+      );
+      mkdirSync(join(honestInner, 'wt2'), { recursive: true });
+      expect(mountRootFor(join(honestInner, 'wt2'))).toBe(
+        realpathSync(honestInner),
+      );
+    },
+  );
 });

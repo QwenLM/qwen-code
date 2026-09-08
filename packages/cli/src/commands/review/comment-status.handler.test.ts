@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   ensureAuthenticated: vi.fn(),
   setGhHost: vi.fn(),
   gitOpt: vi.fn((..._a: string[]): string | null => null),
+  untrustedGitfile: vi.fn((_t: string): string | null => null),
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
   writeStdoutLine: vi.fn(),
@@ -35,6 +36,15 @@ vi.mock('./lib/gh.js', () => ({
 
 vi.mock('./lib/git.js', () => ({
   gitOpt: mocks.gitOpt,
+}));
+
+// PARTIAL for the same reason as paths.js below: only `untrustedGitfile` is
+// steered — the trust-gate divergence cases need it answering differently on
+// two successive calls — and a total mock would silently delete the module's
+// other exports from the handler's import graph.
+vi.mock('./lib/worktree.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/worktree.js')>()),
+  untrustedGitfile: mocks.untrustedGitfile,
 }));
 
 // PARTIAL, not a replacement: only `worktreePath` is being steered, and a
@@ -315,5 +325,86 @@ describe('comment-status handler', () => {
     expect(report.liveHeadBefore).toBe('headA');
     expect(report.liveHeadSha).toBe('headA');
     expect(report.headMovedDuringFetch).toBe(false);
+  });
+
+  // The probe a self-gated report would produce real facts through: the repo
+  // answers inside-work-tree, ancestry yes, one touching commit.
+  function probeAnswering() {
+    mocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args.includes('--is-inside-work-tree')) return 'true';
+      if (args.includes('merge-base')) return '';
+      if (args.includes('log')) return 'deadbeef';
+      if (args.includes('rev-parse')) return 'headA';
+      return null;
+    });
+  }
+
+  it('never pairs an untrusted verdict with measured thread facts — the gate is asked ONCE', async () => {
+    // The trust gate was evaluated twice per run — report level and inside
+    // the probe — and the two answers could diverge (a timeout on one side,
+    // a pointer swapped between them). First call refusing, second clean,
+    // the old pairing certified `worktreeUntrusted` beside REAL code facts:
+    // the report's own `threads[]` contradicting its trust state.
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
+    probeAnswering();
+    let n = 0;
+    mocks.untrustedGitfile.mockImplementation(() =>
+      ++n === 1
+        ? 'resolves to an admin entry inside the review temp dir'
+        : null,
+    );
+    try {
+      queueHeads('headA', 'headA');
+      await run();
+      const report = reportWritten();
+      expect(mocks.untrustedGitfile).toHaveBeenCalledTimes(1);
+      expect(report.worktreeUntrusted).toContain('review temp dir');
+      expect(report.worktreeHeadSha).toBeNull();
+      expect(report.threads[0].code.changedSinceComment).toBe('unknown');
+    } finally {
+      mocks.untrustedGitfile.mockImplementation(() => null);
+    }
+  });
+
+  it('never pairs a clean verdict and a live HEAD with all-unknown facts — the same single answer', async () => {
+    // The mirror divergence: first call clean, second refusing. The old
+    // pairing wrote `worktreeUntrusted: null` and a populated HEAD beside
+    // thread facts the probe had degraded to `unknown` — a report that
+    // claims trust while its own payload measured nothing.
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
+    probeAnswering();
+    let n = 0;
+    mocks.untrustedGitfile.mockImplementation(() =>
+      ++n === 1
+        ? null
+        : 'resolves to an admin entry inside the review temp dir',
+    );
+    try {
+      queueHeads('headA', 'headA');
+      await run();
+      const report = reportWritten();
+      expect(mocks.untrustedGitfile).toHaveBeenCalledTimes(1);
+      expect(report.worktreeUntrusted).toBeNull();
+      expect(report.worktreeHeadSha).toBe('headA');
+      expect(report.threads[0].code.changedSinceComment).toBe(true);
+    } finally {
+      mocks.untrustedGitfile.mockImplementation(() => null);
+    }
   });
 });

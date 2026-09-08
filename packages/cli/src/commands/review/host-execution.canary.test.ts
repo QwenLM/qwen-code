@@ -30,6 +30,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -478,6 +479,49 @@ describe('a planted repository reaches no host-side execution', () => {
           status: null,
           refusal: expect.stringContaining('review temp dir'),
         });
+      } finally {
+        process.chdir(saved);
+      }
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'an ancestor rename does not memoize TRUSTED over the re-stood-up spelling (lib/git)',
+    () => {
+      // The rename attack on the launch-dir memo. Judged once while clean,
+      // the directory is inside a review temp dir — but `mv .qwen
+      // .qwen-real` makes `mountRootFor` answer null for the live cwd's
+      // stale spelling, and a memo keyed on "no mount root" recorded TRUSTED
+      // for it. The spelling re-stood-up over a filter-carrying plant then
+      // inherited the verdict and the next `status` ran the planted clean
+      // filter on the host. The memo's key is the LEXICAL marker scan now:
+      // a spelling that carries the marker is never memoized, and the
+      // renamed-away state is itself a refusal.
+      const { repo, tree, canary, plant } = mountedTree();
+      const saved = process.cwd();
+      try {
+        process.chdir(tree);
+        // Clean, and — inside a review temp dir — never memoized.
+        expect(gitOpt('rev-parse', 'HEAD')).not.toBeNull();
+
+        // The ancestor is renamed out from under the live cwd. The stale
+        // spelling still matches the marker lexically, so this call is a
+        // refusal — not the "nothing to police" the old gate memoized.
+        renameSync(join(repo, '.qwen'), join(repo, '.qwen-real'));
+        expect(gitProbe('rev-parse', 'HEAD')).toEqual({
+          out: null,
+          status: null,
+          refusal: expect.stringContaining('review temp dir'),
+        });
+
+        // The same spelling is stood back up, with the plant under it.
+        mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+        renameSync(join(repo, '.qwen-real', 'tmp', 'review-pr-1'), tree);
+        plant();
+        // `status`, not `rev-parse`: the command that refreshes the index,
+        // so the canary is a witness and not a decoration.
+        expect(() => git('status', '--porcelain')).toThrow(/review temp dir/);
       } finally {
         process.chdir(saved);
       }

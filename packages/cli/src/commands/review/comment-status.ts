@@ -272,7 +272,17 @@ export function summarizeThreads(threads: ThreadStatus[]): ThreadSummary {
  * worktree. Memoized per (path, sinceSha): several threads routinely anchor
  * to the same file at the same commit.
  */
-export function makeGitProbe(worktree: string): CodeChangeProbe {
+export function makeGitProbe(
+  worktree: string,
+  // The trust verdict, asked ONCE by the report and handed down so the probe
+  // and the report can never disagree: evaluated separately, the two calls
+  // straddle a rewrite (or merely a timeout on one side) and the report
+  // certifies a trust state its own `threads[]` payload contradicts — a
+  // `worktreeUntrusted` string beside measured code facts, or a clean verdict
+  // beside all-`unknown` ones. Defaulted rather than required so standalone
+  // callers (the integration suite, the canary) keep self-gating.
+  untrusted: string | null = untrustedGitfile(worktree),
+): CodeChangeProbe {
   // The pointer this probe reads THROUGH is inside the directory the review
   // sandbox hands the reviewed code read-write, so `-C <review worktree>` is
   // not by itself a scoping guarantee: a `.git` rewritten to a planted admin
@@ -285,7 +295,7 @@ export function makeGitProbe(worktree: string): CodeChangeProbe {
   // The existing `!inRepo` degradation carries it: every thread's code facts
   // become `unknown`, which the report already distinguishes from "unchanged".
   const inRepo =
-    untrustedGitfile(worktree) === null &&
+    untrusted === null &&
     gitOpt('-C', worktree, 'rev-parse', '--is-inside-work-tree') === 'true';
   const memo = new Map<string, ReturnType<CodeChangeProbe>>();
   // Ancestry depends on the SHA alone (HEAD is fixed for the run); memoizing
@@ -424,10 +434,13 @@ function writeCommentStatusReport(
   const { prAuthor, liveHeadBefore, liveHeadAfter, comments } = facts;
 
   const worktree = worktreePath(prNumber);
-  // Same gate the probe applies, asked once for the report's own read: a HEAD
-  // sha read through a rewritten pointer is the planted repository's, and it
-  // feeds `worktreeStale` — the flag that decides whether this report's code
-  // facts are announced as describing a superseded checkout.
+  // The gate the probe reads through, asked ONCE for the whole report and
+  // handed down to it: a HEAD sha read through a rewritten pointer is the
+  // planted repository's, and it feeds `worktreeStale` — the flag that
+  // decides whether this report's code facts are announced as describing a
+  // superseded checkout. Asked twice, the two answers can diverge between
+  // calls, and the report would certify a trust state its `threads[]`
+  // contradicts.
   const worktreeUntrusted = untrustedGitfile(worktree);
   const worktreeHeadSha =
     worktreeUntrusted === null
@@ -491,7 +504,11 @@ function writeCommentStatusReport(
   const threads = buildThreadStatuses(
     comments,
     prAuthor,
-    makeGitProbe(worktree),
+    // The SAME verdict the report level just read: asking the gate a second
+    // time here would let the two answers diverge (a timeout on one side, a
+    // pointer swapped between them), and the report would certify a trust
+    // state its own thread facts contradict.
+    makeGitProbe(worktree, worktreeUntrusted),
     me,
   );
   if (worktreeStale) {

@@ -226,6 +226,74 @@ describe('releaseWorktree', () => {
       git('worktree', 'add', '-q', 'wt-link', '-b', 'topic2'),
     ).not.toThrow();
   });
+
+  it('reports the release it could not even ASK git to make', () => {
+    // `{status: null, refusal: null}` is the probe's third shape: spawn
+    // ENOENT or the timeout kill — git was never asked. Keying "not freed"
+    // on the refusal alone read that as "no objection", while the rmSync
+    // fallback cleared the DIRECTORY anyway, so the result certified
+    // `freed: true` over a registration and branch that both survived — and
+    // the next `worktree add` met "missing but already registered". Driven
+    // with a stripped PATH, the pattern this file's gitProbe block uses.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const savedPath = process.env['PATH'];
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      process.env['PATH'] = join(repo, 'no-such-bin');
+      got = releaseWorktree(join(repo, 'wt'));
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+
+    expect(got).toMatchObject({ existed: true, freed: false });
+    // `reason` set whenever `existed && !freed` — cleanup prints it.
+    expect(got?.reason).toBeTruthy();
+    // The directory IS gone (rmSync is not git); the registration survived.
+    expect(existsSync(join(repo, 'wt'))).toBe(false);
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'wt')),
+    );
+    // Restored, a real prune clears the registration and the path is
+    // reusable — the wedge the false `freed` would have hidden.
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: false,
+      freed: false,
+    });
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt', '-b', 'topic2'),
+    ).not.toThrow();
+  });
+
+  it('degrades through the result — never throws — when the cwd is deleted mid-release', () => {
+    // The never-throws contract starts before the first git call: `resolve`
+    // of the RELATIVE path production callers pass reads the cwd, and so does
+    // `redirectedAncestor`'s default `stopAt = process.cwd()` — both threw
+    // `uv_cwd` ENOENT here once the directory was gone, ahead of every
+    // degradation the probe carries.
+    git('worktree', 'add', '-q', 'wt', '-b', 'topic');
+    const gone = join(repo, 'gone');
+    mkdirSync(gone);
+    process.chdir(gone);
+    let got: ReturnType<typeof releaseWorktree> | undefined;
+    try {
+      rmSync(gone, { recursive: true, force: true });
+      // The precondition, asserted rather than assumed.
+      expect(process.cwd).toThrow(/uv_cwd/);
+      expect(() => {
+        got = releaseWorktree('wt');
+      }).not.toThrow();
+    } finally {
+      process.chdir(repo);
+    }
+    expect(got).toMatchObject({ existed: true, freed: false });
+    expect(got?.reason).toBeTruthy();
+    // Nothing was removed — and the release retried from a live cwd completes.
+    expect(existsSync(join(repo, 'wt'))).toBe(true);
+    expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+  });
 });
 
 describe('gitRawTolerateDiff', () => {

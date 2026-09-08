@@ -10,7 +10,7 @@
 
 import { execFileSync } from 'node:child_process';
 import {
-  mountRootFor,
+  insideReviewTmpLexically,
   redirectedAncestor,
   sanitizedGitEnv,
   untrustedRepositoryFrom,
@@ -76,16 +76,25 @@ function gitOpts() {
  * thread by `comment-status`, off a per-call syscall and an ordinary checkout
  * never pays for this gate at all.
  *
- * Inside a review temp dir the question is RE-ASKED on every call. That is not
- * the TOCTOU residual this design documents and does not close, which is about a
- * pointer rewritten between a check and its own use: here the OUTER review's
- * containerized build/test phase holds the directory read-write for the length
- * of a whole command, so it rewrites the pointer BETWEEN calls, and a verdict
- * memoized for the process served the first clean answer to every later wrapper
- * — `status` refreshing the plant's index and running its clean filter, `show
- * <base>:<path>` handing the plant's content back as this review's own rules.
- * `fetch-pr` asks twice for the same reason; this asks every time, and the
- * spawn it costs exists only in the one geometry where the gate speaks.
+ * The memo's key is the LEXICAL marker scan, never `mountRootFor`'s answer.
+ * That null is overloaded (see `insideReviewTmpLexically`), and the rename
+ * attack turns on the difference: `mv .qwen .qwen-real` from inside the outer
+ * mount leaves the live cwd's stale spelling matching the marker while the
+ * mount stops answering, so a memo keyed on "no mount root" recorded TRUSTED
+ * for a spelling inside the review temp dir — and served it to whatever tree
+ * the same spelling was later stood back up over, filter-carrying gitfile
+ * included. A spelling that carries the marker is therefore NEVER memoized:
+ * inside a review temp dir the question is RE-ASKED on every call. That is
+ * not the TOCTOU residual this design documents and does not close, which is
+ * about a pointer rewritten between a check and its own use: here the OUTER
+ * review's containerized build/test phase holds the directory read-write for
+ * the length of a whole command, so it rewrites the pointer BETWEEN calls,
+ * and a verdict memoized for the process served the first clean answer to
+ * every later wrapper — `status` refreshing the plant's index and running its
+ * clean filter, `show <base>:<path>` handing the plant's content back as this
+ * review's own rules. `fetch-pr` asks twice for the same reason; this asks
+ * every time, and the spawn it costs exists only in the one geometry where
+ * the gate speaks.
  */
 let trustedLaunchDir: string | null = null;
 
@@ -95,7 +104,7 @@ function launchDirRefusal(): string | null {
   if (trustedLaunchDir === cwd) return null;
   const refusal = untrustedRepositoryFrom(cwd);
   if (refusal === null) {
-    if (mountRootFor(cwd) === null) trustedLaunchDir = cwd;
+    if (!insideReviewTmpLexically(cwd)) trustedLaunchDir = cwd;
     return null;
   }
   return refusal;
@@ -324,7 +333,22 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   // `dirname`, because the LEAF is the branch below: a link AT the path is
   // unlinked rather than refused, which is what clears it out of the next
   // `worktree add`'s way.
-  const redirected = redirectedAncestor(dirname(resolve(worktreePath)));
+  //
+  // In its own try, because the never-throws contract starts HERE, before any
+  // `gitProbe` call: `resolve` reads the cwd for the RELATIVE path production
+  // callers pass (`worktreePath()` returns `.qwen/tmp/review-pr-<n>`), and so
+  // does `redirectedAncestor`'s default `stopAt = process.cwd()` — evaluated
+  // at the call, outside that function's own try. A cwd deleted out from
+  // under the process (an operator `rm -rf` mid-run, the nested geometry's
+  // outer sweep) throws `uv_cwd` ENOENT on both reads, and this function
+  // degrades through the result the way the probe does: `existed`, not freed,
+  // and the errno as the reason.
+  let redirected: string | null;
+  try {
+    redirected = redirectedAncestor(dirname(resolve(worktreePath)));
+  } catch (err) {
+    return worktreeReleaseResult(true, true, err);
+  }
   if (redirected !== null) {
     // `existed`/`stillThere` both true: the contract's `reason` is only carried
     // when something is still there, and a refusal is exactly that — the
@@ -357,7 +381,9 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
       }
       // prune still runs: a registration whose tree once stood at this
       // path must not wedge the next `worktree add` or hold the branch
-      // checked out.
+      // checked out. `{status: null, refusal: null}` — spawn failure,
+      // timeout kill — is git never ASKED, so the registration may survive:
+      // that is not freed, keyed the same way the main path below keys it.
       const pruned = gitProbe('worktree', 'prune');
       let stillThere = false;
       try {
@@ -368,8 +394,10 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
       }
       return worktreeReleaseResult(
         true,
-        stillThere || pruned.refusal !== null,
-        removeError ?? refusalError(pruned.refusal),
+        stillThere || pruned.refusal !== null || pruned.status === null,
+        removeError ??
+          refusalError(pruned.refusal) ??
+          (pruned.status === null ? couldNotRunError() : undefined),
       );
     }
   } catch {
@@ -409,6 +437,18 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   }
   const pruned = gitProbe('worktree', 'prune');
   const refusal = removed?.refusal ?? pruned.refusal;
+  // `{status: null, refusal: null}` is the third shape a probe answers: git
+  // could not be run AT ALL (spawn ENOENT, the timeout kill, a cwd deleted
+  // underneath). Keying "not freed" on the refusal alone read that as "no
+  // objection", while the `rmSync` above had already cleared the DIRECTORY —
+  // so the result certified `freed: true` over a registration under
+  // `<repo>/.git/worktrees/` and a branch that both survived, and the next
+  // `worktree add` met "missing but already registered": the wedge this
+  // function's docstring exists to prevent. `status === 128` stays on the
+  // rmSync-fallback path above (git answered, the answer was "not a working
+  // tree", and the fallback owns it); a null status means nobody answered.
+  const couldNotRun =
+    (removed !== null && removed.status === null) || pruned.status === null;
   const stillThere = existsSync(worktreePath);
   // A path that IS gone but a release that did not happen: git never ran, so
   // the registration and the branch survive. `stillThere` is how the result
@@ -416,8 +456,24 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   // remove worktree <path>: undefined`.
   return worktreeReleaseResult(
     existed,
-    stillThere || (existed && refusal !== null),
-    removeError ?? refusalError(refusal),
+    stillThere || (existed && (refusal !== null || couldNotRun)),
+    removeError ??
+      refusalError(refusal) ??
+      (couldNotRun ? couldNotRunError() : undefined),
+  );
+}
+
+/**
+ * The `reason` for a release git was never even asked to make: the spawn
+ * failed or the timeout killed it, so the prune that clears the registration
+ * and frees the branch did not happen — however the directory itself fared.
+ */
+function couldNotRunError(): Error {
+  return new Error(
+    'git could not be run at all (a spawn failure or the timeout kill), so ' +
+      "this worktree's registration and branch were not pruned — the next " +
+      '`git worktree add` over the path will still fail with "missing but ' +
+      'already registered". Re-run `qwen review cleanup`.',
   );
 }
 

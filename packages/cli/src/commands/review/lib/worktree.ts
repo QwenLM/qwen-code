@@ -165,8 +165,29 @@ export function mountRootFor(cwd: string): string | null {
   // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
   // `resetScratchTree`); the mount is the one place a redirect would hand the
   // reviewed code a directory nobody chose.
+  //
+  // The walk's bound is geometry-aware. `outermostReviewTmpRoot(root) ===
+  // root` is the flat case — one review temp dir on the path — and the bound
+  // is the repository root: the root itself stays inside the walk (a link at
+  // `.qwen` redirects the whole path), but the walk does not climb past the
+  // checkout into the user's own layout. A bound one component higher lstats
+  // the checkout's DIRECT parent before the stop test fires, so a link there
+  // — a checkout one hop below a linked directory, the everyday macOS shape —
+  // was read as a redirect in a path the pipeline owns, and `--sandbox=auto`
+  // silently degraded to unsandboxed execution of the reviewed code over a
+  // false refusal. The sibling walks (scratch-tree's, `worktreeResidue`'s)
+  // bound at the repository root for exactly this reason.
+  //
+  // The nested case — one review's worktree inside another's, the dogfood
+  // geometry — bounds at the OUTERMOST enclosing review temp root instead:
+  // the outer review's containerized phase held that directory read-write, so
+  // a link planted there sits inside a writable surface and must stay inside
+  // the walk, exactly as `adminEntryInsideReviewTmp` judges distrust against
+  // the outermost root rather than the one the mount was cut at.
+  const outermost = outermostReviewTmpRoot(root);
+  const bound = outermost === root ? resolve(root, '..', '..') : outermost;
   try {
-    if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
+    if (redirectedAncestor(root, bound) !== null) {
       return null;
     }
     const real = realpathSync(root);
@@ -177,25 +198,60 @@ export function mountRootFor(cwd: string): string | null {
     // report attributes to the PR; under `required` the gate passes and the
     // refusal that should have explained it never happens. Both designed
     // degradations are bypassed because this said "mountable" about a root
-    // that is not.
-    //
-    // Refusing it here puts such a checkout back on the path every other
-    // unmountable root already takes. That is the whole fix: the `-v` grammar
-    // has exactly one separator, and `:` in a repository path — legal, if
-    // rare — is the only way to write it.
-    //
-    // On Windows this refuses EVERY absolute path, and that is the right
-    // answer rather than a casualty of it: a drive letter is a colon, and the
-    // mount this builds uses one path as both source and target, which a
-    // Windows path cannot be — the container side has no `C:`. So containment
-    // is not available there, and saying so gives `auto` its direct fallback
-    // and `required` its refusal instead of the runtime's parse error on every
-    // single command.
-    if (real.includes(':')) return null;
+    // that is not. `unmountableRootSpelling` owns the refusal class; saying
+    // so here gives `auto` its direct fallback and `required` its refusal
+    // instead of the runtime's parse error on every single command.
+    if (unmountableRootSpelling(real)) return null;
     return real;
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a mount root's SPELLING is one the container's mount grammar cannot
+ * write. Pure, so both arms of the refusal class are pinnable on every host —
+ * a UNC path cannot be constructed off Windows, and a colon in a repository
+ * path is legal but rare.
+ *
+ * `-v src:dst` has exactly one separator. The colon arm covers a `:` anywhere
+ * in the root — which on Windows is EVERY absolute path, and that is the
+ * right answer rather than a casualty of it: a drive letter is a colon, and
+ * the mount this builds uses one path as both source and target, which a
+ * Windows path cannot be — the container side has no `C:`. So containment is
+ * not available there.
+ *
+ * The UNC arm is the same class with no colon in it: `\\server\share\...` is
+ * an absolute Windows path a colon-only check declares mountable, and the
+ * mount grammar cannot spell it either. Refusing it keeps the "on Windows
+ * this refuses EVERY absolute path" claim true as written, instead of sending
+ * a UNC checkout's every sandboxed command into a raw mount error the report
+ * attributes to the PR.
+ */
+export function unmountableRootSpelling(root: string): boolean {
+  return root.includes(':') || root.startsWith('\\\\');
+}
+
+/**
+ * Whether `cwd`'s spelling places it inside a review temp dir — the same
+ * deepest-marker arithmetic `mountRootFor` cuts with, and NOTHING else: no
+ * realpath, no lstat, no filesystem question of any kind.
+ *
+ * The gates consume this beside `mountRootFor`, not instead of it, because
+ * that function's null is overloaded: "outside any temp dir, nothing to
+ * police" and "inside one, but REFUSED — a symlink redirects it, or the
+ * spelling cannot be mounted" were the same value, and every gate read a
+ * refusal as "nothing to police". That is the fail-open direction inverted:
+ * the shapes `mountRootFor` refuses are exactly the ones a host-side command
+ * must not resolve through. So where this lexical scan says INSIDE and
+ * `mountRootFor` says null, the gate fails closed with a refusal of its own —
+ * and where the spelling carries no marker at all, the answer costs no
+ * syscall, which is what keeps an ordinary checkout off this machinery.
+ */
+export function insideReviewTmpLexically(cwd: string): boolean {
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  return (resolved + sep).lastIndexOf(marker) >= 0;
 }
 
 /**
@@ -363,8 +419,35 @@ export function untrustedRepositoryFrom(
   cwd: string,
   mountRoot: (dir: string) => string | null = mountRootFor,
 ): string | null {
-  if (mountRoot(cwd) === null) return null;
-  if (!existsSync(cwd)) return null;
+  // INSIDE-by-spelling and mount-null together are a refusal, not "nothing to
+  // police": `mountRootFor`'s null is overloaded (see
+  // `insideReviewTmpLexically`), and a launch directory it REFUSED — a
+  // symlinked `.qwen/tmp`, an unspellable root — is precisely one no host-side
+  // command may resolve through. Reading that null as "outside any temp dir"
+  // inverted the gate's fail direction, measured end-to-end with a symlinked
+  // `.qwen/tmp`.
+  if (mountRoot(cwd) === null) {
+    if (!insideReviewTmpLexically(cwd)) return null;
+    return (
+      `${cwd}: the path is inside the review temp dir by spelling, but no ` +
+      `mount root answered for it — a redirect or an unmountable shape ` +
+      `refused it, so where a command run from here would land is unmeasured`
+    );
+  }
+  if (!existsSync(cwd)) {
+    // Inside the same spelling, a launch directory that is not there is the
+    // rename attack, not "no objection": `mv .qwen .qwen-real` from inside
+    // the outer mount leaves the stale spelling matching lexically while
+    // `mountRootFor` stops answering, and the next call at the re-stood-up
+    // spelling must be judged fresh, never inherited. Outside the spelling
+    // nothing changed: absence stays the caller's own error path.
+    if (!insideReviewTmpLexically(cwd)) return null;
+    return (
+      `${cwd}: no directory exists at this spelling inside the review temp ` +
+      `dir — an ancestor was renamed out from under it, so where a command ` +
+      `run from here would land is unmeasured`
+    );
+  }
   const target = resolvedGitDir(cwd);
   if (target.value === null) {
     // Not a repository from here at all — the caller's own error path owns
@@ -428,13 +511,25 @@ export function untrustedGitfile(
   // the way of a default any more.
   mountRoot: (cwd: string) => string | null = mountRootFor,
 ): string | null {
-  const root = mountRoot(tree);
-  if (root === null) return null;
   // No tree, no pointer, nothing to resolve through — and callers reach this
   // with a path that may not exist yet (`--resume` asks about a worktree
   // before deciding whether to build one). Absence is their question, not
   // this one's; answering it here refused every ordinary resume.
   if (!existsSync(tree)) return null;
+  const root = mountRoot(tree);
+  if (root === null) {
+    // The tree IS there and its spelling is inside the review temp dir, yet
+    // no mount root answered: `mountRootFor` REFUSED the path (a redirect, an
+    // unspellable root), and a refusal is not "nothing to police" — see
+    // `insideReviewTmpLexically`. Outside the spelling, null really does mean
+    // there is no writable surface for this question to be about.
+    if (!insideReviewTmpLexically(tree)) return null;
+    return (
+      `${tree}: the path is inside the review temp dir by spelling, but no ` +
+      `mount root answered for it — a redirect or an unmountable shape ` +
+      `refused it, so where a command through its .git would land is unmeasured`
+    );
+  }
   const dotGit = join(tree, '.git');
   let stat;
   try {
@@ -1497,9 +1592,25 @@ export function worktreeResidue(
   //
   // Unmeasured-with-reason, not a throw: this is a tripwire, and a tree whose
   // pointer cannot be trusted is precisely what the `unmeasured` channel
-  // exists to report — every caller already treats it as "not clean". Outside
-  // a mount the question does not arise (`mountRootFor` answers null), so an
-  // ordinary checkout never pays for the extra spawn.
+  // exists to report — every caller already treats it as "not clean".
+  //
+  // The mount's null is overloaded (see `insideReviewTmpLexically`): outside
+  // any review temp dir it means the question does not arise and an ordinary
+  // checkout never pays for the extra spawn — but INSIDE the spelling it is a
+  // REFUSAL (a redirect, an unspellable root), and reading it as "nothing to
+  // police" ran the measurement through exactly the redirect `mountRootFor`
+  // had just declined to mount. Distinguish lexically, fail closed.
+  if (mountRootFor(cwd) === null && insideReviewTmpLexically(cwd)) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the path is inside the review temp dir by spelling, but no mount ' +
+        'root answered for it — a redirect or an unmountable shape refused ' +
+        'it, and the status below would measure whichever repository the ' +
+        'pointer here names',
+    };
+  }
   if (mountRootFor(cwd) !== null) {
     const target = resolvedGitDir(cwd);
     // git not answering is not "no objection", and widening this gate's budget
