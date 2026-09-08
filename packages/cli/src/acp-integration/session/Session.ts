@@ -41,6 +41,7 @@ import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnHost,
+  GoalContinuationTurn,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -349,7 +350,7 @@ import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
-  getModelConfiguration,
+  getConfiguredModelReasoning,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
@@ -616,15 +617,11 @@ type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
 
-interface AcpGoalTurn {
+interface AcpGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
   turnKey: string;
   controller: AbortController;
   origin: 'runtime' | 'user';
-  continuationContext: string;
-  objectiveUpdated?: boolean;
-  windDown?: boolean;
-  verifierFeedback?: string;
   modelStarted: boolean;
 }
 
@@ -2307,19 +2304,13 @@ export class Session implements SessionContext {
           ) {
             return;
           }
+          const { permit, ...continuation } = input;
           this.goalQueue.push({
-            permit: { ...input.permit },
-            turnKey: `goal-runtime:${input.permit.turnId}`,
+            permit: { ...permit },
+            turnKey: `goal-runtime:${permit.turnId}`,
             controller: new AbortController(),
             origin: 'runtime',
-            continuationContext: input.continuationContext,
-            ...(input.objectiveUpdated
-              ? { objectiveUpdated: input.objectiveUpdated }
-              : {}),
-            ...(input.windDown ? { windDown: true } : {}),
-            ...(input.verifierFeedback
-              ? { verifierFeedback: input.verifierFeedback }
-              : {}),
+            ...continuation,
             modelStarted: false,
           });
           void this.#drainGoalQueue();
@@ -10769,10 +10760,16 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
+    const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
     let supported =
       selection !== undefined &&
       selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+      isReasoningSelectionSupported(
+        modelId,
+        selection,
+        thinkingMandatory,
+        modelReasoning,
+      );
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10783,7 +10780,12 @@ export class Session implements SessionContext {
       supported =
         selection !== undefined &&
         selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+        isReasoningSelectionSupported(
+          modelId,
+          selection,
+          thinkingMandatory,
+          modelReasoning,
+        );
     }
     if (
       !hasSessionSelection &&
@@ -10801,7 +10803,6 @@ export class Session implements SessionContext {
         );
       }
     }
-    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
     if (
       supported &&
       generation &&
