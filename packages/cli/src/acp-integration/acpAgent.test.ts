@@ -5167,6 +5167,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     const settings = makeSessionSettings({
       mcpServers: {},
+      imageModel: 'openai:old-model\0https://images.example/v1',
       modelProviders: { openai: [{ id: 'old-model' }] },
       providerProtocol: { openai: 'openai' },
     }) as LoadedSettings & {
@@ -5184,6 +5185,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       { openai: 'openai' },
     );
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(innerConfig.setImageModel).toHaveBeenLastCalledWith(
+      'openai:old-model\0https://images.example/v1',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

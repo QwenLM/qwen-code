@@ -330,7 +330,8 @@ export function parseAuthProviderInstallRequest(
   }
   if (
     purpose === 'voice' &&
-    (protocol !== 'openai' ||
+    ((protocol ?? 'openai') !== 'openai' ||
+      !baseUrl ||
       !modelIds?.length ||
       modelIds.some((id) => resolveVoiceTransport(id) === 'unsupported'))
   ) {

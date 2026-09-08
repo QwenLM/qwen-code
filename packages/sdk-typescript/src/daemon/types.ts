@@ -2160,6 +2160,7 @@ export interface DaemonWorkspaceProviderCurrent {
 }
 
 export interface DaemonWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -3448,6 +3449,7 @@ export interface DaemonModelConfiguration {
   contextWindowSize?: number;
   purpose: 'chat' | 'image' | 'voice';
   imageModel?: string;
+  advisorModel?: string;
 }
 
 export interface DaemonModelConfigurationUpdateResult {
@@ -3458,6 +3460,7 @@ export interface DaemonModelConfigurationUpdateResult {
 
 /** Identifies a configured model to remove from `modelProviders`. */
 export interface DaemonModelDeleteRequest {
+  key?: string;
   authType: string;
   modelId: string;
   baseUrl?: string;
@@ -3483,6 +3486,9 @@ export type DaemonVoiceTransport =
   | 'dashscope-task-realtime';
 
 export interface DaemonVoiceModelDescriptor {
+  name?: string;
+  baseUrl?: string;
+  contextWindow?: number;
   id: string;
   transport: DaemonVoiceTransport;
 }

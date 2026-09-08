@@ -1966,11 +1966,11 @@ const EN: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
-    'Context window capacity in tokens. Leave empty to use the model default.',
+    'Context window capacity in tokens. Leave empty to infer the limit from the model ID.',
   'auth.advanced.contextPlaceholder': 'Context window (optional)',
   'auth.advanced.maxTokens': 'Maximum output tokens',
   'auth.advanced.maxTokensDesc':
-    'Maximum tokens per response. Leave empty to use the model default.',
+    'Maximum tokens per response. Leave empty to infer the limit from the model ID.',
   'auth.advanced.tokenLimitInvalid': (v) =>
     `${v?.field ?? 'Token limit'} must be a whole number between 1 and 10,000,000.`,
   'auth.advanced.modalitiesRequired':
@@ -2562,6 +2562,8 @@ const EN: Messages = {
   'model.setVoice': 'Set Voice Model',
   'auth.purpose.label': 'Model purpose',
   'auth.purpose.chat': 'Conversation',
+  'auth.purpose.chatHint':
+    'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
   'auth.purpose.imageHint':
@@ -2570,7 +2572,7 @@ const EN: Messages = {
     'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
-    'Leave empty to restore the model default. Existing sessions need a restart to use the new limit.',
+    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
   'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
   'settings.models.saved': 'Saved',
   'model.setAdvisor': 'Set Advisor Model',
@@ -3228,6 +3230,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -5478,11 +5482,11 @@ const ZH: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
-    '模型的上下文窗口 Token 容量，留空使用模型默认值。',
+    '模型的上下文窗口 Token 容量，留空根据模型 ID 自动推断。',
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
   'auth.advanced.maxTokens': '最大输出 Token',
   'auth.advanced.maxTokensDesc':
-    '每次回复的最大 Token 数，留空使用模型默认值。',
+    '每次回复的最大 Token 数，留空根据模型 ID 自动推断。',
   'auth.advanced.tokenLimitInvalid': (v) =>
     `${v?.field ?? 'Token 上限'}必须是 1 到 10,000,000 之间的整数。`,
   'auth.advanced.modalitiesRequired':
@@ -6029,6 +6033,8 @@ const ZH: Messages = {
   'model.setVoice': '设置语音模型',
   'auth.purpose.label': '模型用途',
   'auth.purpose.chat': '对话',
+  'auth.purpose.chatHint':
+    '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
   'auth.purpose.imageHint':
@@ -6037,7 +6043,7 @@ const ZH: Messages = {
     '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
-    '留空恢复模型默认值。已有会话需重启后使用新窗口大小。',
+    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
   'settings.models.windowSaved': '已保存，重启已有会话后生效。',
   'settings.models.saved': '已保存',
   'model.setAdvisor': '设置顾问模型',
@@ -6657,6 +6663,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',

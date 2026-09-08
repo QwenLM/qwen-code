@@ -95,6 +95,65 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it('pairs rows by persisted key even when their displayed endpoint differs', () => {
+    const configured = providers();
+    configured[0].models[0].configurationKey = 'exact-key';
+    const { container } = renderSection({
+      providers: configured,
+      onUpdateContextWindow: vi.fn(),
+      configurations: [
+        {
+          key: 'exact-key',
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          name: 'GPT-4o',
+          baseUrl: 'https://api.openai.com/v1',
+          purpose: 'chat',
+        },
+      ],
+    });
+    expect(
+      container.querySelectorAll('[aria-label="Edit context window GPT-4o"]'),
+    ).toHaveLength(1);
+    expect(
+      container.querySelectorAll('[aria-label="Delete GPT-4o"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps distinct persisted service rows and deletes their exact key without selecting them', () => {
+    const { container, props } = renderSection({
+      providers: [],
+      configurations: ['first', 'second'].map((key) => ({
+        key,
+        authType: 'openai',
+        modelId: 'image',
+        name: key,
+        baseUrl: 'https://media.example/v1',
+        purpose: 'image',
+      })),
+    });
+    expect(container.textContent).toContain('Image generation');
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent === 'Set current',
+      ),
+    ).toHaveLength(0);
+    act(() =>
+      (
+        container.querySelector(
+          '[aria-label="Delete second"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    act(() => buttonByText(container, 'Confirm').click());
+    expect(props.onDeleteModel).toHaveBeenCalledWith({
+      key: 'second',
+      authType: 'openai',
+      modelId: 'image',
+      baseUrl: 'https://media.example/v1',
+    });
+    expect(props.onSelectModel).not.toHaveBeenCalled();
+  });
   it('shows model configuration metadata and only declared input capabilities', () => {
     const configured = providers();
     Object.assign(configured[0].models[0], {

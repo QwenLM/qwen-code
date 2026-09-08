@@ -271,6 +271,40 @@ describe('voice service', () => {
     ).toContain('qwen3-asr-flash');
   });
 
+  it('lists voice model metadata without leaking URL secrets', () => {
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3-asr-flash',
+              name: 'Private transcription',
+              baseUrl:
+                'https://private-user:private-password@voice.example/v1?token=private-query#private-fragment',
+              voiceOnly: true,
+              envKey: 'DASHSCOPE_API_KEY',
+              generationConfig: { contextWindowSize: 65536 },
+            },
+          ],
+        },
+      },
+    });
+
+    const models = listAvailableVoiceModels(settings);
+    expect(models).toEqual([
+      {
+        id: 'qwen3-asr-flash',
+        name: 'Private transcription',
+        baseUrl: 'https://voice.example/v1',
+        contextWindow: 65536,
+        transport: 'qwen-asr-chat',
+      },
+    ]);
+    expect(JSON.stringify(models)).not.toMatch(
+      /private-user|private-password|private-query|private-fragment/,
+    );
+  });
+
   it('rejects unknown, duplicate, and unsupported voice model selections', () => {
     const settings = makeSettings({
       user: {

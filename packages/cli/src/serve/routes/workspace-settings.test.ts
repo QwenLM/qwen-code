@@ -960,3 +960,27 @@ it('refreshes only the resolved runtime for a qualified image model write', asyn
     workspaceCwd: '/workspace',
   });
 });
+
+it.each(['failed', 'deferred', 'rejected', 'closed'] as const)(
+  'reports a qualified image runtime sync outcome: %s',
+  async (status) => {
+    const { app, reloadModelProviders, persistSetting } = makeQualifiedApp();
+    if (status === 'closed' || status === 'rejected') {
+      reloadModelProviders.mockRejectedValueOnce(
+        status === 'closed'
+          ? new WorkspaceGenerationClosedError()
+          : new Error('sync unavailable'),
+      );
+    } else {
+      reloadModelProviders.mockResolvedValueOnce({ status });
+    }
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({ scope: 'workspace', key: 'imageModel', value: '' });
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(response.status).toBe(status === 'closed' ? 503 : 200);
+    if (status === 'closed')
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    else expect(response.body.requiresRestart).toBe(status !== 'deferred');
+  },
+);

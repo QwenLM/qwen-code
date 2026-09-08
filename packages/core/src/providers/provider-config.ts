@@ -24,9 +24,14 @@ function resolveEnvKey(
   inputs: ProviderSetupInputs,
 ): string {
   const protocol = inputs.protocol ?? config.protocol;
-  return typeof config.envKey === 'function'
-    ? config.envKey(protocol, inputs.baseUrl)
-    : config.envKey;
+  const key =
+    typeof config.envKey === 'function'
+      ? config.envKey(protocol, inputs.baseUrl)
+      : config.envKey;
+  return config.id === 'custom-openai-compatible' &&
+    inputs.advancedConfig?.purpose
+    ? `${key}_${inputs.advancedConfig.purpose.toUpperCase()}`
+    : key;
 }
 
 function resolveModelNamePrefix(

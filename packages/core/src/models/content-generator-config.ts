@@ -26,6 +26,7 @@ import {
 import type { ResolvedModelConfig } from './types.js';
 
 export interface AuthOverrides {
+  registryBaseUrl?: string | null;
   authType: string;
   apiKey?: string;
   baseUrl?: string;
@@ -53,12 +54,24 @@ export function buildAgentContentGeneratorConfig(
     ? modelsConfig.getResolvedModel(
         authOverrides.authType as AuthType,
         modelId,
-        authOverrides.baseUrl,
+        authOverrides.registryBaseUrl !== undefined
+          ? authOverrides.registryBaseUrl
+          : authOverrides.baseUrl,
       )
     : undefined;
-  if (resolvedModel?.imageOnly) {
+  if (
+    modelId &&
+    authOverrides.registryBaseUrl !== undefined &&
+    (!resolvedModel ||
+      (resolvedModel.registryBaseUrl ?? null) !== authOverrides.registryBaseUrl)
+  ) {
     throw new Error(
-      `Image-only model '${resolvedModel.id}' cannot be used for content generation`,
+      `Model '${modelId}' is no longer configured at the selected endpoint`,
+    );
+  }
+  if (resolvedModel?.imageOnly || resolvedModel?.voiceOnly) {
+    throw new Error(
+      `${resolvedModel.imageOnly ? 'Image' : 'Voice'}-only model '${resolvedModel.id}' cannot be used for content generation`,
     );
   }
 
@@ -147,6 +160,12 @@ function applyResolvedModelConfig(
   authOverrides: AuthOverrides,
 ): void {
   const sameProvider = authOverrides.authType === parentConfig.authType;
+  const inheritCredentials =
+    sameProvider &&
+    (authOverrides.registryBaseUrl === undefined ||
+      (resolvedModel.baseUrl === parentConfig.baseUrl &&
+        resolvedModel.envKey === parentConfig.apiKeyEnvKey));
+  if (!inheritCredentials) targetConfig.customHeaders = undefined;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =
@@ -158,16 +177,19 @@ function applyResolvedModelConfig(
     targetConfig.apiKey =
       authOverrides.apiKey ??
       process.env[resolvedModel.envKey] ??
-      (sameProvider ? parentConfig.apiKey : undefined);
+      (inheritCredentials ? parentConfig.apiKey : undefined);
     targetConfig.apiKeyEnvKey = resolvedModel.envKey;
   } else {
-    targetConfig.apiKey = resolveCredentialField(
-      authOverrides.apiKey,
-      sameProvider ? parentConfig.apiKey : undefined,
-      authOverrides.authType,
-      'apiKey',
-    );
-    targetConfig.apiKeyEnvKey = sameProvider
+    targetConfig.apiKey =
+      authOverrides.registryBaseUrl !== undefined && !inheritCredentials
+        ? authOverrides.apiKey
+        : resolveCredentialField(
+            authOverrides.apiKey,
+            sameProvider ? parentConfig.apiKey : undefined,
+            authOverrides.authType,
+            'apiKey',
+          );
+    targetConfig.apiKeyEnvKey = inheritCredentials
       ? parentConfig.apiKeyEnvKey
       : undefined;
   }

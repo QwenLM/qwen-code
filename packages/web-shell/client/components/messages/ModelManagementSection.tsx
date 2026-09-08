@@ -14,6 +14,7 @@ import { useI18n } from '../../i18n';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
+  key?: string;
   authType: string;
   modelId: string;
   baseUrl?: string;
@@ -101,16 +102,13 @@ export function ModelManagementSection({
     ...provider,
     models: [...provider.models],
   }));
-  const missing = configurations.filter(
+  const uniqueConfigurations = [
+    ...new Map(configurations.map((config) => [config.key, config])).values(),
+  ];
+  const missing = uniqueConfigurations.filter(
     (config) =>
-      !providers.some(
-        (provider) =>
-          provider.authType === config.authType &&
-          provider.models.some(
-            (model) =>
-              model.baseModelId === config.modelId &&
-              (model.baseUrl ?? '').split(/[?#]/)[0] === (config.baseUrl ?? ''),
-          ),
+      !providers.some((provider) =>
+        provider.models.some((model) => model.configurationKey === config.key),
       ),
   );
   for (const config of missing) {
@@ -128,6 +126,7 @@ export function ModelManagementSection({
       displayProviders.push(provider);
     }
     provider.models.push({
+      configurationKey: config.key,
       modelId: config.key,
       baseModelId: config.modelId,
       name: config.name ?? config.modelId,
@@ -174,11 +173,7 @@ export function ModelManagementSection({
             <div className={styles.providerName}>{provider.authType}</div>
             {provider.models.map((model) => {
               const candidates = configurations.filter(
-                (config) =>
-                  config.authType === provider.authType &&
-                  config.modelId === model.baseModelId &&
-                  (config.baseUrl ?? '') ===
-                    (model.baseUrl ?? '').split(/[?#]/)[0],
+                (config) => config.key === model.configurationKey,
               );
               const configuration =
                 candidates.length === 1 ? candidates[0] : undefined;
@@ -296,6 +291,9 @@ export function ModelManagementSection({
                             onClick={() => {
                               setConfirmKey(null);
                               onDeleteModel({
+                                ...(model.configurationKey
+                                  ? { key: model.configurationKey }
+                                  : {}),
                                 authType: provider.authType,
                                 modelId: model.baseModelId,
                                 ...(model.baseUrl
@@ -370,6 +368,7 @@ function ModelWindowEditor({
           onClick={() => {
             setValue(configuration.contextWindowSize?.toString() ?? '');
             setError('');
+            setNotice('');
             setEditing(true);
           }}
         >
@@ -431,7 +430,12 @@ function ModelWindowEditor({
         </p>
       )}
       <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={!valid || saving || busy}>
+        <Button
+          type="submit"
+          size="sm"
+          aria-label={`${t('common.save')} ${configuration.name ?? configuration.modelId}`}
+          disabled={!valid || saving || busy}
+        >
           {t('common.save')}
         </Button>
         <Button
@@ -439,6 +443,7 @@ function ModelWindowEditor({
           variant="outline"
           size="sm"
           disabled={saving || busy}
+          aria-label={`${t('settings.models.cancel')} ${configuration.name ?? configuration.modelId}`}
           onClick={() => setEditing(false)}
         >
           {t('settings.models.cancel')}

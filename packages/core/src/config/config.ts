@@ -5208,7 +5208,11 @@ export class Config {
    */
   async setImageModel(model: string | undefined): Promise<void> {
     this.imageModel = model || undefined;
-    if (!this.initialized || !this.isImageGenerationEnabled()) {
+    if (
+      !this.initialized ||
+      !this.toolRegistry ||
+      !this.isImageGenerationEnabled()
+    ) {
       return;
     }
     await this.registerImageGenerationTool(this.toolRegistry);

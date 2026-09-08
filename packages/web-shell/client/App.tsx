@@ -243,6 +243,7 @@ import {
 } from './shadowDom';
 import {
   WebShellSidebar,
+  DEFAULT_SESSION_ACTION_ITEMS,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -8063,6 +8064,12 @@ export function App({
   }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  const [outerSplitPanePending, setOuterSplitPanePending] = useState(false);
+  const handleSplitPendingPanesChange = useCallback(
+    (ids: string[]) =>
+      setOuterSplitPanePending(ids.includes(connection.sessionId ?? '')),
+    [connection.sessionId],
+  );
   // False until the split bootstrap has decided whether a split view is
   // coming (URL deep link, per-tab sessionStorage, or controlled prop). The
   // pane-tab reclaim below must wait for it: at restore-commit time
@@ -10778,23 +10785,47 @@ export function App({
     modelSettingScope,
     'imageModel',
   );
-  const advisorModels = useMemo(() => {
-    const seen = new Set<string>();
-    return [
-      { id: '', label: t('model.useMain') },
-      ...(connection.models ?? []).flatMap((model) => {
-        const authType = model.authType ?? model.id.match(/\(([^()]+)\)$/)?.[1];
-        const id = authType
-          ? `${authType}:${model.baseModelId ?? extractBareModelId(model.id)}`
-          : (model.baseModelId ?? model.id);
-        if (seen.has(id)) return [];
-        seen.add(id);
-        return [
-          { id, baseModelId: model.baseModelId, label: model.label, authType },
-        ];
-      }),
-    ];
-  }, [connection.models, t]);
+  const roleModelsReady =
+    !modelConfigurations.loading &&
+    !modelConfigurations.error &&
+    modelConfigurations.data !== undefined;
+  const advisorModels: ModelDialogModel[] =
+    roleModelsReady && !providersState.loading && !providersState.error
+      ? [
+          { id: '', label: t('model.useMain') },
+          ...providersState.providers.flatMap((provider) =>
+            provider.models.flatMap((model) => {
+              if (
+                model.isRuntime ||
+                !isVisibleComposerModel({ id: model.modelId })
+              )
+                return [];
+              const configuration = modelConfigurations.models.find(
+                (entry) => entry.key === model.configurationKey,
+              );
+              const id =
+                configuration?.advisorModel ??
+                (provider.authType === 'qwen-oauth'
+                  ? `${provider.authType}:${model.baseModelId}`
+                  : undefined);
+              return id
+                ? [
+                    {
+                      id,
+                      baseModelId: model.baseModelId,
+                      label: model.name,
+                      authType: provider.authType,
+                      baseUrl: model.baseUrl,
+                      envKey: model.envKey,
+                      contextWindow: model.contextLimit,
+                      modalities: model.modalities,
+                    },
+                  ]
+                : [];
+            }),
+          ),
+        ]
+      : [];
   const imageModels = modelConfigurations.models.flatMap((model) =>
     model.imageModel
       ? [
@@ -10805,6 +10836,7 @@ export function App({
             authType: model.authType,
             baseUrl: model.baseUrl,
             envKey: model.envKey,
+            contextWindow: model.contextWindowSize,
           },
         ]
       : [],
@@ -10963,6 +10995,9 @@ export function App({
         setVoiceModels(
           status.availableVoiceModels.map((model) => ({
             id: model.id,
+            label: model.name,
+            baseUrl: model.baseUrl,
+            contextWindow: model.contextWindow,
             authType: 'openai',
             modalities: { audio: true },
           })),
@@ -15819,7 +15854,14 @@ export function App({
     key: 'advisorModel' | 'imageModel',
     value: string,
   ) => {
-    if (!projectFeaturesAvailable) return;
+    if (
+      !projectFeaturesAvailable ||
+      !roleModelsReady ||
+      !(
+        key === 'advisorModel' ? advisorModels : [{ id: '' }, ...imageModels]
+      ).some((model) => model.id === value)
+    )
+      return;
     const owner = sessionOwnerGuard.capture();
     void setWorkspaceSetting(modelSettingScope, key, value)
       .then((result) => {
@@ -15860,13 +15902,20 @@ export function App({
   > = {
     voice: voiceModels,
     advisor: advisorModels,
-    image: [{ id: '', label: t('model.disabled') }, ...imageModels],
+    image: roleModelsReady
+      ? [{ id: '', label: t('model.disabled') }, ...imageModels]
+      : [],
   };
   const modelDialogCurrent: Partial<Record<ModelDialogMode, string>> = {
     voice: currentVoiceModel,
     vision: currentVisionModel,
     fast: currentFastModel,
-    advisor: typeof currentAdvisorModel === 'string' ? currentAdvisorModel : '',
+    advisor:
+      typeof currentAdvisorModel === 'string'
+        ? (advisorModels.find(
+            (model) => model.id === `${currentAdvisorModel}\0`,
+          )?.id ?? currentAdvisorModel)
+        : '',
     image: typeof currentImageModel === 'string' ? currentImageModel : '',
   };
 
@@ -16428,6 +16477,18 @@ export function App({
               <ModelDialog
                 mode={modelDialogMode}
                 models={modelDialogModels[modelDialogMode]}
+                loading={
+                  (modelDialogMode === 'advisor' && providersState.loading) ||
+                  ((modelDialogMode === 'advisor' || modelDialogMode === 'image') &&
+                    modelConfigurations.loading)
+                }
+                error={
+                  modelDialogMode === 'advisor'
+                    ? providersState.error ?? modelConfigurations.error
+                    : modelDialogMode === 'image'
+                      ? modelConfigurations.error
+                      : undefined
+                }
                 filterModel={
                   modelDialogMode === 'main' ? mainModelFilter : undefined
                 }
@@ -17309,7 +17370,8 @@ export function App({
                           currentModelId:
                             connection.currentModel ?? undefined,
                           loading:
-                            providersState.loading || modelConfigurations.loading,
+                            providersState.loading ||
+                            modelConfigurations.loading,
                           error:
                             providersState.error ?? modelConfigurations.error,
                           busy: modelActionBusy,
@@ -17754,9 +17816,10 @@ export function App({
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
-                      session isn't one of the panes, the approval would be
-                      invisible — surface a notice with a way back to it. */}
-                  {approvalOverlayActive && (
+                      session's pane hasn't surfaced its approval (including
+                      failed or still-attaching panes), show a way back to it. */}
+                  {approvalOverlayActive &&
+                    !outerSplitPanePending && (
                     <div
                       className={styles.splitApprovalNotice}
                       role="status"
@@ -17775,11 +17838,16 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
                         sessionIds={splitSessionIds}
+                        showSessionDetails={
+                          (sidebarOptions.sessionActions?.items ??
+                            DEFAULT_SESSION_ACTION_ITEMS).includes('details')
+                        }
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Keep this
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
@@ -18118,7 +18186,7 @@ export function App({
                               sessionActiveWorkState === 'active'
                             }
                             onOpen={
-                              showFloatingTodos
+                              sessionWorkflowEnabled && showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
                                   ? openWorkflowInspector
                                   : openTasksPanel

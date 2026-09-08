@@ -1080,6 +1080,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             </div>
           ))}
         </dl>
+        {provider?.showAdvancedConfig && (
+          <div className={styles.text}>{t(`auth.purpose.${purpose}Hint`)}</div>
+        )}
       </>
     );
   })();

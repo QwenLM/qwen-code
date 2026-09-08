@@ -14,6 +14,7 @@ import { createContentGenerator } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from './types.js';
+import { ModelsConfig } from './modelsConfig.js';
 
 vi.mock('../core/contentGenerator.js', async (importOriginal) => {
   const actual =
@@ -51,6 +52,102 @@ describe('buildAgentContentGeneratorConfig', () => {
     contextWindowSize: 128000,
     extra_body: { custom: 'value' },
   };
+
+  describe('endpoint-qualified advisor models', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    function endpointConfig() {
+      const models = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            { id: 'shared', envKey: 'IMPLICIT_KEY' },
+            {
+              id: 'shared',
+              baseUrl: 'https://parent.example.com',
+              envKey: 'PARENT_KEY_ENV',
+            },
+            {
+              id: 'shared',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'SECOND_KEY',
+            },
+          ],
+        },
+      });
+      return {
+        getContentGeneratorConfig: () => ({
+          ...parentConfig,
+          model: 'shared',
+          customHeaders: { Authorization: 'parent-secret' },
+        }),
+        getModelsConfig: () => models,
+      } as unknown as Config;
+    }
+
+    it('uses the selected endpoint and its own credential with a bare model ID', () => {
+      vi.stubEnv('SECOND_KEY', 'second-key');
+      const result = buildAgentContentGeneratorConfig(
+        endpointConfig(),
+        'shared',
+        {
+          authType: 'openai',
+          registryBaseUrl: 'https://second.example/v1',
+        },
+      );
+      expect(result).toMatchObject({
+        model: 'shared',
+        baseUrl: 'https://second.example/v1',
+        apiKey: 'second-key',
+        apiKeyEnvKey: 'SECOND_KEY',
+      });
+      expect(result.customHeaders).toBeUndefined();
+    });
+
+    it('does not send parent credentials to an endpoint with a missing key', () => {
+      vi.stubEnv('SECOND_KEY', undefined);
+      const result = buildAgentContentGeneratorConfig(
+        endpointConfig(),
+        'shared',
+        {
+          authType: 'openai',
+          registryBaseUrl: 'https://second.example/v1',
+        },
+      );
+      expect(result.apiKey).toBeUndefined();
+      expect(result.customHeaders).toBeUndefined();
+    });
+
+    it('retains credentials and headers when the selected route matches the parent', () => {
+      vi.stubEnv('PARENT_KEY_ENV', undefined);
+      const result = buildAgentContentGeneratorConfig(
+        endpointConfig(),
+        'shared',
+        {
+          authType: 'openai',
+          registryBaseUrl: 'https://parent.example.com',
+        },
+      );
+      expect(result.apiKey).toBe('parent-key');
+      expect(result.customHeaders).toEqual({ Authorization: 'parent-secret' });
+    });
+
+    it('selects an implicit endpoint exactly and rejects a removed explicit endpoint', () => {
+      vi.stubEnv('IMPLICIT_KEY', 'implicit-key');
+      const config = endpointConfig();
+      expect(
+        buildAgentContentGeneratorConfig(config, 'shared', {
+          authType: 'openai',
+          registryBaseUrl: null,
+        }),
+      ).toMatchObject({ apiKey: 'implicit-key' });
+      expect(() =>
+        buildAgentContentGeneratorConfig(config, 'shared', {
+          authType: 'openai',
+          registryBaseUrl: 'https://api.openai.com/v1',
+        }),
+      ).toThrow('no longer configured');
+    });
+  });
 
   describe('same-provider, bare model ID, no registry match', () => {
     it('should override the model but keep parent generation config', () => {

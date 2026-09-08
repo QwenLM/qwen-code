@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { listModelConfigurations } from '../model-configuration.js';
+import {
+  findModelConfiguration,
+  listModelConfigurations,
+} from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
@@ -70,7 +73,17 @@ export interface WorkspaceModelsRouteDeps {
 
 function parseTarget(
   body: Record<string, unknown>,
-): RemoveModelTarget | { error: string; code: string } {
+): (RemoveModelTarget & { key?: string }) | { error: string; code: string } {
+  const key = body['key'];
+  if (
+    key !== undefined &&
+    (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key))
+  ) {
+    return {
+      error: 'Invalid model configuration key',
+      code: 'invalid_model_key',
+    };
+  }
   const authType = body['authType'];
   const modelId = body['modelId'];
   const baseUrl = body['baseUrl'];
@@ -99,6 +112,7 @@ function parseTarget(
   // fail the exact string match in removeModelFromProviders (misleading 404).
   const trimmedBaseUrl = typeof baseUrl === 'string' ? baseUrl.trim() : '';
   return {
+    ...(key ? { key } : {}),
     authType: authType.trim(),
     modelId: modelId.trim(),
     ...(trimmedBaseUrl ? { baseUrl: trimmedBaseUrl } : {}),
@@ -136,6 +150,7 @@ export function registerWorkspaceModelsRoutes(
       res.json({ models: listModelConfigurations(loaded) });
     } catch (error) {
       if (sendGenerationClosedError(res, error)) return;
+      writeStderrLine('qwen serve: GET /workspace/models failed');
       res.status(500).json({ error: 'Unable to load model configurations' });
     }
   });
@@ -204,6 +219,7 @@ export function registerWorkspaceModelsRoutes(
       });
     } catch (error) {
       if (sendGenerationClosedError(res, error)) return;
+      writeStderrLine('qwen serve: PATCH /workspace/models failed');
       res.status(500).json({ error: 'Unable to update model configuration' });
     }
   });
@@ -261,11 +277,37 @@ export function registerWorkspaceModelsRoutes(
         const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
         const modelProviders =
           loaded.forScope(scope).settings.modelProviders ?? {};
-        const { next, removed, removedBaseUrl } = removeModelFromProviders(
-          modelProviders,
-          loaded.merged.providerProtocol,
-          parsed,
-        );
+        const configuration = parsed.key
+          ? findModelConfiguration(loaded, parsed.key)
+          : undefined;
+        if (
+          parsed.key &&
+          (!configuration ||
+            configuration.authType !== parsed.authType ||
+            configuration.model.id !== parsed.modelId)
+        ) {
+          res.status(409).json({
+            error:
+              'Model configuration changed or is ambiguous. Reload and try again.',
+          });
+          return;
+        }
+        const { next, removed, removedBaseUrl } = configuration
+          ? {
+              next: {
+                ...modelProviders,
+                [configuration.provider]: modelProviders[
+                  configuration.provider
+                ]!.filter((_, index) => index !== configuration.index),
+              },
+              removed: true,
+              removedBaseUrl: configuration.model.baseUrl,
+            }
+          : removeModelFromProviders(
+              modelProviders,
+              loaded.merged.providerProtocol,
+              parsed,
+            );
         if (!removed) {
           res.status(404).json({
             error: 'Model not found in configured providers',
@@ -317,7 +359,7 @@ export function registerWorkspaceModelsRoutes(
         const stillConfigured = Object.values(next).some(
           (models) =>
             Array.isArray(models) &&
-            models.some((model) => model.id === parsed.modelId),
+            models.some((model) => model?.id === parsed.modelId),
         );
         const fallbacksScope = getOwnKeyScope(loaded, 'modelFallbacks');
         const fallbacks = fallbacksScope

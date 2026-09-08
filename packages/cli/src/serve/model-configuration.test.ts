@@ -63,6 +63,62 @@ afterEach(() => {
   fs.rmSync(temp, { recursive: true, force: true });
 });
 describe('persisted model configuration', () => {
+  it('does not offer ambiguous routes or fast/voice-only entries as image choices', () => {
+    const image = {
+      id: 'image',
+      baseUrl: 'https://media.example/v1',
+      supportsImageGeneration: true,
+      envKey: 'IMAGE_KEY',
+    };
+    fs.writeFileSync(
+      path.join(temp, 'settings.json'),
+      JSON.stringify({
+        providerProtocol: { gateway: 'openai' },
+        modelProviders: {
+          openai: [
+            image,
+            { ...image, id: 'fast', fastOnly: true },
+            { ...image, id: 'voice', voiceOnly: true },
+            { ...image, id: 'no-key', envKey: undefined },
+          ],
+          gateway: [image],
+        },
+      }),
+    );
+    const configs = listModelConfigurations(load());
+    expect(configs).toHaveLength(5);
+    expect(configs.every((config) => config.imageModel === undefined)).toBe(
+      true,
+    );
+    expect(
+      configs
+        .filter((config) => config.modelId === 'image')
+        .every((config) => config.advisorModel === undefined),
+    ).toBe(true);
+  });
+  it.each([{ openai: 'gpt-4o' }, { openai: [null] }])(
+    'keeps valid models readable and editable beside malformed providers ($openai)',
+    ({ openai }) => {
+      fs.writeFileSync(
+        path.join(temp, 'settings.json'),
+        JSON.stringify({
+          modelProviders: { openai, gemini: [{ id: 'g' }] },
+        }),
+      );
+      const configs = listModelConfigurations(load());
+      expect(
+        configs.map(({ authType, modelId }) => ({ authType, modelId })),
+      ).toEqual([{ authType: 'gemini', modelId: 'g' }]);
+      expect(updateModelContextWindow(load(), configs[0]!.key, 32768)).toBe(
+        'user',
+      );
+      expect(read().modelProviders).toEqual({
+        openai,
+        gemini: [{ id: 'g', generationConfig: { contextWindowSize: 32768 } }],
+      });
+    },
+  );
+
   it('projects service models and explicit windows without credentials', () => {
     const configs = listModelConfigurations(load());
     expect(configs).toHaveLength(3);

@@ -16,7 +16,7 @@ behavior. Replace only the advanced step with shared Field, Switch, Checkbox,
 and Input primitives. Expose thinking, individual image/video/audio/PDF input
 capabilities, context-window size, and maximum output tokens. Optional numeric
 values must be whole numbers from 1 to 10,000,000, matching the daemon parser.
-Blank values use provider defaults. Preserve input while moving backward through
+Blank values let the registry infer limits from the model ID. Preserve input while moving backward through
 the wizard and reset it when starting a new provider. Saving disables all
 editable controls.
 
@@ -30,28 +30,36 @@ advertise overrides that the backend ignores.
 Show the model ID, description, effective context limit, supported input
 modalities, and credential environment-variable name in the existing model
 list. Do not expose credential values. Continue using the current list grouping,
-selection, and deletion identities.
+selection and deletion controls, matching persisted entries by opaque configuration key.
 
 ## Model roles and existing configuration
 
 Advisor Model uses the shared model picker and a main-model default choice.
+Configured choices retain their exact raw endpoint identity; the runtime strips
+that qualifier before issuing requests and uses only that route’s credentials.
+An obsolete endpoint fails instead of binding another configuration. Loading,
+failed, or unresolved role choices cannot implicitly reset a saved selection.
 Image Model becomes visible with an endpoint-qualified picker of configured image
 routes. Voice Model lists the daemon's supported transcription models, including
-voice-only entries. The voice picker retains its selected-workspace ownership.
+voice-only entries and their display names, safe endpoints, and context limits. The voice picker retains its selected-workspace ownership.
 
 Custom provider setup adds a purpose choice: conversation, image generation, or
 voice transcription. Image routes receive supportsImageGeneration and imageOnly;
 voice routes receive voiceOnly and require the OpenAI protocol and a supported ASR
 model ID. Installing a service-only model preserves the current conversation model
-and auth selection. Other preset setup behavior stays unchanged.
+and auth selection, including service-only presets. New service routes follow
+existing conversation routes and custom service credentials use separate
+environment keys. Other preset setup behavior stays unchanged.
 Reject service-only installs that would overwrite an existing conversation model
-with the same protocol, ID, and endpoint before any settings or environment write.
+through either identity replacement or preset ownership before any settings or
+environment write. Changing an existing identity to another purpose is rejected.
 Image setup describes the existing DashScope/MiniMax-compatible transports.
 
 GET /workspace/models returns a secret-safe list of persisted model configurations,
 including service-only models and the explicit context-window override. PATCH on
 that route accepts an opaque model key and a context size (1–10,000,000), or null
-to restore the registry default. The key includes scope, storage provider, model
+to restore model-ID inference. DELETE accepts the same opaque key for exact
+persisted targeting even when displayed URLs are redacted. The key includes scope, storage provider, model
 ID, and endpoint; missing or ambiguous targets fail without a fallback. A locked
 fresh read/modify/write preserves credentials and unrelated generation settings.
 The model list attaches a small window-size editor to persisted rows; built-in and

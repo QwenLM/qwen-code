@@ -86,6 +86,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  AuthType,
+  ProviderInstallError,
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
@@ -38526,6 +38528,45 @@ describe('auth device-flow routes', () => {
       else process.env['QWEN_HOME'] = previousQwenHome;
       await fsp.rm(qwenHome, { recursive: true, force: true });
     }
+  });
+
+  it('POST /workspace/auth/provider reports model purpose conflicts as a client error', async () => {
+    const installAuthProvider = vi
+      .fn()
+      .mockRejectedValue(
+        new ProviderInstallError(
+          'This install would replace a model configured for another purpose.',
+          'modelPurpose',
+          AuthType.USE_OPENAI,
+        ),
+      );
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+        modelIds: ['image-01'],
+        advancedConfig: { purpose: 'image' },
+      });
+
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      code: 'model_purpose_conflict',
+      error:
+        'This install would replace a model configured for another purpose.',
+    });
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {

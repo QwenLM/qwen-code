@@ -12,6 +12,7 @@ import {
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
+  minimaxProvider,
   ProviderInstallError,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
@@ -98,12 +99,27 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
-  it.each(['image', 'voice'] as const)(
-    'rejects a %s install that would replace a conversation model before any write',
-    async (purpose) => {
-      const existing = {
-        openai: [{ id: 'main', baseUrl: 'https://media.example/v1' }],
+  it.each([
+    ['chat', 'image'],
+    ['chat', 'voice'],
+    ['image', 'chat'],
+    ['voice', 'chat'],
+    ['image', 'voice'],
+    ['voice', 'image'],
+  ] as const)(
+    'rejects changing the same model identity from %s to %s before any write',
+    async (from, to) => {
+      const existing: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'main',
+            baseUrl: 'https://media.example/v1',
+            ...(from === 'image' ? { imageOnly: true } : {}),
+            ...(from === 'voice' ? { voiceOnly: true } : {}),
+          },
+        ],
       };
+      const snapshot = structuredClone(existing);
       const adapter = createAdapter(existing);
       process.env['TEST_API_KEY'] = 'unchanged';
       const plan = buildInstallPlan(customProvider, {
@@ -111,7 +127,7 @@ describe('applyProviderInstallPlan', () => {
         baseUrl: 'https://media.example/v1',
         apiKey: 'test-only',
         modelIds: ['main'],
-        advancedConfig: { purpose },
+        ...(to === 'chat' ? {} : { advancedConfig: { purpose: to } }),
       });
       plan.env = { TEST_API_KEY: 'must-not-write' };
       const reloadModelProviders = vi.fn();
@@ -120,14 +136,107 @@ describe('applyProviderInstallPlan', () => {
           settings: adapter,
           reloadModelProviders,
         }),
-      ).rejects.toThrow('already configured for conversation');
+      ).rejects.toMatchObject({
+        name: 'ProviderInstallError',
+        step: 'modelPurpose',
+        authType: AuthType.USE_OPENAI,
+      });
       expect(adapter.setValue).not.toHaveBeenCalled();
       expect(adapter.backup).not.toHaveBeenCalled();
       expect(adapter.persist).not.toHaveBeenCalled();
       expect(reloadModelProviders).not.toHaveBeenCalled();
       expect(process.env['TEST_API_KEY']).toBe('unchanged');
-      expect(existing.openai[0]).not.toHaveProperty('imageOnly');
-      expect(existing.openai[0]).not.toHaveProperty('voiceOnly');
+      expect(existing).toEqual(snapshot);
+    },
+  );
+
+  it('rejects a service preset that would remove an owned conversation model', async () => {
+    const conversation = {
+      id: 'MiniMax-M2.7',
+      name: '[MiniMax] MiniMax-M2.7',
+      baseUrl: 'https://api.minimax.io/v1',
+      envKey: 'MINIMAX_API_KEY',
+    };
+    const adapter = createAdapter({ openai: [conversation] });
+    const plan = buildInstallPlan(minimaxProvider, {
+      baseUrl: conversation.baseUrl,
+      apiKey: 'must-not-write',
+      modelIds: ['image-01'],
+    });
+    const previous = process.env['MINIMAX_API_KEY'];
+    process.env['MINIMAX_API_KEY'] = 'chat-secret';
+    try {
+      expect(plan.modelSelection).toBeUndefined();
+      expect(plan.modelProviders?.[0]?.ownsModel?.(conversation)).toBe(true);
+      await expect(
+        applyProviderInstallPlan(plan, { settings: adapter }),
+      ).rejects.toMatchObject({ step: 'modelPurpose' });
+      expect(adapter.setValue).not.toHaveBeenCalled();
+      expect(adapter.backup).not.toHaveBeenCalled();
+      expect(adapter.persist).not.toHaveBeenCalled();
+      expect(adapter.getModelProviders()).toEqual({ openai: [conversation] });
+      expect(process.env['MINIMAX_API_KEY']).toBe('chat-secret');
+    } finally {
+      if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
+      else process.env['MINIMAX_API_KEY'] = previous;
+    }
+  });
+
+  it.each(['image', 'voice'] as const)(
+    'isolates %s credentials from a conversation model at the same endpoint',
+    async (purpose) => {
+      const inputs = {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://media.example/v1',
+      };
+      const chat = buildInstallPlan(customProvider, {
+        ...inputs,
+        apiKey: 'chat-secret',
+        modelIds: ['chat-model'],
+      });
+      const service = buildInstallPlan(customProvider, {
+        ...inputs,
+        apiKey: 'service-secret',
+        modelIds: ['service-model'],
+        advancedConfig: { purpose },
+      });
+      const chatKey = Object.keys(chat.env!)[0]!;
+      const serviceKey = Object.keys(service.env!)[0]!;
+      const previous = new Map(
+        [chatKey, serviceKey].map((key) => [key, process.env[key]]),
+      );
+      try {
+        expect(serviceKey).not.toBe(chatKey);
+        const installed = await applyProviderInstallPlan(chat, {
+          settings: createAdapter(),
+        });
+        const adapter = createAdapter(installed.updatedModelProviders);
+        const result = await applyProviderInstallPlan(service, {
+          settings: adapter,
+        });
+        expect(result.updatedModelProviders['openai']).toEqual([
+          ...installed.updatedModelProviders['openai']!,
+          expect.objectContaining({ id: 'service-model', envKey: serviceKey }),
+        ]);
+        expect(result.updatedModelProviders['openai']?.[0]?.envKey).toBe(
+          chatKey,
+        );
+        expect(adapter.setValue).toHaveBeenCalledWith(
+          `env.${serviceKey}`,
+          'service-secret',
+        );
+        expect(adapter.setValue).not.toHaveBeenCalledWith(
+          `env.${chatKey}`,
+          expect.anything(),
+        );
+        expect(process.env[chatKey]).toBe('chat-secret');
+        expect(process.env[serviceKey]).toBe('service-secret');
+      } finally {
+        for (const [key, value] of previous) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
     },
   );
 
@@ -149,7 +258,7 @@ describe('applyProviderInstallPlan', () => {
     plan.env = {};
     const result = await applyProviderInstallPlan(plan, { settings: adapter });
     expect(result.updatedModelProviders['openai']).toHaveLength(2);
-    expect(result.updatedModelProviders['openai']).toContainEqual(conversation);
+    expect(result.updatedModelProviders['openai']?.[0]).toEqual(conversation);
     expect(result.updatedModelProviders['openai']).toContainEqual(
       expect.objectContaining({
         id: 'model',

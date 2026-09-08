@@ -52,6 +52,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
     models: [
       {
         modelId: 'configured-test-model',
+        configurationKey: 'configured-test-key',
         baseModelId: 'configured-test-model',
         name: 'Configured Test Model',
         description: 'Configured for image and audio input.',
@@ -59,6 +60,16 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
         modalities: { image: true, audio: true, video: false, pdf: false },
         baseUrl: 'https://models.example/v1',
         envKey: 'WEB_SHELL_TEST_API_KEY',
+        isCurrent: false,
+        isRuntime: false,
+      },
+      {
+        modelId: 'configured-test-model',
+        configurationKey: 'configured-second-key',
+        baseModelId: 'configured-test-model',
+        name: 'Configured Second Endpoint',
+        baseUrl: 'https://second.example/v1',
+        envKey: 'SECOND_API_KEY',
         isCurrent: false,
         isRuntime: false,
       },
@@ -103,6 +114,17 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
       envKey: 'WEB_SHELL_TEST_API_KEY',
       contextWindowSize: 131072,
       purpose: 'chat',
+      advisorModel: 'openai:configured-test-model\0https://models.example/v1',
+    },
+    {
+      key: 'configured-second-key',
+      authType: 'openai',
+      modelId: 'configured-test-model',
+      name: 'Configured Second Endpoint',
+      baseUrl: 'https://second.example/v1',
+      envKey: 'SECOND_API_KEY',
+      purpose: 'chat',
+      advisorModel: 'openai:configured-test-model\0https://second.example/v1',
     },
     ...['one', 'two'].map((endpoint) => ({
       key: `image-${endpoint}-key`,
@@ -110,6 +132,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
       modelId: 'image-model',
       name: `Image endpoint ${endpoint}`,
       baseUrl: `https://images-${endpoint}.example/v1`,
+      envKey: `IMAGE_${endpoint.toUpperCase()}_KEY`,
       purpose: 'image' as const,
       imageModel: `openai:image-model\0https://images-${endpoint}.example/v1`,
     })),
@@ -119,6 +142,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
       modelId: 'qwen3-asr-flash',
       name: 'Voice Only ASR',
       baseUrl: 'https://voice.example/v1',
+      envKey: 'VOICE_API_KEY',
       purpose: 'voice',
     },
   ];
@@ -175,7 +199,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
     .click();
   const modelList = page.getByTestId('model-management');
   await expect(
-    modelList.getByText('configured-test-model', { exact: true }),
+    modelList.getByText('configured-test-model', { exact: true }).first(),
   ).toBeVisible();
   await expect(
     modelList.getByText('Configured for image and audio input.', {
@@ -451,10 +475,17 @@ test('starts a fresh provider configuration with default limits and capabilities
   await page.getByRole('checkbox', { name: 'Image', exact: true }).uncheck();
   await page.getByRole('checkbox', { name: 'Video', exact: true }).uncheck();
   await page.getByRole('checkbox', { name: 'Audio', exact: true }).check();
+  await page.getByRole('combobox', { name: 'Model purpose' }).click();
+  await page
+    .getByRole('option', { name: 'Image generation', exact: true })
+    .click();
   for (let index = 0; index < 5; index += 1) {
     await page.getByRole('button', { name: 'previous', exact: true }).click();
   }
   await enterCustomConnection(page);
+  await expect(
+    page.getByRole('combobox', { name: 'Model purpose' }),
+  ).toContainText('Conversation');
   await expect(page.getByLabel('Context window', { exact: true })).toHaveValue(
     '',
   );
@@ -485,9 +516,9 @@ test('starts a fresh provider configuration with default limits and capabilities
 });
 
 function roleSetting(page: Page, name: string) {
-  return page
-    .getByRole('group')
-    .filter({ has: page.getByText(name, { exact: true }) });
+  return page.getByRole('group').filter({
+    has: page.locator('[data-slot="field-label"]').filter({ hasText: name }),
+  });
 }
 
 test('selects Advisor defaults, endpoint-specific image routes, and voice-only ASR choices', async ({
@@ -496,7 +527,14 @@ test('selects Advisor defaults, endpoint-specific image routes, and voice-only A
   const { daemon } = await openModelSettings(page, testInfo);
   await roleSetting(page, 'Advisor Model').getByRole('button').click();
   const advisor = page.getByRole('listbox', { name: 'Set Advisor Model' });
-  await advisor.getByRole('option', { name: /Qwen Test Alt/ }).click();
+  await expect(
+    advisor.getByRole('option', {
+      name: /Configured (Test Model|Second Endpoint)/,
+    }),
+  ).toHaveCount(2);
+  await advisor
+    .getByRole('option', { name: /Configured Second Endpoint/ })
+    .click();
   await expect
     .poll(() =>
       daemon.requests
@@ -509,7 +547,7 @@ test('selects Advisor defaults, endpoint-specific image routes, and voice-only A
     .toContainEqual({
       scope: 'workspace',
       key: 'advisorModel',
-      value: 'qwen-test-alt',
+      value: 'openai:configured-test-model\0https://second.example/v1',
     });
   await roleSetting(page, 'Advisor Model').getByRole('button').click();
   await advisor.getByRole('option', { name: /Use main model/ }).click();
@@ -723,16 +761,23 @@ test('edits a persisted context window, retries a failure, and resets to automat
   await expect(context).toHaveValue('131072');
   await context.fill('0');
   await expect(
-    page.getByRole('button', { name: 'save', exact: true }),
+    page.getByRole('button', {
+      name: 'save Configured Test Model',
+      exact: true,
+    }),
   ).toBeDisabled();
   expect(updates).toHaveLength(0);
   await context.fill('65536');
-  await page.getByRole('button', { name: 'save', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'save Configured Test Model', exact: true })
+    .click();
   await expect(page.getByRole('alert')).toContainText(
     'Test context save failed',
   );
   await expect(context).toHaveValue('65536');
-  await page.getByRole('button', { name: 'save', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'save Configured Test Model', exact: true })
+    .click();
   await expect(edit).toBeVisible();
   await expect
     .poll(() => updates)
@@ -740,11 +785,27 @@ test('edits a persisted context window, retries a failure, and resets to automat
       { key: 'configured-test-key', contextWindowSize: 65536 },
       { key: 'configured-test-key', contextWindowSize: 65536 },
     ]);
+  await expect(
+    page.getByText('Saved. Restart existing sessions to apply.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await edit.click();
+  await expect(
+    page.getByText('Saved. Restart existing sessions to apply.', {
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Cancel Configured Test Model', exact: true })
+    .click();
   await reloadSettings();
   await edit.click();
   await expect(context).toHaveValue('65536');
   await context.fill('');
-  await page.getByRole('button', { name: 'save', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'save Configured Test Model', exact: true })
+    .click();
   await expect(edit).toBeVisible();
   await expect
     .poll(() => updates.at(-1))

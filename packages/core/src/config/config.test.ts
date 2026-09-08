@@ -5944,6 +5944,48 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
+    it('retains an image selection while the tool registry is still initializing', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      let release!: (registry: ToolRegistry) => void;
+      const createRegistry = vi
+        .spyOn(config, 'createToolRegistry')
+        .mockReturnValue(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+      const initializing = config.initialize();
+      await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+      const selection = `openai:qwen-image-2.0\0${baseUrl}`;
+      try {
+        await expect(config.setImageModel(selection)).resolves.toBeUndefined();
+      } finally {
+        release(new ToolRegistry(config));
+        await initializing;
+      }
+      expect(config.getImageGenerationConfig()).toMatchObject({
+        model: 'qwen-image-2.0',
+        baseUrl,
+      });
+      await config.setImageModel(selection);
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
     it('registers image_gen immediately when the image model changes at runtime', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({

@@ -153,24 +153,32 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
-  if (
-    preserveSelection &&
-    (plan.modelProviders ?? []).some((patch) =>
-      patch.models.some((model) =>
-        (previousRuntimeProviders[patch.authType] ?? []).some(
-          (existing) =>
-            !existing.imageOnly &&
-            !existing.voiceOnly &&
-            isSameModelIdentity(existing, model),
-        ),
+  for (const patch of plan.modelProviders ?? []) {
+    const existingModels = previousRuntimeProviders[patch.authType] ?? [];
+    const changesRole = existingModels.some((existing) =>
+      patch.models.some(
+        (model) =>
+          isSameModelIdentity(existing, model) &&
+          (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
+            Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly)),
       ),
-    )
-  ) {
-    throw new ProviderInstallError(
-      'This model ID and endpoint are already configured for conversation. Use a different model ID or endpoint for an image or voice model.',
-      'modelPurpose',
-      plan.authType,
     );
+    const removesConversation =
+      preserveSelection &&
+      existingModels.some(
+        (existing) =>
+          !existing.imageOnly &&
+          !existing.voiceOnly &&
+          (patch.ownsModel?.(existing) ??
+            patch.models.some((model) => isSameModelIdentity(existing, model))),
+      );
+    if (changesRole || removesConversation) {
+      throw new ProviderInstallError(
+        'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
   }
 
   // Track which step is in flight so a rethrow at the bottom can name it
@@ -228,7 +236,9 @@ export async function applyProviderInstallPlan(
     for (const patch of plan.modelProviders ?? []) {
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
-        patch,
+        preserveSelection
+          ? { ...patch, mergeStrategy: 'replace-owned' }
+          : patch,
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,

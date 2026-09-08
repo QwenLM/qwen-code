@@ -15,6 +15,7 @@ import { updateModelContextWindow } from '../model-configuration.js';
 import { loadSettings } from '../../config/settings.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
+import * as jsoncEditor from '../../utils/jsonc-editor.js';
 
 let home: string;
 let workspace: string;
@@ -110,6 +111,49 @@ afterEach(() => {
 });
 
 describe('DELETE /workspace/models', () => {
+  it.each(['sanitized URLs', 'provider keys'])(
+    'deletes only the selected configuration despite same-id collisions (%s)',
+    async (collision) => {
+      const separateProviders = collision === 'provider keys';
+      const first = {
+        id: 'shared',
+        baseUrl: separateProviders
+          ? 'https://api.example/v1'
+          : 'https://one:secret@api.example/v1?token=one',
+      };
+      const second = {
+        id: 'shared',
+        baseUrl: separateProviders
+          ? first.baseUrl
+          : 'https://two:secret@api.example/v1?token=two',
+      };
+      writeUserSettings({
+        providerProtocol: { alternate: 'openai' },
+        modelProviders: separateProviders
+          ? { openai: [first], alternate: [second] }
+          : { openai: [first, second] },
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      expect(listed.status).toBe(200);
+      const [keep, target] = listed.body.models;
+      expect(target.key).not.toBe(keep.key);
+      expect(target.baseUrl).toBe(keep.baseUrl);
+      const result = await request(app)
+        .delete('/workspace/models')
+        .send(target);
+      expect(result.status).toBe(200);
+      expect(readUserSettings()['modelProviders']).toEqual(
+        separateProviders
+          ? { openai: [first], alternate: [] }
+          : { openai: [first] },
+      );
+      const remaining = await request(app).get('/workspace/models');
+      expect(remaining.body.models).toHaveLength(1);
+      expect(remaining.body.models[0].key).toBe(keep.key);
+    },
+  );
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
     let generationOpen = true;
@@ -576,6 +620,113 @@ describe('DELETE /workspace/models', () => {
 });
 
 describe('model configuration routes', () => {
+  it('persists a workspace-owned window and reports runtime sync failure without touching user settings', async () => {
+    writeUserSettings({
+      $version: 4,
+      modelProviders: { openai: [{ id: 'user' }] },
+    });
+    writeWorkspaceSettings({
+      $version: 4,
+      modelProviders: {
+        openai: [{ id: 'workspace', envKey: 'WORKSPACE_KEY' }],
+      },
+    });
+    const before = fs.readFileSync(path.join(home, 'settings.json'), 'utf8');
+    const sync = vi.fn(async () => ({ status: 'failed' as const }));
+    const { app, broadcastSettingsChanged } = makeApp({
+      syncModelProvidersRuntime: sync,
+    });
+    const listed = await request(app).get('/workspace/models');
+    const target = listed.body.models.find(
+      (model: { modelId: string }) => model.modelId === 'workspace',
+    );
+    const response = await request(app)
+      .patch('/workspace/models')
+      .send({ key: target.key, contextWindowSize: 65536 });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      updated: true,
+      requiresRestart: true,
+      runtimeSync: { status: 'failed' },
+    });
+    expect(sync).toHaveBeenCalledOnce();
+    expect(readWorkspaceSettings()).toMatchObject({
+      modelProviders: {
+        openai: [
+          {
+            id: 'workspace',
+            envKey: 'WORKSPACE_KEY',
+            generationConfig: { contextWindowSize: 65536 },
+          },
+        ],
+      },
+    });
+    expect(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'modelProviders',
+      undefined,
+      'workspace',
+      undefined,
+    );
+  });
+  it('returns 500 without broadcasting when the settings writer refuses a save', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'model' }] } });
+    const { app, broadcastSettingsChanged } = makeApp();
+    const listed = await request(app).get('/workspace/models');
+    const before = fs.readFileSync(path.join(home, 'settings.json'), 'utf8');
+    const writer = vi
+      .spyOn(jsoncEditor, 'updateSettingsFilePreservingFormat')
+      .mockReturnValue(false);
+    try {
+      const result = await request(app)
+        .patch('/workspace/models')
+        .send({ key: listed.body.models[0].key, contextWindowSize: 32768 });
+      expect(result.status).toBe(500);
+      expect(writer).toHaveBeenCalled();
+      expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).toBe(
+        before,
+      );
+    } finally {
+      writer.mockRestore();
+    }
+  });
+
+  it.each(['stale', 'ambiguous'])(
+    'rejects a %s configuration key without writing or broadcasting',
+    async (shape) => {
+      const model = { id: 'shared', baseUrl: 'https://original.example/v1' };
+      writeUserSettings({ modelProviders: { openai: [model] } });
+      const { app, broadcastSettingsChanged } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const target = listed.body.models[0];
+      writeUserSettings({
+        $version: 4,
+        modelProviders: {
+          openai:
+            shape === 'stale'
+              ? [{ ...model, baseUrl: 'https://replacement.example/v1' }]
+              : [model, model],
+        },
+      });
+      const before = fs.readFileSync(path.join(home, 'settings.json'), 'utf8');
+      const patched = await request(app)
+        .patch('/workspace/models')
+        .send({ key: target.key, contextWindowSize: 32768 });
+      const deleted = await request(app)
+        .delete('/workspace/models')
+        .send(target);
+      expect(patched.status).toBe(409);
+      expect(deleted.status).toBe(409);
+      expect(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).toBe(
+        before,
+      );
+      expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+    },
+  );
+
   it('reads service models and saves a context override with safe invalidation', async () => {
     writeUserSettings({
       modelProviders: {

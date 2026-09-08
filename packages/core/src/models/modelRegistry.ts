@@ -301,7 +301,9 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values()).find((model) => !model.imageOnly);
+    return Array.from(models.values()).find(
+      (model) => !model.imageOnly && !model.voiceOnly,
+    );
   }
 
   /**

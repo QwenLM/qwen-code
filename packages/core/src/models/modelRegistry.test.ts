@@ -350,6 +350,18 @@ describe('ModelRegistry', () => {
   });
 
   describe('getDefaultModelForAuthType', () => {
+    it('does not use service-only entries when no conversation default exists', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'asr', voiceOnly: true },
+          { id: 'image', imageOnly: true },
+        ],
+      });
+      expect(
+        registry.getDefaultModelForAuthType(AuthType.USE_OPENAI),
+      ).toBeUndefined();
+    });
+
     it('should return coder-model for qwen-oauth', () => {
       const registry = new ModelRegistry();
       const defaultModel = registry.getDefaultModelForAuthType(
