@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isSubagentLikeExecutionContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import type { Config } from '../config/config.js';
 import {
   validateSessionSourceInput,
@@ -34,6 +35,9 @@ class RecordSourceInvocation extends BaseToolInvocation<
   }
   async execute(): Promise<ToolResult> {
     try {
+      if (isSubagentLikeExecutionContext()) {
+        throw new Error('Only the top-level session can register sources');
+      }
       const service = this.config.getSessionSourceService();
       if (!service) throw new Error('Session source service unavailable');
       if (this.params.locator.type === 'attachment')

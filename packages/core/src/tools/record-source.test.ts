@@ -5,6 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import type { Config } from '../config/config.js';
 import { SessionSourceService } from '../services/session-sources.js';
 import { RecordSourceTool } from './record-source.js';
@@ -56,6 +58,41 @@ describe('record_source', () => {
     expect(result.llmContent).not.toContain('Reference added');
     expect((await service.list()).sources).toEqual([]);
   });
+
+  it.each(['subagent', 'teammate'])(
+    'rejects direct %s execution against the parent service while keeping top-level registration available',
+    async (context) => {
+      const { tool: sourceTool, service, persist } = tool();
+      const execute = () =>
+        sourceTool.build(input).execute(AbortSignal.timeout(1000));
+      const result =
+        context === 'subagent'
+          ? await runWithAgentContext('workflow-subagent', execute)
+          : await runWithTeammateIdentity(
+              {
+                agentId: 'scribe@demo',
+                agentName: 'scribe',
+                teamName: 'demo',
+                isTeamLead: false,
+              },
+              execute,
+            );
+
+      expect(result.error?.message).toBe(
+        'Only the top-level session can register sources',
+      );
+      expect(result.llmContent).not.toContain('Reference added');
+      expect(persist).not.toHaveBeenCalled();
+      expect((await service.list()).sources).toEqual([]);
+
+      const parentResult = await sourceTool
+        .build(input)
+        .execute(AbortSignal.timeout(1000));
+      expect(parentResult.error).toBeUndefined();
+      expect(persist).toHaveBeenCalledOnce();
+      expect((await service.list()).sources).toHaveLength(1);
+    },
+  );
 
   it('rejects attachment locators, unknown input fields and invalid URLs before execution', () => {
     const { tool: sourceTool } = tool();
