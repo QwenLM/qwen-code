@@ -85,6 +85,9 @@ describe('StandaloneApp', () => {
     expect(testState.props?.webShellProps.environmentPanel?.items).toContain(
       'attachments',
     );
+    expect(testState.props?.webShellProps.header?.items).toContain(
+      'contextUsage',
+    );
     expect(testState.props?.webShellProps.sidebar).toMatchObject({
       enabled: true,
       showLive: true,

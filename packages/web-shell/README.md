@@ -205,6 +205,25 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
 历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
 
+## 拖入文件的默认行为
+
+通过 `fileDropAction` 指定拖入文件时的默认去向，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders fileDropAction="upload" fileUploadDirectory="uploads" />
+<WebShellWithProviders fileDropAction="attach" />
+```
+
+- `upload`：直接上传到工作区，并插入 `@文件` 引用。
+- `attach`：直接添加为当前消息的附件。
+- 不传：仅当上传和附件都可用时显示选择弹窗。
+
+只有一种方式可用时直接使用它，即使配置的默认去向是另一种；两种都不可用时
+不接收拖入文件。`fileUploadEnabled={false}` 只关闭工作区上传，不再关闭附件
+拖入或添加附件入口。上传仍受 daemon 能力、工作区信任及目标路径检查约束。
+修改默认去向或可用方式时，会关闭已经打开的选择弹窗；需要重新拖入文件。
+
 ## 消息操作
 
 - 已完成的 assistant 消息支持复制；具备持久化 checkpoint 时还支持分支。

@@ -267,7 +267,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onSessionIdChange: handleSessionIdChange,
             sidebar: { enabled: true, showLive: true },
             header: {
-              items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
+              items: [
+                'title',
+                'environment',
+                'rightPanel',
+                'tokenUsage',
+                'contextUsage',
+              ],
             },
             rightPanel: {
               items: ['review', 'sideTask', 'terminal'],

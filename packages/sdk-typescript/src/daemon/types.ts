@@ -4051,6 +4051,8 @@ export interface DaemonChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -4059,6 +4061,7 @@ export interface DaemonChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -4067,6 +4070,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -4076,6 +4080,7 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -4085,16 +4090,21 @@ export interface DaemonChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
 }
 
 export type DaemonChannelConfigNestedFieldDescriptor =
-  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      DaemonChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         DaemonChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';
