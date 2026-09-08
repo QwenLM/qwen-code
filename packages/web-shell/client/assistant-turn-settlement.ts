@@ -46,6 +46,13 @@ function getSettledAssistantMessage(
     ) {
       continue;
     }
+    // A whitespace-only assistant block that cannot merge (after a tool
+    // boundary, or carrying a segmentId) renders as its own empty message and
+    // would otherwise win the backward scan as the turn's final message. The
+    // adapter's own emptiness test rejects only zero-length text, so re-apply
+    // the block-level skip here. Streaming stays `return undefined` (not yet
+    // settled) rather than `continue`.
+    if (message.content.trim().length === 0) continue;
     if (message.isStreaming) return undefined;
     return {
       id: message.id,

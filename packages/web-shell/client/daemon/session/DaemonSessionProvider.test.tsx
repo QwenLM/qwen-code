@@ -10257,6 +10257,305 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('publishes the replayed terminal when an epoch reset discards the binding', async () => {
+    // `requestEpochResetReload` deletes the ActivePrompt before the reload, so
+    // `settleActivePromptFromTurnEvent` returns false for the replayed
+    // terminal; the admission-key gate must still publish it.
+    const resyncGate = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-settle-epoch',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 9,
+      })),
+      events: async function* epochResetThenResync(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          resyncGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-settle-epoch',
+      events: createPendingEvents(reloaded),
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed answer' },
+              },
+            },
+          },
+          {
+            id: 12,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      const prompt = requireActions(actions).sendPrompt('hello');
+      void prompt.catch(() => {});
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-epoch',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+  });
+
+  it('publishes a failed retirement when an epoch reset destroys the terminal', async () => {
+    // A cold restore emits only `session_update` chunks, never terminal
+    // events. The admitted prompt's terminal is gone; the host must still hear
+    // a `failed` settlement instead of waiting forever.
+    const resyncGate = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-retire-epoch',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 9,
+      })),
+      events: async function* epochResetThenResync(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          resyncGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-retire-epoch',
+      hasActivePrompt: false,
+      events: createPendingEvents(reloaded),
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'answer before the crash' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      const prompt = requireActions(actions).sendPrompt('hello');
+      void prompt.catch(() => {});
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-retire-epoch',
+        promptId: 'prompt-1',
+        outcome: 'failed',
+        error: {
+          message: 'Prompt terminal lost across daemon epoch reset',
+          code: 'epoch_reset',
+        },
+      },
+    ]);
+  });
+
+  it('publishes a replayed cancelled terminal after the prompt was cancelled', async () => {
+    // `cancel()` removes the ActivePrompt (deletes it in `finally`) but the
+    // admission key survives; a `turn_complete{stopReason:'cancelled'}` that
+    // only reaches the client through replay must still be published.
+    const resyncGate = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-settle-cancel',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 9,
+      })),
+      events: async function* cancelThenResync(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          resyncGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-settle-cancel',
+      events: createPendingEvents(reloaded),
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed answer' },
+              },
+            },
+          },
+          {
+            id: 12,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-1', stopReason: 'cancelled' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    await act(async () => {
+      const prompt = requireActions(actions).sendPrompt('hello');
+      void prompt.catch(() => {});
+      await flushPromises();
+    });
+    await act(async () => {
+      await requireActions(actions).cancel();
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      resyncGate.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-cancel',
+        promptId: 'prompt-1',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      },
+    ]);
+  });
+
   it('does not publish settlements when a first attach replays a finished turn', async () => {
     // Ordinary history loading stays silent: with no locally bound prompt the
     // replay branch settles nothing, so it must not publish either.

@@ -170,12 +170,17 @@ describe('assistant turn settlement projection', () => {
     });
   });
 
-  it('skips a whitespace-only assistant block', () => {
+  it('skips a whitespace-only assistant block after a tool boundary', () => {
+    // A whitespace-only assistant block after a tool call cannot merge (the
+    // tool case sets `needsNewContentMessage`), so it renders as its own empty
+    // message and would otherwise win the backward scan as the turn's final
+    // message — dropping the substantive answer.
     harness.blocks = [
       assistantBlock('assistant-1', 'The answer is 42.', {
         promptId: 'prompt-live',
       }),
-      assistantBlock('assistant-2', '   ', { promptId: 'prompt-live' }),
+      toolBlock('tool-2', 'call-1'),
+      assistantBlock('assistant-3', '   ', { promptId: 'prompt-live' }),
     ];
 
     const settled = mountAndSettle({
@@ -185,7 +190,12 @@ describe('assistant turn settlement projection', () => {
       stopReason: 'end_turn',
     });
 
-    expect(settled.message).toMatchObject({ id: 'assistant-1' });
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
   });
 
   it('omits the message for a settlement from another session', () => {

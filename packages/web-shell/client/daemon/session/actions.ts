@@ -245,7 +245,15 @@ export interface CreateDaemonSessionActionsArgs {
       blockId?: string;
     },
   ) => void;
-  onPromptRemoved?: (owner: DaemonSessionClient, promptId: string) => void;
+  onPromptRemoved?: (
+    owner: DaemonSessionClient,
+    promptId: string,
+    // Present only when the removal bypassed the session object (the
+    // stale-session branch routes to `session.client.removePendingPrompt` and
+    // hands over the foreign owner session id, since `session` there is the
+    // *current* session, not the prompt's owner).
+    sessionId?: string,
+  ) => void;
 }
 
 export function getWorkspaceModelsAfterSessionClear(
@@ -2409,10 +2417,14 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        return await session.client.removePendingPrompt(
+        const result = await session.client.removePendingPrompt(
           opts.sessionId,
           promptId,
         );
+        if (result.removed) {
+          onPromptRemoved?.(session, promptId, opts.sessionId);
+        }
+        return result;
       }
       const result = await session.removePendingPrompt(promptId);
       if (result.removed) onPromptRemoved?.(session, promptId);
