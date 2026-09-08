@@ -1264,9 +1264,9 @@ describe('ShellExecutionService', () => {
       // omitting `postPromote` re-attaches no data listener and invokes no
       // callback the caller didn't provide. The settle listener itself IS
       // attached — it is the only path left that can release a promoted
-      // shell's ConPTY host and conout worker (#11303), and `firePostSettle`
+      // shell's conout worker (#11303), and `firePostSettle`
       // early-returns before any forwarding when there is no onSettle handler.
-      // Pinned by 'releases host and conout worker when a promote passed no
+      // Pinned by 'releases the conout worker when a promote passed no
       // postPromote handlers' below.
       const onDataCalls: ShellOutputEvent[] = [];
       const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
@@ -1813,10 +1813,12 @@ describe('ShellExecutionService', () => {
         ['/f', '/pid', String(mockPtyProcess.pid)],
         HIDDEN_WINDOW,
       );
-      // The ConPTY host release (#11303) sits in the same spot for the same
+      // The ConPTY release (#11303) sits in the same spot for the same
       // reason: above firePostSettle's `!postPromote?.onSettle` early return.
       // This assertion is what goes red if it is ever slid below it — with
-      // onData but no onSettle, every backgrounded command would leak its host.
+      // onData but no onSettle, every backgrounded command would leak its
+      // conout worker. (mockPtyNativeKill only pins that the call is made; the
+      // real native no-ops after a natural exit — see releaseConPtyHost.)
       expect(mockPtyNativeKill).toHaveBeenCalledWith(777, false);
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
@@ -1866,7 +1868,7 @@ describe('ShellExecutionService', () => {
     });
   });
 
-  describe('Windows ConPTY host release (#11303)', () => {
+  describe('Windows ConPTY release (#11303)', () => {
     // A finished PTY leaves two Windows resources behind: the ConPTY host
     // process (`conhost.exe --headless`) and the worker thread node-pty runs to
     // read the conout pipe. node-pty releases neither on a natural shell exit,
@@ -1878,13 +1880,19 @@ describe('ShellExecutionService', () => {
     // has already exited (the healthy path), falls back after 5s to
     // TerminateProcess on a pid ClosePseudoConsole just freed for reuse — the
     // #6067 collateral-kill mode, on every tool call.
+    //
+    // These cases certify the WORKER half only. mockPtyNativeKill is a vi.fn(),
+    // so asserting it was called says nothing about whether the real native
+    // call closes anything — and at the pinned node-pty it does not, because
+    // the exit watcher erases the pty baton before onExit. Do not read a green
+    // run here as evidence that conhost.exe is freed. See releaseConPtyHost.
 
     beforeEach(() => {
       mockCpSpawn.mockReturnValue(new EventEmitter());
       mockSpawnSync.mockReturnValue({ status: 0 });
     });
 
-    it('releases host and conout worker on a clean win32 completion (the leaking path)', async () => {
+    it('releases the conout worker on a clean win32 completion (the leaking path)', async () => {
       mockPlatform.mockReturnValue('win32');
       // The shell exited cleanly: isPtyActive is false, so the taskkill reap is
       // (correctly) skipped — and that is exactly the path that leaked.
@@ -2064,7 +2072,7 @@ describe('ShellExecutionService', () => {
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
-    it('releases host and conout worker when a promote passed no postPromote handlers', async () => {
+    it('releases the conout worker when a promote passed no postPromote handlers', async () => {
       mockPlatform.mockReturnValue('win32');
 
       const { result } = await simulateExecution(

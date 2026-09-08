@@ -1856,11 +1856,15 @@ export class ShellExecutionService {
           ) {
             windowsKillPid(ptyProcess.pid, cancelKillDispatched);
           }
-          // The taskkill above owns the shell; this owns the pseudo-console
-          // host and the conout worker thread, which nothing else releases once
-          // we delete from activePtys below. It is NOT under the isPtyActive
-          // guard: the healthy path — shell exited cleanly, so no taskkill — is
-          // exactly the one that leaks both, once per tool call (#11303).
+          // The taskkill above owns the shell; this releases node-pty's conout
+          // worker thread, which nothing else frees once we delete from
+          // activePtys below. It is NOT under the isPtyActive guard: the
+          // healthy path — shell exited cleanly, so no taskkill — is exactly
+          // the one that leaks it, once per tool call (#11303).
+          //
+          // It does NOT free the conhost.exe half: by the time we get here
+          // node-pty's native exit watcher has erased the pty baton, so its
+          // ClosePseudoConsole silently no-ops. See releaseConPtyHost.
           releaseConPtyHost(ptyProcess);
           this.activePtys.delete(ptyProcess.pid);
         };
@@ -2124,10 +2128,12 @@ export class ShellExecutionService {
             ) {
               windowsKillPid(ptyProcess.pid, false);
             }
-            // ...and release the ConPTY host itself. The promote branch already
-            // dropped this pid from activePtys, so the process-exit cleanup()
-            // cannot reach it either — without this a backgrounded command
-            // leaks a conhost exactly like the foreground path did (#11303).
+            // ...and release node-pty's conout worker. The promote branch
+            // already dropped this pid from activePtys, so the process-exit
+            // cleanup() cannot reach it either — without this a backgrounded
+            // command leaks the worker exactly like the foreground path did
+            // (#11303). The conhost.exe half is not freed here either; see
+            // releaseConPtyHost.
             releaseConPtyHost(ptyProcess);
             if (!postPromote?.onSettle) return;
             try {

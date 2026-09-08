@@ -17,9 +17,11 @@ export interface WebTerminalPty {
   resize(cols: number, rows: number): void;
   kill(): void;
   /**
-   * Release the Windows ConPTY host and conout worker without signalling the
-   * shell pid. Used when the shell has already exited, where `kill()` would
-   * reach a possibly recycled pid. No-op off Windows. See #11303.
+   * Release node-pty's Windows conout worker without signalling the shell pid.
+   * Used when the shell has already exited, where `kill()` would reach a
+   * possibly recycled pid. Attempts the ConPTY host close too, which no-ops
+   * after a natural exit at the pinned node-pty — see `releaseConPtyHost`.
+   * No-op off Windows. See #11303.
    */
   releaseHost?(): void;
 }
@@ -423,10 +425,11 @@ export class WebTerminalRegistry {
       killPtyTree(session.pty);
     } else {
       // The shell already exited, so nothing may signal its (possibly recycled)
-      // pid — but node-pty releases neither the ConPTY host nor its conout
-      // worker thread on a natural exit, so without this every terminal the
-      // user exits leaks both for the life of the CLI. Same defect as the
-      // shell-tool path in shellExecutionService. See #11303.
+      // pid — but node-pty does not release its conout worker thread on a
+      // natural exit, so without this every terminal the user exits leaks one
+      // for the life of the CLI. Same defect as the shell-tool path in
+      // shellExecutionService. The conhost.exe half is not freed here (the
+      // native baton is already gone); see releaseConPtyHost. See #11303.
       session.pty.releaseHost?.();
     }
     return true;

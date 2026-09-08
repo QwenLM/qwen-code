@@ -282,7 +282,9 @@ describe('WebTerminalRegistry', () => {
     expect(spawnSync).not.toHaveBeenCalled();
     expect(kill).not.toHaveBeenCalled();
     // node-pty releases neither the ConPTY host nor its conout worker on a
-    // natural exit, so the release goes at the agent directly.
+    // natural exit, so the release goes at the agent directly. Only the worker
+    // half actually lands: nativeKill is a stub here, and the real one no-ops
+    // after a natural exit. See releaseConPtyHost.
     expect(nativeKill).toHaveBeenCalledOnce();
     expect(conoutDispose).toHaveBeenCalledOnce();
     expect(disposeData).toHaveBeenCalledOnce();
