@@ -10005,8 +10005,6 @@ export class Session implements SessionContext {
             promptId,
             item.todoWorkChainId,
           );
-          await this.#emitBackgroundNotificationDisplay(item);
-
           // Report anything overflow discarded on the first turn that follows
           // it, so the model learns what it will never be told about before it
           // acts on the notifications that survived.
@@ -10021,6 +10019,7 @@ export class Session implements SessionContext {
           if (droppedSummary) {
             await this.#emitDroppedNotificationSummary(droppedSummary);
           }
+          await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
           if (droppedSummary) {
@@ -10029,13 +10028,33 @@ export class Session implements SessionContext {
           if (!item.persisted) {
             this.config
               .getChatRecordingService()
-              ?.recordNotification(notificationParts, item.displayText, {
-                taskId: item.taskId,
-                status: item.status,
-                kind: item.kind,
-                toolUseId: item.toolUseId,
-                ...item.structured,
-              });
+              ?.recordNotification(
+                notificationParts,
+                droppedSummary
+                  ? `${droppedSummary.displayText}\n${item.displayText}`
+                  : item.displayText,
+                {
+                  taskId: item.taskId,
+                  status: item.status,
+                  kind: item.kind,
+                  toolUseId: item.toolUseId,
+                  ...item.structured,
+                },
+              );
+          } else if (droppedSummary) {
+            this.config
+              .getChatRecordingService()
+              ?.recordNotification(
+                [{ text: droppedSummary.modelText }],
+                droppedSummary.displayText,
+                {
+                  taskId: item.taskId,
+                  status: item.status,
+                  kind: item.kind,
+                  toolUseId: item.toolUseId,
+                  ...item.structured,
+                },
+              );
           }
 
           const notificationReminders =

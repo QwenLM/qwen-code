@@ -117,12 +117,12 @@ describe('decideNotificationAdmission', () => {
 
     expect(
       decideNotificationAdmission(queue, shell('bg_new'), { isProtected }),
-    ).toEqual({ action: 'drop' });
+    ).toEqual({ action: 'drop', reason: 'all-protected' });
     // A protected incoming item is dropped too: evicting a protected peer
     // would trade one irreplaceable result for another.
     expect(
       decideNotificationAdmission(queue, agent('a_new'), { isProtected }),
-    ).toEqual({ action: 'drop' });
+    ).toEqual({ action: 'drop', reason: 'all-protected' });
   });
 
   it('drops an arriving pulse rather than displace a terminal result', () => {
@@ -134,6 +134,7 @@ describe('decideNotificationAdmission', () => {
     // copy of a shell result to make room for one trades the wrong way.
     expect(decideNotificationAdmission(queue, pulse('mon_new'))).toEqual({
       action: 'drop',
+      reason: 'superseded-pulse',
     });
     // But a queued pulse is still the first thing an arriving pulse displaces.
     const withPulse = fill(MAX_BACKGROUND_NOTIFICATION_QUEUE, (i) =>
@@ -194,16 +195,18 @@ describe('DroppedNotificationTally', () => {
     const summary = tally.take();
 
     expect(summary?.displayText).toBe(
-      'Dropped 7 background notifications (queue full): 2 shell results ' +
-        '(bg_ef56, bg_gh78), 5 monitor pulses (mon_ab12, mon_cd34, mon_ab12, +2).',
+      'Dropped 2 background notifications (queue full): 2 shell results ' +
+        '(bg_ef56, bg_gh78). 5 superseded monitor pulses (mon_ab12, ' +
+        'mon_cd34, +3) were not delivered.',
     );
     expect(summary?.modelText).toBe(
       '<task-notification>\n<kind>queue</kind>\n<status>dropped</status>\n' +
-        '<summary>7 background notifications were dropped before delivery ' +
+        '<summary>2 background notifications were dropped before delivery ' +
         'because the notification queue overflowed: 2 shell results (bg_ef56, ' +
-        'bg_gh78), 5 monitor pulses (mon_ab12, mon_cd34, mon_ab12, +2). Their ' +
-        'tasks were not stopped. Check their current state with /tasks or by ' +
-        'reading the task output files before acting on this turn.</summary>\n' +
+        'bg_gh78). 5 superseded monitor pulses (mon_ab12, mon_cd34, +3) were ' +
+        'not delivered. The affected tasks were not stopped or deleted. Check ' +
+        'their current state with /tasks or by reading the task output files ' +
+        'before acting on this turn.</summary>\n' +
         '</task-notification>',
     );
   });
@@ -229,6 +232,11 @@ describe('DroppedNotificationTally', () => {
     expect(tally.take()).toBeDefined();
     expect(tally.count).toBe(0);
     expect(tally.take()).toBeUndefined();
+
+    tally.record(shell('bg_2'));
+    expect(tally.take()?.displayText).toBe(
+      'Dropped 1 background notification (queue full): 1 shell result (bg_2).',
+    );
   });
 
   it('discards the backlog on clear without producing a summary', () => {
@@ -239,6 +247,11 @@ describe('DroppedNotificationTally', () => {
 
     expect(tally.count).toBe(0);
     expect(tally.take()).toBeUndefined();
+
+    tally.record(shell('bg_2'));
+    expect(tally.take()?.displayText).toBe(
+      'Dropped 1 background notification (queue full): 1 shell result (bg_2).',
+    );
   });
 
   it('separates interim monitor pulses from terminal monitor results', () => {
@@ -247,8 +260,8 @@ describe('DroppedNotificationTally', () => {
     tally.record({ kind: 'monitor', taskId: 'mon_2' });
 
     expect(tally.take()?.displayText).toBe(
-      'Dropped 2 background notifications (queue full): 1 monitor result ' +
-        '(mon_2), 1 monitor pulse (mon_1).',
+      'Dropped 1 background notification (queue full): 1 monitor result ' +
+        '(mon_2). 1 superseded monitor pulse (mon_1) was not delivered.',
     );
   });
 
@@ -256,8 +269,13 @@ describe('DroppedNotificationTally', () => {
     const tally = new DroppedNotificationTally();
     tally.record({ kind: 'cron' });
 
-    expect(tally.take()?.displayText).toBe(
+    const summary = tally.take();
+    expect(summary?.displayText).toBe(
       'Dropped 1 background notification (queue full): 1 scheduled prompt.',
     );
+    expect(summary?.modelText).toContain(
+      'The scheduled prompts were not delivered and will not be retried.',
+    );
+    expect(summary?.modelText).not.toContain('/tasks');
   });
 });

@@ -42,6 +42,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  MAX_BACKGROUND_NOTIFICATION_QUEUE,
   goalPauseReasonForFailure,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
@@ -12371,7 +12372,10 @@ describe('Session', () => {
       // The eviction is remembered, so the next turn can report it.
       expect(internals.droppedNotifications.count).toBe(1);
 
-      internals.notificationQueue = [];
+      internals.notificationProcessing = true;
+      await session.cancelPendingPrompt();
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.droppedNotifications.count).toBe(0);
       internals.notificationProcessing = false;
     });
 
@@ -12413,8 +12417,27 @@ describe('Session', () => {
       ).message;
       expect(parts[0]?.text).toContain('<kind>queue</kind>');
       expect(parts[0]?.text).toContain('1 shell result (shell-0)');
-      expect(parts[0]?.text).toContain('Their tasks were not stopped.');
+      expect(parts[0]?.text).toContain(
+        'The affected tasks were not stopped or deleted.',
+      );
       expect(parts[1]?.text).toBe('<shell-1 />');
+
+      const sessionUpdateCalls = vi.mocked(mockClient.sessionUpdate).mock.calls;
+      const summaryUpdateIndex = sessionUpdateCalls.findIndex(
+        ([{ update }]) =>
+          update._meta?.backgroundTask?.kind === 'queue' &&
+          update._meta.backgroundTask.status === 'dropped',
+      );
+      const survivingUpdateIndex = sessionUpdateCalls.findIndex(
+        ([{ update }]) => update._meta?.backgroundTask?.taskId === 'shell-1',
+      );
+      expect(summaryUpdateIndex).toBeGreaterThanOrEqual(0);
+      expect(summaryUpdateIndex).toBeLessThan(survivingUpdateIndex);
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.stringContaining('Dropped 1 background notification'),
+        expect.objectContaining({ taskId: 'shell-1' }),
+      );
 
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -12431,6 +12454,55 @@ describe('Session', () => {
           },
         },
       });
+    });
+
+    it('records an overflow summary without duplicating a persisted notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
+      };
+      internals.pendingPrompt = new AbortController();
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+      for (let index = 0; index <= MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      expect(internals.droppedNotifications.count).toBe(1);
+      internals.notificationQueue = [];
+      internals.pendingPrompt = null;
+      mockChatRecordingService.recordNotification.mockClear();
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'Worker completed.',
+        modelText: '<worker-persisted />',
+        taskId: 'worker-persisted',
+        status: 'completed',
+        kind: 'agent',
+      });
+
+      await vi.waitFor(() =>
+        expect(mockChatRecordingService.recordNotification).toHaveBeenCalled(),
+      );
+      const summaryRecord =
+        mockChatRecordingService.recordNotification.mock.calls[0];
+      expect(summaryRecord?.[0]).toEqual([
+        { text: expect.stringContaining('<kind>queue</kind>') },
+      ]);
+      expect(summaryRecord?.[0]).not.toContainEqual({
+        text: '<worker-persisted />',
+      });
+      expect(summaryRecord?.[1]).toContain('Dropped 1 background notification');
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {
@@ -42194,6 +42266,7 @@ describe('Session', () => {
       const internals = session as unknown as {
         notificationProcessing: boolean;
         notificationQueue: Array<{ taskId: string }>;
+        droppedNotifications: { count: number };
       };
       internals.notificationProcessing = true;
       const callback =
@@ -42226,6 +42299,7 @@ describe('Session', () => {
       expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
         'Notification queue overflow: dropping related task=related-agent-20 kind=agent because all queued items are related',
       );
+      expect(internals.droppedNotifications.count).toBe(1);
       internals.notificationProcessing = false;
     });
 

@@ -133,11 +133,11 @@ Use continuation for related follow-up work. Launch a new agent when the task is
 
 ## Notification Queue
 
-Completion notifications from background agents, shells, monitors and workflows share one queue, drained into a model turn once the session is idle. The queue holds at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog.
+In the interactive TUI and ACP session, completion notifications from background agents, shells, monitors and workflows share a queue that drains into a model turn once the session is idle. These queues hold at most 20 notifications so a noisy producer cannot accumulate an unbounded backlog. The headless CLI's local queue is not capped by this rule.
 
 When a 21st notification arrives, Qwen Code evicts an interim monitor pulse first — the monitor's next poll supersedes it — and otherwise the oldest queued notification. Agent results, workflow results and scheduled prompts are never evicted in the interactive TUI; a notification that would displace one is dropped instead, and so is an arriving pulse when only terminal results are queued.
 
-Discarded notifications are reported rather than dropped quietly. The next drained turn is prefixed with one summary naming how many went and which tasks they came from, both in the transcript and in what the model reads. The summary rides along with that turn, so it waits until some notification actually drains; it goes unreported only if the session is cleared or switched before then. The tasks themselves keep running: the summary points at `/tasks` and the task output files for their current state.
+Discarded notifications are reported rather than dropped quietly. The summary appears before the next notification in the transcript. ACP also prefixes it to that turn's model input; the TUI keeps it parked for the next Notification batch so cron prompts still pass unchanged through slash, shell and `@` preprocessing. ACP can discard a pending summary if the session is cleared or switched, or if a client cancels or preempts the notification turn. Discarding a notification never stops or deletes its task, and completed tasks retain their results; the summary points at `/tasks` and task output files when there is a task to inspect. A discarded scheduled prompt was never delivered and is not retried.
 
 ## Agent Working Directory
 

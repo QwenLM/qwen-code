@@ -6102,33 +6102,42 @@ export const useLlmStream = (
    * cron prompt is work the user scheduled. Shell results and monitor pulses
    * absorb the overflow, pulses first — the next poll supersedes them anyway.
    */
-  const admitNotification = useCallback((item: QueuedNotification): void => {
-    const queue = notificationQueueRef.current;
-    const admission = decideNotificationAdmission(queue, item, {
-      max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
-      isProtected: (queued) =>
-        queued.kind === 'agent' ||
-        queued.kind === 'workflow' ||
-        queued.kind === 'cron',
-    });
-    if (admission.action === 'drop') {
-      debugLogger.warn(
-        `Notification queue overflow: dropping task=${item.taskId ?? 'unknown'} kind=${item.kind} because every queued notification is protected`,
-      );
-      droppedNotificationsRef.current.record(item);
+  const admitNotification = useCallback(
+    (item: QueuedNotification): void => {
+      const queue = notificationQueueRef.current;
+      const admission = decideNotificationAdmission(queue, item, {
+        max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
+        isProtected: (queued) =>
+          queued.kind === 'agent' ||
+          queued.kind === 'workflow' ||
+          queued.kind === 'cron',
+      });
+      if (admission.action === 'drop') {
+        debugLogger.warn(
+          `Notification queue overflow: dropping task=${item.taskId ?? 'unknown'} kind=${item.kind} because ${admission.reason === 'all-protected' ? 'every queued notification is protected' : 'the next monitor pulse will supersede it'}`,
+        );
+        droppedNotificationsRef.current.record(item);
+        return;
+      }
+      if (admission.action === 'evict') {
+        const [evicted] = queue.splice(admission.index, 1);
+        debugLogger.warn(
+          `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
+        );
+        if (evicted) {
+          const cancelledPulse =
+            evicted.interim &&
+            evicted.taskId !== undefined &&
+            config.getMonitorRegistry().get(evicted.taskId)?.status ===
+              'cancelled';
+          if (!cancelledPulse) droppedNotificationsRef.current.record(evicted);
+        }
+      }
+      queue.push(item);
       setNotificationTrigger((n) => n + 1);
-      return;
-    }
-    if (admission.action === 'evict') {
-      const [evicted] = queue.splice(admission.index, 1);
-      debugLogger.warn(
-        `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
-      );
-      if (evicted) droppedNotificationsRef.current.record(evicted);
-    }
-    queue.push(item);
-    setNotificationTrigger((n) => n + 1);
-  }, []);
+    },
+    [config],
+  );
   // Last time an interim-monitor-led notification batch started a model turn
   // (#10818 cooldown).
   const lastInterimMonitorTurnAtRef = useRef(0);
@@ -6455,6 +6464,13 @@ export const useLlmStream = (
         const restoreDroppedSummary = () => {
           pendingDroppedSummaryRef.current = droppedSummary;
         };
+        const restoreBatch = (batch: QueuedNotification[]) => {
+          queue.unshift(...batch);
+          const overflow = queue.splice(MAX_BACKGROUND_NOTIFICATION_QUEUE);
+          for (const item of overflow) {
+            droppedNotificationsRef.current.record(item);
+          }
+        };
 
         // Cron prompts must run as individual turns — each needs its own
         // slash/shell/@ preprocessing and approval cycle. Only batch
@@ -6470,28 +6486,25 @@ export const useLlmStream = (
             );
             item.displayed = true;
           }
-          releaseDroppedSummary();
-          void submitQuery(
-            withDroppedSummary(item.modelText),
-            item.sendMessageType,
-            undefined,
-            {
-              notificationDisplayText: item.displayText,
-              todoWorkChainId: item.todoWorkChainId,
-              onDelivered: item.onDelivered,
-              onDeliveryFailed: item.onDeliveryFailed,
-              onAdmissionFailed: () => {
-                queue.unshift(item);
-                restoreDroppedSummary();
-              },
-              claimGoalTurn: admission.claimGoalTurn,
-              onGoalClaimDeferred: () => {
-                queue.unshift(item);
-                restoreDroppedSummary();
-                setNotificationTrigger((n) => n + 1);
-              },
+          void submitQuery(item.modelText, item.sendMessageType, undefined, {
+            notificationDisplayText: item.displayText,
+            todoWorkChainId: item.todoWorkChainId,
+            onDelivered: item.onDelivered,
+            onDeliveryFailed: () => {
+              restoreDroppedSummary();
+              item.onDeliveryFailed?.();
             },
-          ).catch((error) => {
+            onAdmissionFailed: () => {
+              queue.unshift(item);
+              restoreDroppedSummary();
+            },
+            claimGoalTurn: admission.claimGoalTurn,
+            onGoalClaimDeferred: () => {
+              queue.unshift(item);
+              restoreDroppedSummary();
+              setNotificationTrigger((n) => n + 1);
+            },
+          }).catch((error) => {
             debugLogger.warn('Failed to admit cron notification', error);
           });
           return;
@@ -6534,12 +6547,13 @@ export const useLlmStream = (
             notificationDisplayText: combinedDisplayText,
             todoWorkChainId: batch[0]?.todoWorkChainId,
             onAdmissionFailed: () => {
-              queue.unshift(...batch);
+              restoreBatch(batch);
               restoreDroppedSummary();
             },
+            onDeliveryFailed: restoreDroppedSummary,
             claimGoalTurn: admission.claimGoalTurn,
             onGoalClaimDeferred: () => {
-              queue.unshift(...batch);
+              restoreBatch(batch);
               restoreDroppedSummary();
               setNotificationTrigger((n) => n + 1);
             },

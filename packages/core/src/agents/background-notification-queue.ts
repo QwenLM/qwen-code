@@ -5,9 +5,9 @@
  */
 
 /**
- * @fileoverview Admission rule shared by every front end that queues
- * background notifications (the interactive TUI's unified queue and the ACP
- * `Session` queue).
+ * @fileoverview Admission rule shared by the two front ends that cap queued
+ * background notifications: the interactive TUI and the ACP `Session`.
+ * The headless CLI's local queue is not capped here.
  *
  * Both front ends turn a queued notification into a model turn once the
  * session goes idle. Without a cap, a noisy producer — a monitor printing on
@@ -17,17 +17,19 @@
  * notifications that carry irreplaceable results survive and the repetitive
  * ones are the first to go.
  *
- * Losses are never silent: the caller records each one in a
+ * Overflow discards are not silent: the caller records each one in a
  * {@link DroppedNotificationTally} and folds one summary line into the next
- * drained turn.
+ * compatible drained turn. A caller may omit already-cancelled monitor pulses
+ * that its normal drain would prune without delivery.
  */
 
 /**
- * Hard cap on queued background notifications, shared by every front end.
+ * Hard cap on queued background notifications in the TUI and ACP session.
  *
- * Sized above the default background-agent concurrency cap (10) so a full
- * fan-out of agents plus a handful of shells and workflows never evicts a
- * result that a session actually waited for.
+ * Sized above the default background-agent concurrency cap (10).
+ * `QWEN_CODE_MAX_BACKGROUND_AGENTS` can raise fan-out past this cap, at which
+ * point protected agent results are dropped rather than evicted and the loss
+ * is reported.
  */
 export const MAX_BACKGROUND_NOTIFICATION_QUEUE = 20;
 
@@ -59,7 +61,7 @@ export interface AdmissibleNotification {
 export type NotificationAdmission<T> =
   | { action: 'push' }
   | { action: 'evict'; index: number; evicted: T }
-  | { action: 'drop' };
+  | { action: 'drop'; reason: 'all-protected' | 'superseded-pulse' };
 
 export interface NotificationAdmissionOptions<T> {
   max?: number;
@@ -99,12 +101,16 @@ export function decideNotificationAdmission<T extends AdmissibleNotification>(
   for (let index = 0; index < queue.length; index++) {
     if (!isProtected(queue[index]!, index)) unprotected.push(index);
   }
-  if (unprotected.length === 0) return { action: 'drop' };
+  if (unprotected.length === 0) {
+    return { action: 'drop', reason: 'all-protected' };
+  }
 
   // Oldest interim pulse first — the queue is append-ordered, so the first
   // matching index is the oldest.
   const interimIndex = unprotected.find((index) => queue[index]!.interim);
-  if (interimIndex === undefined && incoming.interim) return { action: 'drop' };
+  if (interimIndex === undefined && incoming.interim) {
+    return { action: 'drop', reason: 'superseded-pulse' };
+  }
   const evictedIndex = interimIndex ?? unprotected[0]!;
   return {
     action: 'evict',
@@ -135,17 +141,13 @@ function droppedNoun(
 }
 
 /** Ordering of the per-kind clauses in the summary; stable across drains. */
-const GROUP_ORDER: ReadonlyArray<{
-  kind: BackgroundNotificationKind;
-  interim: boolean;
-}> = [
-  { kind: 'agent', interim: false },
-  { kind: 'workflow', interim: false },
-  { kind: 'shell', interim: false },
-  { kind: 'monitor', interim: false },
-  { kind: 'monitor', interim: true },
-  { kind: 'cron', interim: false },
-];
+const GROUP_ORDER = {
+  agent: [false],
+  workflow: [false],
+  shell: [false],
+  monitor: [false, true],
+  cron: [false],
+} as const satisfies Record<BackgroundNotificationKind, readonly boolean[]>;
 
 /** At most this many task ids are named per group before eliding the rest. */
 const MAX_NAMED_IDS_PER_GROUP = 3;
@@ -175,7 +177,11 @@ export class DroppedNotificationTally {
     const key = groupKey(item);
     const group = this.groups.get(key) ?? { count: 0, ids: [] };
     group.count++;
-    if (item.taskId && group.ids.length < MAX_NAMED_IDS_PER_GROUP) {
+    if (
+      item.taskId &&
+      group.ids.length < MAX_NAMED_IDS_PER_GROUP &&
+      !group.ids.includes(item.taskId)
+    ) {
       group.ids.push(item.taskId);
     }
     this.groups.set(key, group);
@@ -200,28 +206,69 @@ export class DroppedNotificationTally {
     if (this.total === 0) return undefined;
 
     const clauses: string[] = [];
-    for (const { kind, interim } of GROUP_ORDER) {
-      const group = this.groups.get(groupKey({ kind, interim }));
-      if (!group) continue;
-      const noun = droppedNoun(kind, interim, group.count);
-      const elided = group.count - group.ids.length;
-      const names =
-        group.ids.length > 0
-          ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
-          : '';
-      clauses.push(`${group.count} ${noun}${names}`);
+    let supersededPulseClause: string | undefined;
+    let supersededPulseCount = 0;
+    let hasInspectableLoss = false;
+    let hasCronLoss = false;
+    for (const kind of Object.keys(
+      GROUP_ORDER,
+    ) as BackgroundNotificationKind[]) {
+      for (const interim of GROUP_ORDER[kind]) {
+        const group = this.groups.get(groupKey({ kind, interim }));
+        if (!group) continue;
+        const noun = droppedNoun(kind, interim, group.count);
+        const elided = group.count - group.ids.length;
+        const names =
+          group.ids.length > 0
+            ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
+            : '';
+        if (kind === 'monitor' && interim) {
+          supersededPulseCount = group.count;
+          supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
+        } else {
+          clauses.push(`${group.count} ${noun}${names}`);
+          hasInspectableLoss ||= kind !== 'cron';
+          hasCronLoss ||= kind === 'cron';
+        }
+      }
     }
 
-    const total = this.total;
+    const droppedTotal = this.total - supersededPulseCount;
     const totalNoun =
-      total === 1 ? 'background notification' : 'background notifications';
+      droppedTotal === 1
+        ? 'background notification'
+        : 'background notifications';
     const detail = clauses.join(', ');
-    const displayText = `Dropped ${total} ${totalNoun} (queue full): ${detail}.`;
-    const summary =
-      `${total} ${totalNoun} ${total === 1 ? 'was' : 'were'} dropped before ` +
-      `delivery because the notification queue overflowed: ${detail}. Their ` +
-      `tasks were not stopped. Check their current state with /tasks or by ` +
-      `reading the task output files before acting on this turn.`;
+    const droppedClause =
+      droppedTotal > 0
+        ? `Dropped ${droppedTotal} ${totalNoun} (queue full): ${detail}.`
+        : undefined;
+    const displayText = [
+      droppedClause,
+      supersededPulseClause ? `${supersededPulseClause}.` : undefined,
+    ]
+      .filter((clause): clause is string => clause !== undefined)
+      .join(' ');
+    const summaryParts: string[] = [];
+    if (droppedTotal > 0) {
+      summaryParts.push(
+        `${droppedTotal} ${totalNoun} ${droppedTotal === 1 ? 'was' : 'were'} dropped before delivery because the notification queue overflowed: ${detail}.`,
+      );
+    }
+    if (supersededPulseClause) {
+      summaryParts.push(`${supersededPulseClause}.`);
+    }
+    if (hasInspectableLoss) {
+      summaryParts.push(
+        'The affected tasks were not stopped or deleted. Check their current state with /tasks or by reading the task output files before acting on this turn.',
+      );
+    }
+    if (hasCronLoss) {
+      summaryParts.push(
+        'The scheduled prompts were not delivered and will not be retried.',
+      );
+    }
+    const summary = summaryParts.join(' ');
     const modelText = `<task-notification>\n<kind>queue</kind>\n<status>dropped</status>\n<summary>${summary}</summary>\n</task-notification>`;
 
     this.clear();

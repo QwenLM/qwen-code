@@ -38,6 +38,7 @@ import {
   goalPauseReasonForFailure,
   LlmEventType as ServerLlmEventType,
   MessageSenderType,
+  MAX_BACKGROUND_NOTIFICATION_QUEUE,
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
@@ -13878,6 +13879,9 @@ describe('useLlmStream', () => {
           };
           return {
             goalQueueRef,
+            block: () => {
+              queuedUserMessages = true;
+            },
             release: () => {
               queuedUserMessages = false;
             },
@@ -13978,10 +13982,241 @@ describe('useLlmStream', () => {
           }
           // And the loss is reported rather than silent.
           expect(submitted).toContain('<kind>queue</kind>');
-          expect(submitted).toContain('1 monitor pulse (mon_1)');
-          expect(notificationTexts()).toContain(
-            'Dropped 1 background notification (queue full): 1 monitor pulse (mon_1).',
+          expect(submitted).toContain(
+            '1 superseded monitor pulse (mon_1) was not delivered',
           );
+          expect(submitted.indexOf('<kind>queue</kind>')).toBeLessThan(
+            submitted.indexOf('<shell-0 />'),
+          );
+          expect(notificationTexts()).toContain(
+            '1 superseded monitor pulse (mon_1) was not delivered.',
+          );
+        });
+
+        it('does not report a cancelled monitor pulse evicted during overflow', async () => {
+          const { goalQueueRef, release } = blockedDrain();
+          const { rerender, client } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          await waitFor(() =>
+            expect(
+              mockMonitorRegistry.setNotificationCallback,
+            ).toHaveBeenCalled(),
+          );
+          const monitorCallback = mockMonitorRegistry.setNotificationCallback
+            .mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          const shellCallback = mockBackgroundShellRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { shellId: string; status: string },
+          ) => void;
+
+          await act(async () => {
+            monitorCallback('pulse', '<cancelled-pulse />', {
+              monitorId: 'mon_cancelled',
+              status: 'running',
+            });
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE - 1; i++) {
+              shellCallback(`shell ${i}`, `<shell-${i} />`, {
+                shellId: `bg_${i}`,
+                status: 'completed',
+              });
+            }
+            mockMonitorRegistry.get.mockReturnValue({ status: 'cancelled' });
+            shellCallback('last shell', '<shell-last />', {
+              shellId: 'bg_last',
+              status: 'completed',
+            });
+          });
+
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+          const submitted = JSON.stringify(
+            mockSendMessageStream.mock.calls[0][0],
+          );
+          expect(submitted).not.toContain('<cancelled-pulse />');
+          expect(submitted).not.toContain('<kind>queue</kind>');
+          expect(notificationTexts()).not.toContainEqual(
+            expect.stringContaining('Dropped'),
+          );
+        });
+
+        it('keeps a terminal monitor result ahead of an interim pulse', async () => {
+          const { goalQueueRef, release } = blockedDrain();
+          const { rerender, client } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          await waitFor(() =>
+            expect(
+              mockMonitorRegistry.setNotificationCallback,
+            ).toHaveBeenCalled(),
+          );
+          const monitorCallback = mockMonitorRegistry.setNotificationCallback
+            .mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          const shellCallback = mockBackgroundShellRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { shellId: string; status: string },
+          ) => void;
+
+          await act(async () => {
+            monitorCallback('terminal', '<monitor-done />', {
+              monitorId: 'mon_done',
+              status: 'completed',
+            });
+            monitorCallback('pulse', '<monitor-pulse />', {
+              monitorId: 'mon_live',
+              status: 'running',
+            });
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE - 2; i++) {
+              shellCallback(`shell ${i}`, `<shell-${i} />`, {
+                shellId: `bg_${i}`,
+                status: 'completed',
+              });
+            }
+            shellCallback('last shell', '<shell-last />', {
+              shellId: 'bg_last',
+              status: 'completed',
+            });
+          });
+
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+          const submitted = JSON.stringify(
+            mockSendMessageStream.mock.calls[0][0],
+          );
+          expect(submitted).toContain('<monitor-done />');
+          expect(submitted).not.toContain('<monitor-pulse />');
+          expect(submitted).toContain(
+            '1 superseded monitor pulse (mon_live) was not delivered',
+          );
+        });
+
+        it('keeps a drop summary out of cron command classification and parks it for a notification batch', async () => {
+          const { goalQueueRef, release } = blockedDrain();
+          let schedulerCallback:
+            | ((job: {
+                id?: string;
+                prompt: string;
+                cronExpr?: string;
+              }) => void)
+            | null = null;
+          const scheduler = {
+            enableDurable: vi.fn().mockResolvedValue(undefined),
+            start: vi.fn(
+              (
+                callback: (job: {
+                  id?: string;
+                  prompt: string;
+                  cronExpr?: string;
+                }) => void,
+              ) => {
+                schedulerCallback = callback;
+              },
+            ),
+            stop: vi.fn(),
+            getExitSummary: vi.fn().mockReturnValue(undefined),
+          };
+          (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+          (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(
+            scheduler,
+          );
+          mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+
+          const { rerender, client } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          await waitFor(() => expect(schedulerCallback).not.toBeNull());
+          const workflowCallback = mockWorkflowRunRegistry.setCompletionCallback
+            .mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { runId: string; status: string },
+          ) => void;
+          const shellCallback = mockBackgroundShellRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { shellId: string; status: string },
+          ) => void;
+          mockSendMessageStream.mockClear();
+          mockAddItem.mockClear();
+
+          act(() => {
+            schedulerCallback?.({
+              id: 'cron_head',
+              prompt: '/loop check status',
+              cronExpr: '* * * * *',
+            });
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE - 1; i++) {
+              workflowCallback(`workflow ${i}`, `<wf-${i} />`, {
+                runId: `run_${i}`,
+                status: 'completed',
+              });
+            }
+            shellCallback('dropped shell', '<shell-dropped />', {
+              shellId: 'bg_dropped',
+              status: 'completed',
+            });
+          });
+
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() =>
+            expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+              '/loop check status',
+            ),
+          );
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(notificationTexts().slice(0, 2)).toEqual([
+            'Dropped 1 background notification (queue full): 1 shell result (bg_dropped).',
+            'Cron: /loop check status',
+          ]);
+
+          mockHandleSlashCommand.mockResolvedValue(false);
+          act(() => {
+            shellCallback('later shell', '<shell-later />', {
+              shellId: 'bg_later',
+              status: 'completed',
+            });
+          });
+          await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+          const submitted = JSON.stringify(
+            mockSendMessageStream.mock.calls[0][0],
+          );
+          expect(submitted).toContain('<kind>queue</kind>');
+          expect(submitted).toContain('<wf-0 />');
+          expect(submitted).not.toContain('<shell-dropped />');
+          expect(
+            notificationTexts().filter((text) => text.startsWith('Dropped')),
+          ).toHaveLength(1);
         });
 
         it('drops an incoming notification rather than evict a protected one', async () => {
@@ -14015,7 +14250,7 @@ describe('useLlmStream', () => {
           mockAddItem.mockClear();
 
           await act(async () => {
-            for (let i = 0; i < 20; i++) {
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
               workflowCallback(`workflow ${i} done`, `<wf-${i} />`, {
                 runId: `run_${i}`,
                 status: 'completed',
@@ -14046,7 +14281,7 @@ describe('useLlmStream', () => {
         });
 
         it('reports the overflow summary once, not on every later turn', async () => {
-          const { goalQueueRef, release } = blockedDrain();
+          const { goalQueueRef, block, release } = blockedDrain();
           const { rerender, client } = renderTestHook(
             [],
             undefined,
@@ -14110,9 +14345,30 @@ describe('useLlmStream', () => {
           const second = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
           expect(second).toContain('<shell-later />');
           expect(second).not.toContain('<kind>queue</kind>');
-          expect(notificationTexts()).not.toContain(
+          expect(notificationTexts()).not.toContainEqual(
             expect.stringContaining('Dropped'),
           );
+
+          block();
+          mockSendMessageStream.mockClear();
+          await act(async () => {
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+              workflowCallback(`workflow again ${i}`, `<wf-again-${i} />`, {
+                runId: `run_again_${i}`,
+                status: 'completed',
+              });
+            }
+            shellCallback('another dropped shell', '<shell-late-2 />', {
+              shellId: 'bg_late_2',
+              status: 'completed',
+            });
+          });
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+          const third = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+          expect(third).toContain('<kind>queue</kind>');
+          expect(third).toContain('bg_late_2');
         });
 
         // Regression: notifications must never overtake what the user typed.
