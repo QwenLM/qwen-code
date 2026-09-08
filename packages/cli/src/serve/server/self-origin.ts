@@ -55,7 +55,7 @@ export function installRemoteSelfOriginMiddleware(
     // Charge a same-origin credential reject to the pre-auth budget, not
     // the operator one: the marker is set provisionally and cleared when
     // the bearer actually verifies.
-    res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
+    (res.locals ??= {})[ACCESS_LOG_REJECT_LOCAL] = true;
     const allow = () => {
       delete res.locals[ACCESS_LOG_REJECT_LOCAL];
       delete req.headers.origin;

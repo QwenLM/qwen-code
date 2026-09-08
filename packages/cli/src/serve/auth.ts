@@ -15,10 +15,11 @@ import { ACCESS_LOG_REJECT_LOCAL } from './server/access-log.js';
 
 /**
  * Stamp the access-log reject marker so the line is charged to the
- * pre-authentication budget, not the operator one.
+ * pre-authentication budget, not the operator one. res.locals is an
+ * Express convenience that embedded shims may not provide.
  */
 function markPreAuthReject(res: Response): void {
-  res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
+  (res.locals ??= {})[ACCESS_LOG_REJECT_LOCAL] = true;
 }
 
 /**
