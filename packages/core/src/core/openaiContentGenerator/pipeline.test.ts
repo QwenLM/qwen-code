@@ -3326,7 +3326,7 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
-    it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
+    it('logs protocol-tag sanitization when a held finish is flushed on the error path', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
@@ -3370,12 +3370,18 @@ describe('ContentGenerationPipeline', () => {
         'test-prompt-id',
       );
 
+      const results = [];
       await expect(async () => {
-        for await (const _ of resultGenerator) {
+        for await (const result of resultGenerator) {
           // Consume until the stream error after the held finish.
+          results.push(result);
         }
       }).rejects.toThrow(streamError);
-      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+      // The error-path flush delivers the held finish ahead of the
+      // rejection, so its sanitization is telemetry for a response the
+      // caller really received — suppressing it would lose the event.
+      expect(results).toEqual([finishResponse]);
+      expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
     });
 
     it('logs only the accepted finish after duplicate and empty trailing chunks', async () => {
@@ -4962,6 +4968,82 @@ describe('ContentGenerationPipeline', () => {
         ).length;
       }
       expect(totalFunctionCalls).toBe(1);
+    });
+
+    it('flushes a parked finish response when the stream fails before the trailing tail', async () => {
+      // A gateway error frame can land where the trailing usage chunk would
+      // have been: the finish chunk is already parked for the usage merge,
+      // and the iterator throws before anything releases it. The caller must
+      // still receive the finish response ahead of the rejection, or
+      // downstream completeness gates cannot tell the answer finished.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [
+          { delta: { content: 'a complete answer' }, finish_reason: null },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk2 = {
+        id: 'chunk-2',
+        choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const upstreamError = Object.assign(new Error("'id'"), {
+        code: 'KeyError',
+        requestID: 'req-1',
+      });
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk1;
+          yield mockChunk2;
+          throw upstreamError;
+        },
+      };
+
+      const mockContentResponse = new GenerateContentResponse();
+      mockContentResponse.candidates = [
+        { content: { parts: [{ text: 'a complete answer' }], role: 'model' } },
+      ];
+      const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(mockContentResponse)
+        .mockReturnValueOnce(mockFinishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const iterator = resultGenerator[Symbol.asyncIterator]();
+
+      const contentResult = await iterator.next();
+      if (contentResult.done) throw new Error('Expected a content response.');
+      expect(contentResult.value).toBe(mockContentResponse);
+
+      // The parked finish is flushed ahead of the propagated error.
+      const finishResult = await iterator.next();
+      if (finishResult.done) throw new Error('Expected a finish response.');
+      expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+
+      await expect(iterator.next()).rejects.toThrow("'id'");
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
     });
   });
 

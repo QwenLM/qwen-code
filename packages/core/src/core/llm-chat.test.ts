@@ -9902,14 +9902,15 @@ describe('LlmChat', async () => {
         }
       });
 
-      it('propagates a status-less upstream error that lands after the terminal finish reason', async () => {
+      it('accepts the completed answer when a status-less upstream error lands after the terminal finish reason', async () => {
         // The SDK's error scan is position-independent and the pipeline keeps
         // pulling the iterator after the finish chunk to absorb trailing usage
         // metadata, so a gateway that fails while writing that tail throws the
-        // same status-less frame *after* the answer already completed. There
-        // is nothing to resume: continuing would send a "connection dropped
-        // mid-response" instruction that is false for this shape and fold a
-        // fabricated tail into durable history.
+        // same status-less frame *after* the answer already completed. The
+        // turn is over: failing it would strand a complete answer out of
+        // history and the JSONL record, and continuing would send a
+        // "connection dropped mid-response" instruction that is false for
+        // this shape and fold a fabricated tail into durable history.
         const upstreamError = Object.assign(new Error("'id'"), {
           code: 'KeyError',
           requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
@@ -9947,23 +9948,206 @@ describe('LlmChat', async () => {
         expect(
           events.filter((event) => event.type === StreamEventType.RETRY),
         ).toHaveLength(0);
-        expect(String(caughtError)).toContain("'id'");
-        // The durable layers keep the delivered answer out of the error path
-        // entirely: the turn was complete, and no fabricated continuation may
-        // be merged into history.
+        expect(caughtError).toBeUndefined();
+        // The completed answer is the turn's outcome: it reaches durable
+        // history exactly as a cleanly-ended stream would leave it.
         expect(chat.getHistory().at(-1)).toEqual({
-          role: 'user',
-          parts: [{ text: 'test' }],
+          role: 'model',
+          parts: [{ text: 'a complete answer' }],
         });
-        // Recovery not taken, and the attribution log still carries the
-        // classifier fields — the request id is the only handle a gateway
-        // ticket can be filed against.
+        // The trailing failure stays observable — as the acceptance log,
+        // not as a retry decision.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Accepting completed answer despite trailing stream failure.',
+          expect.objectContaining({ finishReason: 'STOP' }),
+        );
+      });
+
+      it('accepts the completed answer when a transport cut lands after the terminal finish reason', async () => {
+        // The same post-completion shape through the socket-cut class: the
+        // finish chunk was already delivered when the connection died, so
+        // the turn is complete and must neither fail nor resume.
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            cutAfter([textChunk('a complete answer', 'STOP')]),
+          )
+          // Tripwire: consumed only if the finished answer is wrongly resumed.
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield textChunk('fabricated tail', 'STOP');
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-cut-after-finish',
+        );
+        const { events, caughtError } = await drainCollecting(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(0);
+        expect(caughtError).toBeUndefined();
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'a complete answer' }],
+        });
+      });
+
+      it('continues when the cut follows a finish reason that carries no completeness information', async () => {
+        // The converters map every unrecognised wire value to
+        // FINISH_REASON_UNSPECIFIED — a truthy "we could not tell", not a
+        // terminal signal. Treating it as a closed answer would refuse the
+        // very continuation this arm exists for.
+        vi.useFakeTimers();
+        try {
+          const upstreamError = Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+          });
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('partial answer', 'FINISH_REASON_UNSPECIFIED');
+                throw upstreamError;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' and the rest', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-upstream-statusless-unmapped-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'partial answer and the rest' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('continues a MAX_TOKENS-truncated answer after a stream cut', async () => {
+        // The carve-out's own witness: a generation truncated at MAX_TOKENS
+        // and then cut by the same gateway idle timeout is the exact shape
+        // the continuation arm exists for. The finish reason must ride the
+        // *pre-error* chunk — `lastFinishReason` is reset per attempt and
+        // only the failing attempt's chunks feed the gate.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('partial answer', 'MAX_TOKENS')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' completed', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-max-tokens',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+          const delivered = events
+            .filter((event) => event.type === StreamEventType.CHUNK)
+            .map(
+              (event) =>
+                (event as { value: GenerateContentResponse }).value
+                  .candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+            )
+            .join('');
+          expect(delivered).toBe('partial answer completed');
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'partial answer completed' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('attributes a refused continuation to the terminal finish reason', async () => {
+        // When the finish chunk was already delivered, recovery is refused
+        // because the answer closed — not because content reached the
+        // caller. The not-taken log must name the operative cause, or a
+        // gateway ticket filed with this payload points at the wrong gate.
+        const toolChunk = {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_1',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          cutAfter([textChunk('delivered half '), toolChunk]),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-not-taken-terminal-finish',
+        );
+        await expect(async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        }).rejects.toThrow('terminated');
+
         expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
           'Transport stream retry not taken',
           expect.objectContaining({
-            classificationReason: 'upstream-error-without-status',
-            providerCode: 'KeyError',
-            requestId: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+            retryDecision: 'skipped_terminal_finish_reason',
           }),
         );
       });

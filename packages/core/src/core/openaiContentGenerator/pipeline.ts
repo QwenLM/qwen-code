@@ -778,6 +778,21 @@ export class ContentGenerationPipeline {
         );
       }
 
+      // A finish chunk parked for the usage merge must not be lost when the
+      // iterator throws before the trailing usage chunk arrives (e.g. a
+      // gateway error frame landing where that tail would have been):
+      // downstream completeness gates key on the finish reason to tell a
+      // completed answer from a cut one. `handleError` never returns, so the
+      // Stage 2d flush above cannot double-yield this response.
+      if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
+        yield pendingFinishResponse;
+        finishYielded = true;
+      }
+
       // Use shared error handling logic
       await this.handleError(error, context, request);
     }

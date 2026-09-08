@@ -150,6 +150,23 @@ const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 // must stay in sync.
 const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
 
+/**
+ * Finish reasons that positively mean the model's answer is closed: a
+ * completed or definitively blocked response leaves nothing a continuation
+ * could resume. Deliberately a deny-list, never an allow-list — values that
+ * carry no completeness information (converter fall-throughs such as
+ * FINISH_REASON_UNSPECIFIED, or enum members a future @google/genai version
+ * adds) must fail open to continuable.
+ */
+const CLOSED_FINISH_REASONS: ReadonlySet<string> = new Set([
+  FinishReason.STOP,
+  FinishReason.SAFETY,
+  FinishReason.RECITATION,
+  FinishReason.BLOCKLIST,
+  FinishReason.PROHIBITED_CONTENT,
+  FinishReason.SPII,
+]);
+
 function hasCandidateOutput(response: GenerateContentResponse): boolean {
   return Boolean(
     response.candidates?.some(
@@ -3574,16 +3591,17 @@ export class LlmChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
-            // A terminal finish reason means the attempt's answer already
-            // completed — the failure landed while the SDK was absorbing
-            // trailing metadata, so there is nothing to resume and a
-            // continuation would only fabricate a tail into durable history.
-            // MAX_TOKENS stays continuable: it marks a *truncated* answer,
-            // the exact shape this arm exists for.
+            // A closed finish reason means the attempt's answer already
+            // completed (or was definitively blocked) — the failure landed
+            // while the SDK was absorbing trailing metadata, so there is
+            // nothing to resume and a continuation would only fabricate a
+            // tail into durable history. MAX_TOKENS stays continuable: it
+            // marks a *truncated* answer, the exact shape this arm exists
+            // for.
             const canContinueAfterStreamCut =
               isRetryableStreamCut &&
               (lastFinishReason === undefined ||
-                lastFinishReason === FinishReason.MAX_TOKENS) &&
+                !CLOSED_FINISH_REASONS.has(lastFinishReason)) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3626,15 +3644,20 @@ export class LlmChat {
             }
             if (isRetryableStreamCut) {
               // Reached only when neither branch above fired: content was
-              // already delivered so replaying would duplicate it, or the
+              // already delivered so replaying would duplicate it, the
               // replay budget is exhausted, or continuation is unavailable
-              // (function-call cut, no text to anchor on, or its own budget
-              // exhausted).
+              // (function-call cut, no text to anchor on, its own budget
+              // exhausted, or a closed finish reason — the attempt's answer
+              // already completed, so there was nothing to resume).
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
-                retryDecision: streamYieldedContentChunk
-                  ? 'skipped_after_content'
-                  : 'exhausted',
+                retryDecision:
+                  lastFinishReason !== undefined &&
+                  CLOSED_FINISH_REASONS.has(lastFinishReason)
+                    ? 'skipped_terminal_finish_reason'
+                    : streamYieldedContentChunk
+                      ? 'skipped_after_content'
+                      : 'exhausted',
                 attempts: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
                 continuationAttempts: transportContinuationCount,
@@ -5267,6 +5290,10 @@ export class LlmChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // The first closed finish reason seen, if any — tracked so a stream
+    // that fails *after* the model closed its answer can be accepted as
+    // complete below rather than retried.
+    let closedFinishReason: string | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -5323,6 +5350,11 @@ export class LlmChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
+        closedFinishReason ??= chunk?.candidates?.find(
+          (candidate) =>
+            candidate.finishReason !== undefined &&
+            CLOSED_FINISH_REASONS.has(candidate.finishReason),
+        )?.finishReason;
 
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
@@ -5585,6 +5617,35 @@ export class LlmChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    // A failure that lands after the model already closed its answer —
+    // typically a gateway error frame pushed into an already-200 stream
+    // while the SDK was absorbing trailing usage metadata — must not fail
+    // the turn: the answer is complete, and the trailing error concerns
+    // only a tail the turn no longer needs. Accept the delivered content so
+    // it persists through the success path below; propagating instead
+    // strands a complete answer out of history and the JSONL record, and
+    // the retry arms have nothing to resume (continuing would fabricate a
+    // tail past the finish). Tool-call turns keep the error-path partial
+    // persistence below, which the scheduler's repair flow depends on.
+    if (
+      streamError !== null &&
+      !hasToolCall &&
+      closedFinishReason !== undefined &&
+      contentText
+    ) {
+      debugLogger.warn(
+        'Accepting completed answer despite trailing stream failure.',
+        {
+          finishReason: closedFinishReason,
+          error:
+            streamError instanceof Error
+              ? streamError.message
+              : String(streamError),
+        },
+      );
+      streamError = null;
+    }
 
     // Deferred until after the throw sites below so a protocol-tag leak
     // or stream-validation failure cannot dispatch a recovered call that
