@@ -179,6 +179,19 @@ export type HistoryItemUser = HistoryItemBase & {
    */
   promptIdFileKeyOnly?: boolean;
   /**
+   * The model-facing text of this turn, when it differs from `text`.
+   *
+   * The rewind ownership proof checks that the entry wearing the target's
+   * `promptId` carries the target's text, which keeps a re-minted twin from
+   * resolving onto the wrong entry. `text` is DISPLAY text, though, and the
+   * resume builder substitutes synthetic strings for it — most visibly
+   * `'[User message with attachments]'` — so the proof compared two strings
+   * that never match and the identity gate silently never fired for those
+   * turns. Set this to the text the model actually received so the proof has
+   * something real to compare, while `text` stays what the UI renders.
+   */
+  promptOwnerText?: string;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

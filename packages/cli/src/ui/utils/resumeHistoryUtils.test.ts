@@ -12,10 +12,13 @@ import {
   expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
+import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
   Config,
+  ChatRecord,
   ConversationRecord,
   FindingsResultDisplay,
   GoalSnapshotV2,
@@ -1998,5 +2001,94 @@ describe('expandCollapsedHistory', () => {
         SUPERSEDED_FINDINGS_MESSAGE,
       );
     });
+  });
+});
+
+describe('resumed identity survives a synthetic display string', () => {
+  // End-to-end through the real builders on BOTH sides: the same records
+  // produce the UI items and the model-facing history, exactly as resume
+  // does. The rewind ownership proof compares the two, so a UI item whose
+  // displayed text is synthetic ('[User message with attachments]') used to
+  // match nothing and silently lose identity resolution for that turn.
+  //
+  // The fixture makes the walk and the identity gate DISAGREE, otherwise it
+  // would pin nothing: turn 2 is a media-only prompt whose entry was cleared
+  // to a placeholder, which the rewind walk excludes from its count, so
+  // rewinding to turn 3 desyncs the walk and only identity can land it.
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  const model = (text: string) =>
+    rec({ type: 'assistant', message: { role: 'model', parts: [{ text }] } });
+
+  function truncationIndexForLastUserTurn(messages: ChatRecord[]): number {
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const userItems = ui.filter((item) => item.type === 'user');
+    return computeApiTruncationIndex(
+      ui,
+      userItems[userItems.length - 1]!.id,
+      api,
+    );
+  }
+
+  const leadingTurns = (): ChatRecord[] => [
+    rec({
+      type: 'user',
+      promptId: 's########0',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+    }),
+    model('r0'),
+    rec({
+      type: 'user',
+      promptId: 's########1',
+      message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+    }),
+    model('r1'),
+  ];
+
+  it('resolves a plainly recorded third turn through identity', () => {
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves it identically when the record carries attachments', () => {
+    // Same history; the only difference is the recorded attachment
+    // references, which make the resume builder display
+    // '[User message with attachments]'. Before `promptOwnerText` this
+    // returned -1 — a loud "cannot rewind" on a plainly reachable turn.
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
   });
 });

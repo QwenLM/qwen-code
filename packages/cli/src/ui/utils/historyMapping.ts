@@ -275,6 +275,13 @@ export function computeApiTruncationIndex(
       target.promptId,
       startIndex,
     );
+    // `text` is DISPLAY text; the entry carries MODEL-FACING text. They are
+    // the same string on the live path, but the resume builder substitutes
+    // synthetic display strings (notably '[User message with attachments]'),
+    // and comparing those against the entry can never match — the gate then
+    // silently never fired for such turns. Prefer the model-facing text the
+    // resume builder records for exactly this comparison.
+    const ownerText = target.promptOwnerText ?? target.text;
     const ownershipProofIsUnique = (): boolean => {
       if (
         uiHistory.some(
@@ -283,14 +290,14 @@ export function computeApiTruncationIndex(
             isRealUserTurn(item) &&
             !item.promptIdFileKeyOnly &&
             item.promptId === target.promptId &&
-            item.text === target.text,
+            (item.promptOwnerText ?? item.text) === ownerText,
         )
       ) {
         return false;
       }
       let sameTextEntries = 0;
       for (let i = startIndex; i < apiHistory.length; i++) {
-        if (isApiEntryOwnedByText(apiHistory[i]!, target.text)) {
+        if (isApiEntryOwnedByText(apiHistory[i]!, ownerText)) {
           sameTextEntries++;
           if (sameTextEntries > 1) return false;
         }
@@ -326,9 +333,8 @@ export function computeApiTruncationIndex(
       return counted === uiUserTurnCount;
     };
     const ownershipProven = (matchIndex: number): boolean =>
-      isApiEntryOwnedByText(apiHistory[matchIndex]!, target.text) &&
-      (!isClearedMediaPlaceholder(target.text) ||
-        matchOrdinalAgrees(matchIndex));
+      isApiEntryOwnedByText(apiHistory[matchIndex]!, ownerText) &&
+      (!isClearedMediaPlaceholder(ownerText) || matchOrdinalAgrees(matchIndex));
     if (
       identifiedIndex !== -1 &&
       ownershipProven(identifiedIndex) &&

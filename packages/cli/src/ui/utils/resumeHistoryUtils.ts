@@ -9,6 +9,7 @@ import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
   ConversationRecord,
+  ChatRecord,
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
@@ -265,6 +266,21 @@ function convertToHistoryItems(
     });
   };
 
+  // The rewind ownership proof compares the UI item against the model-facing
+  // entry built from this same record, so capture that text whenever the
+  // displayed string differs from it (synthetic placeholders, at-command raw
+  // text). `undefined` when they already agree — no field, no behavior change.
+  const modelFacingText = (record: ChatRecord): string | undefined => {
+    const parts = record.message?.parts;
+    if (!Array.isArray(parts)) return undefined;
+    for (const part of parts) {
+      if (typeof part.text === 'string' && part.text.length > 0) {
+        return part.text;
+      }
+    }
+    return undefined;
+  };
+
   for (const record of conversation.messages) {
     const promptId =
       typeof record.promptId === 'string' && record.promptId.length > 0
@@ -423,10 +439,14 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
+            const ownerText = modelFacingText(record);
             items.push({
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
+              ...(promptId && ownerText && ownerText !== text
+                ? { promptOwnerText: ownerText }
+                : {}),
             });
           }
 
@@ -461,10 +481,14 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
+          const ownerText = modelFacingText(record);
           items.push({
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
+            ...(promptId && ownerText && ownerText !== text
+              ? { promptOwnerText: ownerText }
+              : {}),
           });
         }
         break;
