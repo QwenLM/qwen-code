@@ -70,7 +70,7 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { sanitizeHookName } from '../sanitize.js';
+import { sanitizeHookName, redactErrorText } from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -105,6 +105,33 @@ const MAX_RETRY_EVENTS = 100;
 
 export interface LogResponse {
   nextRequestWaitMs?: number;
+}
+
+/**
+ * Sink-side pass over the error-text fields of every queued RUM event.
+ * Runs at the single choke point all log methods share, so future call
+ * sites inherit the redaction instead of reopening the gap per field
+ * (#11198): tool error messages carry raw shell command lines, which can
+ * embed credentials no source-level redactor sees.
+ */
+function redactErrorTextFields(event: RumEvent): void {
+  const exception = event as RumExceptionEvent;
+  if (typeof exception.message === 'string') {
+    exception.message = redactErrorText(exception.message);
+  }
+  if (typeof exception.stack === 'string') {
+    exception.stack = redactErrorText(exception.stack);
+  }
+  const properties = event.properties;
+  if (properties === undefined) {
+    return;
+  }
+  for (const key of ['error_message', 'error_excerpt'] as const) {
+    const value = properties[key];
+    if (typeof value === 'string') {
+      properties[key] = redactErrorText(value);
+    }
+  }
 }
 
 // Singleton class for batch posting log events to RUM. When a new event comes in, the elapsed time
@@ -181,6 +208,8 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      redactErrorTextFields(event);
+
       // Manually handle overflow for FixedDeque, which throws when full.
       const wasAtCapacity = this.events.size >= MAX_EVENTS;
 

@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { sanitizeHookName } from './sanitize.js';
+import {
+  sanitizeHookName,
+  redactErrorText,
+  ERROR_TEXT_MAX_CHARS,
+} from './sanitize.js';
 
 describe('sanitizeHookName', () => {
   it('should return "unknown-command" for empty string', () => {
@@ -71,5 +75,78 @@ describe('sanitizeHookName', () => {
   it('should return "unknown-command" for malformed paths', () => {
     expect(sanitizeHookName('/')).toBe('unknown-command');
     expect(sanitizeHookName('\\')).toBe('unknown-command');
+  });
+});
+
+describe('redactErrorText', () => {
+  it('should redact URL userinfo credentials', () => {
+    expect(
+      redactErrorText(
+        'Command: git clone https://x-access-token:ghs_abc@github.com/o/r',
+      ),
+    ).toBe('Command: git clone https://***REDACTED***@github.com/o/r');
+  });
+
+  it('should redact database DSN credentials', () => {
+    expect(
+      redactErrorText('failed to connect: postgres://user:pass@host/db'),
+    ).toBe('failed to connect: postgres://***REDACTED***@host/db');
+  });
+
+  it('should redact Authorization header values including bearer prefixes', () => {
+    expect(
+      redactErrorText('curl -H "Authorization: Bearer abc123" https://e.com'),
+    ).toBe('curl -H "Authorization: ***" https://e.com');
+    expect(redactErrorText('Authorization=Bearer xyz')).toBe(
+      'Authorization=***',
+    );
+  });
+
+  it('should redact bare bearer tokens', () => {
+    expect(redactErrorText('request rejected for bearer eyJhbGciOi')).toBe(
+      'request rejected for bearer ***',
+    );
+  });
+
+  it('should redact secret-looking flags with = and space separators', () => {
+    expect(redactErrorText('git push --token=ghs_abcdef')).toBe(
+      'git push --token=***',
+    );
+    expect(redactErrorText('run --token abc123')).toBe('run --token ***');
+    expect(redactErrorText('curl --api-key=xyz host')).toBe(
+      'curl --api-key=*** host',
+    );
+    expect(redactErrorText('x --registry-token=xyz')).toBe(
+      'x --registry-token=***',
+    );
+  });
+
+  it('should redact secret-looking header-style keys', () => {
+    expect(redactErrorText('-H "X-Auth-Token: abc123"')).toBe(
+      '-H "X-Auth-Token: ***"',
+    );
+  });
+
+  it('should redact secret-looking env assignments', () => {
+    expect(redactErrorText('AWS_SECRET_ACCESS_KEY=xyz cmd')).toBe(
+      'AWS_SECRET_ACCESS_KEY=*** cmd',
+    );
+    expect(redactErrorText('API_KEY=abc123 failed')).toBe('API_KEY=*** failed');
+  });
+
+  it('should leave non-secret text intact', () => {
+    const text = 'error: connection refused for host db:5432 after 3 tries';
+    expect(redactErrorText(text)).toBe(text);
+  });
+
+  it('should leave non-secret flags intact', () => {
+    const text = 'normal --verbose=2 command';
+    expect(redactErrorText(text)).toBe(text);
+  });
+
+  it('should truncate over-long error text', () => {
+    const result = redactErrorText('a'.repeat(ERROR_TEXT_MAX_CHARS + 100));
+    expect(result.length).toBe(ERROR_TEXT_MAX_CHARS + '…[truncated]'.length);
+    expect(result.endsWith('…[truncated]')).toBe(true);
   });
 });

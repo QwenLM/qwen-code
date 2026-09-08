@@ -30,7 +30,7 @@ import {
   SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
-import type { RumEvent, RumPayload } from './event-types.js';
+import type { RumEvent, RumPayload, RumResourceEvent } from './event-types.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -283,6 +283,57 @@ describe('QwenLogger', () => {
       expect(events[events.length - 1]?.name).toBe(
         `test-event-${TEST_ONLY.MAX_EVENTS + 9}`,
       );
+    });
+
+    it('should redact credentials in error text before queueing', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message:
+          'Command: git clone https://x-access-token:ghs_abc@github.com/o/r\nError: fatal: Authentication failed',
+        properties: {
+          tool_name: 'run_shell_command',
+          error_message:
+            'Command: curl -H "Authorization: Bearer abc123" https://example.com',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      expect(queued[queued.length - 1]?.message).toBe(
+        'Command: git clone https://***REDACTED***@github.com/o/r\nError: fatal: Authentication failed',
+      );
+      expect(queued[queued.length - 1]?.properties?.['error_message']).toBe(
+        'Command: curl -H "Authorization: ***" https://example.com',
+      );
+    });
+
+    it('should leave non-error properties untouched when redacting', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumEvent = {
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'misc',
+        name: 'test-event',
+        properties: {
+          model: 'test-model',
+          duration_ms: 123,
+          error_type: 'CONNECTION_ERROR',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumEvent[];
+      expect(queued[queued.length - 1]?.properties).toEqual({
+        model: 'test-model',
+        duration_ms: 123,
+        error_type: 'CONNECTION_ERROR',
+      });
     });
 
     it('should handle enqueue errors gracefully', () => {
