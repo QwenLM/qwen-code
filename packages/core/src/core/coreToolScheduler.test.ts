@@ -13499,7 +13499,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.status).toBe('cancelled');
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
-    expect(responseText).toContain('User cancelled tool execution.');
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.',
+    );
     expect(responseText).not.toContain('had already completed');
   });
 
@@ -13591,7 +13593,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     const responseText = JSON.stringify(
       (completedCalls[0] as CompletedToolCall).response.responseParts,
     );
-    expect(responseText).toContain('User cancelled tool execution.');
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.',
+    );
     expect(responseText).not.toContain('had already completed');
   });
 
