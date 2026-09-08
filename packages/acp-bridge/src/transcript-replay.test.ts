@@ -12,9 +12,10 @@ import {
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
 import type { TranscriptRecordInput } from '@qwen-code/qwen-code-core/transcriptRecords';
-import type {
-  GoalRecord,
-  GoalStateCause,
+import {
+  GOAL_PAUSE_REASON_COMMAND,
+  type GoalRecord,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
 
 const GOAL: GoalRecord = {
@@ -156,6 +157,59 @@ describe('createTranscriptReplayMachine', () => {
         source: 'goal_control',
         'qwen.session.recordId': 'goal-create',
       },
+    });
+  });
+
+  it('replays only a typed pause as the user typing it', () => {
+    // The runtime writes `pause` records of its own (the no-progress bound
+    // stops an idle Goal with nobody at the keyboard). Replaying those as a
+    // `/goal pause` the user typed would attribute the stop to the person
+    // who was away; the paused card that follows carries the reason.
+    const typed = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-typed', 'pause', {
+        ...GOAL,
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_COMMAND,
+      }),
+    );
+    expect(typed).toHaveLength(2);
+    expect(typed[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '/goal pause' },
+      _meta: { source: 'goal_control' },
+    });
+
+    const autonomous = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-idle', 'pause', {
+        ...GOAL,
+        status: 'paused',
+        lastReason:
+          'Three Goal turns in a row recorded nothing to judge and no proposal.',
+      }),
+    );
+    expect(autonomous).toHaveLength(1);
+    expect(autonomous[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      _meta: {
+        goalStatus: { kind: 'paused' },
+        'qwen.session.recordId': 'goal-pause-idle',
+      },
+    });
+
+    // A record from before pauses carried reasons keeps its projection.
+    const { lastReason: _reason, ...unreasoned } = GOAL;
+    const legacy = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-pause-legacy', 'pause', {
+        ...unreasoned,
+        status: 'paused',
+      }),
+    );
+    expect(legacy[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '/goal pause' },
     });
   });
 
