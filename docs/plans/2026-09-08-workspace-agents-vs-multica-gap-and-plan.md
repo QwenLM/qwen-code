@@ -1,5 +1,33 @@
 # What is missing against Multica, and how to close it
 
+## Current correction — task orchestration before process isolation
+
+The owner's clarified goal is existing agents collaborating on tasks, with
+assignment, child tasks, reports and human acceptance visible in the panel.
+Separate OS processes are not a prerequisite for this slice. Historical claims
+below that a session is a process, or that Stage A delivered crash isolation,
+are incorrect: the current ACP bridge multiplexes sessions in one process.
+
+Source inspection found that `sendPrompt` resolves at turn completion. Awaiting
+it inside dispatch delayed the HTTP assignment response, blocked peer starts,
+and sampled usage only after the work was done. Session dispatch now prepares
+the session, persists its run binding and usage baseline, then activates the
+prompt without waiting for the model. The adapter exposes the active run's
+identity for cancellation, and asynchronous errors settle as visible failures.
+Timer and HTTP dispatch passes share one in-flight pass to avoid reconciling
+a run between claim and activation.
+
+The claim that `deliver` already uses live mid-turn input is also incorrect.
+It used the normal prompt FIFO. Replies now explicitly take the existing durable
+rebooking path; true mid-turn input and drain acknowledgements remain unconnected.
+This is not evidence of a complete leader → worker → human acceptance demo.
+
+Verification for this correction: source/call-site inspection only; the named
+session-dispatch-port test was updated with an unresolved model promise and
+asynchronous failure case, but was not run. No build, lint, typecheck or local
+CI was run. Next entry: exercise panel assignment with two existing agents,
+then connect live input acknowledgement and verify child-report/acceptance flow.
+
 > Written after reading `multica-ai/multica@7a438bd5b` properly: its migrations
 > (`agent`, `agent_runtime`, `agent_task_queue`, `issue`, `comment`, `squad`,
 > `agent_invocation_target`, `inbox_item`) and its product routes.

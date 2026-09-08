@@ -57,6 +57,7 @@ export type AgentBodyState =
   | { kind: 'absent' }
   | { kind: 'paused' }
   | { kind: 'completed' }
+  | { kind: 'failed'; runId: string; attempt: number; error: string }
   | {
       kind: 'running';
       threadId?: string;
@@ -85,6 +86,8 @@ export type AgentStartResult =
       sessionId: string;
       transcriptStartOffset?: number;
       consumedOnStart?: boolean;
+      /** Start execution only after the session and usage baseline are saved. */
+      activate?: () => void;
     }
   | { status: 'capacity_wait' }
   | { status: 'agent_unavailable'; error: string }
@@ -394,6 +397,7 @@ function actionFor(state: AgentBodyState): AgentStartAction | undefined {
     case 'paused':
       return 'resume';
     case 'completed':
+    case 'failed':
       return 'continue_completed';
     default:
       return undefined;
@@ -415,6 +419,29 @@ async function reconcileInterruptedRuns(
       if (!agent) continue;
       const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
       const state = await port.inspect(agent);
+      if (
+        state.kind === 'failed' &&
+        run.status !== 'cancelling' &&
+        state.runId === run.id &&
+        state.attempt === run.attempts
+      ) {
+        await chargeRunUsage(projectRoot, port, agent, thread.id, run);
+        await withAgentStoreTransaction(projectRoot, (transaction) =>
+          finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: {
+              status: 'failed',
+              attempt: run.attempts,
+              error: state.error,
+              failureStage: 'execution',
+            },
+            now,
+          }),
+        );
+        records.push({ ...base, kind: 'recovery_failed', detail: state.error });
+        continue;
+      }
       if (run.status === 'cancelling') {
         if (state.kind === 'running' && !bodyCarriesRun(state, thread, run)) {
           records.push({
@@ -728,10 +755,8 @@ export async function dispatchOnce(
     });
 
     if (result.status === 'started') {
-      // Read after the body started, so the reading includes the turn's own
-      // opening prompt in neither direction: the baseline and the settlement
-      // are taken from the same counter, and only what happens between them is
-      // charged to this thread tree.
+      // Session ports prepare first: persist the baseline and run binding
+      // before activation lets the model call any thread tools.
       const usageBaselineTokens = await port.totalTokens?.(agent);
       await bindRunSession(projectRoot, {
         threadId: thread.id,
@@ -746,6 +771,7 @@ export async function dispatchOnce(
           : {}),
         ...(usageBaselineTokens !== undefined ? { usageBaselineTokens } : {}),
       });
+      result.activate?.();
       records.push({ ...base, kind: 'started' });
       continue;
     }

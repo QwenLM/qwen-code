@@ -153,6 +153,14 @@ export function startAgentHostSessionOwner(options: {
     return ensuring;
   };
 
+  let dispatching: Promise<DispatchRecord[]> | undefined;
+  const dispatch = (): Promise<DispatchRecord[]> => {
+    dispatching ??= dispatchOnce(workspaceCwd, port).finally(() => {
+      dispatching = undefined;
+    });
+    return dispatching;
+  };
+
   const tick = async (): Promise<void> => {
     assertGenerationOpen();
     const workspace = await readAgentWorkspace(workspaceCwd);
@@ -162,7 +170,7 @@ export function startAgentHostSessionOwner(options: {
     // dispatches; it no longer holds the agents themselves.
     await ensureResident();
     assertGenerationOpen();
-    await dispatchOnce(workspaceCwd, port);
+    await dispatch();
   };
 
   let running = false;
@@ -197,7 +205,7 @@ export function startAgentHostSessionOwner(options: {
     async dispatch() {
       await ensureResident();
       assertGenerationOpen();
-      return { records: await dispatchOnce(workspaceCwd, port) };
+      return { records: await dispatch() };
     },
     tick,
     stop,

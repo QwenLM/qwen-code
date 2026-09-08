@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview The dispatcher's port, backed by one session process per agent.
+ * @fileoverview The dispatcher's port, backed by one ACP session per agent.
  *
  * This is the whole of the execution-model change. The dispatcher's rules, its
  * twelve admission outcomes and every state it records are unchanged, because
@@ -13,10 +13,8 @@
  * the answer: a body used to be a background subagent inside one shared host
  * process, and is now a session of its own.
  *
- * Why that matters beyond tidiness: N agents sharing one process share one
- * crash, one memory ceiling and one model client. Multica's agents are
- * separate runtimes for the same reason, and the roster in the UI only tells
- * the truth if the isolation behind it is real.
+ * Sessions currently share the bridge's ACP process. Separate session identity
+ * is not process isolation.
  *
  * The port lives in the daemon rather than in core because only the daemon
  * holds the session bridge. It carries no rules of its own: everything it
@@ -77,6 +75,7 @@ export function createSessionDispatchPort(
   input: CreateSessionDispatchPortInput,
 ): AgentDispatchPort {
   const { bridge, workspaceCwd } = input;
+  const executions = new Map<string, AgentBodyState>();
 
   /**
    * Sends one turn to an agent's session, saying which run it is a turn of.
@@ -120,6 +119,8 @@ export function createSessionDispatchPort(
 
   return {
     async inspect(agent): Promise<AgentBodyState> {
+      const execution = executions.get(agent.id);
+      if (execution) return execution;
       const session = sessionFor(bridge, workspaceCwd, agent);
       if (!session) return { kind: 'absent' };
       // A session with a prompt in flight is working. One that is idle is
@@ -153,7 +154,7 @@ export function createSessionDispatchPort(
           sourceId: agent.id,
           sessionScope: 'thread',
         });
-        await send(session.sessionId, prompt, runId, {
+        const context: AgentRunContext = {
           workspaceId,
           agentId: agent.id,
           runId,
@@ -161,14 +162,38 @@ export function createSessionDispatchPort(
           rootThreadId,
           attempt,
           contextThroughSequence,
-        });
+        };
         return {
           status: 'started',
           sessionId: session.sessionId,
-          // The turn's opening prompt is in the session's own history the
-          // moment `sendPrompt` accepts it, so the delivery is consumed here
-          // rather than waiting for an event that will not come.
           consumedOnStart: true,
+          activate() {
+            const execution: AgentBodyState = {
+              kind: 'running',
+              threadId,
+              runId,
+              attempt,
+            };
+            executions.set(agent.id, execution);
+            // sendPrompt resolves at turn completion, not queue acceptance.
+            // Keep dispatch free to start peers and service cancellation.
+            void send(session.sessionId, prompt, runId, context).then(
+              () => {
+                if (executions.get(agent.id) === execution) {
+                  executions.delete(agent.id);
+                }
+              },
+              (error: unknown) => {
+                if (executions.get(agent.id) !== execution) return;
+                executions.set(agent.id, {
+                  kind: 'failed',
+                  runId,
+                  attempt,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          },
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -185,39 +210,11 @@ export function createSessionDispatchPort(
       }
     },
 
-    async deliver({
-      agent,
-      prompt,
-      deliveryId,
-      workspaceId,
-      threadId,
-      rootThreadId,
-      runId,
-      attempt,
-      contextThroughSequence,
-    }): Promise<boolean> {
-      const session = sessionFor(bridge, workspaceCwd, agent);
-      if (!session) return false;
-      try {
-        // A mid-run delivery is still a turn of the same run, so it carries
-        // the same frame. Sending it without one would land a message the
-        // agent can read and cannot answer.
-        await send(session.sessionId, prompt, deliveryId, {
-          workspaceId,
-          agentId: agent.id,
-          runId,
-          threadId,
-          rootThreadId,
-          attempt,
-          contextThroughSequence,
-        });
-        return true;
-      } catch {
-        // A refused delivery is a miss, not a failure: the run's terminal
-        // write rebooks whatever it never read, so this costs latency and
-        // never a message.
-        return false;
-      }
+    async deliver(): Promise<boolean> {
+      // sendPrompt queues another whole turn, not an input to the active one.
+      // Let the dispatcher durably rebook the reply until mid-turn drain
+      // acknowledgements are connected to the run's delivery watermark.
+      return false;
     },
 
     async totalTokens(agent): Promise<number | undefined> {

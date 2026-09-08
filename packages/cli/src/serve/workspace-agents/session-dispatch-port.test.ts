@@ -57,6 +57,9 @@ describe('session dispatch port', () => {
     });
 
     expect(result.status).toBe('started');
+    expect(sendPrompt).not.toHaveBeenCalled();
+    if (result.status !== 'started') throw new Error('Expected prepared session');
+    result.activate?.();
     expect(contextOf(sendPrompt)?.agentRun).toEqual({
       workspaceId: 'ws_1',
       agentId: 'ag_alice',
@@ -68,9 +71,7 @@ describe('session dispatch port', () => {
     });
   });
 
-  it('carries the same run on a mid-run delivery', async () => {
-    // A message arriving while the agent works is another turn of the same
-    // run. Sent without a frame it would be readable and unanswerable.
+  it('leaves mid-run replies for durable rebooking instead of another prompt', async () => {
     const { bridge, sendPrompt } = makeBridge([
       {
         sessionId: 'agent-ag_alice',
@@ -87,11 +88,41 @@ describe('session dispatch port', () => {
       ...TURN,
     });
 
-    expect(delivered).toBe(true);
-    expect(contextOf(sendPrompt)?.agentRun).toMatchObject({
-      agentId: 'ag_alice',
-      runId: 'run_1',
-      threadId: 'th_1',
+    expect(delivered).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('returns before the model settles and exposes the owning run and failure', async () => {
+    const { bridge, sendPrompt } = makeBridge();
+    let reject!: (error: Error) => void;
+    sendPrompt.mockReturnValue(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
+    const result = await port.start({
+      action: 'launch',
+      agent: AGENT,
+      prompt: 'work',
+      ...TURN,
+    });
+    if (result.status !== 'started') throw new Error('Expected prepared session');
+    result.activate?.();
+    await expect(port.inspect(AGENT)).resolves.toEqual({
+      kind: 'running',
+      threadId: TURN.threadId,
+      runId: TURN.runId,
+      attempt: TURN.attempt,
+    });
+    reject(new Error('Model connection lost'));
+    await vi.waitFor(async () => {
+      expect(await port.inspect(AGENT)).toEqual({
+        kind: 'failed',
+        runId: TURN.runId,
+        attempt: TURN.attempt,
+        error: 'Model connection lost',
+      });
     });
   });
 

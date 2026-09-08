@@ -1,6 +1,12 @@
 # Multi-agent collaboration on a shared thread
 
-> Status: The two-agent happy path and Web demo are verified. Production paths
+> Current session-adapter caveat (2026-09-08): the earlier live demo below does
+> not verify the replacement ACP-session execution path. Dispatch now prepares
+> and binds a session before asynchronously activating its prompt. Live replies
+> use durable rebooking, not mid-turn delivery. The new path still needs a live
+> panel → agent → child task → human acceptance run.
+>
+> Earlier-path status: The two-agent happy path and Web demo are verified. Production paths
 > exist for direct delivery, recovery, startup replay, source-first
 > cancellation, and the Web surface, but the negative reliability matrix has
 > not been run. Channel delivery is blocked on the destination decision in
@@ -170,11 +176,17 @@ rather than these files — argue from the symbols, not from the marketing pages
 
 ## 1. Execution model
 
-**An agent is its own local session process.** One OS process per agent per
-workspace, spawned through the ACP bridge, with its own model conversation, its
-own transcript, and its own lifecycle. This is what "multiple independent
-agents" means in the brief, and it is the shape Multica has: its agents are
-separate CLI runtimes that claim work, not callees inside one process.
+**An agent has its own top-level ACP session.** The current bridge multiplexes
+these sessions in one ACP process; a session is not an OS-process boundary.
+The owner's clarified acceptance target is task orchestration visible and
+controllable in the panel, not process isolation. Keep the existing identity,
+task and session layers; do not introduce a runtime rewrite for this demo.
+
+The session port prepares the session first. Dispatch persists the run/session
+binding and pre-prompt usage baseline before activating model execution, without
+waiting for turn completion. The port reports the active run identity and any
+asynchronous failure for subsequent reconciliation. Replies received while busy
+are durably rebooked; true mid-turn delivery remains a separate missing wire.
 
 ### 1.1 The correction this replaces
 
