@@ -185,6 +185,7 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -192,6 +193,78 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('does not treat a historical background launch as agent completion', () => {
+    const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+      toolName: 'agent',
+      rawInput: { prompt: 'inspect history' },
+      rawOutput: {
+        type: 'task_execution',
+        status: 'background',
+        result: 'kept detail',
+      },
+      updatedAt: 1005,
+    });
+    const messages = transcriptBlocksToDaemonMessages([block]);
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'pending',
+      startTime: 1000,
+      endTime: undefined,
+      args: { prompt: 'inspect history' },
+      rawOutput: { result: 'kept detail' },
+    });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
+  it.each(['completed', 'failed'] as const)(
+    'uses an in-range background notification for historical %s status',
+    (status) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-history', 'agent-1', 'completed', 1000, {
+          toolName: 'agent',
+          rawInput: { prompt: 'inspect history' },
+          rawOutput: {
+            type: 'task_execution',
+            status: 'background',
+            result: 'kept detail',
+          },
+          updatedAt: 1005,
+        }),
+        textBlock(
+          'agent-result',
+          'assistant',
+          `agent ${status}`,
+          60000,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                taskId: 'task-1',
+                toolUseId: 'agent-1',
+                status,
+              },
+            },
+          },
+        ),
+      ]);
+      const tool = messages.find((message) => message.role === 'tool_group')
+        ?.tools[0];
+
+      expect(tool).toMatchObject({
+        status,
+        startTime: 1000,
+        endTime: 60000,
+        args: { prompt: 'inspect history' },
+        rawOutput: { result: 'kept detail' },
+      });
+    },
+  );
+
   it('preserves user source metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
@@ -4861,3 +4934,85 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.subContent).toBeUndefined();
   });
 });
+
+describe('running subagent replay start time', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it.each([10_000, 20_000])(
+    'keeps the server start when reopened at %s',
+    (receivedAt) => {
+      const tool = firstTool([
+        toolBlock('agent', 'agent-1', 'in_progress', receivedAt, {
+          toolName: 'Agent',
+          serverTimestamp: 1_000,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(1_000);
+    },
+  );
+
+  it.each([
+    ['Agent', 'completed', 1_000],
+    ['Agent', 'failed', 1_000],
+    ['Read', 'in_progress', 1_000],
+    ['Agent', 'in_progress', undefined],
+  ])(
+    'preserves existing timing for %s/%s/%s',
+    (toolName, status, serverTimestamp) => {
+      const tool = firstTool([
+        toolBlock('tool', 'tool-1', status, 10_000, {
+          toolName,
+          serverTimestamp,
+        }),
+      ]);
+      expect(tool?.startTime).toBe(10_000);
+    },
+  );
+});
+
+it.each(['selected:allow', 'selected:cancel'])(
+  'keeps permission merging compatible with the running clock (%s)',
+  (resolved) => {
+    const permission: DaemonTranscriptBlock = {
+      id: 'permission',
+      kind: 'permission',
+      requestId: 'req',
+      sessionId: 'session',
+      title: 'Agent',
+      options: [],
+      preview: { kind: 'generic' },
+      resolved,
+      toolCall: {
+        toolCallId: 'agent-1',
+        rawInput: { subagent_type: 'general-purpose' },
+      },
+      serverTimestamp: 1_000,
+      clientReceivedAt: 10_000,
+      createdAt: 10_000,
+      updatedAt: 11_000,
+    };
+    const real = toolBlock('real', 'agent-1', 'in_progress', 12_000, {
+      toolName: 'Agent',
+      serverTimestamp: 2_000,
+    });
+    for (const blocks of [
+      [permission],
+      [permission, real],
+      [real, permission],
+    ]) {
+      const tool = transcriptBlocksToDaemonMessages(blocks).find(
+        (message) => message.role === 'tool_group',
+      )?.tools[0];
+      if (tool?.endTime !== undefined) {
+        expect(tool.endTime).toBe(11_000);
+        expect(tool.startTime).toBe(blocks[0].createdAt);
+      } else {
+        expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
+      }
+    }
+  },
+);
