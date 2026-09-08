@@ -93,6 +93,23 @@ describe('isRateLimitError — statusless provider errors', () => {
   });
 
   it.each([
+    [
+      'api_error',
+      'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+      true,
+    ],
+    ['api_error', 'Streaming error: 404: Model not found.', false],
+    ['api_error', 'Streaming error: 404: Account quota exceeded.', false],
+    [
+      'api_error',
+      'Invalid prompt containing Rate limit exceeded on Anthropic API.',
+      false,
+    ],
+    [
+      'authentication_error',
+      'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+      false,
+    ],
     ['invalid_request_error', throttleMessage, true],
     [
       'invalid_request_error',
@@ -165,6 +182,16 @@ describe('isRateLimitError — statusless provider errors', () => {
       isRateLimitError({
         status: 401,
         error: { type: 'rate_limit_error', message: throttleMessage },
+      }),
+    ).toBe(false);
+    expect(
+      isRateLimitError({
+        status: 404,
+        error: {
+          type: 'api_error',
+          message:
+            'Streaming error: 404: Rate limit exceeded on Anthropic API.',
+        },
       }),
     ).toBe(false);
   });
