@@ -216,6 +216,65 @@ describe('createGoalCheckpointVerifier', () => {
     expect(captured?.aborted).toBe(true);
   });
 
+  it.each([
+    ['the configured ceiling', 45_000, { timeoutMs: 45_000 }],
+    ['the built-in default', GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS, {}],
+  ] as const)(
+    'arms the abort timer with %s, not a shorter wait',
+    async (_label, armedMs, options) => {
+      // The ceiling is the whole point of the setting, and only the delay
+      // handed to setTimeout makes it real: asserting the constant, or the
+      // factory argument, leaves a clamp back to the old 30 s invisible.
+      // Fake timers are mandatory here -- vitest's testTimeout is far below
+      // the 180 s default, so the wait can only be advanced, never awaited.
+      vi.useFakeTimers();
+      try {
+        let captured: AbortSignal | undefined;
+        const generateText = vi
+          .fn()
+          .mockImplementation((request: { abortSignal?: AbortSignal }) => {
+            captured = request.abortSignal;
+            return new Promise((_resolve, reject) => {
+              request.abortSignal?.addEventListener('abort', () => {
+                reject(request.abortSignal?.reason);
+              });
+            });
+          });
+        const baseLlmClient = {
+          generateText,
+          generateJson: vi.fn(),
+        } as unknown as BaseLlmClient;
+        const config = {
+          getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
+          getFastModel: vi.fn().mockReturnValue('fast-model'),
+          getModel: vi.fn().mockReturnValue('main-model'),
+          getOutputLanguageFilePath: vi.fn(),
+        } as unknown as Config;
+
+        const pending = createGoalCheckpointVerifier(config, options)(input());
+        // Hold the rejection so advancing past the ceiling cannot surface as
+        // an unhandled rejection before it is asserted below.
+        let rejected = false;
+        pending.catch(() => {
+          rejected = true;
+        });
+
+        await vi.advanceTimersByTimeAsync(armedMs - 1);
+        expect(captured?.aborted).toBe(false);
+        expect(rejected).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(captured?.aborted).toBe(true);
+        await expect(pending).rejects.toThrow(
+          `Goal checkpoint verifier timed out after ${armedMs}ms`,
+        );
+      } finally {
+        // The neighbouring abort test arms a real 1 ms timer.
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('measures the claim limit after trimming, in code points', () => {
     // A max-length claim with trailing padding must parse the same way
     // materializeGoalEvidenceCheckpoint validates it: trimmed, code points.
