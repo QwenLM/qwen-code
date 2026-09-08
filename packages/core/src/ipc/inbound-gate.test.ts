@@ -10,6 +10,7 @@ import {
   DEFAULT_HELD_EXPIRY_MS,
   describeHoldCause,
   InboundGate,
+  peerSenderKey,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
   parseHeldExpiry,
@@ -61,6 +62,7 @@ interface Harness {
     msgId: string;
     reason: PeerDropReason;
     selfSent: boolean;
+    controller?: PeerControllerIdentity;
   }>;
   heldChanges: number;
   setMode: (mode: ApprovalMode | null) => void;
@@ -107,6 +109,7 @@ function harness(
     msgId: string;
     reason: PeerDropReason;
     selfSent: boolean;
+    controller?: PeerControllerIdentity;
   }> = [];
   const state = { heldChanges: 0 };
   let deliveryFails = false;
@@ -119,6 +122,7 @@ function harness(
         msgId: f.msgId,
         reason,
         selfSent: origin.selfSent,
+        ...(origin.controller ? { controller: origin.controller } : {}),
       }),
     getApprovalMode: () => {
       if (modeThrows) throw new Error('mode getter exploded');
@@ -637,7 +641,10 @@ describe('settled ids', () => {
     expect(h.delivered).toHaveLength(1);
   });
 
-  it('settles evicted ids so a flood cannot recycle a handle', () => {
+  it('keeps a reviewed handle when a flood fills the buffer', () => {
+    // A full buffer turns arrivals away rather than making room, so a
+    // flood can neither destroy the entry the user is looking at nor free
+    // its handle for a re-sent body to occupy.
     const h = harness({ mode: ApprovalMode.YOLO });
     const first = frame({ msgId: 'task-0004', fromMode: 'prompting' });
     expect(h.gate.admit(first)).toBe('held');
@@ -646,15 +653,14 @@ describe('settled ids', () => {
     }
     const isHeld = (msgId: string) =>
       h.gate.getHeld().some((e) => e.frame.msgId === msgId);
-    expect(isHeld('task-0004')).toBe(false);
+    expect(isHeld('task-0004')).toBe(true);
 
     const forgery = frame({ msgId: 'task-0004', fromMode: 'prompting' });
-    expect(h.gate.admit(forgery)).toBe('refused');
-    expect(isHeld('task-0004')).toBe(false);
-    expect(h.statuses.at(-1)).toEqual({
-      msgId: 'task-0004',
-      status: 'expired',
-    });
+    expect(h.gate.admit(forgery)).toBe('held');
+    expect(
+      h.gate.getHeld().filter((e) => e.frame.msgId === 'task-0004'),
+    ).toHaveLength(1);
+    expect(h.gate.getHeld()[0]!.frame).toBe(first);
   });
 
   it('settles ids that reevaluate dropped, across a later policy flip', () => {
@@ -891,20 +897,36 @@ describe('receipts', () => {
 });
 
 describe('hold buffer bounds', () => {
-  it('evicts the oldest as expired once full', () => {
+  it('turns a newcomer away once full, keeping what the user has not read', () => {
+    // An arrival must not be able to destroy a message the user has yet
+    // to review: the cost of a full buffer falls on the sender that could
+    // not fit, which is told so and can retry.
     const h = harness({ mode: ApprovalMode.YOLO });
     const first = frame();
     h.gate.admit(first);
-    for (let i = 0; i < MAX_HELD_MESSAGES; i++) h.gate.admit(frame());
+    for (let i = 0; i < MAX_HELD_MESSAGES - 1; i++) h.gate.admit(frame());
+    expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
 
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('dropped');
     expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
     expect(
       h.gate.getHeld().some((entry) => entry.frame.msgId === first.msgId),
-    ).toBe(false);
-    expect(h.statuses).toContainEqual({
-      msgId: first.msgId,
-      status: 'expired',
-    });
+    ).toBe(true);
+    expect(h.drops.at(-1)).toEqual({ msgId: late.msgId, reason: 'queue-full' });
+    expect(h.statuses.some((s) => s.status === 'expired')).toBe(false);
+  });
+
+  it('leaves no tombstone when a full buffer turns a message away', () => {
+    // The retry is honest — the message was never seen — so it must meet
+    // the gate rather than a repeat of a verdict nobody gave.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) h.gate.admit(frame());
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('dropped');
+
+    h.gate.decide(h.gate.getHeld()[0]!.frame.msgId, 'deny');
+    expect(h.gate.admit(late)).toBe('held');
   });
 });
 
@@ -1714,22 +1736,15 @@ describe('held message expiry', () => {
         newer.msgId,
       ]);
 
-      // Fill to exactly the cap, then admit one more so precisely one
-      // eviction happens: the victim must be the genuinely oldest entry,
-      // not the one with the smaller wall-clock stamp.
+      // Fill to the cap. Nothing is evicted any more, so what the order
+      // still decides is what `/peers` shows first — and that must be the
+      // genuinely oldest entry, not the one with the smaller wall-clock
+      // stamp.
       for (let i = 0; i < MAX_HELD_MESSAGES - 2; i++) h.gate.admit(frame());
       expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
-      h.gate.admit(frame());
-      expect(
-        h.statuses.some(
-          (s) => s.msgId === older.msgId && s.status === 'expired',
-        ),
-      ).toBe(true);
-      expect(
-        h.statuses.some(
-          (s) => s.msgId === newer.msgId && s.status === 'expired',
-        ),
-      ).toBe(false);
+      expect(h.gate.admit(frame())).toBe('dropped');
+      expect(h.gate.getHeld()[0]!.frame.msgId).toBe(older.msgId);
+      expect(h.statuses.some((s) => s.status === 'expired')).toBe(false);
     } finally {
       perf.mockRestore();
     }
@@ -1939,21 +1954,29 @@ describe('admission', () => {
     expect(h.heldChanges).toBe(0);
   });
 
-  it('survives a reporter that throws', () => {
+  it('survives a reporter that throws, and still runs the other one', () => {
+    // Each is wrapped on its own: one try around both would let a
+    // throwing receipt silently cost the user the transcript line.
+    const reported: string[] = [];
+    const announced: string[] = [];
     const gate = new InboundGate({
       admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => 'accept',
       deliver: () => {},
-      reportDropped: () => {
+      reportDropped: (_frame, reason) => {
+        reported.push(reason);
         throw new Error('receipt exploded');
       },
-      onDropped: () => {
+      onDropped: (_frame, _origin, reason) => {
+        announced.push(reason);
         throw new Error('notice exploded');
       },
     });
 
     expect(() => gate.admit(frame({ from: '/tmp/a.sock' }))).not.toThrow();
+    expect(reported).toEqual(['rate-limited']);
+    expect(announced).toEqual(['rate-limited']);
   });
 
   it('meters with the shipped limits when none is injected', () => {
@@ -1967,5 +1990,161 @@ describe('admission', () => {
       expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
     }
     expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+  });
+});
+
+describe('the metering key', () => {
+  const controller = { id: 'c_1234abcd', label: 'voice' };
+
+  it('keeps a peer out of the identities the transport establishes', () => {
+    // `from` is a field in a frame. A peer writing `own-process` there
+    // would otherwise spend the bucket this session's own scripts use,
+    // and its flood would be announced to the user as coming from a
+    // process they started.
+    const squat = peerSenderKey({ from: 'own-process' }, { selfSent: false });
+    const genuine = peerSenderKey({ from: undefined }, { selfSent: true });
+    expect(squat).not.toBe(genuine);
+
+    expect(
+      peerSenderKey(
+        { from: `controller:${controller.id}` },
+        { selfSent: false },
+      ),
+    ).not.toBe(
+      peerSenderKey({ from: undefined }, { selfSent: false, controller }),
+    );
+  });
+
+  it('meters a squatting peer apart from the session own processes', () => {
+    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
+      h.gate.admit(frame({ from: 'own-process' }));
+    }
+    expect(h.gate.admit(frame({ from: 'own-process' }))).toBe('dropped');
+
+    // The session's own child process is untouched by that flood.
+    expect(h.gate.admit(frame({ from: undefined }), { selfSent: true })).toBe(
+      'accept',
+    );
+  });
+
+  it('meters a squatting peer apart from a trusted controller', () => {
+    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
+      h.gate.admit(frame({ from: `controller:${controller.id}` }));
+    }
+    expect(h.gate.admit(frame({ from: `controller:${controller.id}` }))).toBe(
+      'dropped',
+    );
+
+    expect(
+      h.gate.admit(frame({ from: undefined }), { selfSent: false, controller }),
+    ).toBe('accept');
+  });
+
+  it('gives two controllers their own meters', () => {
+    const other = { id: 'c_beefcafe', label: 'dictation' };
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+    h.gate.admit(frame({ from: undefined }), { selfSent: false, controller });
+    expect(
+      h.gate.admit(frame({ from: undefined }), { selfSent: false, controller }),
+    ).toBe('dropped');
+    expect(
+      h.gate.admit(frame({ from: undefined }), {
+        selfSent: false,
+        controller: other,
+      }),
+    ).toBe('accept');
+  });
+
+  it('bounds what a self-asserted address can make this session hold', () => {
+    // No address that can be dialled comes near this; the cap exists so a
+    // megabyte of peer-chosen bytes cannot be retained as a map key.
+    const key = peerSenderKey({ from: 'x'.repeat(4096) }, { selfSent: false });
+    expect(key.length).toBeLessThanOrEqual(300);
+  });
+
+  it('forwards the grant a dropped controller message came in on', () => {
+    const h = harness({
+      policy: 'accept',
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+    });
+    h.gate.admit(frame({ from: '/tmp/a.sock' }), {
+      selfSent: false,
+      controller,
+    });
+    expect(h.dropNotices.at(-1)?.controller).toEqual(controller);
+  });
+});
+
+describe('a message settled without the far model seeing it', () => {
+  /** The same words under a fresh id, as an honest retry sends them. */
+  function retry(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
+    return frame({
+      from: '/tmp/a.sock',
+      fromMode: 'prompting',
+      message: { role: 'user', content: 'please run the tests' },
+      ...over,
+    });
+  }
+
+  it('lets an honest retry land after a queue-full drop', () => {
+    const h = harness({
+      mode: ApprovalMode.DEFAULT,
+      admission: new PeerAdmission(),
+    });
+    h.failDelivery();
+    expect(h.gate.admit(retry())).toBe('dropped');
+    h.recoverDelivery();
+    expect(h.gate.admit(retry({ msgId: 'again-0001' }))).toBe('accept');
+  });
+
+  it('lets an honest retry land after a full hold buffer turned it away', () => {
+    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      h.gate.admit(frame({ from: `/tmp/filler-${i}.sock` }));
+    }
+    expect(h.gate.admit(retry())).toBe('dropped');
+    expect(h.drops.at(-1)?.reason).toBe('queue-full');
+
+    h.gate.decide(h.gate.getHeld()[0]!.frame.msgId, 'deny');
+    expect(h.gate.admit(retry({ msgId: 'again-0002' }))).toBe('held');
+    expect(h.drops.at(-1)?.reason).toBe('queue-full');
+  });
+
+  it('keeps telling a refusing session refuses, rather than calling it a repeat', () => {
+    // 'refused' says stop; 'duplicate' says fold it into a later message,
+    // which invites a session that turns everything away to be tried again.
+    const h = harness({ policy: 'refuse', admission: new PeerAdmission() });
+    expect(h.gate.admit(retry())).toBe('refused');
+    expect(h.gate.admit(retry({ msgId: 'again-0003' }))).toBe('refused');
+    expect(h.drops).toHaveLength(0);
+  });
+
+  it('lets a denied message be sent again for review', () => {
+    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    const f = retry();
+    h.gate.admit(f);
+    h.gate.decide(f.msgId, 'deny');
+    expect(h.gate.admit(retry({ msgId: 'again-0004' }))).toBe('held');
+  });
+
+  it('keeps the token spent, so a full queue still bounds the attempts', () => {
+    const h = harness({
+      mode: ApprovalMode.DEFAULT,
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+    });
+    h.failDelivery();
+    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(h.drops.at(-1)?.reason).toBe('queue-full');
+
+    h.recoverDelivery();
+    // A different body from the same sender: the rollback returns the
+    // repeat memory, never the allowance.
+    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(h.drops.at(-1)?.reason).toBe('rate-limited');
   });
 });

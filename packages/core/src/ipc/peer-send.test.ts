@@ -216,7 +216,11 @@ describe('sendToPeer', () => {
       ApprovalMode.AUTO,
     ]) {
       sendPeerFrame.mockClear();
-      await sendToPeer({ target: 'app-ab', message: 'hi', approvalMode: mode });
+      await sendToPeer({
+        target: 'app-ab',
+        message: `hi in ${mode}`,
+        approvalMode: mode,
+      });
       expect(sendPeerFrame.mock.calls[0][1]).toMatchObject({
         fromMode: 'bypass',
       });
@@ -641,11 +645,16 @@ describe('lookupSentPeerMessageForTest', () => {
 });
 
 describe('settleSentPeerMessage', () => {
+  // A distinct body each time: the mirror refuses a verbatim repeat to
+  // one target inside the receiver's dedup window, and these cases are
+  // about the ledger rather than about that.
+  let sendCounter = 0;
   async function sendOne(): Promise<string> {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+    sendCounter += 1;
     await sendToPeer({
       target: 'app-ab',
-      message: 'hi',
+      message: `hi ${sendCounter}`,
       approvalMode: ApprovalMode.DEFAULT,
     });
     return sendPeerFrame.mock.calls.at(-1)![1].msgId as string;
@@ -787,14 +796,28 @@ describe('sender-side pacing', () => {
   });
 
   it('does not write, or remember, a send it refused', async () => {
+    // The ledger half matters as much as the write: a refused send left
+    // in it would sit `pending` forever, and evict a real send whose
+    // receipt still needs its slot.
     for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
       await send(`message ${index}`);
     }
     const writes = sendPeerFrame.mock.calls.length;
+    const lastRealId = sendPeerFrame.mock.calls.at(-1)![1].msgId as string;
 
     await send('one too many');
     // No frame, so no id, so nothing for a receipt to answer for.
     expect(sendPeerFrame.mock.calls).toHaveLength(writes);
+    // And the ledger is untouched: the last thing in it is still the last
+    // send that really happened.
+    expect(lookupSentPeerMessageForTest(lastRealId)).toBeDefined();
+    expect(
+      sendPeerFrame.mock.calls.filter(
+        (call: unknown[]) =>
+          ((call[1] as { message: { content: string } }).message.content ??
+            '') === 'one too many',
+      ),
+    ).toHaveLength(0);
   });
 
   it('gives the token back when the frame provably never left', async () => {
@@ -922,15 +945,50 @@ describe('sender-side pacing', () => {
     }
   });
 
-  it('does not charge the mirror for a repeat the receiver drops for free', async () => {
-    // The receiver drops a repeat of the previous body inside its dedup
-    // window without charging the sender's bucket; the mirror skips the
-    // charge too, or it ends up stricter than the real limit and refuses
-    // the first genuinely different send after a loop.
-    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
-      expect((await send('stuck on this')).kind).toBe('sent');
+  it('refuses a repeat the receiver would drop, without writing it', async () => {
+    // The mirror knows the receiver remembers this exact body and will
+    // turn it away before policy, so writing it would spend a connection
+    // there and tell the caller "sent" for a message nobody reads.
+    expect((await send('stuck on this')).kind).toBe('sent');
+    const writes = sendPeerFrame.mock.calls.length;
+
+    const repeat = await send('stuck on this');
+    expect(repeat.kind).toBe('failed');
+    expect(repeat.kind === 'failed' && repeat.reason).toContain(
+      'turns away a repeat',
+    );
+    expect(sendPeerFrame.mock.calls).toHaveLength(writes);
+  });
+
+  it('does not charge the mirror for a repeat it refused', async () => {
+    // The refusal costs no token, or a model looping on one body would
+    // drain the mirror below the receiver's real bucket and then be
+    // refused its first genuinely different message.
+    expect((await send('stuck on this')).kind).toBe('sent');
+    for (let index = 0; index < 40; index++) {
+      expect((await send('stuck on this')).kind).toBe('failed');
     }
-    expect((await send('something new')).kind).toBe('sent');
+    for (
+      let index = 0;
+      index < PEER_ADMISSION_LIMITS.bucketCapacity - 1;
+      index++
+    ) {
+      expect((await send(`different ${index}`)).kind).toBe('sent');
+    }
+    expect((await send('one too many')).kind).toBe('failed');
+  });
+
+  it('lets the same body through once the receiver has forgotten it', async () => {
+    let clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      expect((await send('say it again')).kind).toBe('sent');
+      expect((await send('say it again')).kind).toBe('failed');
+      clock += PEER_ADMISSION_LIMITS.dedupWindowMs + 1;
+      expect((await send('say it again')).kind).toBe('sent');
+    } finally {
+      setSendPacerClockForTest();
+    }
   });
 });
 
@@ -966,5 +1024,111 @@ describe('dropped receipts on the send side', () => {
 
   it('answers for nothing a stranger names', () => {
     expect(settleSentPeerMessage('never-sent', 'dropped')).toBeUndefined();
+  });
+});
+
+describe('the mirror and the receiver disagreeing', () => {
+  const target = peer('p1', 'app-a');
+
+  beforeEach(() => {
+    listMessageablePeers.mockResolvedValue([target]);
+  });
+
+  async function send(message: string) {
+    return sendToPeer({
+      target: 'app-a',
+      message,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+  }
+
+  it('does not un-drain the mirror with a refund that lands after the drain', async () => {
+    // The drain is the receiver's own word on its level. A refund from a
+    // send that was in flight at the time must not quietly restore the
+    // token it just took away.
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      expect((await send('first')).kind).toBe('sent');
+      let failing: (() => void) | undefined;
+      sendPeerFrame.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            failing = () => reject(new PeerSendError('gone', 'ECONNREFUSED'));
+          }),
+      );
+      const inFlight = send('second');
+      // The receiver answers an earlier message while this one is still
+      // on the wire.
+      drainSendPacer(target.ipcPath);
+      failing?.();
+      expect((await inFlight).kind).toBe('failed');
+
+      sendPeerFrame.mockResolvedValue(undefined);
+      expect((await send('third')).kind).toBe('failed');
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('restores the body the receiver still remembers when a send is refunded', async () => {
+    // Clearing the record instead would make the next send of the earlier
+    // body cost a token here while the receiver drops it for free — the
+    // mirror drifting below the real bucket, which it must never do.
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      expect((await send('A')).kind).toBe('sent');
+      sendPeerFrame.mockRejectedValueOnce(new PeerSendError('busy', 'EAGAIN'));
+      expect((await send('C')).kind).toBe('failed');
+      sendPeerFrame.mockResolvedValue(undefined);
+
+      // The receiver never saw C, and still remembers A.
+      const retryA = await send('A');
+      expect(retryA.kind).toBe('failed');
+      expect(retryA.kind === 'failed' && retryA.reason).toContain(
+        'turns away a repeat',
+      );
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('does not invent a mirror for a target it never paced', async () => {
+    // A receipt can name any address. Minting an empty bucket for one
+    // nothing was sent to would refuse the first real send there, quoting
+    // a burst of zero.
+    drainSendPacer('/tmp/never-used.sock');
+    expect((await send('hello')).kind).toBe('sent');
+  });
+
+  it('keeps the burst count bounded by the window, not by the session', async () => {
+    // A drain corrects the level; it is not the start of a new burst.
+    // Re-anchoring the window on every receipt would stop it ever
+    // rolling, so the count a refusal quotes as "in the last minute"
+    // would grow for as long as the session lives.
+    let clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      const perWindow =
+        (PEER_BURST_WINDOW_MS / 1000) * PEER_ADMISSION_LIMITS.refillPerSecond;
+      for (let step = 0; step < PEER_BURST_WINDOW_MS / 1000 + 60; step += 2) {
+        clock += 2000;
+        await send(`paced ${step}`);
+        drainSendPacer(target.ipcPath);
+      }
+      clock += 1;
+      const refusal = await send('one more');
+      expect(refusal.kind).toBe('failed');
+      const quoted = Number(
+        /: (\d+) were sent/.exec(
+          refusal.kind === 'failed' ? refusal.reason : '',
+        )?.[1] ?? '-1',
+      );
+      expect(quoted).toBeGreaterThanOrEqual(0);
+      expect(quoted).toBeLessThanOrEqual(perWindow + 1);
+    } finally {
+      setSendPacerClockForTest();
+    }
   });
 });

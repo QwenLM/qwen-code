@@ -95,6 +95,7 @@ import {
   type GoalTurnHost,
   describeDeliveryStatus,
   describeDropReason,
+  PEER_ADMISSION_LIMITS,
   type DropNotice,
   type HeldMessage,
   type SubagentManager,
@@ -8248,7 +8249,11 @@ describe('AppContainer State Management', () => {
       });
       expect(notices()).toHaveLength(8);
       expect(notices()[7]).not.toContain('exited before');
-      expect(notices()[7]).toContain('shutting down');
+      // Disjunctive: `previous` records what this sender heard, and a
+      // `held` receipt can be lost to the outbound ceiling under exactly
+      // the flood this feature is about, so a live peer can land here.
+      expect(notices()[7]).toContain('shutting down, or could not keep it');
+      expect(notices()[7]).toContain('Retry once it is idle');
     });
 
     it('says what became of messages the far inbox turned away', () => {
@@ -8273,9 +8278,13 @@ describe('AppContainer State Management', () => {
       expect(notices()).toHaveLength(1);
       expect(notices()[0]).toBe(
         "Message to docs-cd: it was dropped at that session's inbox — " +
-          `${describeDropReason('duplicate')}. Treat it as unsent; fold what ` +
-          'still matters into one later message.',
+          `${describeDropReason('duplicate')}. The identical message was ` +
+          `accepted there within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, ` +
+          'so there is nothing to re-send.',
       );
+      // A repeat means the text is already over there, so advising a fold
+      // would have the model reword it and deliver the instruction twice.
+      expect(notices()[0]).not.toContain('Treat it as unsent');
 
       // One receipt can stand for a burst, so the line counts rather than
       // repeating itself.
@@ -8338,9 +8347,12 @@ describe('AppContainer State Management', () => {
         });
       });
       expect(notices()[0]).toBe(
-        'Dropped a message from docs-cd (/tmp/peer.sock): it is sending ' +
-          'faster than this session accepts.',
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'this session is taking peer messages faster than it accepts them.',
       );
+      // The trust category leads, as it does on both sibling lines: a
+      // peer-chosen name alone could read as the user's own session.
+      expect(notices()[0]).toContain('another session');
 
       // The count of what one line stands for, so a flood stays one line.
       act(() => {
@@ -8352,9 +8364,14 @@ describe('AppContainer State Management', () => {
         });
       });
       expect(notices()[1]).toBe(
-        'Dropped a message from docs-cd (/tmp/peer.sock): it repeated its ' +
-          'previous message within 30 s. (+12 similar dropped)',
+        'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
+          'it repeated its previous message within ' +
+          `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s. ` +
+          '(+12 more dropped, not all from this sender)',
       );
+      // The count is a session-wide total once the notice budget is
+      // spent, so it must not be labelled as this sender's own.
+      expect(notices()[1]).not.toContain('similar');
 
       // A controller is named by the label its user gave it, never by
       // anything the sender wrote.

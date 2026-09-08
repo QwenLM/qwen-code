@@ -878,8 +878,9 @@ Declined, refused and dropped are three different answers: declined means
 someone reviewed the message and said no, refused means that session's
 `agents.crossSessionInbound` is `refuse` and nobody saw it at all, and
 dropped means its inbox turned the message away before any of that (see
-below). A burst of drops is answered with one receipt that says how many,
-so a run of them is one line rather than one line each. The model that
+below). The first drop is answered at once and the rest are folded into a
+receipt every few seconds, each naming the messages it stands for, so a
+run of them costs a handful of lines rather than one line each. The model that
 sent it is not told; if the other session replies, the reply arrives as a
 cross-session message.
 

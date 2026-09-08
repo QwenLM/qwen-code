@@ -86,6 +86,17 @@ tombstone exists so a decided id cannot be decided twice; nothing was
 decided here, and a sender that waits out its burst and retries should
 find the gate it would have found if it had waited in the first place.
 
+**The repeat record is rolled back wherever a message is settled unseen.**
+A body is recorded when it is admitted, but admission is not arrival: the
+gate can still refuse it, park it into a full buffer, or hand it to a
+session that is shutting down. Left in place, the record turns the
+sender's honest retry into a `duplicate` — a verdict whose whole premise
+is that the content is already at the far side. The rollback restores
+what the admission displaced rather than clearing the slot, so the body
+admitted _before_ the failed one keeps its own protection, and it leaves
+the token spent, which is the only bound on how often a peer can make the
+receiver attempt a delivery that cannot land.
+
 **One receipt for a burst.** The first drop from a sender answers
 immediately — while the sender can still stop — and the rest are folded
 into one receipt every five seconds that names the ids it stands for.
@@ -98,14 +109,22 @@ sent, because more of them would not help.
 **One transcript line per sender per minute**, carrying the count of what
 it stands for. A message about a flood must not scale with the flood.
 
-**A full queue is a drop, not an expiry.** It gets `queue-full`, which
-says what happened; `expired` now means only that a hold ran out, that
-the session exited with the message unread, or that it arrived during
-shutdown.
+**A full buffer is a drop, not an expiry.** Both of them: the input queue
+and, now, the hold buffer. The hold buffer used to evict its oldest entry
+to make room, so an arrival could destroy a message the user had not
+reviewed yet and its uninvolved sender was told `expired` — a flood
+walked the backlog out one message at a time, which is the first thing
+the Problem section above names. It now turns the newcomer away with
+`queue-full` instead, the same shape the accept path already had: the
+cost falls on the sender that could not fit, it is told the truth, and it
+can retry. With no eviction left, `expired` means only that a hold ran
+out, that the session exited with the message unread, or that it arrived
+during shutdown.
 
 **Mirror the receiver's bucket on the sending side.** Each session tracks
-what it has sent to each address with the same arithmetic the receiver
-uses, and refuses a send the receiver would drop — so the model is told
+what it has sent to each address — and the last body it sent there — with
+the same arithmetic the receiver uses, and refuses a send the receiver
+would drop, whether for rate or for repetition — so the model is told
 to batch _before_ the message is written, and the receiver never spends a
 connection on one it was going to turn away. The mirror is keyed by
 socket path, which is what the receiver meters by and what changes when a

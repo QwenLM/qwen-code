@@ -465,6 +465,23 @@ describe('dropped receipts', () => {
     expect(parsePeerFrame(encodePeerFrame(built).trim())).toEqual(built);
   });
 
+  it('caps the ids the builder puts on the wire, and round-trips them', () => {
+    // The parser's cap and the builder's are separate lines; only a
+    // round trip pins them to the same ceiling.
+    const many = Array.from(
+      { length: MAX_DROPPED_MSG_IDS + 20 },
+      (_, index) => `id${index}`,
+    );
+    const built = buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      dropReason: 'rate-limited',
+      droppedMsgIds: many,
+    });
+    expect(built.droppedMsgIds).toHaveLength(MAX_DROPPED_MSG_IDS);
+    expect(parsePeerFrame(encodePeerFrame(built).trim())).toEqual(built);
+  });
+
   it('explains each reason to the sending session', () => {
     expect(describeDropReason('rate-limited')).toBe(
       'you sent faster than that session accepts',

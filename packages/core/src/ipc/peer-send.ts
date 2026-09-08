@@ -257,6 +257,13 @@ interface PacedTarget {
    */
   lastBodyHash: string | undefined;
   lastBodyAt: number;
+  /**
+   * Bumped whenever the mirror's level is set by something other than
+   * this session's own arithmetic — a drain, or a fresh entry. A refund
+   * carrying an older stamp is answering a question that has since been
+   * settled by the receiver, and must not hand a token back.
+   */
+  generation: number;
 }
 
 const pacedTargets = new Map<string, PacedTarget>();
@@ -280,6 +287,7 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
     burstStartedAt: now,
     lastBodyHash: undefined,
     lastBodyAt: 0,
+    generation: 0,
   };
   pacedTargets.set(ipcPath, fresh);
   return fresh;
@@ -307,7 +315,10 @@ export function setSendPacerClockForTest(now?: () => number): void {
 function reservePacerToken(
   ipcPath: string,
   body: string,
-): { ok: true; refund: () => void } | { ok: false; sentInBurst: number } {
+):
+  | { ok: true; refund: () => void }
+  | { ok: false; repeat: true }
+  | { ok: false; repeat?: false; sentInBurst: number } {
   const now = pacerNow();
   const target = pacedTargetFor(ipcPath, now);
   target.tokens = refillBucket(
@@ -325,6 +336,21 @@ function reservePacerToken(
     return { ok: false, sentInBurst: target.sentInBurst };
   }
 
+  const bodyHash = hashBody(body);
+  if (
+    target.lastBodyHash === bodyHash &&
+    now - target.lastBodyAt < PEER_ADMISSION_LIMITS.dedupWindowMs
+  ) {
+    // The receiver remembers this exact body and will turn it away before
+    // policy, so writing it buys a connection there, a line in its drop
+    // report and a receipt back — and the caller would be told "sent" for
+    // a message that is never read. Nothing sendToPeer writes can reach
+    // the receiver's own exemptions (a peer connection is neither a child
+    // process nor a controller grant), so refusing here matches its rule
+    // rather than exceeding it.
+    return { ok: false, repeat: true };
+  }
+
   // The burst is over once the bucket is whole again, or once enough time
   // has passed that it would have been had nothing been sent. Without
   // this the count in the refusal would grow for the life of the session
@@ -337,15 +363,19 @@ function reservePacerToken(
     target.burstStartedAt = now;
   }
 
-  const bodyHash = hashBody(body);
-  const repeat =
-    target.lastBodyHash === bodyHash &&
-    now - target.lastBodyAt < PEER_ADMISSION_LIMITS.dedupWindowMs;
-  if (!repeat) {
-    target.tokens -= 1;
-    target.lastBodyHash = bodyHash;
-    target.lastBodyAt = now;
-  }
+  // Kept so a refund can restore what this reservation displaced. Erasing
+  // instead would leave the mirror with no record while the receiver
+  // still remembers the body before this one, and the next send of that
+  // body would be charged here and dropped free there — the mirror
+  // drifting below the real bucket, which is the direction it must never
+  // drift.
+  const previousHash = target.lastBodyHash;
+  const previousAt = target.lastBodyAt;
+  const generation = target.generation;
+
+  target.tokens -= 1;
+  target.lastBodyHash = bodyHash;
+  target.lastBodyAt = now;
   target.sentInBurst += 1;
 
   let refunded = false;
@@ -354,19 +384,22 @@ function reservePacerToken(
     refund: () => {
       if (refunded) return;
       refunded = true;
+      // A drain since the reservation means the receiver has told this
+      // session what its level really is. Handing a token back now would
+      // silently undo that and write the very message the drain exists to
+      // hold back.
+      if (target.generation !== generation) return;
       target.sentInBurst = Math.max(0, target.sentInBurst - 1);
-      // A repeat was never charged, so there is no token to hand back.
-      if (repeat) return;
       target.tokens = Math.min(
         PEER_ADMISSION_LIMITS.bucketCapacity,
         target.tokens + 1,
       );
       // The receiver records a body only when it admits the message, and
-      // this frame never arrived — so the record rolls back with the
-      // token unless a later send already recorded a body of its own.
+      // this frame never arrived — so the record rolls back to whatever
+      // it displaced, unless a later send already recorded one of its own.
       if (target.lastBodyHash === bodyHash) {
-        target.lastBodyHash = undefined;
-        target.lastBodyAt = 0;
+        target.lastBodyHash = previousHash;
+        target.lastBodyAt = previousAt;
       }
     },
   };
@@ -382,13 +415,22 @@ function reservePacerToken(
  * nothing is left and let it refill at the rate the receiver refills at.
  */
 export function drainSendPacer(ipcPath: string): void {
-  const now = pacerNow();
-  const target = pacedTargetFor(ipcPath, now);
+  // Only a target this session has actually paced. A receipt naming
+  // anything else would otherwise mint an empty bucket for an address
+  // nothing was ever sent to, and the next send there would be refused
+  // quoting a burst of zero.
+  const target = pacedTargets.get(ipcPath);
+  if (target === undefined) return;
   target.tokens = 0;
-  target.lastRefill = now;
+  target.lastRefill = pacerNow();
+  target.generation += 1;
   // The burst count is this session's own — the receiver's level says
-  // nothing about how much this session sent — so it is left alone.
-  target.burstStartedAt = now;
+  // nothing about how much this session sent — so it is left alone. Nor
+  // is `burstStartedAt` re-anchored: a drain is a correction to the
+  // level, not the start of a new burst, and re-anchoring it on every
+  // receipt would stop the window ever rolling, so the count a refusal
+  // quotes as "in the last minute" would grow for the life of the
+  // session.
 }
 
 /** Test-only: forget what every target has been sent. */
@@ -527,10 +569,13 @@ export async function sendToPeer(
       kind: 'failed',
       peer,
       address,
-      reason:
-        `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
-        'in the last minute and more would be dropped by its rate limit, so this one was ' +
-        'not sent. Batch what remains into one message, or wait a little before sending more.',
+      reason: reservation.repeat
+        ? 'that exact message went to that session within the last 30 seconds, and its ' +
+          'inbox turns away a repeat before anyone reads it, so this one was not sent. ' +
+          'Say something different, or wait for a reply rather than re-sending.'
+        : `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
+          'in the last minute and more would be dropped by its rate limit, so this one was ' +
+          'not sent. Batch what remains into one message, or wait a little before sending more.',
     };
   }
   const frame = buildUserFrame({

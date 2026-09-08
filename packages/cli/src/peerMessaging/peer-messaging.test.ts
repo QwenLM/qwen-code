@@ -103,10 +103,13 @@ let messaging: PeerMessaging | null = null;
 /** Stands in for the peer that sent us something, to collect receipts. */
 let senderInbox: PeerInbox | null = null;
 let receipts: PeerFrame[];
+/** Addresses whose send-side mirror a receipt emptied. */
+let drained: string[];
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
+  drained = [];
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
@@ -210,6 +213,7 @@ async function start(
     controllerRegistryPath?: string;
     admission?: PeerAdmission;
     dropReceiptTrailMs?: number;
+    drainMirror?: (ipcPath: string) => void;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -227,6 +231,7 @@ async function start(
     // over, and neither is what they are about. The admission cases build
     // their own meter.
     admission: unmeteredAdmission(),
+    drainMirror: (ipcPath: string) => drained.push(ipcPath),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -915,8 +920,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
       admission: unmeteredAdmission(),
-      // Short enough that the folded batch lands inside the test.
-      dropReceiptTrailMs: 10,
+      // Above the burst's own spread, so five drops arriving over several
+      // socket round trips still fold into one batch, and well under the
+      // wait loop's ceiling so that batch lands inside the test.
+      dropReceiptTrailMs: 200,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -937,11 +944,13 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
       );
     }
-    for (
-      let waits = 0;
-      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
-      waits++
-    ) {
+    // Waits on what the assertions below need. Folding means the old
+    // condition — one receipt per message — can never hold, so the loop
+    // used to burn its whole ceiling and the exact counts passed by
+    // accident of timing rather than by synchronisation.
+    const droppedReceipts = () =>
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped');
+    for (let waits = 0; waits < 50 && droppedReceipts().length < 2; waits++) {
       await settle();
     }
 
@@ -983,7 +992,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     }
     for (
       let waits = 0;
-      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
+      waits < 50 &&
+      receipts.filter(
+        (r) => r.type === 'control' && r.dropReason === 'queue-full',
+      ).length < 1;
       waits++
     ) {
       await settle();
@@ -2020,11 +2032,16 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     trackSentPeerMessageForTest('sent-a', 'app-ab');
     trackSentPeerMessageForTest('sent-b', 'app-ab');
 
+    // The receipt's `from` is the receiver's own socket path, which is
+    // exactly what the send-side mirror is keyed by — so this also pins
+    // that the drain reaches the right bucket.
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
     await send(
       m.socketPath!,
       buildDeliveryStatusFrame({
         status: 'dropped',
         origMsgId: 'sent-a',
+        from: receiverPath,
         dropReason: 'rate-limited',
         // One this session never sent: answered for nothing, like every
         // other receipt naming a stranger's id.
@@ -2041,6 +2058,28 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
         address: 'app-ab',
       },
     ]);
+    expect(drained).toEqual([receiverPath]);
+  });
+
+  it('does not drain the mirror for a drop that is not a rate limit', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    trackSentPeerMessageForTest('sent-c', 'app-ab');
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-c',
+        from: receiverPath,
+        dropReason: 'duplicate',
+      }),
+    );
+    await settle();
+
+    // A repeat says nothing about the receiver's level, so the mirror is
+    // left alone.
+    expect(drained).toEqual([]);
   });
 
   it('ignores a dropped receipt for messages it never sent', async () => {
@@ -2156,9 +2195,10 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     ) {
       await settle();
     }
-    await settle();
-    await settle();
-
+    // No further settles: the two that used to sit here let close() get
+    // far enough that the listener was always gone, so the 'sent' arm
+    // below could never run and a regression that really did accept a
+    // frame into silence would have left this test green.
     const probeFrame = peerFrame({ content: 'late', from: sender.socketPath });
     const probe = await send(m.socketPath!, probeFrame).then(
       () => 'sent' as const,
@@ -2177,28 +2217,22 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     ).toBe(true);
 
     if (probe === 'sent') {
-      // The inbox took the late frame, so its drop is owed a receipt.
-      for (
-        let waits = 0;
-        waits < 10 &&
-        !receipts.some(
-          (r) =>
-            r.type === 'control' &&
-            r.status === 'dropped' &&
-            r.origMsgId === probeFrame.msgId,
-        );
-        waits++
-      ) {
-        await settle();
-      }
-      expect(
+      // The inbox took the late frame, so its drop is owed a receipt —
+      // either addressed for it, or naming it among the ids a batch it
+      // joined folded in. A drop noted while a batch is pending always
+      // rides in `droppedMsgIds`, never in `origMsgId`.
+      const answered = () =>
         receipts.some(
           (r) =>
             r.type === 'control' &&
             r.status === 'dropped' &&
-            r.origMsgId === probeFrame.msgId,
-        ),
-      ).toBe(true);
+            (r.origMsgId === probeFrame.msgId ||
+              r.droppedMsgIds?.includes(probeFrame.msgId) === true),
+        );
+      for (let waits = 0; waits < 10 && !answered(); waits++) {
+        await settle();
+      }
+      expect(answered()).toBe(true);
     }
   });
 

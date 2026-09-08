@@ -100,12 +100,19 @@ export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
 /**
  * How long `close()` waits for folded drop receipts to reach their
- * senders. Sized against the 2 s ceiling the exit path gives each
- * cleanup entry: the gate's shutdown receipts and the unconsumed
- * backlog's receipts each take the same order of time, and the three
- * together must fit.
+ * senders.
+ *
+ * Nothing here can make three rounds of best-effort receipts fit the exit
+ * path's per-entry budget: each individual send may take up to
+ * `SEND_TIMEOUT_MS`, which is already longer than the budget on its own.
+ * What is choosable is the order, and these receipts go last — so this
+ * bound spends only what the corrective ones left, and a slow but living
+ * peer still gets its answer.
  */
 const CLOSE_DROP_FLUSH_BOUND_MS = 1_000;
+
+/** Drop notices held for a listener that has not subscribed yet. */
+const MAX_UNHEARD_DROP_NOTICES = 20;
 
 /**
  * A delivery receipt for a message this session sent, as surfaced to
@@ -186,6 +193,13 @@ export interface PeerMessagingOptions {
   admission?: PeerAdmission;
   /** How long a dropped-receipt batch waits. A test seam; see the gate. */
   dropReceiptTrailMs?: number;
+  /**
+   * Empty this session's send-side mirror for an address. Defaults to the
+   * real pacer; injectable for the same reason `settleSentMessage` is —
+   * the wiring from a receipt to the drain is a decision this class
+   * makes, and it should be observable without staging a real send.
+   */
+  drainMirror?: (ipcPath: string) => void;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
@@ -207,8 +221,11 @@ export class PeerMessaging {
     status: PeerDeliveryStatus,
   ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
   private reassertSessionRecord: (() => Promise<void>) | null = null;
+  private drainMirror: (ipcPath: string) => void = drainSendPacer;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private readonly dropListeners = new Set<(notice: DropNotice) => void>();
+  /** Notices raised before anything subscribed; see `onDropped`. */
+  private readonly unheardDrops: DropNotice[] = [];
   /** Folds dropped receipts so a flood draws few connections, not many. */
   private dropReceipts: DropReceiptCoalescer | null = null;
   private submitFn: PeerSubmitFn | null = null;
@@ -316,6 +333,7 @@ export class PeerMessaging {
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
+    messaging.drainMirror = options.drainMirror ?? drainSendPacer;
 
     // Any pair still in the environment at this point was inherited from an
     // ancestor session, and every exit below this line other than a bound
@@ -541,11 +559,40 @@ export class PeerMessaging {
    * carrying the count of what it stands for.
    */
   onDropped(listener: (notice: DropNotice) => void): () => void {
+    const first = this.dropListeners.size === 0;
     this.dropListeners.add(listener);
+    // The socket is accepting before the UI subscribes, and a notice
+    // raised in that window has already spent its sender's once-a-minute
+    // budget — so dropping it would cost the user the line *and* delay
+    // the next one by a full window. Replayed as it was, never re-noted,
+    // so the throttle that produced it stays the only thing rationing
+    // these. The same replay `onHeldChange` does, for the same reason.
+    if (first && this.unheardDrops.length > 0) {
+      const unheard = this.unheardDrops.splice(0, this.unheardDrops.length);
+      for (const notice of unheard) {
+        try {
+          listener(notice);
+        } catch (error) {
+          debugLogger.debug(
+            `drop listener threw on replay: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
     return () => this.dropListeners.delete(listener);
   }
 
   private emitDropped(notice: DropNotice): void {
+    if (this.dropListeners.size === 0) {
+      // Bounded: one per sender and reason is all the throttle can raise
+      // in a window anyway, and the startup gap is far shorter than that.
+      if (this.unheardDrops.length < MAX_UNHEARD_DROP_NOTICES) {
+        this.unheardDrops.push(notice);
+      }
+      return;
+    }
     for (const listener of this.dropListeners) {
       try {
         listener(notice);
@@ -576,21 +623,38 @@ export class PeerMessaging {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // Stop arrivals before draining the reporters: the gate settles its
-    // parked messages, then the socket goes away so no new drop can be
-    // noted into a coalescer that is about to be flushed and disposed.
-    // Outbound receipts do not need the listening socket — each opens
-    // its own connection, and `socketPath` survives `close()` — so
-    // flushing after the inbox closes loses nothing, and a receipt still
-    // in flight when the process exits is one the sender never receives.
-    await this.gate?.shutdown();
+    // The exit path gives this whole method one bounded slot, and three
+    // separate rounds of best-effort receipts want to travel in it, each
+    // send of which may take longer than the slot on its own. So the
+    // order is the decision, and it is made by what a lost receipt costs:
+    //
+    //  - `gate.shutdown()` tells senders their parked messages expired.
+    //    Started first so it has the whole slot to work in, but not
+    //    awaited here: it is unbounded, and awaiting it ahead of the rest
+    //    let it spend the entire budget and take everything below down
+    //    with it.
+    //  - the inbox closes next, so no new drop can be noted into a
+    //    coalescer that is about to be flushed.
+    //  - `settleUnconsumed()` corrects receipts this session already sent
+    //    as `delivered` for messages it never read. Those are the only
+    //    ones that are actively *wrong* rather than merely missing, so
+    //    they go before the drop receipts.
+    //  - the registry and environment clears come next; leaving a socket
+    //    path advertised after the socket is gone makes this session look
+    //    reachable to every peer that lists.
+    //  - the folded drop receipts last, under their own bound.
+    //
+    // Outbound receipts do not need the listening socket: each opens its
+    // own connection, and `socketPath` survives `close()`.
+    const shuttingDown = this.gate?.shutdown();
     await this.inbox?.close();
-    await this.dropReceipts?.flush(CLOSE_DROP_FLUSH_BOUND_MS);
-    this.dropReceipts?.dispose();
     await this.settleUnconsumed();
     // Same pair, same removal as the startup scrub — one writer for it.
     clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
+    await this.dropReceipts?.flush(CLOSE_DROP_FLUSH_BOUND_MS);
+    this.dropReceipts?.dispose();
+    await shuttingDown;
   }
 
   /**
@@ -657,7 +721,9 @@ export class PeerMessaging {
     // empty it so the next send waits for the rate the receiver actually
     // refills at rather than for the one this side guessed.
     if (frame.dropReason === 'rate-limited' && frame.from) {
-      drainSendPacer(frame.from);
+      // Keyed by the receipt's `from`, which is the receiver's own socket
+      // path — the same string the mirror reserved against.
+      this.drainMirror(frame.from);
     }
     this.emitReceipt({
       status: 'dropped',

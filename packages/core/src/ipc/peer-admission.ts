@@ -79,7 +79,16 @@ export interface PeerAdmissionLimits {
   refillPerSecond: number;
   /** The same body from the same peer inside this window is a duplicate. */
   dedupWindowMs: number;
-  /** Burst across every sender combined — `from` is self-asserted. */
+  /**
+   * Burst across every sender combined — `from` is self-asserted.
+   *
+   * Deliberately allowed to exceed the buffers downstream (`MAX_HELD_MESSAGES`,
+   * `MAX_ACCEPTED_BACKLOG`, both 50): neither of them evicts what a user
+   * already has, so a burst larger than a buffer costs its own tail a
+   * `queue-full` drop rather than costing someone else their message.
+   * Shrinking those buffers below this figure is safe; teaching either one
+   * to evict again is not.
+   */
   globalBucketCapacity: number;
   globalRefillPerSecond: number;
   /** Sender buckets kept at once; see the eviction note in `trackSender`. */
@@ -152,6 +161,18 @@ interface SenderMeter {
   lastBodyAt: number;
   /** Wall-clock counterpart of `lastBodyAt`; see the repeat check. */
   lastBodyAtWall: number;
+  /**
+   * The record this one displaced.
+   *
+   * A message is recorded when it is admitted, but admission is not
+   * arrival: the gate can still turn it away afterwards. Rolling back has
+   * to restore what the admission overwrote, not clear the slot — erasing
+   * it would drop the protection of the body *before* the failed one, and
+   * that body may already be sitting in the receiving model's queue.
+   */
+  previousBodyHash: string | undefined;
+  previousBodyAt: number;
+  previousBodyAtWall: number;
 }
 
 export interface AdmissionRequest {
@@ -277,6 +298,9 @@ export class PeerAdmission {
     this.globalTokens -= 1;
     meter.tokens -= 1;
     if (bodyHash !== undefined) {
+      meter.previousBodyHash = meter.lastBodyHash;
+      meter.previousBodyAt = meter.lastBodyAt;
+      meter.previousBodyAtWall = meter.lastBodyAtWall;
       meter.lastBodyHash = bodyHash;
       meter.lastBodyAt = now;
       meter.lastBodyAtWall = wallNow;
@@ -290,21 +314,35 @@ export class PeerAdmission {
   }
 
   /**
-   * Forget the body remembered for `senderKey`, leaving its bucket alone.
+   * Undo the repeat record `body` left when it was admitted, leaving the
+   * bucket alone.
    *
-   * The gate calls this when a message it admitted could not be delivered
-   * (its input queue was full): the admission is rolled back, so a
-   * verbatim retry once the queue drains meets the same repeat check it
-   * would have met had this message never arrived. The token stays spent
-   * — it is the only bound on how often a peer can make the receiver
-   * attempt a delivery into a full queue.
+   * The gate calls this wherever it settles an admitted message as
+   * anything other than delivered or held — a full input queue, a
+   * standing refusal, a hold buffer with no room, a shutdown, a session
+   * swap. In every one of those the far model never saw the message, so a
+   * `duplicate` verdict on the sender's honest retry would assert
+   * something false: that identical content is already over there. The
+   * retry then meets the repeat check it would have met had this message
+   * never arrived.
+   *
+   * Restores rather than clears, and only when the record is still this
+   * message's: a later send owns the slot if it has written one, and the
+   * body admitted *before* this one keeps the protection it earned.
+   *
+   * The token stays spent. It is the only bound on how often a peer can
+   * make the receiver attempt, and fail, a delivery.
    */
-  forgetLastBody(senderKey: string): void {
+  forgetBody(senderKey: string, body: string): void {
     const meter = this.senders.get(senderKey);
     if (meter === undefined) return;
-    meter.lastBodyHash = undefined;
-    meter.lastBodyAt = 0;
-    meter.lastBodyAtWall = 0;
+    if (meter.lastBodyHash !== hashBody(body)) return;
+    meter.lastBodyHash = meter.previousBodyHash;
+    meter.lastBodyAt = meter.previousBodyAt;
+    meter.lastBodyAtWall = meter.previousBodyAtWall;
+    meter.previousBodyHash = undefined;
+    meter.previousBodyAt = 0;
+    meter.previousBodyAtWall = 0;
   }
 
   /**
@@ -354,6 +392,9 @@ export class PeerAdmission {
       lastBodyHash: undefined,
       lastBodyAt: 0,
       lastBodyAtWall: 0,
+      previousBodyHash: undefined,
+      previousBodyAt: 0,
+      previousBodyAtWall: 0,
     };
     this.senders.set(key, fresh);
     return fresh;

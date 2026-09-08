@@ -223,6 +223,135 @@ describe('PeerAdmission', () => {
     });
   });
 
+  it('refills the global bucket over time', () => {
+    // Without this the first 60 messages a long-lived session ever takes
+    // would be its last: every later arrival dropped `rate-limited`, with
+    // no recovery short of a restart.
+    const clock = stubClock();
+    const admission = new PeerAdmission({ now: clock.now });
+    const capacity = PEER_ADMISSION_LIMITS.globalBucketCapacity;
+    for (let index = 0; index < capacity; index++) {
+      admission.admit({ senderKey: `peer-${index}`, body: 'hello' });
+    }
+    expect(admission.admit({ senderKey: 'fresh', body: 'hello' })).toEqual({
+      admitted: false,
+      reason: 'rate-limited',
+    });
+
+    clock.advance(1000 / PEER_ADMISSION_LIMITS.globalRefillPerSecond);
+    expect(admission.admit({ senderKey: 'fresh', body: 'hello' })).toEqual({
+      admitted: true,
+    });
+    expect(admission.admit({ senderKey: 'fresher', body: 'hello' })).toEqual({
+      admitted: false,
+      reason: 'rate-limited',
+    });
+  });
+
+  it('does not charge the global bucket for a message it dropped as a repeat', () => {
+    // Otherwise one peer's retry loop starves every other sender.
+    const clock = stubClock();
+    const admission = new PeerAdmission({
+      now: clock.now,
+      limits: { bucketCapacity: 2, globalBucketCapacity: 3 },
+    });
+
+    expect(admission.admit({ senderKey: 'noisy', body: 'same' })).toEqual({
+      admitted: true,
+    });
+    for (let index = 0; index < 3; index++) {
+      expect(admission.admit({ senderKey: 'noisy', body: 'same' })).toEqual({
+        admitted: false,
+        reason: 'duplicate',
+      });
+    }
+    expect(admission.admit({ senderKey: 'quiet', body: 'hello' })).toEqual({
+      admitted: true,
+    });
+  });
+
+  it('keeps the buckets on the monotonic clock alone', () => {
+    // The repeat window takes the larger of the two clocks so a suspend
+    // cannot freeze it. The buckets must not: a forward wall-clock step —
+    // an NTP correction, a VM resuming — would hand a peer that is
+    // mid-flood a whole fresh burst.
+    const clock = stubClock();
+    const wall = stubClock();
+    const admission = new PeerAdmission({
+      now: clock.now,
+      wallNow: wall.now,
+    });
+    for (let index = 0; index < PEER_ADMISSION_LIMITS.bucketCapacity; index++) {
+      admission.admit({ senderKey: 'peer', body: `message ${index}` });
+    }
+
+    wall.advance(
+      (PEER_ADMISSION_LIMITS.bucketCapacity /
+        PEER_ADMISSION_LIMITS.refillPerSecond) *
+        1000 +
+        1,
+    );
+    expect(
+      admission.admit({ senderKey: 'peer', body: 'after the step' }),
+    ).toEqual({ admitted: false, reason: 'rate-limited' });
+  });
+
+  describe('forgetBody', () => {
+    it('restores the record the failed message displaced', () => {
+      // Clearing instead would drop the protection of the body admitted
+      // before it — which may already be in the far model's queue.
+      const clock = stubClock();
+      const admission = new PeerAdmission({ now: clock.now });
+
+      admission.admit({ senderKey: 'peer', body: 'X' });
+      admission.admit({ senderKey: 'peer', body: 'Y' });
+      admission.forgetBody('peer', 'Y');
+
+      expect(admission.admit({ senderKey: 'peer', body: 'Y' })).toEqual({
+        admitted: true,
+      });
+      admission.forgetBody('peer', 'Y');
+      expect(admission.admit({ senderKey: 'peer', body: 'X' })).toEqual({
+        admitted: false,
+        reason: 'duplicate',
+      });
+    });
+
+    it('leaves a record a later message owns', () => {
+      const clock = stubClock();
+      const admission = new PeerAdmission({ now: clock.now });
+
+      admission.admit({ senderKey: 'peer', body: 'X' });
+      admission.admit({ senderKey: 'peer', body: 'Y' });
+      admission.forgetBody('peer', 'X');
+
+      expect(admission.admit({ senderKey: 'peer', body: 'Y' })).toEqual({
+        admitted: false,
+        reason: 'duplicate',
+      });
+    });
+
+    it('leaves the bucket alone', () => {
+      const clock = stubClock();
+      const admission = new PeerAdmission({
+        now: clock.now,
+        limits: { bucketCapacity: 1 },
+      });
+      admission.admit({ senderKey: 'peer', body: 'X' });
+      admission.forgetBody('peer', 'X');
+
+      expect(admission.admit({ senderKey: 'peer', body: 'Z' })).toEqual({
+        admitted: false,
+        reason: 'rate-limited',
+      });
+    });
+
+    it('is a no-op for a sender it never metered', () => {
+      const admission = new PeerAdmission();
+      expect(() => admission.forgetBody('nobody', 'X')).not.toThrow();
+    });
+  });
+
   it('never tracks more senders than the cap', () => {
     const clock = stubClock();
     const admission = new PeerAdmission({

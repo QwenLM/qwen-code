@@ -57,6 +57,29 @@ export const DROP_RECEIPT_TRAIL_MS = 5_000;
 /** How long `flush` waits for in-flight receipts at shutdown. */
 export const DROP_FLUSH_BOUND_MS = 500;
 
+/**
+ * How long a receipt may be held back by a spent budget before it is
+ * abandoned.
+ *
+ * A deferred receipt is not just late news: the sender turns a
+ * `rate-limited` one into a live throttle on itself. Past this the
+ * receiver's own bucket has long since refilled, so the receipt would
+ * make an innocent sender pace itself against a wall that is no longer
+ * there. Comfortably above one trail plus one window, which is the
+ * longest an ordinary deferral takes.
+ */
+export const MAX_DEFERRED_RECEIPT_AGE_MS = 2 * DROP_REPORT_WINDOW_MS;
+
+/**
+ * Receipts `flush` starts at once.
+ *
+ * Each one is an outbound connection, and the close path fires its own
+ * burst of corrective receipts straight afterwards against a shared
+ * ceiling that must stay above `MAX_HELD_MESSAGES`. Draining in slices
+ * keeps that headroom instead of occupying it.
+ */
+export const FLUSH_CONCURRENCY = 8;
+
 /** Most dropped-receipts sent per window, across every sender. */
 export const MAX_DROP_RECEIPTS_PER_WINDOW = 40;
 
@@ -66,9 +89,24 @@ export const MAX_DROP_NOTICES_PER_WINDOW = 20;
 /** Most (sender, reason) pairs either reporter tracks at once. */
 export const MAX_DROP_REPORT_KEYS = 256;
 
+/**
+ * What a receipt needs to reach its sender, and nothing else.
+ *
+ * Deliberately not the frame. A waiting batch outlives the drop by the
+ * trail, and longer while the budget is spent; holding the whole frame
+ * would pin up to a megabyte of the rejected message per waiting sender,
+ * so a flood the meter turned away would live on in the heap of the
+ * session that turned it away. The digest in `SenderMeter` exists for the
+ * same reason.
+ */
+export type DropReceiptTarget = Pick<
+  PeerUserFrame,
+  'msgId' | 'from' | 'replyToken'
+>;
+
 export interface DroppedReceipt {
-  /** The frame the receipt is addressed for: the first of the batch. */
-  frame: PeerUserFrame;
+  /** The message the receipt is addressed for: the first of the batch. */
+  frame: DropReceiptTarget;
   reason: PeerDropReason;
   /** Later ids folded into this receipt; empty for an immediate one. */
   droppedMsgIds: string[];
@@ -77,12 +115,28 @@ export interface DroppedReceipt {
 interface ReceiptBatch {
   lastImmediateAt: number;
   /** The first drop still waiting, whose id addresses the receipt. */
-  frame: PeerUserFrame | undefined;
+  frame: DropReceiptTarget | undefined;
   reason: PeerDropReason | undefined;
+  /** When that first drop was noted, for the deferral's age bound. */
+  firstNotedAt: number;
   /** Ids of the drops after the first. */
   ids: string[];
   pending: number;
   timer: NodeJS.Timeout | undefined;
+  /**
+   * Evicted from the table, so nothing tracks it any more. It must not
+   * re-arm: `flush` and `dispose` iterate the table, so a timer on a
+   * batch that left it would outlive both.
+   */
+  detached: boolean;
+}
+
+function receiptTargetOf(frame: PeerUserFrame): DropReceiptTarget {
+  return {
+    msgId: frame.msgId,
+    ...(frame.from !== undefined ? { from: frame.from } : {}),
+    ...(frame.replyToken !== undefined ? { replyToken: frame.replyToken } : {}),
+  };
 }
 
 export interface DropReceiptCoalescerOptions {
@@ -106,6 +160,12 @@ export class DropReceiptCoalescer {
   private windowStartedAt: number;
   private sentInWindow = 0;
   private disposed = false;
+  /**
+   * Receipts already handed to the transport. `flush` waits on these too:
+   * one started from the immediate path is exactly as easy to cut off
+   * mid-write as one it starts itself.
+   */
+  private readonly inFlight = new Set<Promise<void>>();
 
   constructor(
     private readonly send: (receipt: DroppedReceipt) => Promise<void> | void,
@@ -140,24 +200,40 @@ export class DropReceiptCoalescer {
       !this.budgetSpent(now)
     ) {
       batch.lastImmediateAt = now;
-      void this.dispatch({ frame, reason, droppedMsgIds: [] });
+      ignore(
+        this.dispatch({
+          frame: receiptTargetOf(frame),
+          reason,
+          droppedMsgIds: [],
+        }),
+      );
       return;
     }
 
     batch.pending += 1;
     if (batch.frame === undefined) {
-      batch.frame = frame;
+      batch.frame = receiptTargetOf(frame);
       batch.reason = reason;
-      batch.timer = setTimeout(() => {
-        batch.timer = undefined;
-        void this.sendBatch(batch);
-      }, this.trailMs);
-      // A session with a batch waiting should still be able to exit; the
-      // close path flushes what is left.
-      batch.timer.unref?.();
+      batch.firstNotedAt = now;
+      this.arm(batch);
     } else if (batch.ids.length < MAX_DROPPED_MSG_IDS) {
       batch.ids.push(frame.msgId);
     }
+  }
+
+  /**
+   * Wait one trail, then try to send. Never on a detached batch: nothing
+   * would clear the timer afterwards.
+   */
+  private arm(batch: ReceiptBatch): void {
+    if (batch.detached || batch.timer !== undefined) return;
+    batch.timer = setTimeout(() => {
+      batch.timer = undefined;
+      ignore(this.sendBatch(batch));
+    }, this.trailMs);
+    // A session with a batch waiting should still be able to exit; the
+    // close path flushes what is left.
+    batch.timer.unref?.();
   }
 
   /**
@@ -168,24 +244,44 @@ export class DropReceiptCoalescer {
    * sender left waiting on one cannot tell a drop from a delivery.
    */
   async flush(boundMs = DROP_FLUSH_BOUND_MS): Promise<void> {
-    const settling: Array<Promise<void> | void> = [];
+    const waiting: ReceiptBatch[] = [];
     for (const batch of this.batches.values()) {
       if (batch.timer !== undefined) {
         clearTimeout(batch.timer);
         batch.timer = undefined;
       }
-      if (batch.pending > 0) settling.push(this.sendBatch(batch));
+      if (batch.pending > 0) waiting.push(batch);
     }
-    const inFlight = settling.filter(
-      (value): value is Promise<void> => value instanceof Promise,
-    );
-    if (inFlight.length === 0) return;
+
+    let overdue = false;
+    const deadline = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, boundMs);
+      timer.unref?.();
+    });
+    void deadline.then(() => {
+      overdue = true;
+    });
+
+    // In slices: each receipt is an outbound connection, and the close
+    // path fires its own corrective burst straight after this against a
+    // ceiling that has to stay above the hold buffer's size.
+    const draining = (async () => {
+      for (let at = 0; at < waiting.length; at += FLUSH_CONCURRENCY) {
+        if (overdue) return;
+        const slice = waiting.slice(at, at + FLUSH_CONCURRENCY);
+        const sends = slice
+          // Forced: the budget bounds how loud this session is while it is
+          // running, and it is not running after this. The senders still
+          // owed a receipt are the ones the same budget silenced.
+          .map((batch) => this.sendBatch(batch, true))
+          .filter((value): value is Promise<void> => value instanceof Promise);
+        if (sends.length > 0) await Promise.allSettled(sends);
+      }
+    })();
+
     await Promise.race([
-      Promise.allSettled(inFlight),
-      new Promise<void>((resolve) => {
-        const deadline = setTimeout(resolve, boundMs);
-        deadline.unref?.();
-      }),
+      Promise.allSettled([draining, ...this.inFlight]),
+      deadline,
     ]);
   }
 
@@ -195,11 +291,12 @@ export class DropReceiptCoalescer {
     for (const batch of this.batches.values()) {
       if (batch.timer !== undefined) clearTimeout(batch.timer);
       batch.timer = undefined;
+      batch.detached = true;
     }
     this.batches.clear();
   }
 
-  private sendBatch(batch: ReceiptBatch): Promise<void> | void {
+  private sendBatch(batch: ReceiptBatch, force = false): Promise<void> | void {
     if (this.disposed) return;
     const frame = batch.frame;
     const reason = batch.reason;
@@ -212,18 +309,26 @@ export class DropReceiptCoalescer {
       }
       return;
     }
-    if (this.budgetSpent(this.now())) {
+    const now = this.now();
+    if (!force && now - batch.firstNotedAt >= MAX_DEFERRED_RECEIPT_AGE_MS) {
+      // Too old to be worth sending. A `rate-limited` receipt is a live
+      // instruction on the sending side, and one this late would throttle
+      // a sender against a bucket that refilled long ago — worse than
+      // saying nothing, which is what a best-effort receipt is allowed to
+      // do. The close path forces these out regardless, because there the
+      // sender is about to lose its only chance at any answer.
+      debugLogger.debug(
+        `abandoning a dropped receipt held ${Math.round(now - batch.firstNotedAt)} ms by a spent budget`,
+      );
+      this.clearBatch(batch);
+      return;
+    }
+    if (!force && this.budgetSpent(now)) {
       // The window's budget is still spent: keep the batch and re-arm the
       // trail, so these drops are receipted once the window rolls rather
       // than vanishing. The budget bounds receipts per window, not which
       // drops ever get one.
-      if (batch.timer === undefined) {
-        batch.timer = setTimeout(() => {
-          batch.timer = undefined;
-          void this.sendBatch(batch);
-        }, this.trailMs);
-        batch.timer.unref?.();
-      }
+      this.arm(batch);
       return;
     }
     const droppedMsgIds = batch.ids;
@@ -251,18 +356,33 @@ export class DropReceiptCoalescer {
   }
 
   private dispatch(receipt: DroppedReceipt): Promise<void> | void {
-    if (this.budgetSpent(this.now())) {
-      debugLogger.debug(
-        'not sending another dropped receipt this minute; the budget is spent',
-      );
-      return;
-    }
     this.sentInWindow += 1;
+    let result: Promise<void> | void;
     try {
-      return this.send(receipt);
+      result = this.send(receipt);
     } catch (error) {
+      // A `send` that throws synchronously must not take the caller down:
+      // one of them is a timer callback, where it would surface as an
+      // uncaught exception rather than as an error anyone can attribute.
       debugLogger.debug(`sending a dropped receipt threw: ${describe(error)}`);
       return;
+    }
+    if (!(result instanceof Promise)) return result;
+    // Tracked so `flush` can wait for receipts it did not start itself,
+    // and cleaned up either way.
+    this.inFlight.add(result);
+    void result.catch(() => {}).finally(() => this.inFlight.delete(result));
+    return result;
+  }
+
+  private clearBatch(batch: ReceiptBatch): void {
+    batch.frame = undefined;
+    batch.reason = undefined;
+    batch.ids = [];
+    batch.pending = 0;
+    if (batch.timer !== undefined) {
+      clearTimeout(batch.timer);
+      batch.timer = undefined;
     }
   }
 
@@ -278,11 +398,22 @@ export class DropReceiptCoalescer {
       if (oldest === undefined) break;
       const evicted = this.batches.get(oldest);
       this.batches.delete(oldest);
+      if (!evicted) continue;
+      // Detached first: nothing tracks this batch any more, so a timer it
+      // re-armed would outlive both `flush` and `dispose` and keep a
+      // rejected message's ids alive for the life of the session.
+      evicted.detached = true;
+      if (evicted.timer !== undefined) {
+        clearTimeout(evicted.timer);
+        evicted.timer = undefined;
+      }
       // Send what it was holding rather than forgetting it: the sender is
       // owed the answer whether or not this session still has room to
-      // remember who it was.
-      if (evicted && evicted.pending > 0) void this.sendBatch(evicted);
-      else if (evicted?.timer !== undefined) clearTimeout(evicted.timer);
+      // remember who it was. Not forced — an eviction is driven by the
+      // flood itself, so forcing here would hand a rotating `from` an
+      // unbounded supply of receipts, which is the one thing the budget
+      // exists to stop. One attempt, since a detached batch cannot wait.
+      if (evicted.pending > 0) ignore(this.sendBatch(evicted));
     }
     const fresh: ReceiptBatch = {
       // Negative infinity, not `now`: the first drop from a sender is the
@@ -290,9 +421,11 @@ export class DropReceiptCoalescer {
       lastImmediateAt: Number.NEGATIVE_INFINITY,
       frame: undefined,
       reason: undefined,
+      firstNotedAt: 0,
       ids: [],
       pending: 0,
       timer: undefined,
+      detached: false,
     };
     this.batches.set(key, fresh);
     return fresh;
@@ -389,7 +522,12 @@ export class DropNoticeThrottle {
     while (this.states.size >= MAX_DROP_REPORT_KEYS) {
       const oldest = this.states.keys().next().value;
       if (oldest === undefined) break;
+      const evicted = this.states.get(oldest);
       this.states.delete(oldest);
+      // Its unannounced drops are carried, not discarded: the count this
+      // reporter promises is a total, and a flood rotating `from` is
+      // exactly what evicts a quiet sender that was still owed one.
+      if (evicted) this.globalSuppressed += evicted.suppressed;
     }
     const fresh: NoticeState = {
       lastReportAt: Number.NEGATIVE_INFINITY,
@@ -398,6 +536,18 @@ export class DropNoticeThrottle {
     this.states.set(key, fresh);
     return fresh;
   }
+}
+
+/**
+ * Start a receipt nobody is waiting on.
+ *
+ * A receipt is best-effort by contract, so a rejected one is not an error
+ * anyone can act on — but an unobserved rejection is reported to the user
+ * as a crash worth filing a bug about, which is a worse lie than the
+ * silence.
+ */
+function ignore(result: Promise<void> | void): void {
+  if (result instanceof Promise) void result.catch(() => {});
 }
 
 function describe(error: unknown): string {

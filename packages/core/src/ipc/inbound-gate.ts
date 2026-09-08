@@ -8,8 +8,10 @@
  * Decides what happens to an inbound peer message before this session's
  * model ever sees it.
  *
- * Three outcomes: **accept** (queue it), **hold** (park it for the user to
- * review, model never sees it), **refuse** (drop it and tell the sender).
+ * Four outcomes: **accept** (queue it), **hold** (park it for the user to
+ * review, model never sees it), **refuse** (turn it away because policy
+ * says so, and tell the sender), **dropped** (never metered in at all —
+ * see the admission note below).
  *
  * The explicit `crossSessionInbound` setting wins when set. When it is
  * unset the policy is derived from **approval-mode parity**, which
@@ -19,6 +21,7 @@
  * `bypass`, where some actions can be applied with no one looking — and
  * the sender asserts its class on the frame.
  *
+ *   arriving faster than this session takes  → dropped (before policy)
  *   sender is a process this session started → accept
  *   sender presented a controller grant       → accept
  *   receiver mode unknown/unrecognized        → hold  (fail closed)
@@ -73,14 +76,16 @@
  * hostile peer.
  *
  * Before any of that, a message has to get past the admission meter
- * (`peer-admission.ts`): a fourth outcome, **dropped**, for a sender that
- * is arriving faster than this session can take, repeating itself, or
- * writing into a queue with no room left. A drop happens before policy,
- * so it carries no policy verdict; it also leaves no tombstone, because
- * nobody decided anything about the message and an honest retry later
- * should still be able to land. The sender is told once per burst rather
- * than once per message — see `peer-drop-reports.ts` for why a report
- * about a flood must not scale with it.
+ * (`peer-admission.ts`). A `rate-limited` or `duplicate` drop happens
+ * there, above policy, so it carries no policy verdict and nobody decided
+ * anything about it. A `queue-full` drop is the other half of the same
+ * outcome and sits lower: policy already said accept, and the buffer it
+ * was accepted into — the session's input queue, or the hold buffer —
+ * had no room. Whichever it was, the message is never seen by the model
+ * or by the user, and none of them leaves a tombstone, so an honest retry
+ * later can still land. The sender is told once per burst rather than
+ * once per message — see `peer-drop-reports.ts` for why a report about a
+ * flood must not scale with it.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -110,8 +115,9 @@ export type HoldCause =
  *
  * A hold buffer is reachable by anything that can write to the socket, so
  * it needs a ceiling or a chatty peer becomes a memory leak in a session
- * whose user stepped away. Oldest is evicted first: the newest message is
- * the one most likely to still be relevant.
+ * whose user stepped away. Once full it turns arrivals away rather than
+ * making room: what is already parked is the user's to decide, and an
+ * arrival must not be able to destroy it.
  */
 export const MAX_HELD_MESSAGES = 50;
 
@@ -203,24 +209,43 @@ export interface PeerOrigin {
 }
 
 /**
+ * Longest self-asserted address the metering key keeps.
+ *
+ * `from` is peer-chosen and only type-checked on arrival, inside a frame
+ * that may be a megabyte, while the key it becomes is retained per sender
+ * in three tables at once. No address that can actually be dialled comes
+ * near this: `sun_path` holds 108 bytes on Linux and 104 on macOS, and a
+ * Windows named pipe is shorter still. So the cap costs nothing a real
+ * sender could use, and bounds what an unreal one can make this session
+ * hold.
+ */
+const MAX_SENDER_KEY_CHARS = 256;
+
+/**
  * The identity rate limiting and drop reporting meter a sender by.
  *
- * The reply address when the sender gave one. It is self-asserted, which
- * is why a global limit sits behind the per-sender one — but it is also
- * the only thing that distinguishes two peers, and metering every peer
- * together would let one noisy session mute the rest.
+ * The branch is chosen by what the *transport* established, never by what
+ * the frame claims, and the self-asserted address is namespaced inside
+ * it. Otherwise a peer could simply write `from: "own-process"` and share
+ * a bucket — and a drop-notice line — with the scripts this session
+ * itself started: it would spend their allowance, its flood would be
+ * announced to the user as coming from their own process, and the
+ * receipts would be addressed to a socket path that does not exist.
  *
- * A sender with no reply address is metered by what the transport could
- * establish instead, so a script and a controller do not share one
- * anonymous bucket with every stranger.
+ * A sender with no address is still distinguished by what the transport
+ * knows, so a script and a controller do not fall into one anonymous
+ * bucket with every stranger. Two anonymous strangers do share `unknown`,
+ * which is the one collision nothing here can separate — the transport
+ * established nothing about either of them.
  */
 export function peerSenderKey(
   frame: Pick<PeerUserFrame, 'from'>,
   origin: PeerOrigin,
 ): string {
-  if (frame.from) return frame.from;
   if (origin.controller) return `controller:${origin.controller.id}`;
-  return origin.selfSent ? 'own-process' : 'unknown';
+  const address = (frame.from ?? '').slice(0, MAX_SENDER_KEY_CHARS);
+  if (origin.selfSent) return `own:${address}`;
+  return address ? `peer:${address}` : 'unknown';
 }
 
 /**
@@ -655,7 +680,11 @@ export class InboundGate {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
       // Not 'denied': nobody looked at it. A sender told its message was
       // declined waits for a person to change their mind; one told the
-      // session refuses peer messages knows to stop.
+      // session refuses peer messages knows to stop — and it must keep
+      // hearing that, so its repeat record is rolled back rather than
+      // turning the next verbatim attempt into a `duplicate`, which would
+      // replace "stop" with "fold it into a later message".
+      this.forgetAdmittedBody(frame, origin);
       this.recordSettled(frame.msgId, 'refused');
       void this.report(frame, 'refused');
       return 'refused';
@@ -669,6 +698,7 @@ export class InboundGate {
       debugLogger.debug(
         `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
       );
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, 'expired');
       return 'refused';
     }
@@ -679,13 +709,8 @@ export class InboundGate {
         // backlog being full, so this is a queue-full drop rather than an
         // expiry: 'expired' would tell the sender a decision ran out when
         // no decision was ever pending. The id is deliberately not
-        // settled, and the admission's record of the body is rolled back,
-        // so an honest retry once the queue drains can land instead of
-        // reading as a repeat of a message that never arrived. The token
-        // the meter charged stays spent: it is the only bound on how
-        // often a peer can make this session attempt a delivery into a
-        // full queue.
-        this.admission.forgetLastBody(peerSenderKey(frame, origin));
+        // settled, so an honest retry once the queue drains can land.
+        this.forgetAdmittedBody(frame, origin);
         return this.drop(frame, origin, 'queue-full');
       }
       this.recordSettled(frame.msgId, 'delivered');
@@ -694,12 +719,16 @@ export class InboundGate {
     }
 
     if (this.held.length >= MAX_HELD_MESSAGES) {
-      const evicted = this.held.shift();
-      if (evicted) {
-        debugLogger.debug(`hold buffer full; expiring ${evicted.frame.msgId}`);
-        this.recordSettled(evicted.frame.msgId, 'expired');
-        void this.report(evicted.frame, 'expired');
-      }
+      // The newcomer is turned away rather than a parked message evicted.
+      // Evicting made an arrival destroy someone else's message: a flood
+      // walked the user's real backlog out one entry at a time, and each
+      // eviction told an uninvolved sender its message had `expired` when
+      // what actually happened was that a stranger arrived. Refusing the
+      // newcomer costs only the sender that could not fit, tells it the
+      // truth, and lets it retry — the same shape the accept path above
+      // already had.
+      this.forgetAdmittedBody(frame, origin);
+      return this.drop(frame, origin, 'queue-full');
     }
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
@@ -752,6 +781,7 @@ export class InboundGate {
         // Dropped, not released: the id is tombstoned like every other
         // terminal outcome, and the caller is told the message is gone
         // rather than that it will appear on the next turn.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         this.notifyHeldChange();
@@ -771,6 +801,10 @@ export class InboundGate {
       this.recordSettled(entry.frame.msgId, 'delivered');
       void this.report(entry.frame, 'delivered');
     } else {
+      // A person saw this one, so the far *model* still did not: a
+      // verbatim retry deserves the same review rather than a `duplicate`
+      // asserting the content is already over there.
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'denied');
       void this.report(entry.frame, 'denied');
     }
@@ -812,6 +846,7 @@ export class InboundGate {
         // 'denied', not 'refused': this message was admitted and parked,
         // and what settles it now is the user switching the setting —
         // a decision, made after the fact, by a person.
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
@@ -824,6 +859,7 @@ export class InboundGate {
     for (const entry of release) {
       if (!this.pinStillValid(entry.frame)) {
         misaddressed += 1;
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         continue;
@@ -953,13 +989,33 @@ export class InboundGate {
   }
 
   /**
-   * Turn a message away before it reaches policy, and say so to both
-   * audiences.
+   * Undo the repeat record an admitted message left, when the gate went on
+   * to settle it as something the far model never saw.
    *
-   * No tombstone: `recordSettled` exists so a re-sent id cannot be
-   * decided twice, and nothing was decided here. A sender that waits and
-   * retries once the burst is over should find the same gate it would
-   * have found if it had waited in the first place.
+   * Admission records a body before the gate decides what to do with it,
+   * so every terminal that is not a delivery or a hold leaves a record for
+   * content that never arrived — and the sender's honest retry then comes
+   * back `duplicate`, a verdict whose whole premise is that the far side
+   * already has it. Keyed exactly as admission keyed it, or it is a
+   * silent no-op.
+   */
+  private forgetAdmittedBody(frame: PeerUserFrame, origin: PeerOrigin): void {
+    this.admission.forgetBody(
+      peerSenderKey(frame, origin),
+      frame.message.content,
+    );
+  }
+
+  /**
+   * Turn a message away without the model or the user ever seeing it, and
+   * say so to both audiences.
+   *
+   * Two of the three reasons are decided above policy; `queue-full` is
+   * decided below it, when a buffer the message was already accepted into
+   * had no room. What they share is that nothing was *decided about the
+   * message*, which is why none of them leaves a tombstone: a sender that
+   * waits and retries should find the same gate it would have found if it
+   * had waited in the first place.
    *
    * Both reporters are best-effort and neither may take the gate down,
    * for the same reason `report` is wrapped: this runs on the arrival
