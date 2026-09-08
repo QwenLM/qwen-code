@@ -1257,6 +1257,109 @@ ok(
 );
 ok('and says the spend is tree-wide', bud.scope.includes('thread tree'));
 
+console.log('\n18. concurrency');
+// Everything above ran one operation at a time, which is the one shape a
+// store with a mutation lock is guaranteed to survive. These run together.
+const many = 8;
+
+const conc1 = await startFor('Concurrent posts');
+const posts = await Promise.all(
+  Array.from({ length: many }, (_, i) =>
+    M.postMessage(ROOT, conc1.th.id, {
+      from: M.HUMAN_AUTHOR_ID,
+      text: `post ${i}`,
+    }),
+  ),
+);
+const concThread = await M.readThread(ROOT, conc1.th.id);
+ok(
+  'every concurrent post is kept, none lost to a read-modify-write race',
+  posts.length === many &&
+    Array.from({ length: many }, (_, i) =>
+      concThread.messages.some((m) => m.text === `post ${i}`),
+    ).every(Boolean),
+  `${concThread.messages.length} messages on the thread`,
+);
+const seqs = concThread.messages.map((m) => m.sequence);
+ok(
+  'their sequences are unique',
+  new Set(seqs).size === seqs.length,
+  JSON.stringify(seqs),
+);
+ok(
+  'and strictly increasing',
+  seqs.every((v, i) => i === 0 || v > seqs[i - 1]),
+  JSON.stringify(seqs),
+);
+ok(
+  'the next sequence stays ahead of every message',
+  concThread.nextMessageSequence > Math.max(...seqs),
+  `${concThread.nextMessageSequence} vs ${Math.max(...seqs)}`,
+);
+
+const conc2 = await startFor('Contended claim');
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: conc2.th.id,
+    runId: conc2.runId,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+const reBooked = await M.postMessage(ROOT, conc2.th.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'again',
+});
+const contended = reBooked.dispatched[0].id;
+const claims = await Promise.all(
+  Array.from({ length: many }, () =>
+    M.claimRun(ROOT, { threadId: conc2.th.id, runId: contended }),
+  ),
+);
+ok(
+  'exactly one of many concurrent claims wins',
+  claims.filter(Boolean).length === 1,
+  `${claims.filter(Boolean).length} winners`,
+);
+ok(
+  'and the run is claimed exactly once',
+  (await M.readThread(ROOT, conc2.th.id)).runs.find((r) => r.id === contended)
+    .attempts === 1,
+);
+
+// queueSequence is issued under the lock and orders the whole workspace, so a
+// duplicate would make two runs indistinguishable to the dispatcher.
+const spread = await Promise.all(
+  Array.from({ length: many }, (_, i) =>
+    M.createThread(ROOT, { title: `Parallel ${i}` }),
+  ),
+);
+ok(
+  'concurrent thread creation gives distinct ids',
+  new Set(spread.map((t) => t.id)).size === many,
+);
+const everyRun = (await M.listThreads(ROOT)).threads.flatMap((t) => t.runs);
+const queueSeqs = everyRun.map((r) => r.queueSequence);
+ok(
+  'every run in the workspace has a distinct queue sequence',
+  new Set(queueSeqs).size === queueSeqs.length,
+  `${queueSeqs.length} runs, ${new Set(queueSeqs).size} distinct`,
+);
+
+const rosterBefore = (await M.readWorkspaceAgents(ROOT)).length;
+await Promise.all(
+  Array.from({ length: many }, (_, i) =>
+    M.updateWorkspaceAgents(ROOT, (a) => [
+      ...a,
+      { id: `ag_par${i}`, name: `par${i}`, createdAt: 1 },
+    ]),
+  ),
+);
+ok(
+  'concurrent roster writes all land, none overwrite each other',
+  (await M.readWorkspaceAgents(ROOT)).length === rosterBefore + many,
+  `${rosterBefore} -> ${(await M.readWorkspaceAgents(ROOT)).length}`,
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
