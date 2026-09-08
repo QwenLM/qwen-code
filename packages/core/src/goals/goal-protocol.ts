@@ -30,7 +30,7 @@ export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
  */
 export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
@@ -196,12 +196,14 @@ export interface GoalRecord {
   /**
    * Consecutive checkpoint checks that failed to relieve an overflowing
    * evidence window: the checkpoint came back full (see
-   * `isGoalCheckpointStalled`) or the verifier result could not be folded
-   * into claims at all. Persisted on the record rather than held in memory
-   * so a daemon restart or session resume cannot launder the count; absent
-   * means zero. Reset by any checkpoint check that finds room, and by every
-   * control action that starts a different evidence window: edit, replace,
-   * and the resume of an evidence-limited Goal.
+   * `isGoalCheckpointStalled`), the verifier result could not be folded
+   * into claims at all, or the check itself failed -- a provider error or
+   * a verifier that never answered before its timeout. Persisted on the
+   * record rather than held in memory so a daemon restart or session
+   * resume cannot launder the count; absent means zero. Reset by any
+   * checkpoint check that finds room, and by every control action that
+   * starts a different evidence window: edit, replace, and the resume of
+   * an evidence-limited Goal.
    */
   checkpointStalls?: number;
   /**

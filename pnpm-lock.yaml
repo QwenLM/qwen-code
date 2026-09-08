@@ -141,7 +141,7 @@ importers:
         specifier: ^8.0.1
         version: 8.0.1
       playwright:
-        specifier: ^1.57.0
+        specifier: 1.61.1
         version: 1.61.1
       prettier:
         specifier: ^3.5.3
