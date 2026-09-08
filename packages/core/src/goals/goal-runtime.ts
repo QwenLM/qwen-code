@@ -1136,6 +1136,7 @@ export function createGoalRuntime(
   const runCheckpoint = async (
     attempt: CheckpointAttempt,
     preparedWindow?: GoalEvidenceCheckpointWindow,
+    replay = false,
   ): Promise<void> => {
     const evidenceSource = options.evidenceSource;
     const checkpointVerifier = options.checkpointVerifier;
@@ -1213,7 +1214,11 @@ export function createGoalRuntime(
           `windowTruncated=${window.truncated}`,
           error,
         );
-        if (window.truncated) {
+        // A restore replay is exempt: it runs no turn of its own, so a
+        // transient failure at startup must not spend a streak the restored
+        // session never re-earned. The replay mints a continuation whose own
+        // checks count on this arm as live turns.
+        if (window.truncated && !replay) {
           // A check that produced nothing while the window overflows is a
           // compaction that gave no relief, whatever stopped it: a result
           // that could not be folded into claims, a provider failure, or a
@@ -1403,7 +1408,7 @@ export function createGoalRuntime(
           return;
         }
         try {
-          await runCheckpoint(attempt, preparedCheckpointWindow);
+          await runCheckpoint(attempt, preparedCheckpointWindow, true);
         } catch {
           // Recovery committed before the replay began, so a failed replay
           // degrades instead of bricking the runtime: drop the pending

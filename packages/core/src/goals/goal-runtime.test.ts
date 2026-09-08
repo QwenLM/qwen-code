@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
@@ -57,6 +57,20 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
     },
   };
 });
+
+// The recorder is file-global, so every test starts from an empty log
+// instead of inheriting entries from earlier checkpoint failures.
+beforeEach(() => {
+  runtimeDebugCalls.length = 0;
+});
+
+// Selects only the checkpoint-failure lines: an unrelated GOAL_RUNTIME
+// diagnostic must not shift the counts the stall tests pin.
+function failedCheckpointChecks(): unknown[][] {
+  return runtimeDebugCalls.filter(([message]) =>
+    String(message).includes('Checkpoint check failed'),
+  );
+}
 
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
@@ -2174,7 +2188,6 @@ describe('goal runtime', () => {
   it('stops a Goal whose verifier never answers on an overflowing window', async () => {
     const { journal, host, runtime, checkpointVerifier, setRecords } =
       stallHarness();
-    runtimeDebugCalls.length = 0;
     // The reported loop: one long turn overflowed the window, and every
     // checkpoint after it timed out. Nothing was ever folded into claims,
     // the cursor never moved, and each new turn was told to retry.
@@ -2230,8 +2243,9 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
     // Every failed check leaves the same trace, so an investigation reads
     // why the verifier failed from the first overflow on.
-    expect(runtimeDebugCalls).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-    for (const [message, windowLabel, loggedError] of runtimeDebugCalls) {
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    for (const [message, windowLabel, loggedError] of failedChecks) {
       expect(message).toContain('Checkpoint check failed');
       expect(windowLabel).toBe('windowTruncated=true');
       expect(loggedError).toBeInstanceOf(Error);
@@ -2314,7 +2328,6 @@ describe('goal runtime', () => {
 
   it('keeps the stall streak through a provider failure on a window with room', async () => {
     const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    runtimeDebugCalls.length = 0;
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
 
     let records: RuntimeRecord[] = [];
@@ -2344,8 +2357,9 @@ describe('goal runtime', () => {
     // The room arm leaves the same trace the truncated arm does: the
     // discarded error is diagnosable from the first failure, not only once
     // the window overflows.
-    expect(runtimeDebugCalls).toHaveLength(1);
-    const [message, windowLabel, loggedError] = runtimeDebugCalls[0]!;
+    const failedChecks = failedCheckpointChecks();
+    expect(failedChecks).toHaveLength(1);
+    const [message, windowLabel, loggedError] = failedChecks[0]!;
     expect(message).toContain('Checkpoint check failed');
     expect(windowLabel).toBe('windowTruncated=false');
     expect(loggedError).toBeInstanceOf(Error);
@@ -4918,6 +4932,76 @@ describe('goal runtime', () => {
     await runtime.activateRestoredWork();
 
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('does not spend the stall streak on a failed checkpoint replay at restore', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const checkpointVerifier = vi.fn(async (): Promise<never> => {
+      throw new Error('provider failed');
+    });
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => []),
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    // The crash-point state the runtime itself persists: a streak one short
+    // of the limit beside a pending checkpoint, journaled before the check
+    // ran.
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-restored',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+        },
+      },
+      'turn_finished',
+    );
+    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
+      permit: { goalId: 'g-restored', revision: 1, turnId: 'turn-restored' },
+      recordUuid: 'pending-checkpoint-record',
+    };
+    // The same overflowing chain the crashed process faced: the replayed
+    // window still truncates, and the one verifier call at startup fails
+    // for reasons that have nothing to do with compaction.
+    const preparedWindow = {
+      previousClaims: [],
+      evidence: [],
+      truncated: true,
+      shouldCheckpoint: true,
+    };
+
+    await runtime.prepareRestore([record], preparedWindow);
+    await runtime.activateRestoredWork();
+
+    // A restore replay is not the turn loop the stall breaker exists to
+    // stop: the restored Goal keeps the streak it crashed with, and the
+    // continuation the replay mints re-earns any stall as a live turn.
+    expect(checkpointVerifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'checkpoint',
+    ]);
     expect(host.started).toHaveLength(1);
   });
 
