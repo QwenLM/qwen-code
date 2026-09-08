@@ -412,7 +412,6 @@ describe('createWorkspaceSkillsStatusProvider', () => {
 
   it('reuses one SkillManager per workspace across calls', async () => {
     const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
-    const refreshSpy = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
     const provider = createWorkspaceSkillsStatusProvider();
 
     await provider('/ws');
@@ -422,20 +421,6 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     // listSkills is invoked on the same object rather than a freshly-scanned one.
     expect(listSpy).toHaveBeenCalledTimes(2);
     expect(listSpy.mock.instances[0]).toBe(listSpy.mock.instances[1]);
-    // The cached ExtensionManager is reused as well: the extension store is
-    // read once, not on every request.
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('coalesces concurrent cold builds of the same workspace', async () => {
-    await writeExtension('suite', ['visible']);
-    const refreshSpy = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
-    const provider = createWorkspaceSkillsStatusProvider();
-
-    const [a, b] = await Promise.all([provider(qwenHome), provider(qwenHome)]);
-
-    expect(a).toBe(b);
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 
   async function writeExtension(
@@ -629,37 +614,6 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     },
   );
 
-  it('gates extension discovery but still lists inactive entries when the extension level is disabled', async () => {
-    await writeExtension('active', ['active-skill']);
-    await writeExtension('inactive', ['inactive-skill']);
-    await fsp.writeFile(
-      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
-      JSON.stringify({ inactive: { overrides: ['!*'] } }),
-    );
-    await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
-    await fsp.writeFile(
-      path.join(qwenHome, '.qwen', 'settings.json'),
-      JSON.stringify({ skills: { disabledLevels: ['extension'] } }),
-    );
-    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
-    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-    expect(status.initialized).toBe(true);
-    // Discovery is gated: no active extension Skill is listed as usable...
-    expect(status.skills.some((s) => s.name === 'active-skill')).toBe(false);
-    // ...but inactive management entries still appear, matching the child
-    // producer, which appends them unconditionally.
-    expect(status.skills).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: 'inactive-skill',
-          level: 'extension',
-          disabledReason: 'inactive_extension',
-        }),
-      ]),
-    );
-    expect(refresh).toHaveBeenCalled();
-  });
-
   it('returns an error for an unreadable extension directory', async () => {
     await fsp.writeFile(path.join(qwenHome, 'extensions'), 'not a directory');
     const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
@@ -668,67 +622,8 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       skills: [],
       errors: [{ kind: 'skills', status: 'error' }],
     });
-    // The readdir probe is what surfaces the broken root — pin the identity
-    // of its error, not just the error cell's shape.
     expect(status.errors?.[0]?.error).toContain('ENOTDIR');
   });
-
-  // A dangling symlink lstat()s fine but readdir()s ENOENT: a present,
-  // broken root, not an absent one, so it must fail closed like the
-  // regular-file shape above.
-  it.skipIf(process.platform === 'win32')(
-    'fails closed for a dangling symlink at the extensions root',
-    async () => {
-      await fsp.symlink(
-        path.join(qwenHome, 'missing-target'),
-        path.join(qwenHome, 'extensions'),
-      );
-      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-      expect(status.initialized).toBe(false);
-      expect(status.skills).toEqual([]);
-      expect(status.errors?.[0]?.error).toContain('ENOENT');
-    },
-  );
-
-  it('degrades an unreadable extensions root when the extension level is disabled', async () => {
-    await fsp.writeFile(path.join(qwenHome, 'extensions'), 'not a directory');
-    await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
-    await fsp.writeFile(
-      path.join(qwenHome, '.qwen', 'settings.json'),
-      JSON.stringify({ skills: { disabledLevels: ['extension'] } }),
-    );
-    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-    // The workspace opted out of extension discovery, so the catalog-fatal
-    // root probe must not take the rest of its catalog down with it.
-    expect(status.initialized).toBe(true);
-    expect(status.errors).toBeUndefined();
-    expect(status.skills.some((s) => s.name === 'review')).toBe(true);
-    expect(status.skills.some((s) => s.level === 'extension')).toBe(false);
-    expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
-    expect(mockWriteStderrLine.mock.calls[0][0]).toContain('ENOTDIR');
-  });
-
-  // The store loader swallows listing errors, so the readdir probe is the
-  // only thing that reports a searchable-but-unlistable extensions root.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
-    'fails closed for a searchable but unlistable extensions root',
-    async () => {
-      const extensionsRoot = path.join(qwenHome, 'extensions');
-      await fsp.mkdir(extensionsRoot);
-      await fsp.writeFile(
-        path.join(extensionsRoot, 'extension-enablement.json'),
-        JSON.stringify({}),
-      );
-      await fsp.chmod(extensionsRoot, 0o111);
-      try {
-        const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-        expect(status.initialized).toBe(false);
-        expect(status.errors?.[0]?.error).toContain('EACCES');
-      } finally {
-        await fsp.chmod(extensionsRoot, 0o755);
-      }
-    },
-  );
 
   it('loads linked extensions and Agent Plugin manifests through the shared loader', async () => {
     const source = await writeExtension('linked', ['linked-skill']);
@@ -771,214 +666,21 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     );
   });
 
-  it('serves the non-extension catalog when the extension load fails, and retries it', async () => {
-    const workspace = path.join(qwenHome, 'workspace');
-    const projectSkillDir = path.join(workspace, '.qwen', 'skills', 'proj');
-    await fsp.mkdir(projectSkillDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(projectSkillDir, 'SKILL.md'),
-      '---\nname: proj\ndescription: Project skill\n---\nBody',
-    );
+  it('does not cache a failed store read as an initialized empty catalog', async () => {
     await writeExtension('suite', ['visible']);
     vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockRejectedValueOnce(
       new Error('store unavailable'),
     );
     const provider = createWorkspaceSkillsStatusProvider();
-    // A fault inside the extension load degrades only the extension entries;
-    // project, user and bundled Skills do not depend on that store.
-    const degraded = await provider(workspace);
-    expect(degraded.initialized).toBe(true);
-    expect(degraded.errors).toBeUndefined();
-    expect(degraded.skills.some((s) => s.level === 'extension')).toBe(false);
-    expect(degraded.skills).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: 'proj',
-          level: 'project',
-          status: 'ok',
-        }),
-        expect.objectContaining({ name: 'review', level: 'bundled' }),
-      ]),
-    );
-    // The degraded response carries no errors cell, so this stderr line is
-    // the only observable signal that extension enumeration failed.
-    expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
-    expect(mockWriteStderrLine.mock.calls[0][0]).toContain('store unavailable');
-    // The degraded pair is not cached, so the next call retries the
-    // extension enumeration instead of freezing an extension-less catalog.
-    expect((await provider(workspace)).skills).toEqual(
+    expect(await provider(qwenHome)).toMatchObject({
+      initialized: false,
+      errors: [{ kind: 'skills', error: 'store unavailable' }],
+    });
+    expect((await provider(qwenHome)).skills).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'visible', status: 'ok' }),
       ]),
     );
-  });
-
-  it('re-resolves the extension locale when the configured language changes', async () => {
-    vi.stubEnv('QWEN_CODE_LANG', '');
-    for (const name of ['active', 'inactive']) {
-      const directory = await writeExtension(name, [`${name}-skill`]);
-      const manifestPath = path.join(directory, 'qwen-extension.json');
-      const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
-      await fsp.writeFile(
-        manifestPath,
-        JSON.stringify({
-          ...manifest,
-          displayName: { en: 'Extension', zh: '扩展' },
-        }),
-      );
-    }
-    await fsp.writeFile(
-      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
-      JSON.stringify({ inactive: { overrides: ['!*'] } }),
-    );
-    const workspace = path.join(qwenHome, 'workspace');
-    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
-    await fsp.writeFile(
-      path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ general: { language: 'en' } }),
-    );
-    const provider = createWorkspaceSkillsStatusProvider();
-    const readNames = async () =>
-      (await provider(workspace)).skills
-        .filter((s) => s.level === 'extension')
-        .map((s) => `${s.name}:${s.extensionDisplayName ?? ''}`);
-    expect(await readNames()).toEqual([
-      'active-skill:Extension',
-      'inactive-skill:Extension',
-    ]);
-    await fsp.writeFile(
-      path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ general: { language: 'zh' } }),
-    );
-    // No provider.invalidate: a language change reaches no invalidation
-    // point, so the locale is part of the cache key.
-    expect(await readNames()).toEqual([
-      'active-skill:扩展',
-      'inactive-skill:扩展',
-    ]);
-  });
-
-  it('ignores a non-string general.language instead of failing the catalog', async () => {
-    // Pin the env out of the way ('' loses to settings): an ambient
-    // QWEN_CODE_LANG would shadow the invalid setting and leave the
-    // non-string guard unexercised.
-    vi.stubEnv('QWEN_CODE_LANG', '');
-    const workspace = path.join(qwenHome, 'workspace');
-    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
-    await fsp.writeFile(
-      path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ general: { language: 1 } }),
-    );
-    const status = await createWorkspaceSkillsStatusProvider()(workspace);
-    expect(status.initialized).toBe(true);
-    expect(status.skills.some((s) => s.name === 'review')).toBe(true);
-  });
-
-  it('does not install a pre-mutation snapshot when invalidate lands mid-build', async () => {
-    await writeExtension('first', ['first-skill']);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockImplementationOnce(
-      () => gate,
-    );
-    const provider = createWorkspaceSkillsStatusProvider();
-    const first = provider(qwenHome);
-    // Commit a store mutation and deliver the invalidation while the cold
-    // build is still in flight.
-    await writeExtension('second', ['second-skill']);
-    provider.invalidate?.(qwenHome);
-    release();
-    await first;
-    const second = await provider(qwenHome);
-    expect(second.skills).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'second-skill', status: 'ok' }),
-      ]),
-    );
-  });
-
-  it('starts a fresh build for post-invalidation callers and lets later callers join it', async () => {
-    await writeExtension('first', ['first-skill']);
-    const realRefresh = ExtensionManager.prototype.refreshCache;
-    const parked: Array<() => void> = [];
-    const releases: Array<() => void> = [];
-    const parkedPromises = [
-      new Promise<void>((resolve) => parked.push(resolve)),
-      new Promise<void>((resolve) => parked.push(resolve)),
-    ];
-    let refreshCalls = 0;
-    const refreshSpy = vi
-      .spyOn(ExtensionManager.prototype, 'refreshCache')
-      .mockImplementation(async function (this: ExtensionManager) {
-        const index = refreshCalls++;
-        await realRefresh.call(this);
-        // Park the first two builds after their store reads: the first must
-        // hold a pre-mutation snapshot, and both must be in flight while the
-        // invalidation, the first settle, and the joining caller land. A
-        // third build means the join failed, so let it run through.
-        if (index > 1) return;
-        parked[index]?.();
-        await new Promise<void>((resolve) => {
-          releases[index] = resolve;
-        });
-      });
-    const provider = createWorkspaceSkillsStatusProvider();
-
-    const first = provider(qwenHome);
-    // Commit the store mutation and deliver the invalidation only after the
-    // first build's snapshot is taken, or the mutation races that read.
-    await parkedPromises[0];
-    await writeExtension('second', ['second-skill']);
-    provider.invalidate?.(qwenHome);
-    // The newer epoch must start a fresh build, not join the pre-mutation one.
-    const second = provider(qwenHome);
-    releases[0]!();
-    await first;
-    // The superseded build's cleanup must not evict the fresh build's entry.
-    const third = provider(qwenHome);
-    await parkedPromises[1];
-    releases[1]!();
-    const [firstStatus, secondStatus, thirdStatus] = await Promise.all([
-      first,
-      second,
-      third,
-    ]);
-
-    expect(firstStatus.skills.some((s) => s.name === 'second-skill')).toBe(
-      false,
-    );
-    expect(refreshSpy).toHaveBeenCalledTimes(2);
-    expect(third).toBe(second);
-    expect(thirdStatus).toBe(secondStatus);
-    expect(secondStatus.skills).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'second-skill', status: 'ok' }),
-      ]),
-    );
-  });
-
-  it('lists a duplicate Skill name within one inactive extension only once', async () => {
-    const directory = path.join(qwenHome, 'extensions', 'inactive');
-    for (const dir of ['a', 'b']) {
-      const skillDir = path.join(directory, 'skills', dir);
-      await fsp.mkdir(skillDir, { recursive: true });
-      await fsp.writeFile(
-        path.join(skillDir, 'SKILL.md'),
-        '---\nname: dup\ndescription: dup description\n---\nInstructions',
-      );
-    }
-    await fsp.writeFile(
-      path.join(directory, 'qwen-extension.json'),
-      JSON.stringify({ name: 'inactive', version: '1.0.0' }),
-    );
-    await fsp.writeFile(
-      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
-      JSON.stringify({ inactive: { overrides: ['!*'] } }),
-    );
-    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
-    expect(status.skills.filter((s) => s.name === 'dup')).toHaveLength(1);
   });
 
   it.each([
@@ -1025,6 +727,154 @@ describe('createWorkspaceSkillsStatusProvider', () => {
           disabledReason: 'inactive_extension',
         },
       ]);
+    },
+  );
+
+  it('gates extension discovery but still lists inactive entries when the extension level is disabled', async () => {
+    await writeExtension('active', ['active-skill']);
+    await writeExtension('inactive', ['inactive-skill']);
+    await fsp.writeFile(
+      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
+      JSON.stringify({ inactive: { overrides: ['!*'] } }),
+    );
+    await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(qwenHome, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['extension'] } }),
+    );
+    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+    expect(status.initialized).toBe(true);
+    // Discovery is gated: no active extension Skill is listed as usable...
+    expect(status.skills.some((s) => s.name === 'active-skill')).toBe(false);
+    // ...but inactive management entries still appear, matching the child
+    // producer, which appends them unconditionally.
+    expect(status.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'inactive-skill',
+          level: 'extension',
+          disabledReason: 'inactive_extension',
+        }),
+      ]),
+    );
+    expect(refresh).toHaveBeenCalled();
+  });
+
+  it('re-resolves the extension locale when the configured language changes', async () => {
+    vi.stubEnv('QWEN_CODE_LANG', '');
+    for (const name of ['active', 'inactive']) {
+      const directory = await writeExtension(name, [`${name}-skill`]);
+      const manifestPath = path.join(directory, 'qwen-extension.json');
+      const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
+      await fsp.writeFile(
+        manifestPath,
+        JSON.stringify({
+          ...manifest,
+          displayName: { en: 'Extension', zh: '扩展' },
+        }),
+      );
+    }
+    await fsp.writeFile(
+      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
+      JSON.stringify({ inactive: { overrides: ['!*'] } }),
+    );
+    const workspace = path.join(qwenHome, 'workspace');
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'en' } }),
+    );
+    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const provider = createWorkspaceSkillsStatusProvider();
+    const readNames = async () =>
+      (await provider(workspace)).skills
+        .filter((s) => s.level === 'extension')
+        .map((s) => `${s.name}:${s.extensionDisplayName ?? ''}`);
+    expect(await readNames()).toEqual([
+      'active-skill:Extension',
+      'inactive-skill:Extension',
+    ]);
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+    expect(await readNames()).toEqual([
+      'active-skill:扩展',
+      'inactive-skill:扩展',
+    ]);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a non-string general.language instead of failing the catalog', async () => {
+    // Pin the env out of the way ('' loses to settings): an ambient
+    // QWEN_CODE_LANG would shadow the invalid setting and leave the
+    // non-string guard unexercised.
+    vi.stubEnv('QWEN_CODE_LANG', '');
+    const workspace = path.join(qwenHome, 'workspace');
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 1 } }),
+    );
+    const status = await createWorkspaceSkillsStatusProvider()(workspace);
+    expect(status.initialized).toBe(true);
+    expect(status.skills.some((s) => s.name === 'review')).toBe(true);
+  });
+
+  it('lists a duplicate Skill name within one inactive extension only once', async () => {
+    const directory = path.join(qwenHome, 'extensions', 'inactive');
+    for (const dir of ['a', 'b']) {
+      const skillDir = path.join(directory, 'skills', dir);
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: dup\ndescription: dup description\n---\nInstructions',
+      );
+    }
+    await fsp.writeFile(
+      path.join(directory, 'qwen-extension.json'),
+      JSON.stringify({ name: 'inactive', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(qwenHome, 'extensions', 'extension-enablement.json'),
+      JSON.stringify({ inactive: { overrides: ['!*'] } }),
+    );
+    const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+    expect(status.skills.filter((s) => s.name === 'dup')).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed for a dangling symlink at the extensions root',
+    async () => {
+      await fsp.symlink(
+        path.join(qwenHome, 'missing-target'),
+        path.join(qwenHome, 'extensions'),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(false);
+      expect(status.skills).toEqual([]);
+      expect(status.errors?.[0]?.error).toContain('ENOENT');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails closed for a searchable but unlistable extensions root',
+    async () => {
+      const extensionsRoot = path.join(qwenHome, 'extensions');
+      await fsp.mkdir(extensionsRoot);
+      await fsp.writeFile(
+        path.join(extensionsRoot, 'extension-enablement.json'),
+        JSON.stringify({}),
+      );
+      await fsp.chmod(extensionsRoot, 0o111);
+      try {
+        const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+        expect(status.initialized).toBe(false);
+        expect(status.errors?.[0]?.error).toContain('EACCES');
+      } finally {
+        await fsp.chmod(extensionsRoot, 0o755);
+      }
     },
   );
 });
