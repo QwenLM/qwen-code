@@ -373,7 +373,7 @@ const EN: Messages = {
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
   'agents.description':
-    'Create specialized agents and let Qwen coordinate them in an Agent Team.',
+    'Manage reusable agent definitions for tasks, Agent Teams, and shared-thread collaboration.',
   'subagent.result': 'Result',
   'subagent.tools': (v) => `Tools (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} tools`,
@@ -3941,7 +3941,7 @@ const ZH: Messages = {
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
   'agents.description':
-    '创建专业智能体，并让 Qwen 通过 Agent Team 协调它们共同完成任务。',
+    '管理可复用的智能体定义，用于任务执行、Agent Team 或共享任务协作。',
   'subagent.result': '结果',
   'subagent.tools': (v) => `工具 (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} 个工具`,

@@ -1,6 +1,6 @@
 # Workspace agents implementation — step-by-step acceptance criteria
 
-> Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-workspace agents-foundation` branch) and [`2026-09-07-workspace-agents-review-round2-handoff.md`](./2026-09-07-workspace-agents-review-round2-handoff.md).
+> Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) §5.2 (ten steps, as numbered on the `codex/multi-agent-mesh-foundation` branch) and [`2026-09-07-workspace-agents-review-round2-handoff.md`](./2026-09-07-workspace-agents-review-round2-handoff.md).
 > Delivery shape: **one implementation and delivery PR** (#11206). Runtime changes #11200 / #11202 / #11204 are merged into its branch. Because that branch was their PR base, GitHub records them as merged draft references; their review history remains available and none is merged separately to `main`.
 > Nothing in this file was executed by its author. "Evidence" means what the implementer reports, with observed values, in the PR description or a `docs/verification/workspace agents/` package.
 
@@ -12,7 +12,30 @@
 
 ## 1. How to read the steps
 
-Each step lists: what lands, the acceptance gate, and the evidence to report. A step is done when its gate holds on CI for the whole branch, not when its own tests pass locally. Steps 1-6 need no model; 7 is the first live gate; 8-10 need the daemon or a browser.
+Each step lists: what lands, the acceptance gate, and the evidence to report. The owner's later demo-first instruction overrides the old local-build/CI-wait and child-PR workflow: changes go directly to #11206, with scoped source checks and actual daemon/browser observations. No unrun CI or test gate is represented as passing. Steps 1-6 need no model; 7 is the first live gate; 8-10 need the daemon or a browser.
+
+### Current ACP-session evidence boundary (2026-09-08)
+
+The numbered steps below retain the historical background-agent implementation
+and its observations. They are not proof of the replacement session adapter.
+Current run ids, timestamps and limitations are recorded in
+[`2026-09-08-workspace-agents-vs-multica-gap-and-plan.md`](./2026-09-08-workspace-agents-vs-multica-gap-and-plan.md).
+
+| Requirement | Current evidence / remaining work |
+| --- | --- |
+| Persistent identities and separate sessions | Existing leader/worker reused across tasks; leader continuation preserves its session id. Sessions share one ACP process. |
+| Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded. |
+| Child delegation and parent report | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run. |
+| Live human input | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open. |
+| Cancellation | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open. |
+| Human resolves a blocker | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision. |
+| Read-only boundary and ambient ownership | Guard wiring and direct source checks exist; full model-driven negative matrix has not been demonstrated. |
+| Storage and reliability gates in steps 3/7/8 | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix. |
+| External notifications | Consumer exists, but no recipient is configured for current acceptance; no external send authorized or observed. |
+
+This ledger is not an overall completion claim. The explicit failure cases below
+remain requirements; the demo-first workflow changes how work is sequenced, not
+whether missing evidence can be called a pass.
 
 Every step also updates the design doc: any sentence the implementation contradicts is changed in the same commit, with the reason. The doc is the contract; the code does not silently redefine it.
 
@@ -318,10 +341,10 @@ The owner settled three step-3 inputs: v1 denies every MCP tool; the v1 schema d
 
 The relationship to the Agent Board (#9402) also remains the owner's call. §7.1's conservative v1 default keeps separate stores and distinct names and imports nothing from `board-*.ts` in step 3. The settled first-class runtime shape makes a later foreign-runtime adapter possible without deciding whether #9402 becomes its seed. MCP names fail closed unless a future policy can prove an individual tool preserves the read-only ceiling.
 
-## 4. Working through stacked step PRs
+## 4. Current single-PR workflow
 
-- #11206 is the only PR that merges to `main`. Each numbered step gets one child PR whose base is `codex/multi-agent-workspace agents-foundation`; merge one child at a time, then use #11206's whole-branch CI as that step's gate before opening or merging the next.
-- Child PRs do not run the repository's unit-test or lint jobs. Their named local tests are supporting evidence only; the required CI signal appears after merge on #11206.
+- #11206 is the only delivery PR. Append work directly to `codex/multi-agent-mesh-foundation`; do not create more child PRs or issues for these steps.
+- Do not run local CI/build/lint or make remote CI waiting the critical path. Record the actual source checks and live observations performed, with missing verification named explicitly.
 - Runtime preparation was merged in the order #11200 → #11204 → #11202. The expected final conflict keeps both contracts: structured external input and typed continuation outcomes. GitHub automatically records those draft PRs as merged because their base is this branch; no PR was merged separately to `main` or manually closed.
 - Merge `main` into the agents branch when it falls behind; never rebase (repo policy, and the force-push bot).
 - Keep the design doc and this file current in the same commit as the code that changes them.
@@ -334,7 +357,7 @@ Ordered by how much damage a miss does. Each item names the step where it is pro
 2. **Step 3 is where later bugs get blamed.** Sequence counter written before the thread file; outbox persisted before apply and acknowledged after; migration keeps the `.v0.json` backup until the migrated file reads back through the validator. Each has a crash-injection test in step 3's gate; do not weaken them to make the step land sooner.
 3. **Ambient binding lives inside `runBody`, and mutating tools re-check it.** The per-turn `runWithAgentRunContext` frame is the only hard boundary against wrong-thread actions; the prompt frame is advisory. Every mutating tool reads the ambient triple and then verifies the run is still `running` on that thread before writing (step 5).
 4. **No silent path.** Every admission result is persisted on the message and rendered; a quiescent thread with nothing runnable becomes `blocked`, never idle `in_progress`. Round 2 found more defects of this class than any other.
-5. **Runtime hot paths change in isolated child PRs.** `agent-core.ts`, `background-tasks.ts`, `background-agent-resume.ts`, `agent-headless.ts`, `agent.ts` are shared with Agent Team and every subagent. Keep each such change minimal, pair it with its own tests, and merge it into the foundation without creating another PR to `main`.
+5. **Runtime hot paths need narrow changes, not more PRs.** Shared runtime changes stay minimal and go directly to #11206 under the owner's current workflow; check their ordinary-session consumers as well as agent callers.
 6. **Trust labels are not boundaries.** Until §9.9 is decided, no prompt heading is called "trusted" and no code treats one as a policy input. Provenance is derived from the ambient run, never from model or HTTP input.
 7. **Product decisions stay open until decided.** §9.4, §9.5, §9.9, §9.10, §9.11 and the #9402 relationship; the conservative defaults in §3 above apply meanwhile. Runtime shape, schema batching, and v1 MCP denial are settled in §3.
-8. **Read the CI of #11206 after every numbered step.** Local and source-branch tests are supporting evidence; only the whole delivery branch is the gate.
+8. **Keep acceptance evidence honest.** Follow the current demo-first workflow in §4. Never turn a source check into a claimed live observation, or historical background-runtime evidence into an ACP-session pass.

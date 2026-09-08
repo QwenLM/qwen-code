@@ -4,6 +4,29 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Human unblock — same-session continuation
+
+Chrome task `th_2987a14f-0765-4a32-81e2-c0c12b28dd9a` asked demo-leader to
+request an output format before proceeding. Run
+`rn_7f036523-31ca-4c07-9e86-9e0e11387e5e` closed blocked, and the panel showed
+"Which output format should I use: JSON or CSV?" plus the waiting-for-a-person
+reason. A human JSON selection at sequence 3 booked
+`rn_cd66955c-4d53-4646-8834-90d1d01603b3` and acknowledged the earlier blocker
+at that same sequence. Both runs used session `63465788-a16b-5328-92fc-8020330969a9`.
+The second run submitted `{"ready": true, "marker": "HUMAN-UNBLOCK-6149"}`
+through thread_review, and Chrome Mark done succeeded. The panel displayed
+280.9k tokens. No manual retry or additional agent identity was needed.
+
+This covers a human answering the assigned agent's own question, not every
+open product choice about acknowledging other agents' blockers. The acceptance
+companion now distinguishes current ACP evidence from historical background
+observations and follows the owner's direct-to-#11206/no-local-CI workflow.
+The Agent page's description also now names reusable definitions and shared
+tasks rather than presenting Agent Team as the only collaboration path.
+Updating that translation triggered a React removeChild error once during hot
+reload. A full page reload recovered the UI and showed the new description;
+the hot-reload error itself has not been diagnosed or claimed fixed.
+
 #### Cancellation — wait for the runtime, then account for usage
 
 The dispatcher previously ignored the cancellation result and immediately wrote
