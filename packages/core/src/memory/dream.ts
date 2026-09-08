@@ -63,7 +63,8 @@ export async function snapshotDreamFiles(
   const snapshot = new Map<string, DreamSnapshotEntry>();
   await Promise.all(
     entries.map(async (entry) => {
-      const relativePath = entry.replaceAll('\\', '/');
+      const relativePath =
+        path.sep === '\\' ? entry.replaceAll('\\', '/') : entry;
       const filePath = path.join(memoryRoot, entry);
       let content: string;
       try {
@@ -99,6 +100,7 @@ export async function snapshotDreamFiles(
 export function diffDreamSnapshots(
   before: Map<string, DreamSnapshotEntry>,
   after: Map<string, DreamSnapshotEntry>,
+  includedPaths?: ReadonlySet<string>,
 ): {
   touchedTopics: AutoMemoryType[];
   createdEntries: number;
@@ -113,6 +115,7 @@ export function diffDreamSnapshots(
   const touchedTopics = new Set<AutoMemoryType>();
 
   for (const [relativePath, entry] of after) {
+    if (includedPaths && !includedPaths.has(relativePath)) continue;
     const previous = before.get(relativePath);
     if (!previous) {
       createdEntries += 1;
@@ -126,6 +129,7 @@ export function diffDreamSnapshots(
     }
   }
   for (const [relativePath, entry] of before) {
+    if (includedPaths && !includedPaths.has(relativePath)) continue;
     if (!after.has(relativePath)) {
       deletedEntries += 1;
       if (entry.type) touchedTopics.add(entry.type);
@@ -144,8 +148,10 @@ export function diffDreamSnapshots(
 export function validateDreamSnapshotChanges(
   before: Map<string, DreamSnapshotEntry>,
   after: Map<string, DreamSnapshotEntry>,
+  includedPaths?: ReadonlySet<string>,
 ): void {
   for (const [relativePath, entry] of after) {
+    if (includedPaths && !includedPaths.has(relativePath)) continue;
     const previous = before.get(relativePath);
     if (previous?.content !== entry.content && !entry.valid) {
       throw new Error(
@@ -153,6 +159,28 @@ export function validateDreamSnapshotChanges(
       );
     }
   }
+}
+
+export function dreamRelativePaths(
+  memoryRoot: string,
+  filePaths: readonly string[],
+): Set<string> {
+  const relativePaths = new Set<string>();
+  for (const filePath of filePaths) {
+    const relativePath = path.relative(
+      memoryRoot,
+      path.resolve(memoryRoot, filePath),
+    );
+    if (
+      relativePath !== '' &&
+      relativePath !== '..' &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath)
+    ) {
+      relativePaths.add(relativePath.split(path.sep).join('/'));
+    }
+  }
+  return relativePaths;
 }
 
 async function runDreamByAgent(
@@ -184,28 +212,34 @@ async function runDreamByAgent(
   let after: Map<string, DreamSnapshotEntry>;
   try {
     const written = await snapshotDreamFiles(memoryRoot);
-    validateDreamSnapshotChanges(before, written);
+    const writtenPaths = dreamRelativePaths(
+      memoryRoot,
+      result.filesWritten ?? result.filesTouched,
+    );
+    validateDreamSnapshotChanges(before, written, writtenPaths);
     abortSignal?.throwIfAborted();
-    operations = await applyDreamOperations(memoryRoot, abortSignal);
+    operations = await applyDreamOperations(memoryRoot, before, abortSignal);
     after = await snapshotDreamFiles(memoryRoot);
+    for (const deletedPath of operations.deletedPaths) {
+      writtenPaths.add(deletedPath);
+    }
+    const changes = diffDreamSnapshots(before, after, writtenPaths);
+    return {
+      ...changes,
+      dedupedEntries: operations.dedupedEntries,
+      splitEntries: operations.splitEntries,
+      systemMessage: `Managed auto-memory dream (agent): ${
+        result.finalText
+          ? result.finalText.trim().slice(0, 300)
+          : `updated ${result.filesTouched.length} file(s)`
+      }`,
+    };
   } catch (error) {
     await fs
       .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
       .catch(() => {});
     throw error;
   }
-  const changes = diffDreamSnapshots(before, after);
-
-  const summary = result.finalText
-    ? result.finalText.trim().slice(0, 300)
-    : `updated ${result.filesTouched.length} file(s)`;
-
-  return {
-    ...changes,
-    dedupedEntries: operations.dedupedEntries,
-    splitEntries: operations.splitEntries,
-    systemMessage: `Managed auto-memory dream (agent): ${summary}`,
-  };
 }
 
 export async function runManagedAutoMemoryDream(

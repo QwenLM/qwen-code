@@ -295,6 +295,33 @@ describe('managed auto-memory dream', () => {
     ).rejects.toThrow('invalid memory document');
   });
 
+  it('does not attribute a concurrent writer change to the dream', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const concurrentFile = path.join(memoryRoot, 'project', 'concurrent.md');
+    await fs.mkdir(path.dirname(concurrentFile), { recursive: true });
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.writeFile(concurrentFile, 'written by another task');
+        return {
+          status: 'completed',
+          filesTouched: [],
+          filesWritten: [],
+        };
+      },
+    );
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+    );
+
+    expect(result.createdEntries).toBe(0);
+    await expect(fs.readFile(concurrentFile, 'utf-8')).resolves.toBe(
+      'written by another task',
+    );
+  });
+
   it('skips manual dream while metadata migration is pending', async () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const memoryFile = path.join(memoryRoot, 'project', 'legacy.md');

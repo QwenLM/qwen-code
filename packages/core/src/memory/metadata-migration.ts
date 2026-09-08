@@ -24,6 +24,7 @@ import {
 } from './indexer.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getProjectAutoMemoryRoots,
   getTeamAutoMemoryRoot,
@@ -146,10 +147,16 @@ function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
 }
 
 async function listMemoryFiles(root: string) {
-  return listTrustedMemoryMarkdownFiles(
-    root,
-    getMemoryRootTrustedAnchor(root),
-    AUTO_MEMORY_INDEX_FILENAME,
+  return (
+    await listTrustedMemoryMarkdownFiles(
+      root,
+      getMemoryRootTrustedAnchor(root),
+      AUTO_MEMORY_INDEX_FILENAME,
+    )
+  ).filter(
+    ({ relativePath }) =>
+      relativePath.split('/')[0]?.toLowerCase() !==
+      AUTO_MEMORY_PINNED_DIRNAME.toLowerCase(),
   );
 }
 
@@ -170,7 +177,13 @@ export async function scanMemoryMetadataMigrationCandidates(
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
     }
-    if (validateStructuredAutoMemoryDocument(content).valid) continue;
+    const validation = validateStructuredAutoMemoryDocument(content);
+    if (
+      validation.valid ||
+      validation.missingOrInvalidFields.includes('frontmatter-malformed')
+    ) {
+      continue;
+    }
     const parts = splitFrontmatter(filePath, content);
     candidates.push({
       scope,
@@ -292,9 +305,11 @@ class MigrationConflictError extends Error {}
 export async function commitMigratedMemoryMetadata(
   candidate: MemoryMetadataMigrationCandidate,
   metadata: GeneratedMemoryMetadata,
+  canCommit: () => boolean = () => true,
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
   if (!merged) return 'invalid';
+  if (!canCommit()) return 'conflict';
   const trustedFile = await resolveTrustedMemoryFile(
     candidate.root,
     getMemoryRootTrustedAnchor(candidate.root),
@@ -316,6 +331,7 @@ export async function commitMigratedMemoryMetadata(
       encoding: 'utf-8',
       noFollow: true,
       assertCanCommit: () => {
+        if (!canCommit()) throw new MigrationConflictError();
         let latest: string;
         try {
           latest = fsSync.readFileSync(trustedFile, 'utf-8');
@@ -456,6 +472,10 @@ export async function runMemoryMetadataMigration(params: {
             })
           ).docs;
   const committedRoots = new Set<string>();
+  const trustMustRemain =
+    params.scope !== 'user' && (params.config.isTrustedFolder?.() ?? true);
+  const canCommit = () =>
+    !trustMustRemain || (params.config.isTrustedFolder?.() ?? true);
   const rebuildCommittedIndexes = async (): Promise<void> => {
     if (params.scope === 'project') {
       await Promise.all(
@@ -513,7 +533,11 @@ export async function runMemoryMetadataMigration(params: {
         result.outputTokens += generated.usage.outputTokens;
         result.totalTokens += generated.usage.totalTokens;
       }
-      const status = await commitMigratedMemoryMetadata(candidate, metadata);
+      const status = await commitMigratedMemoryMetadata(
+        candidate,
+        metadata,
+        canCommit,
+      );
       if (status === 'committed') {
         result.committed += 1;
         committedRoots.add(candidate.root);

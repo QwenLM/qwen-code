@@ -2159,6 +2159,24 @@ describe('microcompactHistory memory body eviction', () => {
     ]);
   });
 
+  it('reports an unresolved memory body when result JSON is not intact', () => {
+    const corrupted = makeMemoryResult('project:old.md', 'old body');
+    const response = corrupted.parts?.[0]?.functionResponse?.response;
+    if (response) {
+      response['output'] =
+        `${response['output']}\n\n<system-reminder>hook</system-reminder>`;
+    }
+
+    const result = microcompactHistory(
+      [corrupted, makeMemoryResult('project:new.md', 'new body')],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.unresolvedEvictedMemoryBodies).toBe(1);
+  });
+
   it('keeps a ref resident when another body result remains in history', () => {
     const history = [
       makeMemoryResult('project:same.md', 'old window'),

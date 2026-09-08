@@ -64,10 +64,10 @@ interface MemoryBodySlice extends MemoryBodyVersion {
 
 function getMemoryBodySlicesForResponse(
   part: Part | undefined,
-): MemoryBodySlice[] {
+): MemoryBodySlice[] | undefined {
   if (part?.functionResponse?.name !== ToolNames.SEARCH_MEMORY) return [];
   const output = part.functionResponse.response?.['output'];
-  if (typeof output !== 'string') return [];
+  if (typeof output !== 'string') return undefined;
   try {
     const parsed = JSON.parse(output) as {
       mode?: unknown;
@@ -103,7 +103,7 @@ function getMemoryBodySlicesForResponse(
         total: result.range!.total as number,
       }));
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -117,7 +117,7 @@ export function collectResidentMemoryBodies(
   const slicesByVersion = new Map<string, MemoryBodySlice[]>();
   for (const content of history) {
     for (const part of content.parts ?? []) {
-      for (const slice of getMemoryBodySlicesForResponse(part)) {
+      for (const slice of getMemoryBodySlicesForResponse(part) ?? []) {
         const key = memoryBodyVersionKey(slice);
         const slices = slicesByVersion.get(key) ?? [];
         slices.push(slice);
@@ -643,6 +643,8 @@ export interface MicrocompactMeta {
    * armed entry would serve a dangling placeholder.
    */
   unresolvedEvictedReads: number;
+  /** Count of blanked search_memory results whose body refs could not be recovered. */
+  unresolvedEvictedMemoryBodies: number;
 }
 
 /**
@@ -774,6 +776,7 @@ export function microcompactHistory(
   const evictedReadPaths = new Set<string>();
   const clearedMemoryBodies = new Map<string, MemoryBodyVersion>();
   let unresolvedEvictedReads = 0;
+  let unresolvedEvictedMemoryBodies = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
@@ -826,8 +829,13 @@ export function microcompactHistory(
             }
           }
           if (part.functionResponse.name === ToolNames.SEARCH_MEMORY) {
-            for (const body of getMemoryBodySlicesForResponse(part)) {
-              clearedMemoryBodies.set(memoryBodyVersionKey(body), body);
+            const bodies = getMemoryBodySlicesForResponse(part);
+            if (!bodies) {
+              unresolvedEvictedMemoryBodies++;
+            } else {
+              for (const body of bodies) {
+                clearedMemoryBodies.set(memoryBodyVersionKey(body), body);
+              }
             }
           }
           return {
@@ -912,6 +920,7 @@ export function microcompactHistory(
         .filter((body) => !residentMemoryBodies.has(memoryBodyVersionKey(body)))
         .map(({ memoryRef, mtimeMs }) => ({ memoryRef, mtimeMs })),
       unresolvedEvictedReads,
+      unresolvedEvictedMemoryBodies,
     },
   };
 }

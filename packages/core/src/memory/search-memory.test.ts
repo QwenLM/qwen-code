@@ -744,6 +744,24 @@ describe('executeSearchMemory', () => {
     expect(result.warnings?.[0]).toContain('disappeared');
   });
 
+  it('stops when cancelled while rereading a selected document', async () => {
+    const controller = new AbortController();
+    vi.mocked(rereadAutoMemoryDocument).mockImplementationOnce(async (item) => {
+      controller.abort();
+      return item;
+    });
+
+    await expect(
+      executeSearchMemory(
+        { mode: 'fetch', refs: ['project:project/one.md'] },
+        {
+          ...options([doc('project/one.md')]),
+          abortSignal: controller.signal,
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('accepts Unicode letter keywords used by recall metadata', async () => {
     for (const keyword of [
       'かな',
@@ -960,6 +978,25 @@ describe('executeSearchMemory', () => {
     const searchResult = expectContentResult(result, 'search');
     expect(searchResult.results[0]?.content).toContain('target phrase');
     expect(searchResult.results[0]?.range?.start).toBeGreaterThan(5000);
+  });
+
+  it('maps both window edges back to the original body', async () => {
+    const table = Array.from(
+      { length: 30 },
+      (_, index) => `| row ${index} ${' '.repeat(60)} | value |`,
+    ).join('\n');
+    const body = `intro marker\n${table}\nsecond marker here\n${'tail '.repeat(500)}`;
+    const result = await executeSearchMemory(
+      { mode: 'search', keywords: ['intro marker', 'second marker'] },
+      options([doc('project/aligned-table.md', { body })]),
+    );
+
+    const item = expectContentResult(result, 'search').results[0];
+    expect(
+      item?.matches.filter((match) => match.source === 'body'),
+    ).toHaveLength(2);
+    expect(item?.content).toContain('intro marker');
+    expect(item?.content).toContain('second marker');
   });
 
   it('uses a bounded diversity bonus to cover an otherwise uncovered keyword', async () => {

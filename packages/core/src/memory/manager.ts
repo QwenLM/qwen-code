@@ -109,6 +109,7 @@ import {
 } from './metadata-migration.js';
 import {
   completeUserAutoMemoryDream,
+  DEFAULT_USER_DREAM_FAILURE_BACKOFF_HOURS,
   DEFAULT_USER_DREAM_MIN_HOURS,
   failUserAutoMemoryDream,
   markUserAutoMemoryDreamRunning,
@@ -238,6 +239,7 @@ export interface UserDreamScheduleResult {
     | 'disabled'
     | 'not_pending'
     | 'min_hours'
+    | 'failure_backoff'
     | 'locked'
     | 'running'
     | 'memory_pressure'
@@ -1479,6 +1481,13 @@ export class MemoryManager {
     const elapsed = hoursSince(metadata.lastDreamAt, now);
     if (elapsed !== null && elapsed < DEFAULT_USER_DREAM_MIN_HOURS) {
       return { status: 'skipped', skippedReason: 'min_hours' };
+    }
+    const attemptElapsed = hoursSince(metadata.lastAttemptAt, now);
+    if (
+      attemptElapsed !== null &&
+      attemptElapsed < DEFAULT_USER_DREAM_FAILURE_BACKOFF_HOURS
+    ) {
+      return { status: 'skipped', skippedReason: 'failure_backoff' };
     }
 
     const lockPath = getUserAutoMemoryConsolidationLockPath();

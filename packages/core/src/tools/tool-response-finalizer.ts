@@ -123,7 +123,11 @@ function collectTextSlots(
       const response = part.functionResponse?.response;
       const output = response?.['output'];
       const error = response?.['error'];
-      if (typeof output === 'string') {
+      const budgetExemptOutput =
+        excludeBudgetExemptOutput &&
+        canonicalToolName(part.functionResponse?.name ?? entry.toolName) ===
+          ToolNames.SEARCH_MEMORY;
+      if (typeof output === 'string' && !budgetExemptOutput) {
         const protectedPrefix = excludeBudgetExemptOutput
           ? getPlanModeLifecyclePrefix(
               part.functionResponse?.name ?? entry.toolName,

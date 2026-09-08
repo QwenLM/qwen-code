@@ -131,6 +131,32 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('distinguishes missing and malformed frontmatter', () => {
+    expect(validateStructuredAutoMemoryDocument('Plain memory body.')).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-missing'],
+    });
+    expect(
+      validateStructuredAutoMemoryDocument(
+        '--- \nname: Broken\ntype: project\n---\nBody',
+      ),
+    ).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-malformed'],
+    });
+    for (const malformed of [
+      '\uFEFF---\nname: Broken\n---\nBody',
+      '\n---\nname: Broken\n---\nBody',
+      '---\rname: Broken\r---\rBody',
+      '---\nname: Broken\n  ---\nBody',
+    ]) {
+      expect(validateStructuredAutoMemoryDocument(malformed)).toEqual({
+        valid: false,
+        missingOrInvalidFields: ['frontmatter-malformed'],
+      });
+    }
+  });
+
   it('keeps legacy parsing permissive while strict validation reports fields', () => {
     const content = [
       '---',
@@ -210,6 +236,33 @@ describe('auto-memory topic scanning', () => {
       'database mocking',
     ]);
     expect(parsed?.usageScenarios).toEqual(['User prefers integration tests.']);
+  });
+
+  it('preserves unquoted issue references in prompt-facing metadata', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/issues.md',
+      [
+        '---',
+        'type: project',
+        'name: Release issue #1234',
+        'description: Pointers to issue #1234 and freeze PR #5678',
+        'category: project_introduction',
+        'keywords:',
+        '  - issue #1234',
+        '  - freeze release',
+        'usage_scenarios:',
+        '  - Running the freeze checklist for #1234',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed).toMatchObject({
+      title: 'Release issue #1234',
+      description: 'Pointers to issue #1234 and freeze PR #5678',
+      keywords: ['issue #1234', 'freeze release'],
+      usageScenarios: ['Running the freeze checklist for #1234'],
+    });
   });
 
   it('ignores invalid keyword fields while preserving semantic recall data', () => {
@@ -500,6 +553,17 @@ describe('auto-memory topic scanning', () => {
         snapshot.docs.find((doc) => doc.relativePath === 'project/collision.md')
           ?.title,
       ).toBe('Newer local');
+      expect(snapshot.sourceStatus).toMatchObject({
+        complete: false,
+        incompleteScopes: [
+          {
+            scope: 'project',
+            reason: 'ref_collision',
+            discovered: 2,
+            returned: 1,
+          },
+        ],
+      });
     } finally {
       if (previousLocal === undefined) {
         delete process.env['QWEN_CODE_MEMORY_LOCAL'];

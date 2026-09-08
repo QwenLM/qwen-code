@@ -16,6 +16,7 @@ import {
 } from './paths.js';
 import {
   completeUserAutoMemoryDream,
+  failUserAutoMemoryDream,
   markUserAutoMemoryDreamRunning,
   readUserAutoMemoryMetadata,
   recordUserAutoMemoryMutation,
@@ -107,6 +108,22 @@ describe('User Memory dream', () => {
     expect(completed.status).toBe('noop');
   });
 
+  it('records a failed attempt without clearing pending work', async () => {
+    const now = new Date('2026-08-01T00:00:00.000Z');
+    for (let index = 0; index < 10; index += 1) {
+      await recordUserAutoMemoryMutation(now);
+    }
+
+    const failed = await failUserAutoMemoryDream('failed', now);
+
+    expect(failed).toMatchObject({
+      status: 'failed',
+      dirtyMutations: 10,
+      pendingReason: 'dirty_mutations',
+      lastAttemptAt: '2026-08-01T00:00:00.000Z',
+    });
+  });
+
   it('keeps user dream pending while the document limit is exceeded', async () => {
     const userRoot = path.join(getUserAutoMemoryRoot(), 'user');
     await fs.mkdir(userRoot, { recursive: true });
@@ -159,7 +176,8 @@ describe('User Memory dream', () => {
         version: 1,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
-        lastDreamAt: 'not-a-date',
+        lastDreamAt: now.toISOString(),
+        lastAttemptAt: 'not-a-date',
         dirtyMutations: 10,
         status: 'running',
         pendingReason: 'dirty_mutations',
@@ -191,7 +209,7 @@ describe('User Memory dream', () => {
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(
         filePath,
-        '---\ntype: user\nname: Role\ndescription: Durable role\nkeywords:\n  - platform engineer\n---\n\nThe user is a platform engineer.\n',
+        '---\ntype: user\nname: Role\ndescription: Durable role\ncategory: basic_information\nkeywords:\n  - platform engineer\n  - user role\nusage_scenarios:\n  - Personalizing technical answers\n---\n\nThe user is a platform engineer.\n',
       );
       return {
         status: 'completed',

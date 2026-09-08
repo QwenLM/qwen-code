@@ -582,6 +582,17 @@ describe('MemoryManager', () => {
         status: 'failed',
         error: 'user dream failed',
       });
+
+      await expect(
+        manager.scheduleUserDream({
+          projectRoot,
+          config,
+          now: new Date('2026-08-29T00:30:00.000Z'),
+        }),
+      ).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'failure_backoff',
+      });
     });
 
     it('keeps User Dream completed when completion metadata cannot persist', async () => {

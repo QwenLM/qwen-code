@@ -22,6 +22,17 @@ import {
 } from './scan.js';
 import { logMemoryRecall } from '../telemetry/index.js';
 
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLogger,
+}));
+
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
   return {
@@ -851,6 +862,24 @@ describe('auto-memory relevant recall', () => {
       expect.objectContaining({ selector_duration_ms: 40 }),
     );
     vi.useRealTimers();
+  });
+
+  it('warns when a selected document disappears before injection', async () => {
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(docs);
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) =>
+      doc === docs[0] ? null : doc,
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'project constraints',
+      { config },
+    );
+
+    expect(result.selectedDocs).toEqual([docs[1]]);
+    expect(debugLogger.warn).toHaveBeenCalledWith(
+      'Selected memory dropped before injection (deleted, unreadable, or untrusted): project:reference.md',
+    );
   });
 
   it('does not publish an unrelated stale memory in the fast result', async () => {

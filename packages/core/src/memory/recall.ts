@@ -188,8 +188,7 @@ function toolAliases(toolName: string): string[] {
  * Build the active-tool noise predicate once per recall rather than deriving
  * it per document. The alias set depends only on `recentTools`, so computing
  * it inside the per-document filter re-derived up to
- * `MAX_RECENT_TOOL_NAMES_FOR_MEMORY` alias lists for every scanned document —
- * which recall now does over an uncapped pool.
+ * `MAX_RECENT_TOOL_NAMES_FOR_MEMORY` alias lists for every scanned document.
  *
  * Returns a predicate rather than a boolean so both filter sites share the
  * hoisting; a `recentTools`-free recall short-circuits to a constant `false`.
@@ -500,6 +499,14 @@ async function rereadSelectedDocuments(
   docs: readonly ScannedAutoMemoryDocument[],
 ): Promise<ScannedAutoMemoryDocument[]> {
   const reread = await Promise.all(docs.map(rereadAutoMemoryDocument));
+  const dropped = docs.filter((_, index) => reread[index] === null);
+  if (dropped.length > 0) {
+    debugLogger.warn(
+      `Selected memory dropped before injection (deleted, unreadable, or untrusted): ${dropped
+        .map(toAutoMemoryRef)
+        .join(', ')}`,
+    );
+  }
   return reread.filter((doc): doc is ScannedAutoMemoryDocument => doc !== null);
 }
 
@@ -569,7 +576,6 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         scopes: teamMemoryEnabled ? ['project', 'user', 'team'] : undefined,
         teamMemoryEnabled,
         trustedProject: options.config?.isTrustedFolder?.() ?? false,
-        uncapped: true,
         documentCache: options.documentCache,
       });
   const scanDurationMs = Date.now() - t0;

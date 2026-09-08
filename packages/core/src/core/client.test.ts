@@ -4746,6 +4746,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         microcompactMeta: {
           unresolvedEvictedReads: 2,
+          unresolvedEvictedMemoryBodies: 1,
           evictedReadPaths: [],
           evictedMemoryBodies: [{ memoryRef: 'project:topic.md', mtimeMs: 7 }],
           toolsCleared: 3,
@@ -4771,8 +4772,11 @@ describe('Gemini Client (client.ts)', () => {
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
       expect(
+        mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
+      ).toHaveBeenCalledOnce();
+      expect(
         mockMemoryManager.markMemoryBodiesEvictedFromHistory,
-      ).toHaveBeenCalledWith([{ memoryRef: 'project:topic.md', mtimeMs: 7 }]);
+      ).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -4789,6 +4793,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         microcompactMeta: {
           unresolvedEvictedReads: 0,
+          unresolvedEvictedMemoryBodies: 0,
           evictedReadPaths: [evictedPath],
           toolsCleared: 2,
           mediaCleared: 0,
@@ -4825,6 +4830,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         microcompactMeta: {
           unresolvedEvictedReads: 0,
+          unresolvedEvictedMemoryBodies: 0,
           evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
           toolsCleared: 1,
           mediaCleared: 0,
@@ -5397,10 +5403,25 @@ describe('Gemini Client (client.ts)', () => {
               incompleteScopes: [],
             },
           },
-          focusedPrompt: '',
-          prompt: '',
-          selectedDocs: [],
-          strategy: 'none',
+          focusedPrompt: 'Compressed focus',
+          prompt: 'Compressed focus',
+          selectedDocs: [
+            {
+              type: 'user',
+              scope: 'user',
+              filePath: '/m/compressed.md',
+              relativePath: 'compressed.md',
+              filename: 'compressed.md',
+              category: 'uncategorized',
+              title: 'Compressed',
+              description: 'Compressed memory',
+              keywords: ['compressed'],
+              usageScenarios: ['After compression'],
+              body: '- compressed',
+              mtimeMs: 1,
+            },
+          ],
+          strategy: 'heuristic',
         });
         return new Promise(() => {});
       });
@@ -5436,6 +5457,26 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
       ).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears fast-delivery refs when managed memory is reset', () => {
+      const fastDeliveredRefs = new Set(['user:compressed.md']);
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: true,
+        fastDeliveredRefs,
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+
+      client.resetManagedAutoMemoryAfterCompression();
+
+      expect(fastDeliveredRefs).toEqual(new Set());
     });
 
     it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {

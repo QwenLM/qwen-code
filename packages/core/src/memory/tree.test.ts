@@ -10,6 +10,7 @@ import {
   buildAutoMemoryTree,
   createAutoMemoryTreeSnapshot,
   renderAutoMemoryFocusedSubtree,
+  toAutoMemoryRef,
 } from './tree.js';
 
 const sourceStatus: MemorySourceStatus = {
@@ -42,6 +43,13 @@ function doc(
 }
 
 describe('auto memory tree rendering', () => {
+  it.runIf(process.platform !== 'win32')(
+    'percent-encodes a literal POSIX backslash in refs',
+    () => {
+      expect(toAutoMemoryRef(doc('a\\b.md'))).toBe('project:a%5Cb.md');
+    },
+  );
+
   it('does not repeat a legacy description fallback as a usage scenario', () => {
     const description = `Legacy description ${'detail '.repeat(20)}`;
     const memory = doc('project/legacy.md', {

@@ -722,6 +722,42 @@ describe('tool response finalization', () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it('keeps search_memory JSON intact inside a send-boundary batch', () => {
+    const output = JSON.stringify({ content: 'memory body' });
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'memory-search',
+              name: ToolNames.SEARCH_MEMORY,
+              response: { output },
+            },
+          },
+          {
+            functionResponse: {
+              id: 'shell',
+              name: 'shell',
+              response: { output: 'x'.repeat(1_000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = enforceFunctionResponseBudget(entries, 100);
+    const retained =
+      result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+
+    expect(retained).toBe(output);
+    expect(() => JSON.parse(String(retained))).not.toThrow();
+    expect(
+      result[0]?.responseParts[1]?.functionResponse?.response?.['output'],
+    ).not.toBe('x'.repeat(1_000));
+  });
+
   it('does not split UTF-16 surrogate pairs', () => {
     const entries = [
       entry('unicode', [

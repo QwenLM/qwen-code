@@ -60,6 +60,57 @@ describe('SearchMemoryTool', () => {
     );
   });
 
+  it('passes cancellation through and releases the request claim', async () => {
+    const mockConfig = config();
+    const tool = new SearchMemoryTool(mockConfig);
+    const params = { mode: 'search' as const, keywords: ['memory tree'] };
+    const controller = new AbortController();
+    vi.mocked(executeSearchMemory).mockImplementationOnce(
+      async (_params, options) => {
+        expect(options.abortSignal).toBe(controller.signal);
+        options.bodyPresentVersions?.set('project:one.md', 1);
+        options.bodyCoverage?.set('project:one.md', {
+          version: 1,
+          total: 1,
+          ranges: [{ start: 0, end: 1 }],
+        });
+        options.exhaustedBodyRefs?.add('project:one.md');
+        controller.abort();
+        options.abortSignal?.throwIfAborted();
+        throw new Error('unreachable');
+      },
+    );
+
+    await expect(
+      tool.build(params).execute(controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    const memoryManager = mockConfig.getMemoryManager();
+    expect(memoryManager.getBodyPresentVersionsInHistory()).toEqual(new Map());
+    expect(memoryManager.getBodyCoverageInHistory()).toEqual(new Map());
+    expect(memoryManager.getExhaustedBodyRefsForCurrentTurn()).toEqual(
+      new Set(),
+    );
+
+    vi.mocked(executeSearchMemory).mockResolvedValueOnce({
+      mode: 'search',
+      sourceStatus: {
+        requestedScopes: ['project'],
+        searchedScopes: ['project'],
+        unavailableScopes: [],
+        complete: true,
+        incompleteScopes: [],
+      },
+      results: [],
+    });
+    const retry = await tool
+      .build(params)
+      .execute(new AbortController().signal);
+
+    expect(retry.llmContent).not.toContain('duplicateRequest');
+    expect(executeSearchMemory).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects stale historical calls while the legacy protocol is active', async () => {
     const mockConfig = config();
     vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');
@@ -209,6 +260,7 @@ describe('SearchMemoryTool', () => {
       { mode: 'explore' },
       {
         projectRoot: '/tmp/project',
+        abortSignal: expect.any(AbortSignal),
         teamMemoryEnabled: false,
         trustedProject: true,
         bodyPresentVersions: expect.any(Map),

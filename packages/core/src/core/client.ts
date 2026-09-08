@@ -1398,6 +1398,7 @@ export class LlmClient {
   resetManagedAutoMemoryAfterCompression(): void {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
+    this.pendingMemoryPrefetch?.fastDeliveredRefs.clear();
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
     this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
   }
@@ -3069,9 +3070,14 @@ export class LlmClient {
         // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
-        this.config
-          .getMemoryManager()
-          .markMemoryBodiesEvictedFromHistory(m.evictedMemoryBodies ?? []);
+        const memoryManager = this.config.getMemoryManager();
+        if (m.unresolvedEvictedMemoryBodies > 0) {
+          memoryManager.markAllMemoryBodiesEvictedFromHistory();
+        } else {
+          memoryManager.markMemoryBodiesEvictedFromHistory(
+            m.evictedMemoryBodies ?? [],
+          );
+        }
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -5554,11 +5560,14 @@ export class LlmClient {
         microcompactMeta,
         'compress-fast',
       );
-      this.config
-        .getMemoryManager()
-        .markMemoryBodiesEvictedFromHistory(
+      const memoryManager = this.config.getMemoryManager();
+      if (microcompactMeta.unresolvedEvictedMemoryBodies > 0) {
+        memoryManager.markAllMemoryBodiesEvictedFromHistory();
+      } else {
+        memoryManager.markMemoryBodiesEvictedFromHistory(
           microcompactMeta.evictedMemoryBodies ?? [],
         );
+      }
     }
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
     this.lastDeliveredMemoryTreeRevision = undefined;

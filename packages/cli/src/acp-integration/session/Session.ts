@@ -7899,10 +7899,21 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
     }
+    if (!sourceStream) {
+      llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      return { responseStream: null, stopReason: 'end_turn' };
+    }
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
+      const commitMemoryDelivery = () => {
+        llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+        if (memoryDeliveryStateInvalidated) {
+          llmClient.resetManagedAutoMemoryAfterCompression();
+        }
+        committed = true;
+      };
       try {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
@@ -7919,13 +7930,12 @@ export class Session implements SessionContext {
           yield event;
         }
         if (receivedChunk) {
-          llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
-          if (memoryDeliveryStateInvalidated) {
-            llmClient.resetManagedAutoMemoryAfterCompression();
-          }
-          committed = true;
+          commitMemoryDelivery();
         }
       } finally {
+        if (!committed && receivedChunk && abortSignal.aborted) {
+          commitMemoryDelivery();
+        }
         if (!committed) {
           llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
         }

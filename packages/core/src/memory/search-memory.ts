@@ -159,6 +159,7 @@ export type SearchMemoryToolResult =
 
 export interface ExecuteSearchMemoryOptions {
   projectRoot: string;
+  abortSignal?: AbortSignal;
   teamMemoryEnabled?: boolean;
   trustedProject?: boolean;
   bodyPresentVersions?: Map<string, number>;
@@ -661,7 +662,7 @@ function selectSearchResults(
 function selectBodyWindowOffset(
   body: string,
   keywords: readonly string[],
-): number {
+): { offset: number; maxChars: number } {
   const searchableBody = body.slice(0, FETCH_TOTAL_BODY_CHARS);
   const normalizedBody = normalizeSearchText(searchableBody);
   const hits: Array<{ keyword: string; index: number }> = [];
@@ -674,7 +675,9 @@ function selectBodyWindowOffset(
       from = index + Math.max(1, keyword.length);
     }
   }
-  if (hits.length === 0) return 0;
+  if (hits.length === 0) {
+    return { offset: 0, maxChars: SEARCH_BODY_WINDOW_CHARS };
+  }
 
   const starts = new Set(
     hits.map(({ index }) =>
@@ -722,7 +725,19 @@ function selectBodyWindowOffset(
       bestStart = start;
     }
   }
-  return normalizedOffsetToSourceOffset(searchableBody, bestStart);
+  const offset = normalizedOffsetToSourceOffset(searchableBody, bestStart);
+  const normalizedEnd = Math.min(
+    bestStart + SEARCH_BODY_WINDOW_CHARS,
+    normalizedBody.length,
+  );
+  let end = normalizedOffsetToSourceOffset(searchableBody, normalizedEnd);
+  if (
+    normalizeSearchText(searchableBody.slice(0, end)).length > normalizedEnd &&
+    /\s/u.test(searchableBody[end - 2] ?? '')
+  ) {
+    end -= 1;
+  }
+  return { offset, maxChars: end - offset };
 }
 
 async function readContentResult(
@@ -870,6 +885,7 @@ export async function executeSearchMemory(
   params: SearchMemoryToolParams,
   options: ExecuteSearchMemoryOptions,
 ): Promise<SearchMemoryToolResult> {
+  options.abortSignal?.throwIfAborted();
   const startedAt = Date.now();
   const bodyPresentVersions = options.bodyPresentVersions ?? new Map();
   const bodyCoverage = options.bodyCoverage ?? new Map();
@@ -904,6 +920,7 @@ export async function executeSearchMemory(
       options,
       hasUnscopedRef ? undefined : refScopes,
     );
+    options.abortSignal?.throwIfAborted();
     const docsByRef = new Map(
       snapshot.docs.map((doc) => [memoryRef(doc), doc]),
     );
@@ -914,6 +931,7 @@ export async function executeSearchMemory(
     const warnings: string[] = [];
     let remaining = FETCH_TOTAL_BODY_CHARS;
     for (const ref of params.refs) {
+      options.abortSignal?.throwIfAborted();
       if (seen.has(ref)) continue;
       seen.add(ref);
       const doc = docsByRef.get(ref);
@@ -952,6 +970,7 @@ export async function executeSearchMemory(
         0,
         Math.min(FETCH_BODY_WINDOW_CHARS, remaining),
       );
+      options.abortSignal?.throwIfAborted();
       if (result) {
         const { title: _title, ...fetchResult } = result;
         remaining -= fetchResult.content?.length ?? 0;
@@ -988,6 +1007,7 @@ export async function executeSearchMemory(
     for (const category of params.categories ?? []) validateCategory(category);
     const { keywords, warnings } = normalizeSearchKeywords(params.keywords);
     const snapshot = await getSnapshot(options, scopes);
+    options.abortSignal?.throwIfAborted();
     const categories = params.categories
       ? new Set<AutoMemoryTreeCategoryKey>(params.categories)
       : undefined;
@@ -995,6 +1015,7 @@ export async function executeSearchMemory(
       .filter((doc) => !categories || categories.has(doc.category))
       .filter((doc) => !exhaustedBodyRefs.has(memoryRef(doc)))
       .map((doc) => {
+        options.abortSignal?.throwIfAborted();
         const score = scoreSearchDoc(doc, keywords);
         return score ? { doc, score } : null;
       })
@@ -1021,18 +1042,20 @@ export async function executeSearchMemory(
     let remaining = SEARCH_TOTAL_BODY_CHARS;
     const results: MemorySearchResult[] = [];
     for (const item of ranked) {
+      options.abortSignal?.throwIfAborted();
       if (remaining <= 0) break;
-      const preferredOffset = selectBodyWindowOffset(item.doc.body, keywords);
+      const window = selectBodyWindowOffset(item.doc.body, keywords);
       const result = await readContentResult(
         item.doc,
         bodyPresentVersions,
         bodyCoverage,
         exhaustedBodyRefs,
         undefined,
-        preferredOffset,
-        Math.min(SEARCH_BODY_WINDOW_CHARS, remaining),
+        window.offset,
+        Math.min(window.maxChars, remaining),
         FETCH_TOTAL_BODY_CHARS,
       );
+      options.abortSignal?.throwIfAborted();
       if (result) {
         remaining -= result.content?.length ?? 0;
         results.push({ ...result, matches: item.score.matches });
@@ -1061,6 +1084,7 @@ export async function executeSearchMemory(
   }
   for (const branch of params.branches ?? []) validateCategory(branch.category);
   const snapshot = await getSnapshot(options, scopes);
+  options.abortSignal?.throwIfAborted();
   const cursorScopes = snapshot.sourceStatus.searchedScopes;
   if (!params.branches || params.branches.length === 0) {
     const tree = buildAutoMemoryTree(snapshot.docs);

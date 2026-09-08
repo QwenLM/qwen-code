@@ -63,8 +63,11 @@ interface RenderAutoMemoryFocusedSubtreeResult {
 }
 
 export function toAutoMemoryRef(doc: ScannedAutoMemoryDocument): string {
-  const encodedPath = doc.relativePath
-    .replaceAll('\\', '/')
+  const normalizedPath =
+    process.platform === 'win32'
+      ? doc.relativePath.replaceAll('\\', '/')
+      : doc.relativePath;
+  const encodedPath = normalizedPath
     .split('/')
     .map((segment) => encodeURIComponent(segment))
     .join('/');

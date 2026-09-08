@@ -86,6 +86,7 @@ export interface UserAutoMemoryMetadata {
   createdAt: string;
   updatedAt: string;
   lastDreamAt?: string;
+  lastAttemptAt?: string;
   dirtyMutations: number;
   status: UserAutoMemoryDreamStatus;
   pendingReason?: 'dirty_mutations' | 'document_limit';

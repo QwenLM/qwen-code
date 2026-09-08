@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import { validateStructuredAutoMemoryDocument } from './scan.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -152,15 +152,14 @@ async function validateTarget(
   relativePath: string,
 ): Promise<void> {
   const content = await fs.readFile(filePath, 'utf-8');
-  if (
-    !parseAutoMemoryTopicDocument(filePath, content, 0, relativePath, 'project')
-  ) {
+  if (!validateStructuredAutoMemoryDocument(content).valid) {
     throw new Error(`Dream target is not a valid memory: ${relativePath}`);
   }
 }
 
 export async function applyDreamOperations(
   memoryRoot: string,
+  beforeSnapshot: ReadonlyMap<string, { readonly content: string }>,
   abortSignal?: AbortSignal,
 ): Promise<AppliedDreamOperations> {
   const manifestPath = path.join(memoryRoot, DREAM_OPERATIONS_FILENAME);
@@ -177,11 +176,26 @@ export async function applyDreamOperations(
   try {
     const manifest = parseManifest(JSON.parse(raw) as unknown);
     const deletePaths = manifest.delete.map(normalizeRelativeMarkdownPath);
+    if (deletePaths.some((relativePath) => !beforeSnapshot.has(relativePath))) {
+      throw new Error(
+        'Dream operations can only delete files from the pre-dream snapshot.',
+      );
+    }
     const resolvedDeletes = await Promise.all(
       deletePaths.map(async (relativePath) => ({
         relativePath,
         filePath: await resolveExistingFile(memoryRoot, relativePath),
       })),
+    );
+    await Promise.all(
+      resolvedDeletes.map(async ({ relativePath, filePath }) => {
+        const current = await fs.readFile(filePath, 'utf-8');
+        if (current !== beforeSnapshot.get(relativePath)?.content) {
+          throw new Error(
+            `Dream delete source changed during the run: ${relativePath}`,
+          );
+        }
+      }),
     );
     const deleteSet = new Set(resolvedDeletes.map(({ filePath }) => filePath));
     if (deleteSet.size !== resolvedDeletes.length) {

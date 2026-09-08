@@ -44,7 +44,8 @@ const MAX_STRUCTURED_MEMORY_KEYWORDS = 6;
 export type AutoMemoryScanIncompleteReason =
   | 'root_read_failed'
   | 'file_read_failed'
-  | 'file_limit';
+  | 'file_limit'
+  | 'ref_collision';
 
 export type AutoMemoryUnavailableScopeReason =
   | 'disabled'
@@ -104,7 +105,8 @@ export interface ScannedAutoMemoryDocument {
 export interface StructuredAutoMemoryValidation {
   valid: boolean;
   missingOrInvalidFields: Array<
-    | 'frontmatter'
+    | 'frontmatter-missing'
+    | 'frontmatter-malformed'
     | 'name'
     | 'description'
     | 'type'
@@ -116,6 +118,48 @@ export interface StructuredAutoMemoryValidation {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value.trim() || undefined : undefined;
+}
+
+function preserveUnquotedHash(
+  value: unknown,
+  raw: string | undefined,
+): unknown {
+  return typeof value === 'string' &&
+    raw?.includes(' #') &&
+    !raw.startsWith('"') &&
+    !raw.startsWith("'")
+    ? raw
+    : value;
+}
+
+function rawFrontmatterValue(
+  frontmatter: string,
+  key: string,
+): string | undefined {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return frontmatter
+    .match(new RegExp(`^${escapedKey}:[^\\S\\n]*(.+)$`, 'm'))?.[1]
+    ?.trim();
+}
+
+function recoverUnquotedHashList(
+  frontmatter: string,
+  key: string,
+  value: unknown,
+): unknown {
+  if (!Array.isArray(value)) return value;
+  const lines = frontmatter.split('\n');
+  const start = lines.findIndex((line) => line.trim() === `${key}:`);
+  if (start < 0) return value;
+  const rawItems: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const match = line.match(/^[^\S\n]+-[^\S\n]*(.+)$/);
+    if (!match) break;
+    rawItems.push(match[1].trim());
+  }
+  return rawItems.length === value.length
+    ? value.map((item, index) => preserveUnquotedHash(item, rawItems[index]))
+    : value;
 }
 
 export function normalizeAutoMemoryKeyword(value: string): string {
@@ -208,11 +252,17 @@ function parseUsageScenarios(value: unknown, description: string): string[] {
 export function validateStructuredAutoMemoryDocument(
   content: string,
 ): StructuredAutoMemoryValidation {
-  const frontmatterMatch = content
-    .replace(/\r\n/g, '\n')
-    .match(/^---\n([\s\S]*?)\n---\n?[\s\S]*$/);
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const frontmatterMatch = normalizedContent.match(
+    /^---\n([\s\S]*?)\n---\n?[\s\S]*$/,
+  );
   if (!frontmatterMatch) {
-    return { valid: false, missingOrInvalidFields: ['frontmatter'] };
+    const reason = /^[\s\uFEFF]*---[^\S\r\n]*(?:\r\n?|\n|$)/.test(
+      normalizedContent,
+    )
+      ? 'frontmatter-malformed'
+      : 'frontmatter-missing';
+    return { valid: false, missingOrInvalidFields: [reason] };
   }
   const parsed = parseYaml(frontmatterMatch[1]);
   const invalid: StructuredAutoMemoryValidation['missingOrInvalidFields'] = [];
@@ -278,7 +328,13 @@ export function parseAutoMemoryTopicDocument(
   if (!rawType || !AUTO_MEMORY_TYPES.includes(rawType as AutoMemoryType)) {
     return null;
   }
-  const description = stringValue(parsedFrontmatter['description']) ?? '';
+  const description =
+    stringValue(
+      preserveUnquotedHash(
+        parsedFrontmatter['description'],
+        rawFrontmatterValue(frontmatter, 'description'),
+      ),
+    ) ?? '';
 
   return {
     scope,
@@ -287,14 +343,34 @@ export function parseAutoMemoryTopicDocument(
     relativePath,
     filename: path.basename(filePath),
     title:
-      stringValue(parsedFrontmatter['name']) ??
-      stringValue(parsedFrontmatter['title']) ??
+      stringValue(
+        preserveUnquotedHash(
+          parsedFrontmatter['name'],
+          rawFrontmatterValue(frontmatter, 'name'),
+        ),
+      ) ??
+      stringValue(
+        preserveUnquotedHash(
+          parsedFrontmatter['title'],
+          rawFrontmatterValue(frontmatter, 'title'),
+        ),
+      ) ??
       rawType,
     description,
     category: parseCategory(parsedFrontmatter['category']),
-    keywords: parseKeywords(parsedFrontmatter['keywords']),
+    keywords: parseKeywords(
+      recoverUnquotedHashList(
+        frontmatter,
+        'keywords',
+        parsedFrontmatter['keywords'],
+      ),
+    ),
     usageScenarios: parseUsageScenarios(
-      parsedFrontmatter['usage_scenarios'],
+      recoverUnquotedHashList(
+        frontmatter,
+        'usage_scenarios',
+        parsedFrontmatter['usage_scenarios'],
+      ),
       description,
     ),
     body: bodyContent.trim(),
@@ -494,11 +570,20 @@ async function scanProjectAutoMemoryWithStatus(
       }),
     ),
   );
-  const allDocs = dedupeScannedDocuments(
-    sortScannedDocuments(results.flatMap((result) => result.docs)),
+  const sortedDocs = sortScannedDocuments(
+    results.flatMap((result) => result.docs),
   );
+  const allDocs = dedupeScannedDocuments(sortedDocs);
   const docs = uncapped ? allDocs : allDocs.slice(0, MAX_SCANNED_MEMORY_FILES);
   const incompleteScopes = results.flatMap((result) => result.incompleteScopes);
+  if (allDocs.length < sortedDocs.length) {
+    incompleteScopes.push({
+      scope: 'project',
+      reason: 'ref_collision',
+      discovered: sortedDocs.length,
+      returned: allDocs.length,
+    });
+  }
   if (!uncapped && allDocs.length > MAX_SCANNED_MEMORY_FILES) {
     incompleteScopes.push({
       scope: 'project',
@@ -669,10 +754,8 @@ export async function rereadAutoMemoryDocument(
       doc.relativePath,
     );
     if (!trustedFile) return null;
-    const [content, stats] = await Promise.all([
-      fs.readFile(trustedFile, 'utf-8'),
-      fs.stat(trustedFile),
-    ]);
+    const stats = await fs.stat(trustedFile);
+    const content = await fs.readFile(trustedFile, 'utf-8');
     return parseAutoMemoryTopicDocument(
       doc.filePath,
       content,

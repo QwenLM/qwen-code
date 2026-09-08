@@ -11,6 +11,7 @@ import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import {
   diffDreamSnapshots,
+  dreamRelativePaths,
   snapshotDreamFiles,
   validateDreamSnapshotChanges,
   type AutoMemoryDreamResult,
@@ -38,6 +39,7 @@ import { planUserAutoMemoryDreamByAgent } from './user-dream-agent-planner.js';
 
 const DEFAULT_USER_DREAM_DIRTY_MUTATIONS = 10;
 export const DEFAULT_USER_DREAM_MIN_HOURS = 24;
+export const DEFAULT_USER_DREAM_FAILURE_BACKOFF_HOURS = 1;
 const DEFAULT_USER_DREAM_DOCUMENT_LIMIT = 120;
 
 const METADATA_LOCK_OPTIONS: lockfile.LockOptions = {
@@ -116,7 +118,9 @@ export async function readUserAutoMemoryMetadata(
     (value.pendingReason !== undefined &&
       value.pendingReason !== 'dirty_mutations' &&
       value.pendingReason !== 'document_limit') ||
-    (value.lastDreamAt !== undefined && !isValidTimestamp(value.lastDreamAt))
+    (value.lastDreamAt !== undefined && !isValidTimestamp(value.lastDreamAt)) ||
+    (value.lastAttemptAt !== undefined &&
+      !isValidTimestamp(value.lastAttemptAt))
   ) {
     const replacement = defaultUserMetadata(now);
     await atomicWriteFile(
@@ -223,6 +227,7 @@ export async function failUserAutoMemoryDream(
 ): Promise<UserAutoMemoryMetadata> {
   return mutateUserMetadata(now, (metadata) => {
     metadata.status = status;
+    metadata.lastAttemptAt = now.toISOString();
   });
 }
 
@@ -252,19 +257,26 @@ export async function runManagedUserAutoMemoryDream(
   }
   let operations: AppliedDreamOperations;
   let after: Map<string, DreamSnapshotEntry>;
+  const writtenPaths = dreamRelativePaths(
+    memoryRoot,
+    agent.filesWritten ?? agent.filesTouched,
+  );
   try {
     const written = await snapshotDreamFiles(memoryRoot, 'user');
-    validateDreamSnapshotChanges(before, written);
+    validateDreamSnapshotChanges(before, written, writtenPaths);
     abortSignal?.throwIfAborted();
-    operations = await applyDreamOperations(memoryRoot, abortSignal);
+    operations = await applyDreamOperations(memoryRoot, before, abortSignal);
     after = await snapshotDreamFiles(memoryRoot, 'user');
+    for (const deletedPath of operations.deletedPaths) {
+      writtenPaths.add(deletedPath);
+    }
   } catch (error) {
     await fs
       .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
       .catch(() => {});
     throw error;
   }
-  const changes = diffDreamSnapshots(before, after);
+  const changes = diffDreamSnapshots(before, after, writtenPaths);
   if (!abortSignal?.aborted) {
     await rebuildUserAutoMemoryIndex();
   }

@@ -40,37 +40,20 @@ export async function resolveTrustedMemoryRoot(
     throw new Error(`Memory root is outside its trusted anchor: ${root}`);
   }
   const resolvedAnchor = await fs.realpath(trustedAnchor);
-  const expected = path.join(resolvedAnchor, relative);
   const resolved = await fs.realpath(root);
-  const resolvedAliasRoot = await resolveSharedProjectAliasRoot(
-    resolvedAnchor,
-    relative,
+  const [scopeDirectory] = relative.split(path.sep);
+  const resolvedScope = await fs.realpath(
+    path.join(resolvedAnchor, scopeDirectory),
   );
-  if (comparable(resolved) !== comparable(resolvedAliasRoot ?? expected)) {
+  if (
+    !isWithin(resolvedAnchor, resolvedScope) ||
+    !isWithin(resolvedScope, resolved)
+  ) {
     throw new Error(
       `Memory root resolves outside its trusted boundary: ${root}`,
     );
   }
   return resolved;
-}
-
-async function resolveSharedProjectAliasRoot(
-  resolvedAnchor: string,
-  relative: string,
-): Promise<string | undefined> {
-  const parts = relative.split(path.sep);
-  if (parts.length !== 3 || parts[0] !== 'projects') return undefined;
-
-  const projectAlias = path.join(resolvedAnchor, parts[0], parts[1]);
-  const stats = await fs.lstat(projectAlias).catch(() => undefined);
-  if (!stats?.isSymbolicLink()) return undefined;
-
-  const projectsRoot = await fs.realpath(path.join(resolvedAnchor, 'projects'));
-  const resolvedProject = await fs.realpath(projectAlias);
-  if (comparable(path.dirname(resolvedProject)) !== comparable(projectsRoot)) {
-    return undefined;
-  }
-  return path.join(resolvedProject, parts[2]);
 }
 
 export interface TrustedMemoryFile {
@@ -98,20 +81,28 @@ export async function listTrustedMemoryMarkdownFiles(
         ? path.join(relativeDir, entry.name)
         : entry.name;
       const absolutePath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(absolutePath, relativePath);
-      } else if (
-        entry.isFile() &&
-        entry.name.endsWith('.md') &&
-        entry.name !== excludedFilename
-      ) {
-        const resolvedPath = await fs.realpath(absolutePath);
-        if (isWithin(resolvedRoot, resolvedPath)) {
-          files.push({
-            relativePath: relativePath.replaceAll('\\', '/'),
-            resolvedPath,
-          });
+      try {
+        if (entry.isDirectory()) {
+          await visit(absolutePath, relativePath);
+        } else if (
+          entry.isFile() &&
+          entry.name.endsWith('.md') &&
+          entry.name !== excludedFilename
+        ) {
+          const resolvedPath = await fs.realpath(absolutePath);
+          if (isWithin(resolvedRoot, resolvedPath)) {
+            files.push({
+              relativePath:
+                path.sep === '\\'
+                  ? relativePath.replaceAll('\\', '/')
+                  : relativePath,
+              resolvedPath,
+            });
+          }
         }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'EACCES') throw error;
       }
     }
   };

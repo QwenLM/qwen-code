@@ -18,9 +18,11 @@ import {
   type MemoryMetadataMigrationCandidate,
 } from './metadata-migration.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -121,8 +123,52 @@ describe('memory metadata migration', () => {
     ).resolves.toEqual([]);
   });
 
+  it('does not rewrite malformed frontmatter boundaries', async () => {
+    const original = '---\ntype: project\nUnclosed body';
+    const filePath = await write('project/broken.md', original);
+
+    await expect(
+      scanMemoryMetadataMigrationCandidates(memoryRoot, 'project'),
+    ).resolves.toEqual([]);
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+  });
+
+  it('excludes protected pinned files from migration and readiness', async () => {
+    const userRoot = getUserAutoMemoryRoot();
+    const pinnedFile = path.join(
+      userRoot,
+      AUTO_MEMORY_PINNED_DIRNAME,
+      'keep.md',
+    );
+    const original = legacyContent('Pinned body');
+    await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
+    await fs.writeFile(pinnedFile, original, 'utf-8');
+    const generateMetadata = vi.fn();
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: userRoot,
+      scope: 'user',
+      generateMetadata,
+    });
+    const status = await scanMemoryMetadataCorpusStatus({
+      projectRoot,
+      teamMemoryEnabled: false,
+      trustedProject: true,
+    });
+
+    expect(result).toMatchObject({
+      legacyFiles: 0,
+      attempted: 0,
+      committed: 0,
+    });
+    expect(generateMetadata).not.toHaveBeenCalled();
+    expect(status.ready).toBe(true);
+    await expect(fs.readFile(pinnedFile, 'utf-8')).resolves.toBe(original);
+  });
+
   it.each([
-    ['unclosed boundary', '---\ntype: project\nUnclosed body'],
     ['invalid YAML', '---\nname: [broken\n---\nBody'],
     ['non-object YAML', '---\n- item\n---\nBody'],
   ])('repairs %s without dropping the original file', async (_, original) => {
@@ -448,6 +494,26 @@ describe('memory metadata migration', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toContain(
       'Extraction wrote a newer body.',
     );
+  });
+
+  it('refuses to commit after project trust is revoked', async () => {
+    const original = legacyContent();
+    const filePath = await write('project/legacy.md', original);
+    let trusted = true;
+
+    const result = await runMemoryMetadataMigration({
+      config: { isTrustedFolder: () => trusted } as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate) => {
+        trusted = false;
+        return metadata(candidate);
+      },
+    });
+
+    expect(result).toMatchObject({ committed: 0, conflicts: 1 });
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
   });
 
   it('rejects invalid generated metadata without changing the file', async () => {

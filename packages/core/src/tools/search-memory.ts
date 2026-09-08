@@ -35,7 +35,7 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
     return `Search memory (${this.params.mode})`;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     if (this.config.getMemoryRecallMode() !== 'structured') {
       const message =
         'search_memory is unavailable while the legacy memory protocol is active.';
@@ -63,15 +63,23 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       );
       return { llmContent: content, returnDisplay: content };
     }
+    const bodyPresentVersions = memoryManager.getBodyPresentVersionsInHistory();
+    const bodyCoverage = memoryManager.getBodyCoverageInHistory();
+    const exhaustedBodyRefs =
+      memoryManager.getExhaustedBodyRefsForCurrentTurn();
+    const bodyPresentVersionsBefore = new Map(bodyPresentVersions);
+    const bodyCoverageBefore = structuredClone(bodyCoverage);
+    const exhaustedBodyRefsBefore = new Set(exhaustedBodyRefs);
     let result: SearchMemoryToolResult;
     try {
       result = await executeSearchMemory(this.params, {
         projectRoot: this.config.getProjectRoot(),
+        abortSignal: signal,
         teamMemoryEnabled: this.config.getTeamMemoryEnabled?.() ?? false,
         trustedProject: this.config.isTrustedFolder?.() ?? false,
-        bodyPresentVersions: memoryManager.getBodyPresentVersionsInHistory(),
-        bodyCoverage: memoryManager.getBodyCoverageInHistory(),
-        exhaustedBodyRefs: memoryManager.getExhaustedBodyRefsForCurrentTurn(),
+        bodyPresentVersions,
+        bodyCoverage,
+        exhaustedBodyRefs,
         onComplete: (observation) => {
           logMemorySearch(
             this.config,
@@ -84,7 +92,18 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
           );
         },
       });
+      signal.throwIfAborted();
     } catch (error) {
+      bodyPresentVersions.clear();
+      bodyCoverage.clear();
+      exhaustedBodyRefs.clear();
+      bodyPresentVersionsBefore.forEach((version, ref) =>
+        bodyPresentVersions.set(ref, version),
+      );
+      bodyCoverageBefore.forEach((coverage, ref) =>
+        bodyCoverage.set(ref, coverage),
+      );
+      exhaustedBodyRefsBefore.forEach((ref) => exhaustedBodyRefs.add(ref));
       if (claimed) {
         memoryManager.releaseSearchMemoryRequestForCurrentTurn(signature);
       }
