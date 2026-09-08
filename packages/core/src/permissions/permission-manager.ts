@@ -1226,13 +1226,31 @@ export class PermissionManager {
    */
   private activeSessionAllowRules(): PermissionRule[] {
     const trusted = this.config.isTrustedFolder?.() ?? true;
+    return this.sessionScopedAllowRules().filter(
+      (rule) => trusted || !rule.trustGated,
+    );
+  }
+
+  /**
+   * The session half of {@link activeSessionAllowRules} on its own: every
+   * session allow rule that belongs to the session running now, trust-gated
+   * ones included.
+   *
+   * Split out because `sessionRules.allow` deliberately keeps entries that
+   * are inert (a previous session's grants), so every reader of the raw array
+   * would otherwise report them as live. The AUTO-mode strip is the reader
+   * that needs this half and not the other: excluding trust-gated rules from
+   * the strip candidates would let a mid-AUTO grant of folder trust activate
+   * a dangerous rule that was never stripped, defeating the invariant in
+   * {@link stripDangerousRulesForAutoMode}.
+   */
+  private sessionScopedAllowRules(): PermissionRule[] {
     const currentSessionId = this.config.getSessionId?.();
     return this.sessionRules.allow.filter(
       (rule) =>
-        (trusted || !rule.trustGated) &&
-        (rule.sessionId === undefined ||
-          currentSessionId === undefined ||
-          rule.sessionId === currentSessionId),
+        rule.sessionId === undefined ||
+        currentSessionId === undefined ||
+        rule.sessionId === currentSessionId,
     );
   }
 
@@ -1275,10 +1293,26 @@ export class PermissionManager {
         // Deduplicate on raw string — matches the persistent-stash branch
         // in addPersistentRule. A repeated "Always allow" choice for the
         // same rule must not pile copies into the session stash.
-        const exists = this.strippedAllowRules.session.some(
+        //
+        // A match has its session scope re-pointed in place rather than
+        // being skipped, the same widening the live entry below gets.
+        // Skipping it instead would freeze the stashed rule on the session
+        // that first granted it: `restoreDangerousRules()` re-attaches that
+        // same object on leaving AUTO, where `activeSessionAllowRules()`
+        // then filters it out for good, and a skill re-invoked or restored
+        // in a later session would silently hold no `allowedTools` at all.
+        // The entry must still never reach `sessionRules.allow` while AUTO
+        // is on — that is the invariant this branch exists for.
+        const stashed = this.strippedAllowRules.session.find(
           (r) => r.raw === rule.raw,
         );
-        if (!exists) {
+        if (stashed) {
+          if (!options?.sessionId) {
+            delete stashed.sessionId;
+          } else if (stashed.sessionId !== undefined) {
+            stashed.sessionId = options.sessionId;
+          }
+        } else {
           this.strippedAllowRules.session.push(rule);
         }
         debugLogger.info(
@@ -1301,10 +1335,14 @@ export class PermissionManager {
         if (!options?.trustGated) existing.trustGated = false;
         // Session scoping widens the same way trust gating does, so that a
         // kept entry is never narrower than the grant that just arrived. An
-        // unscoped arrival (a user's own "Always allow") clears the scope;
-        // a scoped one re-points the entry at the session granting it now,
-        // which is what makes a skill re-invoked (or restored) in a later
-        // session active again instead of stuck on the id it first got.
+        // unscoped arrival clears the scope; a scoped one re-points the entry
+        // at the session granting it now, which is what makes a skill
+        // re-invoked (or restored) in a later session active again instead of
+        // stuck on the id it first got. Nothing in-tree arrives unscoped
+        // today — `applySkillSideEffects` always tags, and a user's "Always
+        // allow" is a persistent rule — so the clearing half is defensive:
+        // an external caller that omits `sessionId` widens an existing entry
+        // rather than leaving it alone.
         if (!options?.sessionId) {
           delete existing.sessionId;
         } else if (existing.sessionId !== undefined) {
@@ -1483,8 +1521,13 @@ export class PermissionManager {
    * both session and persistent rules.  Used for telemetry.
    */
   getAllowRawStrings(): string[] {
+    // Through the same filter `evaluate()` decides on: `sessionRules.allow`
+    // keeps a previous session's grants as inert entries, and the one audit
+    // record emitted at a session boundary is attributed to the new session's
+    // id — listing a rule that answers `ask` there would be a false trace of
+    // exactly the approval session scoping removes.
     return [
-      ...this.sessionRules.allow.map((r) => r.raw),
+      ...this.activeSessionAllowRules().map((r) => r.raw),
       ...this.persistentRules.allow.map((r) => r.raw),
     ];
   }
@@ -1511,7 +1554,14 @@ export class PermissionManager {
     const persistentDangerous = findDangerousAllowRules(
       this.persistentRules.allow,
     );
-    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+    // Session-scoped only: a previous session's grant is already inert, so
+    // stripping it would stash an entry the UI then names in "Auto mode
+    // temporarily disabled these allow rules", promising to restore a rule
+    // that was never in force in this session. Trust gating is deliberately
+    // not applied here — see `sessionScopedAllowRules`.
+    const sessionDangerous = findDangerousAllowRules(
+      this.sessionScopedAllowRules(),
+    );
 
     if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
       this.strippedAllowRules = { persistent: [], session: [] };

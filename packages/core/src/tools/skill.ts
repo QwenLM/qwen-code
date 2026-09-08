@@ -79,25 +79,51 @@ Important:
 </skills_instructions>`;
 
 /**
+ * The route that actually re-arms a skill resume declined, named per reason.
+ * "Re-invoke the skill" is the wrong advice for most of them: the model route
+ * is refused by the very condition that produced the decline, and because
+ * bookkeeping is unconditional the dedup guard answers "already loaded in
+ * context" on top of that. The slash command checks only enabledness, so it
+ * still re-arms an inactive or model-hidden skill; for a disabled one it is
+ * filtered out of the registry too, and no route exists until the skill is
+ * re-enabled.
+ */
+const SKILL_RESTORE_REMEDIES = {
+  reinvoke: () => 're-invoke the skill to re-apply its hooks and allowedTools',
+  slash: (name: string) =>
+    `run /${name} to re-apply its hooks and allowedTools — re-invoking it as a tool is refused for the same reason, and the dedup guard answers "already loaded in context"`,
+  enable: (name: string) =>
+    `re-enable it via /skills (or remove it from skills.disabled) and then run /${name} to re-apply its hooks and allowedTools — while it is disabled no route re-arms it, the slash command included`,
+} as const;
+
+type SkillRestoreRemedy = keyof typeof SKILL_RESTORE_REMEDIES;
+
+/**
  * What resume tells the operator when it declines to re-arm a skill, keyed by
  * the condition `skillModelInvocationBlock` reports. The phrasing is the
  * whole point of the branch — a gate that vanishes in silence is #11180 — so
  * each reason names what changed since the skill was invoked, not merely that
- * something did.
+ * something did, and each carries the route that actually works.
  */
-const SKILL_RESTORE_DECLINED_REASONS = {
+const SKILL_RESTORE_DECLINED_REASONS: Record<
+  'disabled' | 'inactive' | 'hidden',
+  { reason: string; remedy: SkillRestoreRemedy }
+> = {
   // `skills.disabled`, or its extension deactivated. Both live paths refuse a
   // disabled skill before applying anything, so restoring its allow rules and
   // hooks would switch an auto-approval back on after the user turned it off.
-  disabled: 'it is disabled',
+  disabled: { reason: 'it is disabled', remedy: 'enable' },
   // `paths:` activation is in-memory, so a conditional skill starts a resumed
   // session deactivated and `validateToolParams` refuses it in that state.
-  inactive: 'its `paths:` activation has not fired',
+  inactive: {
+    reason: 'its `paths:` activation has not fired',
+    remedy: 'slash',
+  },
   // `disable-model-invocation: true`, which `execute` refuses outright
   // (`Skill "X" not found.`): re-arming it would grant a session what no tool
   // call can ask for.
-  hidden: 'it is hidden from model invocation',
-} as const;
+  hidden: { reason: 'it is hidden from model invocation', remedy: 'slash' },
+};
 
 /**
  * Skill tool that enables the model to access skill definitions. The tool keeps
@@ -415,6 +441,16 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
 
     const pendingSkillCalls = new Map<string, string>();
+    // Declines are collected and logged after the scan, not inline. The loop
+    // walks history pairs, and a skill's first recorded pair can be a refusal
+    // (or a body from a stale path) while a later pair is the real body that
+    // restores and fully re-arms it — logging inline would warn that a gate
+    // is gone about a gate this same loop then arms, and name a remedy the
+    // dedup guard refuses.
+    const declined = new Map<
+      string,
+      { skill: SkillConfig; reason: string; remedy: SkillRestoreRemedy | null }
+    >();
     for (const content of history) {
       for (const part of content.parts ?? []) {
         const call = part.functionCall;
@@ -471,11 +507,32 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           // disabled.`, `... not found.`), and telling an operator their
           // SKILL.md changed when it did not sends them to diff a file that
           // never moved.
-          this.logSkillNotRestored(
-            skill.config,
+          //
+          // The compared string embeds the skill's base directory and a
+          // shared boilerplate line as well as the body, so a body-shaped
+          // record can also differ because the skill directory now resolves
+          // elsewhere (a moved checkout, a symlinked home, a session recorded
+          // inside the sandbox and resumed on the host). The reason says so
+          // rather than sending the operator to diff a file that never
+          // changed.
+          declined.set(
+            skill.name,
             output.startsWith(SKILL_LLM_CONTENT_PREFIX)
-              ? 'its body no longer matches SKILL.md on disk'
-              : "the recorded tool response is not this skill's body",
+              ? {
+                  skill: skill.config,
+                  reason:
+                    'its recorded body no longer matches SKILL.md on disk, ' +
+                    'or its skill directory now resolves to a different path',
+                  remedy: 'reinvoke',
+                }
+              : {
+                  skill: skill.config,
+                  reason: "the recorded tool response is not this skill's body",
+                  // A refusal, not a body: no body was ever injected for this
+                  // pair, so nothing this skill declares was armed in the
+                  // recorded session either and nothing has been lost.
+                  remedy: null,
+                },
           );
           continue;
         }
@@ -487,6 +544,17 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
         this.restoreSkillSideEffects(skill.config);
       }
+    }
+
+    // Only for skills nothing later in the history restored. A decline the
+    // loop went on to overturn is not a missing gate, and saying it is turns
+    // the one signal #11180 asked for into noise that contradicts the loop's
+    // own outcome. Declines raised by `restoreSkillSideEffects` are not
+    // routed through here: those follow a successful body match, so no later
+    // pair can overturn them.
+    for (const [name, entry] of declined) {
+      if (this.loadedSkillNames.has(name)) continue;
+      this.logSkillNotRestored(entry.skill, entry.reason, entry.remedy);
     }
   }
 
@@ -541,31 +609,55 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       skill,
     );
     if (blocked) {
-      this.logSkillNotRestored(skill, SKILL_RESTORE_DECLINED_REASONS[blocked]);
+      const { reason, remedy } = SKILL_RESTORE_DECLINED_REASONS[blocked];
+      this.logSkillNotRestored(skill, reason, remedy);
       return;
     }
     applySkillSideEffects(this.config, skill);
   }
 
   /**
-   * Says why a skill carried by the resumed history was not re-armed.
+   * Says why a skill carried by the resumed history was not re-armed, and how
+   * to get it back.
    *
-   * `warn` when the skill declares `hooks:`, matching `applySkillHooks`: a
-   * declared hook is an enforcement gate, and the operator needs to know it
-   * is absent while the skill's instructions are still in context. Every
-   * other case is `debug` — nothing was promised, so it cannot become a
-   * steady-state warning.
+   * `warn` when the skill declares a side effect this session is now missing
+   * — `hooks:` or `allowedTools` — because that is what the operator needs to
+   * know while the skill's instructions are still in context. Both halves
+   * count: nine bundled skills declare `allowedTools` and none declares
+   * `hooks:`, so keying the level on hooks alone would leave every one of
+   * them declining at `debug`, invisible at default verbosity, under a
+   * message that says the lost half is "hooks and allowedTools".
+   *
+   * A `null` remedy means the recorded response was not a body at all, so no
+   * body was injected and nothing was ever armed. That is `debug` regardless
+   * of what the skill declares: there is no gate to have lost, and warning
+   * about one would be the phantom failure the emptiness check below exists
+   * to avoid, repeated on every resume of that session.
    */
-  private logSkillNotRestored(skill: SkillConfig, reason: string): void {
+  private logSkillNotRestored(
+    skill: SkillConfig,
+    reason: string,
+    remedy: SkillRestoreRemedy | null,
+  ): void {
+    const head = `Not restoring skill "${skill.name}" on resume: ${reason}.`;
+    if (remedy === null) {
+      debugLogger.debug(
+        `${head} No body was injected for it by that response, so nothing ` +
+          `it declares was armed in the recorded session either.`,
+      );
+      return;
+    }
     const message =
-      `Not restoring skill "${skill.name}" on resume: ${reason}. ` +
-      `Its instructions may still be in the replayed conversation; ` +
-      `re-invoke the skill to re-apply its hooks and allowedTools.`;
+      `${head} Its instructions may still be in the replayed conversation; ` +
+      `${SKILL_RESTORE_REMEDIES[remedy](skill.name)}.`;
     // Emptiness, not truthiness, exactly as `applySkillHooks` tests it: `{}`
     // is truthy, and the parser assigns one for `hooks: {}` and for a block
     // whose event names are all unknown. Such a skill promised no gate, so a
     // warn here would be the same phantom failure that guard exists to avoid.
-    if (skill.hooks && Object.keys(skill.hooks).length > 0) {
+    const declaresLostSideEffect =
+      (skill.hooks && Object.keys(skill.hooks).length > 0) ||
+      (skill.allowedTools?.length ?? 0) > 0;
+    if (declaresLostSideEffect) {
       debugLogger.warn(message);
     } else {
       debugLogger.debug(message);

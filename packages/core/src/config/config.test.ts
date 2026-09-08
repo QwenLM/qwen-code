@@ -3012,7 +3012,7 @@ describe('Server Config (config.ts)', () => {
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
     });
 
-    it("drops a skill's session allow rule at the session boundary, keeping the user's own", async () => {
+    it("drops a skill's session allow rule at the session boundary, keeping an unscoped one", async () => {
       // The other half of what `clearLoadedSkills` above does: a skill's
       // `allowedTools` are granted as session allow rules, and
       // `PermissionManager` is built once per process — `startNewSession`
@@ -3045,7 +3045,9 @@ describe('Server Config (config.ts)', () => {
         body: 'Body.',
         allowedTools: ['Bash(git *)'],
       } as unknown as SkillConfig);
-      // The user's own "always allow" is not session-scoped and must survive.
+      // An unscoped grant must survive. Nothing in-tree produces one — a
+      // user's "Always allow" is a persistent rule — so this stands for the
+      // defensive branch, not a live user path.
       permissionManager.addSessionAllowRule('Bash(ls *)');
       expect(await permissionManager.evaluate(gitPush)).toBe('allow');
       expect(await permissionManager.evaluate(userGranted)).toBe('allow');

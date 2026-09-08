@@ -40,7 +40,13 @@ export const SKILL_LLM_CONTENT_PREFIX = 'Base directory for this skill: ';
  * silent.
  *
  * The order is the one the resume path reports in, and only shows through
- * when more than one condition fails at once.
+ * when more than one condition fails at once. It runs permanent conditions
+ * before transient ones: `disable-model-invocation` is a frontmatter fact
+ * that no session can satisfy, and `SkillManager` never even enters such a
+ * skill into the activation registry, so `isSkillActive` stays false for it
+ * forever. Reporting `inactive` first would send the operator to touch a
+ * matching file to clear a condition that cannot clear, and hide the
+ * permanent cause that actually explains the decline.
  *
  * Every condition is read live — off `Config` and `SkillManager` — rather
  * than off `SkillTool`'s `hiddenSkillNames` / `pendingConditionalSkillNames`
@@ -58,8 +64,8 @@ export function skillModelInvocationBlock(
   skill: SkillConfig,
 ): 'disabled' | 'inactive' | 'hidden' | undefined {
   if (!config.isSkillEnabled(skill)) return 'disabled';
-  if (!skillManager.isSkillActive(skill)) return 'inactive';
   if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill)) return 'inactive';
   return undefined;
 }
 

@@ -16,8 +16,10 @@
  * hit counter, and nothing at the other call site said why. A shared fixture
  * that always writes it keeps the divergence from mattering — a renamed
  * skill, a different gate shell, or a changed auth flag is now one edit, not
- * two, and a missed one is a compile error rather than a timeout inside a
- * four-minute PTY test.
+ * two. Every constant a suite depends on is imported rather than re-spelled,
+ * and every path written from inside a generated file is named once here, so
+ * a change that the type checker cannot catch cannot silently disarm the gate
+ * and surface as a timeout inside a four-minute PTY test.
  *
  * What is deliberately NOT shared is the fake model itself: parity dispatches
  * on a request counter, resume on the last user message's text (its second
@@ -42,16 +44,32 @@ export const GATE_MARKER = 'GATE_BLOCKED_DOWNSTREAM_SESSION_ID_MISSING';
 /** The file the gated shell command would create if the gate let it through. */
 export const EXECUTED_FLAG = 'executed.flag';
 export const SKILL_NAME = 'gated-skill';
-export const SKILL_DESCRIPTION =
-  'Calls the downstream CLI using a runtime-injected session ID';
 /**
  * Only a loaded skill command can render its own description in the
  * completion menu, which is what the user path polls for. Match on a prefix
  * short enough to survive a narrow terminal truncating the rest.
  */
 export const SKILL_DESCRIPTION_PREFIX = 'Calls the downstream CLI';
+/**
+ * Derived from the prefix rather than repeating it, so the two cannot drift:
+ * a hand-copied prefix that no longer prefixes the description sends the user
+ * path polling for text the completion menu never renders, and it fails as
+ * `timed out waiting for the skill command to be registered` — the product
+ * regression that wait exists to rule out.
+ */
+export const SKILL_DESCRIPTION = `${SKILL_DESCRIPTION_PREFIX} using a runtime-injected session ID`;
 /** Present in the skill body, so a resumed request can be recognized. */
 export const SKILL_BODY_SENTINEL = 'Never fabricate a fallback';
+/**
+ * On-disk paths spelled once each. Both are written from inside a generated
+ * file and read back from TypeScript, so a second spelling is a silent
+ * disagreement: rename half of the gate path and the hook never runs, rename
+ * half of the counter path and `gateHits` returns the same 0 it returns for
+ * "the gate never fired" — blaming the code under test for a fixture typo,
+ * deterministically, three times under `retry: 2`.
+ */
+const GATE_SCRIPT = 'scripts/gate-session-id.sh';
+const GATE_HITS_LOG = 'gate-hits.log';
 
 /**
  * Writes the gated skill into `testDir` and returns where its evidence lands.
@@ -69,17 +87,27 @@ export function installGatedSkill(testDir: string): {
   const skillDir = join(testDir, '.qwen', 'skills', SKILL_NAME);
   mkdirSync(join(skillDir, 'scripts'), { recursive: true });
 
+  // The description is emitted as a quoted YAML flow scalar, not a bare plain
+  // scalar. A value YAML treats specially — a colon-space, a leading `-`, an
+  // embedded ` #` — does not fail loudly here: the frontmatter parser catches
+  // the error and falls back to a line-based parse that rescues `description`
+  // and flattens the nested `hooks:` block, which `parseHooksConfig` then
+  // discards. The skill loads, the command registers, and the gate simply
+  // does not exist. `JSON.stringify` is valid YAML flow syntax and round-trips
+  // to the identical string, so the hazard becomes unrepresentable rather
+  // than merely detectable — and it leaks no quote characters into the parsed
+  // value, which the user path asserts against the rendered menu text.
   writeFileSync(
     join(skillDir, 'SKILL.md'),
     `---
-name: ${SKILL_NAME}
-description: ${SKILL_DESCRIPTION}
+name: ${JSON.stringify(SKILL_NAME)}
+description: ${JSON.stringify(SKILL_DESCRIPTION)}
 hooks:
   PreToolUse:
     - matcher: Shell
       hooks:
         - type: command
-          command: "$QWEN_SKILL_ROOT/scripts/gate-session-id.sh"
+          command: "$QWEN_SKILL_ROOT/${GATE_SCRIPT}"
 ---
 
 Only use the exact runtime-injected ID (\`DOWNSTREAM_SESSION_ID\`).
@@ -87,11 +115,11 @@ ${SKILL_BODY_SENTINEL}; stop if it is missing.
 `,
   );
 
-  const gate = join(skillDir, 'scripts', 'gate-session-id.sh');
+  const gate = join(skillDir, GATE_SCRIPT);
   writeFileSync(
     gate,
     `#!/usr/bin/env bash
-echo fired >> "$QWEN_SKILL_ROOT/gate-hits.log"
+echo fired >> "$QWEN_SKILL_ROOT/${GATE_HITS_LOG}"
 if [ -z "\${DOWNSTREAM_SESSION_ID:-}" ]; then
   echo "${GATE_MARKER}" >&2
   exit 2
@@ -101,7 +129,7 @@ exit 0
   );
   chmodSync(gate, 0o755);
 
-  return { skillDir, hitsLog: join(skillDir, 'gate-hits.log') };
+  return { skillDir, hitsLog: join(skillDir, GATE_HITS_LOG) };
 }
 
 /** How many times the gate has actually run. */

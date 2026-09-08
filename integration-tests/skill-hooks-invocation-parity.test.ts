@@ -20,6 +20,7 @@ import {
   EXECUTED_FLAG,
   GATE_MARKER,
   SKILL_DESCRIPTION_PREFIX,
+  SKILL_NAME,
   exitInteractive,
   fakeModelLaunchArgs,
   installGatedSkill,
@@ -63,7 +64,7 @@ describe('skill hooks fire on both invocation paths', () => {
       if (options.modelInvokesSkill && i === 0) {
         return {
           toolCalls: [
-            fakeToolCall('skill', { skill: 'gated-skill' }, 'call-skill'),
+            fakeToolCall('skill', { skill: SKILL_NAME }, 'call-skill'),
           ],
         };
       }
@@ -102,12 +103,12 @@ describe('skill hooks fire on both invocation paths', () => {
       // USER path: start the skill by hand. Wait for the command to exist,
       // not merely for the typed text to come back: the echo lands long
       // before the skill command registry does, and submitting into that gap
-      // gets `Unknown command: /gated-skill` instead of the skill. That
-      // failure is undetectable downstream — the error text contains
-      // `/gated-skill`, so any inclusion check on the typed command matches
-      // it too. The completion menu rendering the skill's own description is
-      // a signal only a registered command can produce.
-      ptyProcess.write('/gated-skill');
+      // gets `Unknown command: /<skill>` instead of the skill. That failure
+      // is undetectable downstream — the error text contains the typed
+      // command, so any inclusion check on it matches the error too. The
+      // completion menu rendering the skill's own description is a signal
+      // only a registered command can produce.
+      ptyProcess.write(`/${SKILL_NAME}`);
       await waitFor('the skill command to be registered', () =>
         output.includes(SKILL_DESCRIPTION_PREFIX),
       );
@@ -124,7 +125,7 @@ describe('skill hooks fire on both invocation paths', () => {
       expect(
         output,
         'the slash command was submitted before it was registered',
-      ).not.toContain('Unknown command: /gated-skill');
+      ).not.toContain(`Unknown command: /${SKILL_NAME}`);
     }
 
     const prompt = 'run the downstream command';

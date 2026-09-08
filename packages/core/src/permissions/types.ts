@@ -86,8 +86,13 @@ export interface PermissionRule {
    * to a single session — a skill's `allowedTools` — so they stop applying
    * when the process swaps sessions (`/clear`, `/resume`) without the rule
    * having to be found and removed. Unset means the grant is not
-   * session-scoped: a user's "Always allow for this session" choice keeps
-   * its existing lifetime.
+   * session-scoped. Nothing in-tree produces one today: the only non-test
+   * writer of the session allow set is `applySkillSideEffects`, which always
+   * tags with the current session id, and a user's "Always allow" is a
+   * persistent rule (`addPersistentRule`), not a session rule. Omitting
+   * `sessionId` on the exported `applySkillAllowedTools` therefore WIDENS an
+   * existing entry rather than being inert — it clears a scope a live
+   * session already earned.
    */
   sessionId?: string;
 }

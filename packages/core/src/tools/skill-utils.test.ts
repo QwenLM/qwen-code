@@ -405,6 +405,21 @@ describe('skillModelInvocationBlock', () => {
     });
     expect(skillModelInvocationBlock(config, skillManager, s)).toBe('disabled');
   });
+
+  it('reports the permanent condition, not the transient one, when both hold', () => {
+    // A `disable-model-invocation` skill is skipped when `SkillManager`
+    // builds `eligibleForActivation`, so it never enters the registry and
+    // `isSkillActive` is false for it in every session. Reporting `inactive`
+    // here would tell the operator to touch a matching file to clear a
+    // condition that can never clear, while hiding the frontmatter flag that
+    // actually explains the decline.
+    const {
+      config,
+      skillManager,
+      skill: s,
+    } = make({ active: false, hidden: true });
+    expect(skillModelInvocationBlock(config, skillManager, s)).toBe('hidden');
+  });
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {
