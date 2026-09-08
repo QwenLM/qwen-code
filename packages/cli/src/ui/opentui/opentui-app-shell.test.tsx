@@ -896,6 +896,99 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('carries a held prompt image attachments through the drain (R5-5 fix-induced)', async () => {
+    let releaseShell: () => void = () => {};
+    const shellDone = new Promise<void>((resolve) => {
+      releaseShell = resolve;
+    });
+    mocks.state.executeUserShell.mockImplementation(() => shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onTranscriptEvent = vi.fn();
+    const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt, onTranscriptEvent });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('sleep 10');
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    await submit('explain this', ['/tmp/screenshot.png']);
+    expect(screen.getByText(/Queued explain this/)).toBeTruthy();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseShell();
+      await shellDone;
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'explain this',
+      ['/tmp/screenshot.png'],
+      expect.objectContaining({ submittedPrompt: 'explain this' }),
+    );
+  });
+
+  it('re-checks the gate between drain entries so a mid-drain dialog holds the remainder (R6-4)', async () => {
+    let releaseShell: () => void = () => {};
+    const shellDone = new Promise<void>((resolve) => {
+      releaseShell = resolve;
+    });
+    mocks.state.executeUserShell.mockImplementation(() => shellDone);
+    // `/theme` models a canRunDuringStreaming command: admitted during the
+    // shell entry's await window, everything else defers behind the turn.
+    mocks.state.deferGate = (text: string) => text !== '/theme';
+    mocks.state.handleResults.push({
+      kind: 'open_dialog',
+      request: { dialog: 'theme' },
+    } satisfies OpenTuiDispatchOutcome);
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onTranscriptEvent: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+
+    await submit('make');
+    await submit('/chat save ckpt');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    // The drain started and is parked on the shell entry's await window; the
+    // mid-drain `/theme` is admitted straight through the gate and opens the
+    // dialog.
+    await submit('/theme');
+    expect(mocks.state.handledTexts).toEqual(['/theme']);
+    expect(screen.getByText('dialog:theme')).toBeTruthy();
+
+    await act(async () => {
+      releaseShell();
+      await shellDone;
+      await Promise.resolve();
+    });
+    // The second entry must not dispatch behind the dialog the drain's own
+    // entry gate would refuse.
+    expect(mocks.state.handledTexts).toEqual(['/theme']);
+
+    await act(async () => {
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/theme', '/chat save ckpt']);
+  });
+
   it('runs a command queued during a drain after the drain, not beside it (R5-6)', async () => {
     // A third submission queued while the drain runs must wait for the busy
     // slot instead of a second drain instance racing the first (R5-6): the

@@ -417,7 +417,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // message queue; a queued shell entry carries its routing so the drain
   // cannot be fooled by a mid-turn toggle).
   const deferredCommandsRef = useRef<
-    Array<{ text: string; shell?: boolean; prompt?: boolean }>
+    Array<{
+      text: string;
+      shell?: boolean;
+      prompt?: boolean;
+      imagePaths?: string[];
+    }>
   >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
   // ref so re-queueing behind a turn or a dialog does not re-trigger the
@@ -427,6 +432,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [deferredRevision, setDeferredRevision] = useState(0);
   // Guards one drain instance at a time (R5-6).
   const drainingRef = useRef(false);
+  // Render-mirrored gate state for the drain's mid-loop re-check (R6-4): the
+  // effect samples streaming/dialog once, but a canRunDuringStreaming dispatch
+  // admitted during a shell entry's await window can open a dialog or start a
+  // turn, and the entries behind it must wait like newly submitted ones.
+  const streamingRef = useRef(streaming);
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+  const dialogRef = useRef(dialog);
+  useEffect(() => {
+    dialogRef.current = dialog;
+  }, [dialog]);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -552,7 +569,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           deferredCommandsRef.current.push({
             text: command,
             shell: shellEntry,
-            ...(blockedByRunningShell && !shellEntry ? { prompt: true } : {}),
+            // The attachments ride the entry: the seam's contract keeps image
+            // paths in the second, structured argument, so a prompt the
+            // running-`!` gate held back must not lose them in the queue
+            // (R5-5 fix-induced).
+            ...(blockedByRunningShell && !shellEntry
+              ? { prompt: true, imagePaths }
+              : {}),
           });
           setDeferredRevision((revision) => revision + 1);
           notify(
@@ -636,6 +659,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       try {
         for (const [i, entry] of pending.entries()) {
           if (isExitInProgress()) return;
+          // Re-read the gate after the previous iteration's await (R6-4): the
+          // re-queue mirrors the holdsUi branch — paused, no re-arm — so the
+          // dep change that closed the gate is what resumes the batch.
+          if (
+            streamingRef.current ||
+            dialogRef.current ||
+            shellControllersRef.current.size > 0
+          ) {
+            deferredCommandsRef.current.unshift(...pending.slice(i));
+            paused = true;
+            return;
+          }
           if (entry.shell) {
             await runShellCommand(entry.text);
             continue;
@@ -648,7 +683,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               notify('The live prompt turn is not wired in this shell.');
               continue;
             }
-            onSubmitPrompt(entry.text, undefined, {
+            onSubmitPrompt(entry.text, entry.imagePaths, {
               submittedPrompt: entry.text || undefined,
             });
             // The turn it starts owns the drain until it ends, exactly like a
