@@ -542,6 +542,12 @@ export class AcpConnection {
       cwd,
       mcpServers: [],
     });
+    // A stale session/new can resolve after disconnect() (or a re-connect)
+    // retired this connection. Writing then would stamp the dead session's id
+    // onto the replacement connection's field, so bail out before the write.
+    if (this.sdkConnection !== conn) {
+      return response;
+    }
     this.sessionId = response.sessionId || null;
     logger.log('[ACP] Session created with ID:', this.sessionId);
     return response;
@@ -617,7 +623,13 @@ export class AcpConnection {
         mcpServers: [],
       });
       logger.log('[ACP] Session load succeeded for session:', sessionId);
-      this.sessionId = sessionId;
+      // A stale session/load can resolve after disconnect() (or a re-connect)
+      // retired this connection. Writing then would stamp the dead session's
+      // id onto the replacement connection's field; the normal path keeps the
+      // write, since the caller reports currentSessionId right after connect().
+      if (this.sdkConnection === conn) {
+        this.sessionId = sessionId;
+      }
       return response;
     } catch (error) {
       logger.error(
@@ -833,8 +845,11 @@ export class AcpConnection {
         return;
       }
       // The child is detached on POSIX, so it leads its own process group:
-      // signalling the group reaches the shells, PTY hosts and MCP children
-      // the CLI is tracking, not just the CLI root process.
+      // signalling the group reaches the CLI root and its non-detached children
+      // (MCP stdio servers). It does NOT reach descendants that call setsid() —
+      // detached hook supervisors and monitors, and node-pty sessions — and
+      // SIGKILL also skips the CLI's own exit-time reaper
+      // (forceKillActivePosixHookProcesses), so those survive this escalation.
       logger.error(
         `[ACP] CLI did not exit within ${SHUTDOWN_GRACE_MS}ms of stdin close; force-killing its process group`,
       );

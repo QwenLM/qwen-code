@@ -121,6 +121,40 @@ describe('AcpConnection process spawning', () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it('spawns the child detached on POSIX but not on Windows', async () => {
+    // The POSIX escalation is a process-group SIGKILL (process.kill(-pid,
+    // ...)): it reaches the CLI's whole group only because the child is
+    // spawned detached and so leads its own group. Windows has no signalable
+    // group — its tree kill goes through taskkill, and there `detached` only
+    // changes console attachment. Pin both sides so a future refactor of the
+    // options object cannot silently turn the group kill into a root-only
+    // kill that orphans every descendant (the #11303 leak).
+    spawnMock.mockClear();
+    spawnMock.mockReturnValue(createMockChild());
+    const makeConn = () => {
+      const conn = new AcpConnection() as unknown as {
+        connect: (cliEntryPath: string) => Promise<void>;
+        setupChildProcessHandlers: () => Promise<void>;
+      };
+      conn.setupChildProcessHandlers = vi.fn().mockResolvedValue(undefined);
+      return conn;
+    };
+    const platform = vi.spyOn(process, 'platform', 'get');
+    try {
+      platform.mockReturnValue('linux');
+      await makeConn().connect(process.execPath);
+      platform.mockReturnValue('win32');
+      await makeConn().connect(process.execPath);
+
+      const detachedAt = (i: number) =>
+        (spawnMock.mock.calls[i]?.[2] as { detached?: boolean }).detached;
+      expect(detachedAt(0)).toBe(true);
+      expect(detachedAt(1)).toBe(false);
+    } finally {
+      platform.mockRestore();
+    }
+  });
 });
 
 describe('AcpConnection readTextFile error mapping', () => {
@@ -395,8 +429,10 @@ describe('AcpConnection child exit cleanup', () => {
 
       vi.advanceTimersByTime(1);
       // The escalation signals the process GROUP (negative pid), not just the
-      // CLI root process, so the PTYs/ConPTY hosts/MCP children underneath it
-      // are reaped too. Removing the group kill reds this assertion.
+      // CLI root process: it reaps the CLI root and its non-detached children
+      // (MCP stdio servers), but not setsid() descendants (detached hook
+      // supervisors, monitors, node-pty sessions). Removing the group kill
+      // reds this assertion.
       expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGKILL');
       expect(mockKill).not.toHaveBeenCalled();
     } finally {
@@ -524,13 +560,15 @@ describe('AcpConnection child exit cleanup', () => {
   });
 
   it('a superseded connection stops dispatching inbound callbacks', async () => {
-    // The five inbound callbacks on the SDK Client object read `this.*` at
-    // call time. `disconnect()` ends stdin and nulls sdkConnection but does
-    // not close the superseded child's stdout, so its ClientSideConnection
-    // stays live. Each callback must gate on the connection it was built for
+    // The inbound callbacks on the SDK Client object read `this.*` at call
+    // time. `disconnect()` ends stdin and nulls sdkConnection but does not
+    // close the superseded child's stdout, so its ClientSideConnection stays
+    // live. Each callback must gate on the connection it was built for
     // (`this.sdkConnection !== wiredConnection`), or the retired connection
-    // keeps dispatching into callbacks bound to the live replacement.
-    // Removing any guard makes one of these spies fire.
+    // keeps dispatching into callbacks bound to the live replacement. This
+    // case drives the writeTextFile and sessionUpdate guards specifically;
+    // requestPermission, readTextFile and extNotification carry the same gate
+    // but are not exercised here. Removing either driven guard fires its spy.
     vi.useFakeTimers();
     try {
       const stdout = new PassThrough();
@@ -584,6 +622,47 @@ describe('AcpConnection child exit cleanup', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not stamp a superseded connection with a stale session id', async () => {
+    // newSession/loadSession write this.sessionId only after awaiting the
+    // connection they captured. A response from a retired CLI can resolve
+    // after disconnect() nulled sessionId; the post-await write must gate on
+    // the captured connection, or the dead session's id lands back on the
+    // replacement connection's field. Removing either guard reds this test.
+    let resolveNewSession!: (value: unknown) => void;
+    let resolveLoadSession!: (value: unknown) => void;
+    const sdk = {
+      newSession: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveNewSession = resolve;
+          }),
+      ),
+      loadSession: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveLoadSession = resolve;
+          }),
+      ),
+    };
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: sdk,
+      sessionId: 'test-session',
+    });
+    const acp = conn as unknown as AcpConnection;
+
+    const newPromise = acp.newSession();
+    const loadPromise = acp.loadSession('stale-session');
+    acp.disconnect();
+
+    resolveNewSession({ sessionId: 'stale-from-retired-cli' });
+    resolveLoadSession({});
+    await newPromise;
+    await loadPromise;
+
+    expect(acp.currentSessionId).toBeNull();
   });
 
   it('disconnect does not force-kill a CLI that exited on its own', () => {
