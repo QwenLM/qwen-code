@@ -3408,9 +3408,11 @@ export const MessageList = memo(
     const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const locateScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
-    const scrollSettleTimer = useRef<number | undefined>(undefined);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
@@ -4488,13 +4490,13 @@ export const MessageList = memo(
 
     useEffect(
       () => () => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+          locateScrollTimer.current = null;
+        }
         if (sessionTimelineFrame.current !== null) {
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
-        }
-        if (scrollSettleTimer.current !== undefined) {
-          window.clearTimeout(scrollSettleTimer.current);
-          scrollSettleTimer.current = undefined;
         }
       },
       [],
@@ -4554,11 +4556,12 @@ export const MessageList = memo(
             ?.scrollIntoView({ block: 'center' });
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
-        // a frame or two later after measuring the target row). Tracked so an
-        // unmount can cancel it — an untracked fire after teardown touches
-        // requestAnimationFrame, which no longer exists there.
-        scrollSettleTimer.current = window.setTimeout(() => {
-          scrollSettleTimer.current = undefined;
+        // a frame or two later after measuring the target row).
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+        }
+        locateScrollTimer.current = setTimeout(() => {
+          locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
