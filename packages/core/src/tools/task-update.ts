@@ -482,8 +482,11 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       const updateOptions =
         teammateCallerName !== undefined
           ? { callerName: teammateCallerName }
-          : shouldDispatchAssignment
-            ? { expectedOwner: existingOwner ?? null }
+          : explicitOwner !== undefined || this.params.status !== undefined
+            ? {
+                expectedOwner: existingOwner ?? null,
+                expectedStatus: existing.status,
+              }
             : undefined;
       task = await updateTask(
         teamName,
@@ -555,6 +558,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       // sees the task on its next task_list (no notification path).
       persistedOwner !== LEADER_NAME &&
       persistedOwner !== teammateCallerName &&
+      (explicitOwner !== undefined || this.params.status !== undefined) &&
       (persistedOwner !== existingOwner || statusBecameInProgress)
     ) {
       const dispatched = await teamManager.dispatchAssignedTask(task);

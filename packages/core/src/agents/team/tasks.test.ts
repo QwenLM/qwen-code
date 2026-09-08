@@ -23,6 +23,7 @@ import {
   onTasksUpdated,
   notifyTasksUpdated,
   TaskOwnershipError,
+  TaskOwnerChangedError,
   RECIPROCAL_CALLER,
   normalizeTaskId,
 } from './tasks.js';
@@ -425,10 +426,48 @@ describe('tasks', () => {
           result.status === 'rejected',
       );
       expect(rejected).toHaveLength(1);
-      expect(rejected[0]!.reason).toBeInstanceOf(Error);
+      expect(rejected[0]!.reason).toBeInstanceOf(TaskOwnerChangedError);
       expect((rejected[0]!.reason as Error).message).toContain('owner changed');
+      expect((rejected[0]!.reason as Error).message).toContain(
+        'content-only task_update',
+      );
+      expect((rejected[0]!.reason as Error).message).toContain(
+        'without re-delivering',
+      );
       const final = await getTask('team', task.id);
       expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
+    it('rejects a stale leader assignment when status changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+        owner: 'alice',
+      });
+      await updateTask('team', task.id, { status: 'in_progress' });
+      await updateTask(
+        'team',
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress', owner: 'bob' },
+          { expectedOwner: 'alice', expectedStatus: 'in_progress' },
+        ),
+      ).rejects.toMatchObject({
+        name: 'TaskOwnerChangedError',
+        expectedStatus: 'in_progress',
+        actualStatus: 'completed',
+      });
+      expect(await getTask('team', task.id)).toMatchObject({
+        status: 'completed',
+        owner: 'alice',
+      });
     });
 
     it('lets the leader (no callerName) override an existing owner', async () => {

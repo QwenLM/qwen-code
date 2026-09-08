@@ -363,12 +363,26 @@ export class TaskOwnerChangedError extends Error {
     readonly taskId: string,
     readonly expectedOwner: string | undefined,
     readonly actualOwner: string | undefined,
+    readonly expectedStatus?: SwarmTaskStatus,
+    readonly actualStatus?: SwarmTaskStatus,
   ) {
     const label = (owner: string | undefined) => owner ?? 'unassigned';
+    const changes: string[] = [];
+    if (expectedOwner !== actualOwner) {
+      changes.push(
+        `owner changed from "${label(expectedOwner)}" to "${label(actualOwner)}"`,
+      );
+    }
+    if (expectedStatus !== undefined && expectedStatus !== actualStatus) {
+      changes.push(
+        `status changed from "${expectedStatus}" to "${actualStatus}"`,
+      );
+    }
     super(
-      `Task #${taskId} owner changed from "${label(expectedOwner)}" to ` +
-        `"${label(actualOwner)}" before this assignment committed. ` +
-        'Retry task_update using the current task state.',
+      `Task #${taskId} ${changes.join(' and ')} before this assignment ` +
+        `committed. Current state is owner "${label(actualOwner)}", status ` +
+        `"${actualStatus}". Re-read the task before retrying. A content-only ` +
+        `task_update persists changes without re-delivering the assignment.`,
     );
     this.name = 'TaskOwnerChangedError';
   }
@@ -386,10 +400,10 @@ export class TaskOwnerChangedError extends Error {
  * pre-lock guard on an unowned task and have the second writer
  * silently overwrite the first one's claim.
  *
- * `opts.expectedOwner`, when present, adds an optimistic ownership
- * check for leader-side assignment. `null` means the caller observed
- * an unowned task. A stale assignment is rejected inside the same lock
- * before any fields are changed.
+ * `opts.expectedOwner` and `opts.expectedStatus`, when present, add
+ * optimistic checks for leader-side assignment. `null` means the caller
+ * observed an unowned task. A stale assignment is rejected inside the
+ * same lock before any fields are changed.
  */
 export async function updateTask(
   teamName: string,
@@ -404,7 +418,11 @@ export async function updateTask(
     addBlocks?: string[];
     addBlockedBy?: string[];
   },
-  opts?: { callerName?: string; expectedOwner?: string | null },
+  opts?: {
+    callerName?: string;
+    expectedOwner?: string | null;
+    expectedStatus?: SwarmTaskStatus;
+  },
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
@@ -424,13 +442,24 @@ export async function updateTask(
       }
       const task = JSON.parse(raw) as SwarmTask;
 
-      if (opts && 'expectedOwner' in opts) {
+      const checksExpectedOwner = opts && 'expectedOwner' in opts;
+      const checksExpectedStatus = opts && 'expectedStatus' in opts;
+      if (checksExpectedOwner || checksExpectedStatus) {
         const expectedOwner = opts.expectedOwner
           ? sanitizeName(opts.expectedOwner)
           : undefined;
         const actualOwner = task.owner ? sanitizeName(task.owner) : undefined;
-        if (expectedOwner !== actualOwner) {
-          throw new TaskOwnerChangedError(taskId, expectedOwner, actualOwner);
+        if (
+          (checksExpectedOwner && expectedOwner !== actualOwner) ||
+          (checksExpectedStatus && opts.expectedStatus !== task.status)
+        ) {
+          throw new TaskOwnerChangedError(
+            taskId,
+            expectedOwner,
+            actualOwner,
+            opts.expectedStatus,
+            task.status,
+          );
         }
       }
 
