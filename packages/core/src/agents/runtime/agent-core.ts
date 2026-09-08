@@ -1207,7 +1207,7 @@ export class AgentCore {
 
         // Update token usage if available
         if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+          this.recordTokenUsage(lastUsage, cumulativeRounds, roundStreamStart);
         }
 
         if (functionCalls.length > 0) {
@@ -1408,6 +1408,7 @@ export class AgentCore {
         subagentId: this.subagentId,
         kind: typeof input === 'string' ? 'message' : input.kind,
         text: typeof input === 'string' ? input : input.text,
+        deliveryId: typeof input === 'string' ? undefined : input.deliveryId,
         timestamp: Date.now(),
       });
     }

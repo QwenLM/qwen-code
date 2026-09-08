@@ -99,6 +99,9 @@ function createLeaderConfig(projectRoot: string): Config {
     getAllConfiguredModels: vi.fn().mockReturnValue([]),
     getToolRegistry: vi.fn().mockReturnValue(createMockToolRegistry()),
     createToolRegistry: vi.fn().mockResolvedValue(createMockToolRegistry()),
+    getMcpServers: vi.fn().mockReturnValue({
+      session: { command: 'session-server' },
+    }),
     getMonitorRegistry: vi.fn().mockReturnValue({
       setAgentNotificationCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),
@@ -253,6 +256,50 @@ describe('TeamManager teammate model routing (#10071)', () => {
     // The team file reflects the model the teammate actually runs on.
     const member = teamManager.getTeamFile().members[0]!;
     expect(member.model).toBe('claude-worker');
+  });
+
+  it('loads MCP servers declared by the teammate agent definition', async () => {
+    const agentsDir = path.join(projectDir, '.qwen', 'agents');
+    await fs.mkdir(agentsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agentsDir, 'mcp-worker.md'),
+      [
+        '---',
+        'name: mcp-worker',
+        'description: A worker with a private MCP server',
+        'mcpServers:',
+        '  agent-private:',
+        '    command: node',
+        '    args:',
+        '      - /tmp/agent-private-mcp.js',
+        '---',
+        '',
+        'Use the private MCP tool.',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    await teamManager.spawnTeammate({
+      name: 'mcp-worker-1',
+      agentType: 'mcp-worker',
+      cwd: projectDir,
+    });
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { runtimeContext } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    const agentConfig = runtimeContext as unknown as Config;
+    expect(agentConfig.getMcpServers()).toEqual({
+      session: { command: 'session-server' },
+      'agent-private': {
+        command: 'node',
+        args: ['/tmp/agent-private-mcp.js'],
+      },
+    });
+    expect(
+      vi.mocked(agentConfig.getToolRegistry().discoverToolsForServer),
+    ).toHaveBeenCalledWith('agent-private');
   });
 
   it('resolves a fast selector in the definition against the runtime context', async () => {

@@ -283,6 +283,7 @@ export class AgentHeadless {
           subagentId: this.core.subagentId,
           kind: typeof input === 'string' ? 'message' : input.kind,
           text: typeof input === 'string' ? input : input.text,
+          deliveryId: typeof input === 'string' ? undefined : input.deliveryId,
           timestamp: Date.now(),
         });
       }

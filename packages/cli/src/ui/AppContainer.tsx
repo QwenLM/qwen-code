@@ -2517,6 +2517,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     dialogOpen: bgTasksDialogOpen,
     entries: bgTaskEntries,
+    liveAgentEntries,
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
@@ -3879,7 +3880,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // `availableTerminalHeight` — never goes stale below the composer. See
   // getLiveAgentPanelLayoutKey for the full rationale (#5798).
   const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
-    bgTaskEntries,
+    liveAgentEntries ?? bgTaskEntries,
     bgLivePanelFocused,
   );
 

@@ -22,9 +22,15 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
+  compareActiveThenTerminal,
   type DialogEntry,
   useBackgroundTaskView,
 } from '../hooks/useBackgroundTaskView.js';
+import {
+  type LiveAgentDialogEntry,
+  useTeamAgentRoster,
+} from '../hooks/use-team-agent-roster.js';
+import { useAgentViewState } from './AgentViewContext.js';
 
 const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
@@ -43,6 +49,8 @@ export interface BackgroundTaskViewState {
    * a `kind` discriminator so renderers can dispatch on agent vs shell.
    */
   entries: readonly DialogEntry[];
+  /** Agent-only rows rendered by LiveAgentPanel, including team members. */
+  liveAgentEntries?: readonly LiveAgentDialogEntry[];
   /** Index into `entries` for the currently focused row (0-based). */
   selectedIndex: number;
   /** `'closed'` when the overlay isn't mounted; otherwise the active mode. */
@@ -98,6 +106,7 @@ export const BackgroundTaskViewActionsContext =
 
 const DEFAULT_STATE: BackgroundTaskViewState = {
   entries: [],
+  liveAgentEntries: [],
   selectedIndex: 0,
   dialogMode: 'closed',
   dialogOpen: false,
@@ -148,6 +157,19 @@ export function BackgroundTaskViewProvider({
   children,
 }: BackgroundTaskViewProviderProps) {
   const { entries } = useBackgroundTaskView(config ?? null);
+  const { agents } = useAgentViewState();
+  const teamAgentEntries = useTeamAgentRoster(config ?? null, agents);
+  const liveAgentEntries = useMemo(
+    () =>
+      [
+        ...entries.filter(
+          (entry): entry is Extract<DialogEntry, { kind: 'agent' }> =>
+            entry.kind === 'agent',
+        ),
+        ...teamAgentEntries,
+      ].sort(compareActiveThenTerminal),
+    [entries, teamAgentEntries],
+  );
 
   const [rawSelectedIndex, setRawSelectedIndex] = useState(0);
   const [dialogMode, setDialogMode] = useState<BackgroundDialogMode>('closed');
@@ -169,7 +191,7 @@ export function BackgroundTaskViewProvider({
     if (pillFocused && !hasEntries) setPillFocused(false);
   }, [pillFocused, hasEntries]);
 
-  const hasAgentEntries = entries.some((e) => e.kind === 'agent');
+  const hasAgentEntries = liveAgentEntries.length > 0;
   useEffect(() => {
     if (livePanelFocused && !hasAgentEntries) setLivePanelFocusedRaw(false);
   }, [livePanelFocused, hasAgentEntries]);
@@ -321,6 +343,7 @@ export function BackgroundTaskViewProvider({
   const state: BackgroundTaskViewState = useMemo(
     () => ({
       entries,
+      liveAgentEntries,
       selectedIndex,
       dialogMode,
       dialogOpen,
@@ -330,6 +353,7 @@ export function BackgroundTaskViewProvider({
     }),
     [
       entries,
+      liveAgentEntries,
       selectedIndex,
       dialogMode,
       dialogOpen,

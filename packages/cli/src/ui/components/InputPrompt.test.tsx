@@ -62,6 +62,7 @@ const mockViewActions = vi.hoisted(() => ({
   setLivePanelSelectedIndex: vi.fn(),
   setBgSelectedIndex: vi.fn(),
   enterBgDetailFromPanel: vi.fn(),
+  switchToAgent: vi.fn(),
 }));
 
 vi.mock('../hooks/useShellHistory.js');
@@ -96,6 +97,7 @@ vi.mock('../contexts/AgentViewContext.js', () => ({
   })),
   useAgentViewActions: vi.fn(() => ({
     setAgentTabBarFocused: mockViewActions.setAgentTabBarFocused,
+    switchToAgent: mockViewActions.switchToAgent,
   })),
 }));
 vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
@@ -226,6 +228,7 @@ describe('InputPrompt', () => {
     mockViewActions.setLivePanelSelectedIndex.mockReset();
     mockViewActions.setBgSelectedIndex.mockReset();
     mockViewActions.enterBgDetailFromPanel.mockReset();
+    mockViewActions.switchToAgent.mockReset();
 
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
@@ -248,6 +251,7 @@ describe('InputPrompt', () => {
     });
     mockedUseAgentViewActions.mockReturnValue({
       setAgentTabBarFocused: mockViewActions.setAgentTabBarFocused,
+      switchToAgent: mockViewActions.switchToAgent,
     } as unknown as ReturnType<typeof useAgentViewActions>);
     mockedUseBackgroundTaskViewState.mockReturnValue({
       entries: [],
@@ -5967,6 +5971,50 @@ describe('InputPrompt', () => {
       expect(mockViewActions.setBgSelectedIndex).toHaveBeenCalledWith(1);
       expect(mockViewActions.enterBgDetailFromPanel).toHaveBeenCalled();
       expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      unmount();
+    });
+
+    it('Enter on a teammate row opens its existing Agent tab', async () => {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['reviewer@review-team', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [],
+        liveAgentEntries: [
+          {
+            kind: 'agent',
+            id: 'reviewer@review-team',
+            agentId: 'reviewer@review-team',
+            status: 'paused',
+            teamStatus: 'idle',
+            teamName: 'review-team',
+            startTime: 1,
+          },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+      stdin.write('\r');
+      await wait();
+
+      expect(mockViewActions.switchToAgent).toHaveBeenCalledWith(
+        'reviewer@review-team',
+      );
+      expect(mockViewActions.enterBgDetailFromPanel).not.toHaveBeenCalled();
       unmount();
     });
 

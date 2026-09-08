@@ -72,8 +72,9 @@ export interface RunConfig {
 export type AgentExternalInput =
   | string
   | {
-      kind: 'notification';
+      kind: 'message' | 'notification';
       text: string;
+      deliveryId?: string;
     };
 
 /**

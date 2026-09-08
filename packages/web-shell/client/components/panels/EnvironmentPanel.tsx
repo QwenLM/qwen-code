@@ -10,6 +10,7 @@ import {
   BotIcon,
   ChevronRightIcon,
   CircleCheckIcon,
+  CircleDotIcon,
   CirclePauseIcon,
   CircleStopIcon,
   CircleXIcon,
@@ -111,6 +112,7 @@ function taskStatusKey(status: DaemonSessionTaskWithWorkflowStatus['status']) {
 
 function taskStatusIcon(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   if (status === 'completed') return <CircleCheckIcon />;
+  if (status === 'idle') return <CircleDotIcon />;
   if (status === 'running' || status === 'pausing') {
     return <LoaderCircleIcon className={styles.statusRunning} />;
   }
@@ -130,7 +132,9 @@ function agentDisplayName(task: EnvironmentAgentTask): string {
 }
 
 function agentColorValue(color: string | undefined): string {
-  return (color && AGENT_COLORS[color]) || 'var(--muted-foreground)';
+  if (!color) return 'var(--muted-foreground)';
+  if (/^#[\da-f]{6}$/i.test(color)) return color;
+  return AGENT_COLORS[color] || 'var(--muted-foreground)';
 }
 
 export function EnvironmentPanel({
@@ -349,8 +353,11 @@ export function EnvironmentPanel({
                   <button
                     type="button"
                     className={styles.task}
-                    disabled={!onOpenAgent}
-                    onClick={() => onOpenAgent?.(task)}
+                    disabled={!onOpenAgent || Boolean(task.teamName)}
+                    aria-disabled={task.teamName ? true : undefined}
+                    onClick={() => {
+                      if (!task.teamName) onOpenAgent?.(task);
+                    }}
                   >
                     <span className={styles.taskLabel}>
                       {!isForkAgent(task) && (
@@ -376,6 +383,14 @@ export function EnvironmentPanel({
                               });
                         })()}
                       </span>
+                      {task.teamTask && (
+                        <span
+                          className={styles.agentTask}
+                          title={task.teamTask.subject}
+                        >
+                          {task.teamTask.subject}
+                        </span>
+                      )}
                     </span>
                     <span
                       className={styles.taskStatus}

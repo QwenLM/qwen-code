@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import type {
-  AgentDialogEntry,
-  DialogEntry,
-} from '../../hooks/useBackgroundTaskView.js';
+  LiveAgentDialogEntry,
+  TeamAgentDialogEntry,
+} from '../../hooks/use-team-agent-roster.js';
+
+type LiveAgentCandidate = DialogEntry | TeamAgentDialogEntry;
 
 // Keep this shared with keyboard focus gates: anything counted here
 // must be something the live panel can actually render.
@@ -49,9 +52,9 @@ export function getLiveAgentPanelVpMaxRows(terminalHeight: number): number {
 }
 
 export function isLiveAgentPanelVisibleEntry(
-  entry: DialogEntry,
+  entry: LiveAgentCandidate,
   nowMs: number,
-): entry is AgentDialogEntry {
+): entry is LiveAgentDialogEntry {
   if (entry.kind !== 'agent') return false;
   if (entry.status === 'running' || entry.status === 'paused') return true;
   if (entry.endTime === undefined) return false;
@@ -83,7 +86,7 @@ export function isLiveAgentPanelVisibleEntry(
  * direction (no overflow).
  */
 export function getLiveAgentPanelLayoutKey(
-  entries: readonly DialogEntry[],
+  entries: readonly LiveAgentCandidate[],
   livePanelFocused: boolean,
 ): string {
   let key = livePanelFocused ? 'f' : '_';

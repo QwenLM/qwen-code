@@ -393,6 +393,8 @@ export interface ChatRecord {
   agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
+  /** Durable identity of the external delivery that produced this record. */
+  externalInputDeliveryId?: string;
 
   /**
    * Set on every record of a forked session to record its lineage.
