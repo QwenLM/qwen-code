@@ -32,6 +32,11 @@ const PLACEHOLDERS: ReadonlyArray<{
   readonly resolve: (config: Config) => string | undefined;
 }> = [{ token: '${session_id}', resolve: (config) => config.getSessionId() }];
 
+// Normalize equivalent runtime session spellings before applying the consent
+// gate so settings interpolation cannot turn one into an unguarded static value.
+const SESSION_ID_PLACEHOLDER_PATTERN =
+  /\$(?:session_id|QWEN_CODE_SESSION_ID)(?!\w)|\$\{(?:session_id|QWEN_CODE_SESSION_ID)\}/gi;
+
 /**
  * Reports a configured placeholder that the gate is currently refusing,
  * once per distinct header set, on the console.
@@ -77,7 +82,7 @@ export function warnIfDynamicHeadersDisabled(
 
 /** True when `value` asks for at least one runtime-resolved placeholder. */
 export function hasDynamicPlaceholder(value: string): boolean {
-  return PLACEHOLDERS.some(({ token }) => value.includes(token));
+  return value.search(SESSION_ID_PLACEHOLDER_PATTERN) !== -1;
 }
 
 /**
@@ -111,7 +116,10 @@ export function resolveDynamicHeaderValue(
       );
       return undefined;
     }
-    let expanded = value;
+    let expanded = value.replace(
+      SESSION_ID_PLACEHOLDER_PATTERN,
+      '${session_id}',
+    );
     for (const { token, resolve } of PLACEHOLDERS) {
       if (!expanded.includes(token)) continue;
       const resolved = resolve(config);

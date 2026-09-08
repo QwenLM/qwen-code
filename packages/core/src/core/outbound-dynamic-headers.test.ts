@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { resolveEnvVarsInString } from '../utils/envVarResolver.js';
 import {
   applyDynamicHeaderValues,
   expandDynamicHeaders,
@@ -28,13 +29,18 @@ function config({
 describe('hasDynamicPlaceholder', () => {
   it.each([
     '${session_id}',
+    '$session_id',
+    '${SESSION_ID}',
+    '${QWEN_CODE_SESSION_ID}',
+    '$QWEN_CODE_SESSION_ID',
+    '${qwen_code_session_id}',
     'sess-${session_id}',
     '${session_id}-${session_id}',
   ])('detects a placeholder in %s', (value) => {
     expect(hasDynamicPlaceholder(value)).toBe(true);
   });
 
-  it.each(['req-123', '', '$session_id', '${SESSION_ID}', '{session_id}'])(
+  it.each(['req-123', '', '$session_id_suffix', '{session_id}'])(
     'leaves %j alone',
     (value) => {
       expect(hasDynamicPlaceholder(value)).toBe(false);
@@ -56,6 +62,31 @@ describe('resolveDynamicHeaderValue', () => {
     expect(resolveDynamicHeaderValue('${session_id}', config())).toBe(
       'session-1',
     );
+  });
+
+  it.each([
+    ['$session_id', 'session-1'],
+    ['${SESSION_ID}', 'session-1'],
+    ['$QWEN_CODE_SESSION_ID', 'session-1'],
+    ['${qwen_code_session_id}', 'session-1'],
+    ['sess=$QWEN_CODE_SESSION_ID', 'sess=session-1'],
+  ])('expands the session ID alias %s through the gate', (value, expected) => {
+    expect(resolveDynamicHeaderValue(value, config())).toBe(expected);
+    expect(
+      resolveDynamicHeaderValue(value, config({ allow: false })),
+    ).toBeUndefined();
+  });
+
+  it('keeps runtime session environment values behind the consent gate', () => {
+    const value = resolveEnvVarsInString('sess=$QWEN_CODE_SESSION_ID', {
+      QWEN_CODE_SESSION_ID: 'ambient-session',
+    });
+
+    expect(value).toBe('sess=$QWEN_CODE_SESSION_ID');
+    expect(
+      resolveDynamicHeaderValue(value, config({ allow: false })),
+    ).toBeUndefined();
+    expect(resolveDynamicHeaderValue(value, config())).toBe('sess=session-1');
   });
 
   it('expands a placeholder embedded in a larger value, repeatedly', () => {
