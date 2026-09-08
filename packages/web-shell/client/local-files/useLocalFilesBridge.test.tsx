@@ -858,6 +858,68 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('does not re-attach when a declined disconnect is followed by a dismissed picker', async () => {
+    const perms = { query: 'granted' as PermissionState };
+    const handle = fakeHandle('ai_coding', perms);
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const store = fakeStore(handle);
+    const locks = exclusiveLocks();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('held-elsewhere');
+
+    // Declined: the record survives by design and this mount detaches.
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+
+    // A Connect whose picker the user dismisses binds nothing, so it must
+    // leave the detach latch set. The connect is not wrapped in act: its
+    // open scope would hold back this mount's own status commits.
+    perms.query = 'denied';
+    const connecting = hB.get().connect();
+    await hB.flush();
+    rejectPicker(new DOMException('user cancelled', 'AbortError'));
+    await act(async () => {
+      await connecting;
+    });
+    hA.unmount();
+    await hB.flush();
+
+    // A blocker flip re-runs restore(): with the latch intact it must not
+    // re-attach a bridge from the surviving record behind the user's click.
+    hB.rerender({ withheldBlocker: 'workspace-resolving' });
+    await hB.flush();
+    perms.query = 'granted';
+    hB.rerender({ withheldBlocker: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(0);
+    expect(hB.get().status.phase).not.toBe('connecting');
+    expect(hB.get().status.phase).not.toBe('connected');
+    expect(await store.load()).toBe(handle);
+    hB.unmount();
+  });
+
   it('revokes once the owner that parked this tab is gone', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
@@ -1924,6 +1986,221 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('keeps the foreign latch when a connect is invalidated before it binds', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: null,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    // A peer renames the origin-global record; the direct revoke refuses it
+    // and latches the record as foreign.
+    const other = fakeHandle('peer_dir', {
+      query: 'prompt',
+      request: 'granted',
+    });
+    await store.save(other);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+
+    // Gate the store: the reconnect parks inside save(), and the next
+    // disconnect's revoke parks inside load() behind it.
+    let releaseSave!: (ok: boolean) => void;
+    const saveGate = new Promise<boolean>((resolve) => {
+      releaseSave = resolve;
+    });
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    let gateLoads = false;
+    const realLoad = store.load;
+    store.load = async () => {
+      if (gateLoads) await loadGate;
+      return realLoad();
+    };
+    store.save = async () => saveGate;
+
+    // The connect is not wrapped in act: its open scope would hold back
+    // this mount's own status commits while it stays parked.
+    const connecting = h.get().connect();
+    await h.flush();
+    await h.flush();
+    gateLoads = true;
+    const disconnecting = h.get().disconnect();
+    await h.flush();
+    // The save resolves after the disconnect invalidated the connect: the
+    // connect goes stale and binds nothing, so it must not clear the latch
+    // the revoke is about to read.
+    releaseSave(true);
+    await h.flush();
+    releaseLoad();
+    await act(async () => {
+      await connecting;
+      await disconnecting;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(other);
+    h.unmount();
+  });
+
+  it('does not name a foreign record while a blocker is live', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const common = {
+      sessionId: 'session-1' as string | undefined,
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: null,
+    };
+    const h = render({ ...common, withheldBlocker: 'workspace-ineligible' });
+    await h.flush();
+    await h.flush();
+    // The withheld entry names the stored grant so the panel's Disconnect —
+    // the only revoke path — stays reachable over it.
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+
+    // A peer renames the origin-global record: the revoke refuses it, and
+    // no arm may keep naming a record this mount can never clear.
+    const other = fakeHandle('peer_dir', { query: 'granted' });
+    await store.save(other);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(other);
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+
+    // A blocker flip re-runs restore(): the foreign name must not return.
+    h.rerender({ ...common, withheldBlocker: undefined });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+    h.rerender({ ...common, withheldBlocker: 'workspace-ineligible' });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+    expect(h.sockets).toHaveLength(0);
+    h.unmount();
+  });
+
+  it('does not name a foreign record when a connect fails after the latch', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks: null,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const other = fakeHandle('peer_dir', { query: 'denied' });
+    await store.save(other);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+
+    // The picker fails with a real error: the failure write must not name
+    // the foreign record either.
+    const connecting = act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    rejectPicker(new Error('picker broke'));
+    await connecting;
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'failed',
+      blocker: null,
+      message: 'picker broke',
+    });
+    h.unmount();
+  });
+
+  it('revokes the record this mount re-bound after the latch was set', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: null,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    // A peer renames the origin-global record; the direct revoke refuses it
+    // and latches the record as foreign.
+    const other = fakeHandle('peer_dir', { query: 'granted' });
+    await store.save(other);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+
+    // The user reconnects: the re-save fails soft, but the connect still
+    // binds the record's own handle — this mount now owns and serves that
+    // grant, so the latch must not veto its name-matching release.
+    store.save = async () => false;
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(2);
+    expect(h.get().status).toMatchObject({
+      phase: 'connecting',
+      rootName: 'peer_dir',
+    });
+
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
+    h.unmount();
+  });
+
   it('names the surviving grant when a deferred revoke fails soft', async () => {
     const handle = fakeHandle('ai_coding', { query: 'denied' });
     const store = fakeStore(handle);
@@ -2093,13 +2370,14 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
-  it('revokes when the deferred reconnect only attempted to re-save the stored grant', async () => {
+  it('keeps the record when the deferred reconnect re-saved nothing but bound a bridge', async () => {
     const perms = { query: 'denied' as PermissionState };
     const handle = fakeHandle('ai_coding', perms);
     const store = fakeStore(handle);
     // The re-save fails soft and writes nothing (the store's own contract),
-    // so the record is not the reconnect's own grant and the reconnect must
-    // not stamp the saved flag that vetoes the pending revoke.
+    // so connectSavedRef stays false — but the stored-handle arm still binds
+    // a bridge to the record's own handle, and the deferred revoke must not
+    // delete that record out from under the live bridge.
     store.save = async () => false;
     const lock = { held: false, settling: 1 };
     let releaseDelay!: () => void;
@@ -2136,16 +2414,22 @@ describe('useLocalFilesBridge restore', () => {
     await act(async () => {
       await disconnectPromise;
     });
-    // The re-query answers granted: the reconnect binds a live bridge, but
-    // the soft-failed re-save wrote nothing — the deferred revoke must
-    // still reach the record the user asked to release.
+    // The re-query answers granted: the reconnect binds a live bridge to
+    // the record's own handle, so the record is this connect's own grant
+    // and the deferred revoke must leave it standing.
     releaseQuery('granted');
     await act(async () => {
       await connecting;
     });
     await h.flush();
-    expect(store.clears).toBe(1);
-    expect(await store.load()).toBeUndefined();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.get().status).toEqual({
+      phase: 'connecting',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
     h.unmount();
   });
 
@@ -3077,6 +3361,67 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     await h.flush();
     expect(h.sockets[0]!.closeCount).toBe(1);
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
+  it('keeps a live bridge when a transient resolving verdict lands mid-session', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'connected',
+      blocker: null,
+      rootName: 'ai_coding',
+      toolCount: 4,
+    });
+
+    // A registry/snapshot blip resolves to the transient pending verdict:
+    // the bridge still bound to this session must not be torn down mid-turn.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-resolving',
+    });
+    await h.flush();
+    await h.flush();
+    expect(socket.closeCount).toBe(0);
+    expect(h.get().status.phase).toBe('connected');
+
+    // A hard verdict still stops the same bridge.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await h.flush();
+    await h.flush();
+    expect(socket.closeCount).toBe(1);
     expect(h.get().status).toEqual({
       phase: 'unavailable',
       blocker: 'workspace-ineligible',
