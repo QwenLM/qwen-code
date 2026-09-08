@@ -64,6 +64,36 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
   );
 }
 
+/**
+ * Wall-clock instant every capture renders at. Arbitrary, but fixed -- paired
+ * with `timezoneId: 'UTC'` in playwright.visuals.config.ts it makes the
+ * rendered time-of-day identical on every machine, not just within one job.
+ */
+export const FIXED_CAPTURE_TIME = new Date('2026-01-01T09:00:00.000Z');
+
+/**
+ * Pin `Date.now()` / `new Date()` so anything rendering a wall-clock time is
+ * byte-identical across the base and head capture passes.
+ *
+ * Those two passes run minutes apart inside the SAME job -- the base render
+ * waits on its own `npm install` first -- so every timestamped view differed on
+ * every run purely because of when it was photographed. On PR #11267 that was
+ * the entire preview: the one view the compose step flagged as CHANGED,
+ * `terminal-turn-error-copy-narrow-dark`, scored exactly 0.02% (the threshold)
+ * and the whole diff was a `09:09:28` tip against a `09:18:16` one. The narrow
+ * viewport is half the pixels of the wide one, which is why the same ~100
+ * timestamp pixels cleared the threshold there and were skipped at 0.01%
+ * everywhere else.
+ *
+ * `setFixedTime` fakes only clock READINGS, not timers, so replay, streaming,
+ * transitions and `freezeLoopingAnimations` all still behave normally. Anything
+ * rendering an elapsed duration settles on a constant instead of drifting,
+ * which is the point.
+ */
+export async function freezeWallClock(page: Page): Promise<void> {
+  await page.clock.setFixedTime(FIXED_CAPTURE_TIME);
+}
+
 export function resolveBaseURL(testInfo: TestInfo): string {
   const value = testInfo.project.use.baseURL;
   if (!value)
@@ -98,6 +128,7 @@ export async function gotoSession(
   search: Readonly<Record<string, string>> = {},
 ): Promise<void> {
   await primeTheme(page, theme);
+  await freezeWallClock(page);
   const query = new URLSearchParams({ theme, ...search });
   await page.goto(
     `/session/${encodeURIComponent(scenario.sessionId)}?${query.toString()}`,
@@ -125,6 +156,7 @@ export async function gotoNewSession(
   theme: VisualTheme,
 ): Promise<void> {
   await primeTheme(page, theme);
+  await freezeWallClock(page);
   await page.goto(`/?theme=${theme}`);
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
@@ -224,6 +256,9 @@ export async function recordFlow(
   const context: BrowserContext = await browser.newContext({
     baseURL,
     viewport: { ...VISUAL_VIEWPORT },
+    // Contexts made here do not inherit `use` from the config, so repeat the
+    // timezone pin that pairs with `freezeWallClock`.
+    timezoneId: 'UTC',
     recordVideo: { dir: VIDEO_RAW_DIR, size: { ...VISUAL_VIEWPORT } },
   });
   let page: Page | undefined;

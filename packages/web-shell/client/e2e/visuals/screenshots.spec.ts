@@ -177,9 +177,12 @@ for (const theme of THEMES) {
       await expect(actions).toHaveCSS('opacity', '1');
       await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
 
+      // A context created here does NOT inherit `use` from the config, so the
+      // timezone has to be repeated or this one capture drifts from the rest.
       const touchContext = await browser.newContext({
         ...devices['Pixel 7'],
         baseURL,
+        timezoneId: 'UTC',
       });
       try {
         const touchPage = await touchContext.newPage();
