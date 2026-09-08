@@ -588,6 +588,33 @@ describe('buildClassifierContents', () => {
     expect(priorText).not.toContain('must-not-leak');
   });
 
+  it('fails closed when bridged history is resumed without the tool_call wrapper', () => {
+    const registry = makeRegistry({});
+    const result = buildClassifierContents(
+      [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'mcp__srv__tool',
+                  arguments: { secret: 'must-not-leak' },
+                },
+              },
+            },
+          ],
+        },
+      ],
+      registry,
+      { toolName: 'read_file', toolParams: { path: '/tmp/a.ts' } },
+    );
+    const priorText = (result[0].parts?.[0] as { text: string }).text;
+    expect(priorText).toContain('mcp__srv__tool');
+    expect(priorText).not.toContain('must-not-leak');
+  });
+
   it('does not leak the raw envelope of a bridged history entry with no string name', () => {
     const tools: Record<string, AnyDeclarativeTool> = {};
     const registry = makeRegistry(tools);
