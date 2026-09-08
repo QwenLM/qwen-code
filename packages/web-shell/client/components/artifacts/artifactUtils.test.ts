@@ -69,6 +69,14 @@ describe('artifactUtils', () => {
     ).toBe(false);
   });
 
+  it('prefers recognized file types before the artifact kind', () => {
+    expect(artifactKindLabel('file', 'todolist.md')).toBe('Markdown');
+    expect(artifactKindLabel('file', 'preview.html')).toBe('HTML');
+    expect(artifactKindLabel('file', 'photo.png')).toBe('Image');
+    expect(artifactKindLabel('link', 'report.pdf?download=1')).toBe('PDF');
+    expect(artifactKindLabel('file', 'unknown.custom')).toBe('file');
+  });
+
   it.each([
     { workspacePath: 'notes.md' },
     { workspacePath: 'notes.markdown' },

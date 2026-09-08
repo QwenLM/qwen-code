@@ -7,6 +7,7 @@
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   recordDaemonBridgeError,
   recordDaemonError,
   SessionIdCaseConflictError,
@@ -30,6 +31,7 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
@@ -45,6 +47,7 @@ import {
   SessionLimitExceededError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionResetPendingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceInitConflictError,
@@ -58,13 +61,34 @@ import {
 import type { DaemonLogger } from '../daemon-logger.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
+import {
+  WorktreeMarkerMissingError,
+  WorktreeResetActiveError,
+  WorktreeResetInterruptedError,
+  WorktreeResetInvalidStateError,
+  WorktreeResetUnsupportedError,
+  WorktreeSessionSupersededError,
+} from './worktree-reset-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
   sessionId?: string;
+  /**
+   * The caller asserts that, on this request path, the channel-initialize
+   * handshake strictly precedes every durable mutation (git branch/worktree
+   * prep, committed forks, dispatched ACP requests). Only then may the
+   * `init_timeout` response promise `sideEffectPossible: false`. Routes
+   * that mutate before or around initialization must leave it unset so the
+   * response reports an unknown outcome instead.
+   */
+  initPrecedesMutations?: boolean;
   [key: string]: string | number | boolean | undefined;
 };
 
@@ -73,6 +97,50 @@ export type SendBridgeError = (
   err: unknown,
   ctx?: BridgeErrorContext,
 ) => void;
+
+function reportBridgeError(
+  err: unknown,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  const extraContext = bridgeErrorExtraContext(ctx);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge error.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    ...extraContext,
+    'error.type': err instanceof Error ? err.name : typeof err,
+    'error.message': (err instanceof Error ? err.message : String(err)).slice(
+      0,
+      1024,
+    ),
+  });
+  if (daemonLog) {
+    daemonLog.error(
+      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err : undefined,
+      {
+        ...(ctx?.route ? { route: ctx.route } : {}),
+        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        ...extraContext,
+      },
+    );
+    return;
+  }
+  const ctxParts = [
+    ctx?.route,
+    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+    ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
+  ].filter(Boolean);
+  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
+  writeStderrLine(
+    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
+}
 
 const SESSION_WRITER_ERROR_MESSAGES = {
   session_writer_conflict:
@@ -88,7 +156,12 @@ function bridgeErrorExtraContext(
 ): Record<string, string | number | boolean> {
   const extra: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(ctx ?? {})) {
-    if (key === 'route' || key === 'sessionId' || value === undefined) {
+    if (
+      key === 'route' ||
+      key === 'sessionId' ||
+      key === 'initPrecedesMutations' ||
+      value === undefined
+    ) {
       continue;
     }
     extra[key] = value;
@@ -197,6 +270,41 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    if (ctx?.initPrecedesMutations === true) {
+      res.set('Retry-After', '5');
+      // The caller asserted initialization strictly precedes every durable
+      // mutation on this path (plain session creation: the initialize
+      // handshake runs before the ACP newSession request is dispatched), so
+      // clients that understand the structured body can safely distinguish
+      // this timeout from an ambiguous mutation outcome.
+      res.status(504).json({
+        error: err.message,
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        retryable: true,
+        sideEffectPossible: false,
+        phase: 'channel.initialize',
+        timeoutMs: err.timeoutMs,
+      });
+      return;
+    }
+    // Mutations may precede or interleave with initialization on this path
+    // (branch/worktree preparation on POST /session, committed forks on the
+    // branch and side-task restore flows). Report the timeout WITHOUT the
+    // safe-retry contract: no Retry-After, no retryable, and no
+    // sideEffectPossible claim — the mutation outcome is unknown, and a
+    // contract-trusting client must not auto-retry.
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      phase: 'channel.initialize',
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
   if (err instanceof SessionRestoreTimeoutError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
     // The state this 504 leaves behind is the abandoned-restore fence, which
@@ -284,6 +392,24 @@ export function sendBridgeError(
     return;
   }
   if (sendGenerationClosedError(res, err)) return;
+  if (err instanceof WorkspaceRuntimeStillStartingError) {
+    reportBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_still_starting',
+    });
+    return;
+  }
+  if (err instanceof WorkspaceRuntimeInitializationError) {
+    reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_initialization_failed',
+    });
+    return;
+  }
   if (
     err instanceof Error &&
     'code' in err &&
@@ -312,6 +438,14 @@ export function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'invalid_transcript_cursor',
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionTranscriptTurnAnchorError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_turn_anchor',
       ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
     return;
@@ -345,6 +479,7 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceDrainingError) {
+    if (err.cause !== undefined) reportBridgeError(err.cause, ctx, daemonLog);
     res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,
@@ -401,6 +536,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof McpAuthenticationInProgressError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'mcp_authentication_in_progress',
+    });
+    return;
+  }
   if (err instanceof McpServerNotFoundError) {
     // Stable 404 for "MCP server name not in config".
     res.status(404).json({
@@ -433,6 +575,67 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'cd_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionResetPendingError) {
+    // The prompt barrier the worktree-reset route arms for the superseded
+    // session. 409 + the shared reset code: callers that know the reset flow
+    // (Channel worker) retry the task; non-Channel callers get a bounded
+    // message with no path or transfer internals.
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeSessionSupersededError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_session_superseded',
+      sessionId: err.sessionId,
+      replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeMarkerMissingError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_marker_missing',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInterruptedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_interrupted',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeResetInvalidStateError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'worktree_reset_invalid_state',
       sessionId: err.sessionId,
     });
     return;
@@ -850,6 +1053,13 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'invalid_turn_anchor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_turn_anchor',
+        });
+        return;
+      }
       if (kind === 'transcript_snapshot_unavailable') {
         const d = data as { sessionId?: string };
         res.status(409).json({
@@ -902,43 +1112,7 @@ export function sendBridgeError(
   // structured daemon logger (which tees to stderr + log file). When
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
-  recordDaemonBridgeError(err);
-  const extraContext = bridgeErrorExtraContext(ctx);
-  recordDaemonError(undefined, err, {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-  });
-  emitDaemonLog('Daemon bridge error.', {
-    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
-    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
-    ...extraContext,
-    'error.type': err instanceof Error ? err.name : typeof err,
-    'error.message': (err instanceof Error ? err.message : String(err)).slice(
-      0,
-      1024,
-    ),
-  });
-  if (daemonLog) {
-    daemonLog.error(
-      err instanceof Error ? err.message : String(err),
-      err instanceof Error ? err : undefined,
-      {
-        ...(ctx?.route ? { route: ctx.route } : {}),
-        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-        ...extraContext,
-      },
-    );
-  } else {
-    const ctxParts = [
-      ctx?.route,
-      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
-    ].filter(Boolean);
-    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-    writeStderrLine(
-      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-    );
-  }
+  reportBridgeError(err, ctx, daemonLog);
   res.status(500).json(errorPayload(err));
 }
 

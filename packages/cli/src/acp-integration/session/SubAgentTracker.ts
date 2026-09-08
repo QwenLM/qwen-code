@@ -16,12 +16,14 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
+
 import {
   AgentEventType,
   AUTO_REJECT_APPROVAL_PAYLOAD,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
@@ -69,6 +71,7 @@ export class SubAgentTracker {
       args?: Record<string, unknown>;
     }
   >();
+  private readonly approvalNotified = new Set<string>();
 
   constructor(
     private readonly ctx: SessionContext,
@@ -154,6 +157,25 @@ export class SubAgentTracker {
         args: event.args,
       });
 
+      // Emit progress update to parent to make subagent execution visible in ACP clients
+      const progressMessage = event.description
+        ? `${tool?.displayName ?? event.name}: ${event.description}`
+        : `Running tool: ${tool?.displayName ?? event.name}`;
+
+      void this.toolCallEmitter
+        .emitProgressUpdate(
+          this.subagentMeta.parentToolCallId,
+          this.subagentMeta.subagentType,
+          progressMessage,
+          event.name,
+        )
+        .catch((error) => {
+          debugLogger.debug(
+            'Failed to emit subagent progress update for tool call:',
+            error,
+          );
+        });
+
       // Use unified emitter - handles TodoWriteTool skipping internally
       void this.toolCallEmitter
         .emitStart({
@@ -218,6 +240,24 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
+
+      // Update parent progress to indicate permission is needed
+      if (!this.approvalNotified.has(event.callId) && !abortSignal.aborted) {
+        this.approvalNotified.add(event.callId);
+        void this.toolCallEmitter
+          .emitProgressUpdate(
+            this.subagentMeta.parentToolCallId,
+            this.subagentMeta.subagentType,
+            `Waiting for permission: ${state?.tool?.displayName ?? event.name}`,
+            event.name,
+          )
+          .catch((error) => {
+            debugLogger.debug(
+              'Failed to emit subagent progress update for approval:',
+              error,
+            );
+          });
+      }
 
       // Build permission request
       const fullConfirmationDetails = {

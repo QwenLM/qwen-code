@@ -711,6 +711,10 @@ describe('serve fast path argument parsing', () => {
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [
+        'session-prompt-settled-close-grace-ms',
+        ['--session-prompt-settled-close-grace-ms', '60000'],
+      ],
+      [
         'permission-response-timeout-ms',
         ['--permission-response-timeout-ms', '1000'],
       ],
@@ -1753,6 +1757,60 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'keeps update download sources user-owned when loading %s',
+    (source) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-update-source-')),
+      );
+      const keys = [
+        'QWEN_UPDATE_BASE_URL',
+        'qwen_update_base_url',
+        'Qwen_Update_Base_Url',
+      ];
+      for (const key of keys) vi.stubEnv(key, undefined);
+      const values = Object.fromEntries(
+        keys.map((key) => [key, 'https://project.example.com']),
+      );
+      const settings: ServeFastPathSettings = {
+        advanced: { excludedEnvVars: [] },
+      };
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        const envPath = join(tempWorkspace, source);
+        mkdirSync(dirname(envPath), { recursive: true });
+        writeFileSync(
+          envPath,
+          Object.entries(values)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n'),
+        );
+      }
+      try {
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        for (const key of keys) expect(process.env[key]).toBeUndefined();
+
+        const trustedUrl = 'https://downloads.example.com/releases';
+        writeFileSync(
+          join(qwenHome, '.env'),
+          `QWEN_UPDATE_BASE_URL=${trustedUrl}\n`,
+        );
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+
+        process.env['QWEN_UPDATE_BASE_URL'] = 'https://shell.example.com';
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(
+          'https://shell.example.com',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   // Regression for #8653: the fast path runs before runQwenServeImpl freezes
   // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base
   // env distributed to every workspace's session subprocesses — the exact
@@ -1891,6 +1949,60 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // The private Conversations provenance marker is listed in
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS, so a project .env is already rejected —
+  // but home-scoped files are exempt from that list, and the serve fast path
+  // dispatches before llm.tsx's capture-and-delete ever runs. Without its own
+  // gate here the marker would be frozen into daemonRuntimeBaseEnv and handed
+  // to every spawned session child.
+  it('never applies the private Conversations marker from user-level .env files', () => {
+    const trackedKeys = [
+      'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
+      'qwen_code_private_conversations_runtime',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-marker-home-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      [
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME=1',
+        // Windows env lookup is case-insensitive, so the gate must reject
+        // case variants too.
+        'qwen_code_private_conversations_runtime=1',
+        'FASTPATH_HOME_MARKER_ALLOWED=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME'],
+      ).toBeUndefined();
+      expect(
+        process.env['qwen_code_private_conversations_runtime'],
+      ).toBeUndefined();
+      expect(process.env['FASTPATH_HOME_MARKER_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_HOME_MARKER_ALLOWED'];
+    }
+  });
+
   // QWEN_CLI_ENTRY is the spawned session-process entrypoint: a start-dir
   // .env fixing it turns `qwen serve` in an untrusted repo into arbitrary
   // script execution for every workspace's sessions. The fast path consults
@@ -1921,6 +2033,42 @@ describe('serve fast path environment bootstrap', () => {
       loadServeFastPathEnvironment({}, tempWorkspace);
       expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
       expect(process.env['qwen_cli_entry']).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location: a start-dir .env fixing it redirects storage for every
+  // workspace the daemon serves, and reads resolve the configured root first
+  // — an attacker repo would capture uploads and serve back tampered bytes.
+  it('never applies QWEN_SERVE_SESSION_ATTACHMENTS_ROOT from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-attachments-root-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT=./exfil', ''].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'],
+      ).toBeUndefined();
     } finally {
       for (const key of trackedKeys) {
         if (previous[key] === undefined) {
@@ -2311,6 +2459,37 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
+  });
+
+  it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    delete process.env['FAST_PATH_LEAKED_COPY'];
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-secret-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: {
+          FAST_PATH_LEAKED_COPY: 'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+        },
+      }),
+    );
+    process.chdir(tempWorkspace);
+
+    try {
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+      // The placeholders survive verbatim, exactly like an unset variable's;
+      // the daemon bearer token is never copied under another key.
+      expect(process.env['FAST_PATH_LEAKED_COPY']).toBe(
+        'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+      );
+    } finally {
+      delete process.env['FAST_PATH_LEAKED_COPY'];
+    }
   });
 
   it('expands home .env fallback placeholders in workspace settings.env', async () => {

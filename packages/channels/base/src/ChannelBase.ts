@@ -39,10 +39,12 @@ import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
-import { SessionRouter } from './SessionRouter.js';
+import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
 import {
   NamedSessionManager,
+  NamedSessionTaskError,
   type NamedSessionOwnerInput,
+  type NamedSessionSelection,
   type NamedSessionTaskReference,
 } from './named-session-manager.js';
 import { getGlobalQwenDir } from './paths.js';
@@ -58,6 +60,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -69,6 +72,7 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import { applyMessagePrefix } from './message-prefix.js';
 import {
   buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
@@ -89,6 +93,11 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
+
+interface BackgroundResponseDeliveryTarget {
+  target: SessionTarget;
+  sourceLabel?: string;
+}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -333,6 +342,16 @@ type ActivePrompt = {
    */
   clearEvicted?: boolean;
 };
+type ActiveBtw = {
+  id: string;
+  bridge: ChannelAgentBridge;
+  controller: AbortController;
+  target: SessionTarget;
+  chatId: string;
+  threadId?: string;
+  sourceLabel?: string;
+  taskName?: string;
+};
 
 /**
  * Character class (sans the enclosing `[]`) for a slash-command token: alphanumerics
@@ -352,6 +371,8 @@ const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
 const MAX_DISPLAY_PROJECTION_CHARS = 8000;
+// Mirrors BTW_MAX_INPUT_LENGTH in core without adding core to channel-base.
+const CHANNEL_BTW_MAX_INPUT_LENGTH = 4096;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -414,6 +435,9 @@ export abstract class ChannelBase {
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefix?: string;
+  private readonly messagePrefixCheckedEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefixRejectedEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
   private channelMemoryReads = new Map<string, ChannelMemoryReadState>();
@@ -446,6 +470,7 @@ export abstract class ChannelBase {
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
+  private readonly activeBtw: Map<string, ActiveBtw> = new Map();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
@@ -455,8 +480,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -524,15 +550,21 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
-    let target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      text.trim().length === 0
-    ) {
+    if (text.trim().length === 0) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
     }
+    await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected async resolveBackgroundResponseDelivery(
+    sessionId: string,
+  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
+    let target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
@@ -555,6 +587,15 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
+    return { target, sourceLabel };
+  }
+
+  protected async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundResponseDeliveryTarget,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
@@ -588,6 +629,174 @@ export abstract class ChannelBase {
     sourceLabel?: string,
   ): Promise<void> {
     await this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+  }
+
+  private async handleBtw(
+    envelope: Envelope,
+    sessionId: string,
+    question: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `Could not resolve the current task for ${this.prefixedCommand('/btw')}.`,
+        sourceLabel,
+      );
+      return;
+    }
+    const running = this.activeBtw.get(sessionId);
+    if (running) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `BTW #${running.id} is still running for this task.`,
+        sourceLabel,
+      );
+      return;
+    }
+
+    const reference = this.namedSessions?.presentation(sessionId);
+    const request: ActiveBtw = {
+      id: randomUUID().slice(0, 8),
+      bridge: this.bridge,
+      controller: new AbortController(),
+      target: { ...target },
+      chatId: envelope.chatId,
+      ...(envelope.threadId ? { threadId: envelope.threadId } : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(reference?.status === 'open' ? { taskName: reference.taskName } : {}),
+    };
+    this.activeBtw.set(sessionId, request);
+    try {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `BTW #${request.id} received. The main task will continue.`,
+        sourceLabel,
+      );
+    } catch (error) {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
+      throw error;
+    }
+    if (!this.isBtwCurrent(sessionId, request)) {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
+      return;
+    }
+    void this.deliverBtw(sessionId, question, request).catch((error) => {
+      process.stderr.write(
+        `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+      );
+    });
+  }
+
+  private async deliverBtw(
+    sessionId: string,
+    question: string,
+    request: ActiveBtw,
+  ): Promise<void> {
+    let message: string;
+    try {
+      let result: { sessionId: string; answer: string | null };
+      try {
+        result = await request.bridge.btw!(
+          sessionId,
+          question,
+          request.controller.signal,
+        );
+        if (result.sessionId !== sessionId) {
+          throw new Error('BTW response session did not match the request');
+        }
+        const answer = result.answer?.trim();
+        message = answer
+          ? `BTW #${request.id}\n\n${answer}`
+          : `BTW #${request.id}\n\nNo answer is available from the current conversation context.`;
+      } catch (error) {
+        if (request.controller.signal.aborted) return;
+        process.stderr.write(
+          `[${this.name}] BTW request failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+        );
+        message = `BTW #${request.id} failed. Please try again.`;
+      }
+      if (!this.isBtwCurrent(sessionId, request)) return;
+      try {
+        await this.sendThreadMessage(
+          request.chatId,
+          request.threadId,
+          message,
+          request.sourceLabel,
+        );
+      } catch (error) {
+        try {
+          await this.sendThreadMessage(
+            request.chatId,
+            request.threadId,
+            `BTW #${request.id} failed. Please try again.`,
+            request.sourceLabel,
+          );
+        } catch {
+          // Best effort only; the original delivery failure is logged by the caller.
+        }
+        throw error;
+      }
+    } finally {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.activeBtw.delete(sessionId);
+      }
+    }
+  }
+
+  private isBtwCurrent(sessionId: string, request: ActiveBtw): boolean {
+    if (
+      request.controller.signal.aborted ||
+      this.activeBtw.get(sessionId) !== request ||
+      this.bridge !== request.bridge ||
+      !this.router.isSessionLive(sessionId)
+    ) {
+      return false;
+    }
+    const currentTarget = this.router.getTarget(sessionId);
+    // Compare owner + thread only: SessionRouter.promoteTargetToGroup flips
+    // the live target's isGroup whenever any group envelope or loop/webhook
+    // target resolves the same routing key, which changes neither the
+    // conversation nor the delivery destination, so it must not void an
+    // acknowledged answer. The named-task branch applies the same tolerance to
+    // the registry's creation-time snapshot, which keeps the pre-promotion
+    // isGroup value.
+    if (
+      !currentTarget ||
+      !this.sameTaskOwner(request.target, currentTarget) ||
+      request.target.threadId !== currentTarget.threadId
+    ) {
+      return false;
+    }
+    if (!request.taskName) return true;
+    const reference = this.namedSessions?.presentation(sessionId);
+    return (
+      reference?.status === 'open' &&
+      reference.taskName === request.taskName &&
+      this.sameTaskOwner(currentTarget, reference.target) &&
+      currentTarget.threadId === reference.target.threadId
+    );
+  }
+
+  private cancelBtw(sessionId: string): void {
+    const request = this.activeBtw.get(sessionId);
+    if (!request) return;
+    this.activeBtw.delete(sessionId);
+    request.controller.abort();
+  }
+
+  private cancelAllBtw(): void {
+    const requests = Array.from(this.activeBtw.values());
+    this.activeBtw.clear();
+    for (const request of requests) request.controller.abort();
   }
 
   async dispatchPermissionRequest(
@@ -957,8 +1166,17 @@ export abstract class ChannelBase {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
+    if (
+      config.messagePrefix !== undefined &&
+      typeof config.messagePrefix !== 'string'
+    ) {
+      throw new Error(
+        `Channel "${name}" field "messagePrefix" must be a string.`,
+      );
+    }
     this.name = name;
     this.config = config;
+    this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
@@ -1036,6 +1254,10 @@ export abstract class ChannelBase {
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
+
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
@@ -1632,6 +1854,7 @@ export abstract class ChannelBase {
 
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
+    this.cancelAllBtw();
     if (this.registerBridgeEvents) {
       this.detachBridgeEvents(this.bridge);
     }
@@ -2287,6 +2510,8 @@ export abstract class ChannelBase {
         }),
       ]);
       if (!cancelled) {
+        this.cancelBtw(sessionId);
+        this.onSessionRetiring(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -2465,11 +2690,14 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   onSessionDied(sessionId: string): void {
+    this.cancelBtw(sessionId);
     this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
+
+  protected onSessionRetiring(_sessionId: string): void {}
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
@@ -2797,6 +3025,7 @@ export abstract class ChannelBase {
   private pendingPermissionForEnvelope(
     envelope: Envelope,
     args: string,
+    selectedSessionId?: string | null,
   ): PendingPermissionLookup {
     const trimmed = args.trim();
     if (trimmed) {
@@ -2820,6 +3049,8 @@ export abstract class ChannelBase {
       .filter(
         (pending): pending is PendingPermission =>
           pending !== undefined &&
+          (selectedSessionId === undefined ||
+            pending.sessionId === selectedSessionId) &&
           this.canEnvelopeAnswerPendingPermission(envelope, pending),
       );
     if (matching.length === 0) {
@@ -2850,54 +3081,125 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const parameters = this.permissionParameterSummary(toolCall);
+    const approveLabel = this.permissionOptionLabel(
+      this.approvalOption(pending),
+      'allow once',
+    );
     const alwaysOption = this.approvalAlwaysOption(pending);
-    if (pending.taskName) {
-      const replies = [
-        `/approve ${pending.requestId}          allow once`,
-        ...(alwaysOption
-          ? [`/approve-always ${pending.requestId}   ${alwaysOption.label}`]
-          : []),
-        `/deny ${pending.requestId}             deny`,
-      ];
-      return [
-        'Permission required to run a tool',
-        `Request: ${pending.requestId}`,
-        '',
-        'Command:',
-        title,
-        '',
-        'Reply with:',
-        ...replies,
-      ].join('\n');
-    }
+    const denyLabel = this.permissionOptionLabel(
+      this.denialOption(pending),
+      'deny',
+    );
+    const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
+    const replyPadding = pending.taskName
+      ? { approve: '          ', always: '   ', deny: '             ' }
+      : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      '/approve        allow once',
-      ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           deny',
+      `${this.prefixedCommand(`/approve${requestSuffix}`)}${replyPadding.approve}${approveLabel}`,
+      ...(alwaysOption
+        ? [
+            `${this.prefixedCommand(`/approve-always${requestSuffix}`)}${replyPadding.always}${alwaysOption.label}`,
+          ]
+        : []),
+      `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
     ];
-    const lines = [
+    return [
       'Permission required to run a tool',
+      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
       '',
-      'Command:',
-      title,
+      `Tool: ${this.permissionToolName(toolCall)}`,
+      `Action: ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`Parameters: ${parameters}`] : []),
       '',
       'Reply with:',
       ...replies,
-    ];
-    return lines.join('\n');
+    ].join('\n');
   }
 
-  private approvalOptionId(pending: PendingPermission): string | undefined {
+  protected prefixedCommand(command: string): string {
+    return this.messagePrefix ? `${this.messagePrefix} ${command}` : command;
+  }
+
+  protected configuredMessagePrefix(): string | undefined {
+    return this.messagePrefix;
+  }
+
+  private permissionTitle(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawTitle =
+      typeof toolCall.title === 'string' ? toolCall.title : undefined;
+    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+  }
+
+  private permissionToolName(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const meta = isRecord(rawToolCall['_meta'])
+      ? rawToolCall['_meta']
+      : undefined;
+    for (const candidate of [meta?.['toolName'], rawToolCall['kind']]) {
+      if (typeof candidate !== 'string') continue;
+      const name = sanitizeQuotedText(candidate, 120).trim();
+      if (name) return name;
+    }
+    return 'unknown';
+  }
+
+  private permissionParameterSummary(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string | undefined {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const rawInput = isRecord(rawToolCall['rawInput'])
+      ? rawToolCall['rawInput']
+      : undefined;
+    if (!rawInput) return undefined;
+
+    const entries = Object.entries(rawInput);
+    if (entries.length === 0) return undefined;
+    const visible = entries.slice(0, 4).map(([key, value]) => {
+      const safeKey = sanitizeQuotedText(key, 48).trim() || 'unknown';
+      if (Array.isArray(value)) {
+        return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
+      }
+      if (isRecord(value)) {
+        return `${safeKey} (object)`;
+      }
+      return safeKey;
+    });
+    if (entries.length > visible.length) {
+      visible.push(`+${entries.length - visible.length} more`);
+    }
+    return visible.join(', ');
+  }
+
+  private permissionOptionLabel(
+    option: PermissionOption | undefined,
+    fallback: string,
+  ): string {
+    const rawLabel = typeof option?.name === 'string' ? option.name : '';
+    const label = sanitizeQuotedText(rawLabel, 160).trim();
+    return label || fallback;
+  }
+
+  private approvalOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
     const options = pending.request.options;
     return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ??
+      options.find((option) => option.kind === 'allow_once') ??
       options.find(
         (option) =>
           option.optionId === 'proceed_once' &&
           (option as { kind?: string }).kind === undefined,
-      )?.optionId
+      )
     );
+  }
+
+  private approvalOptionId(pending: PendingPermission): string | undefined {
+    return this.approvalOption(pending)?.optionId;
   }
 
   private approvalAlwaysOption(
@@ -2915,7 +3217,10 @@ export abstract class ChannelBase {
     }
     return {
       optionId: option.optionId,
-      label: this.approvalAlwaysLabel(option),
+      label: this.permissionOptionLabel(
+        option,
+        this.approvalAlwaysLabel(option),
+      ),
     };
   }
 
@@ -2943,7 +3248,17 @@ export abstract class ChannelBase {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   } {
-    const option =
+    const option = this.denialOption(pending);
+    if (option) {
+      return { outcome: { outcome: 'selected', optionId: option.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  private denialOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
+    return (
       pending.request.options.find(
         (candidate) => candidate.kind === 'reject_once',
       ) ??
@@ -2951,11 +3266,8 @@ export abstract class ChannelBase {
         (candidate) =>
           candidate.optionId === 'cancel' &&
           (candidate as { kind?: string }).kind === undefined,
-      );
-    if (option) {
-      return { outcome: { outcome: 'selected', optionId: option.optionId } };
-    }
-    return { outcome: { outcome: 'cancelled' } };
+      )
+    );
   }
 
   private async handlePermissionResponseCommand(
@@ -2971,14 +3283,31 @@ export abstract class ChannelBase {
       );
       return true;
     }
-    const lookup = this.pendingPermissionForEnvelope(envelope, args);
+    const namedSessions = this.namedSessions;
+    const bareNamedCommand = namedSessions !== undefined && args.trim() === '';
+    let selectedTask: NamedSessionSelection | undefined;
+    if (bareNamedCommand) {
+      try {
+        selectedTask = await namedSessions.current(
+          this.namedSessionOwner(envelope),
+        );
+      } catch (error) {
+        await this.sendNamedSessionError(envelope, error);
+        return true;
+      }
+    }
+    const lookup = this.pendingPermissionForEnvelope(
+      envelope,
+      args,
+      bareNamedCommand ? (selectedTask?.sessionId ?? null) : undefined,
+    );
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
         .slice(0, 6)
         .map((id) => {
           const pending = this.pendingPermissions.get(id);
           const title = pending
-            ? `: ${sanitizeQuotedText(pending.request.toolCall.title || 'Tool use', 160)}`
+            ? `: ${this.permissionTitle(pending.request.toolCall)}`
             : '';
           const task = pending?.taskName ? `Task ${pending.taskName} — ` : '';
           return `- ${task}${sanitizeQuotedText(id, 128)}${title}`;
@@ -2987,7 +3316,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Multiple permission requests are pending for this chat. Reply with /${decision} <request-id>.\n${requestList}`,
+        `Multiple permission requests are pending for this chat. Reply with ${this.prefixedCommand(`/${decision} <request-id>`)}.\n${requestList}`,
       );
       return true;
     }
@@ -2997,7 +3326,11 @@ export abstract class ChannelBase {
         envelope.threadId,
         lookup.explicit
           ? 'No pending permission request with that id for this chat.'
-          : 'No pending permission request for this chat.',
+          : selectedTask
+            ? `No pending permission request for selected task "${selectedTask.name}". Use an explicit request ID to answer another task.`
+            : this.namedSessions
+              ? 'No task is currently selected. Use an explicit request ID to answer a named task.'
+              : 'No pending permission request for this chat.',
       );
       return true;
     }
@@ -3016,7 +3349,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+        `Submit this question through its interactive card, or use ${this.prefixedCommand('/deny [request-id]')} to cancel it.`,
         pending.sourceLabel,
       );
       return true;
@@ -3142,6 +3475,25 @@ export abstract class ChannelBase {
     this.releaseQueuedTurn(binding.sessionId);
   }
 
+  /**
+   * Follow a task onto the session its reload healed to (a superseded
+   * redirect). The queue reservation and the staleness generation are keyed
+   * by session id, so both must move with the binding: leaving them behind
+   * keeps the stale id "busy" forever and drops the turn on a generation the
+   * replacement never had.
+   */
+  private moveNamedTurnBinding(
+    binding: NamedTurnBinding,
+    sessionId: string,
+  ): void {
+    if (binding.sessionId !== null) {
+      this.releaseQueuedTurn(binding.sessionId);
+    }
+    binding.sessionId = sessionId;
+    binding.generation = this.sessionGenerations.get(sessionId) ?? 0;
+    this.reserveQueuedTurn(sessionId);
+  }
+
   private finishNamedTurnBinding(envelope: Envelope): void {
     const binding = this.namedTurnBindings.get(envelope);
     if (!binding) return;
@@ -3166,7 +3518,6 @@ export abstract class ChannelBase {
     try {
       const sessionId = await namedSessions.resolve(
         this.namedSessionOwner(envelope),
-        undefined,
         (resolvedSessionId) => {
           const binding = this.bindNamedTurn(envelope, resolvedSessionId);
           return () => this.releaseNamedTurnBinding(binding);
@@ -3208,14 +3559,88 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * The actionable recovery message for a worktree task whose ownership state
+   * the daemon refused to restore. Both codes come from the load/resume route
+   * — the reset route resumes an interrupted transfer itself and reports a
+   * broken marker as invalid state — so they surface on selection and on a
+   * message, wrapped in the manager's generic load failure.
+   *
+   * Clearing always acts on the *selected* task, so pointing the user at a
+   * clear is only safe when the task that failed is the selected one. Aimed at
+   * any other task it would run a full ownership transfer against a healthy
+   * one and destroy that conversation, so the alternative points at the close
+   * that works on the broken task without loading it. Both name that task.
+   */
+  private async worktreeRecoveryMessage(
+    envelope: Envelope,
+    error: unknown,
+  ): Promise<string | undefined> {
+    const code = readDaemonHttpErrorCode(error);
+    if (
+      code !== 'worktree_reset_interrupted' &&
+      code !== 'worktree_marker_missing'
+    ) {
+      return undefined;
+    }
+    const interrupted = code === 'worktree_reset_interrupted';
+    const failedTaskName =
+      error instanceof NamedSessionTaskError ? error.taskName : undefined;
+    // This message bypasses the wrapper's sanitizeDisplayText, so bound the one
+    // piece of interpolated text it adds.
+    const safeTaskName =
+      failedTaskName === undefined
+        ? undefined
+        : sanitizeDisplayText(failedTaskName, 32);
+    const subject =
+      safeTaskName === undefined ? 'The task' : `Task "${safeTaskName}"`;
+    const problem = interrupted
+      ? 'was interrupted while being reset'
+      : 'cannot verify its worktree because its ownership marker is missing';
+    if (
+      safeTaskName !== undefined &&
+      failedTaskName === (await this.selectedTaskName(envelope))
+    ) {
+      return `${subject} ${problem}. Its files were not changed. ${
+        interrupted
+          ? 'Clear the task again to finish the reset.'
+          : 'Clear the task to restart it in the same worktree, or close it.'
+      }`;
+    }
+    const remedy =
+      safeTaskName === undefined
+        ? 'select this task first or close it'
+        : `select this task first or close it with ${this.prefixedCommand(`/session close ${safeTaskName}`)}`;
+    return `${subject} ${problem}. Its files were not changed. Clearing now would reset the selected task instead, so ${remedy}.`;
+  }
+
+  private async selectedTaskName(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return undefined;
+    try {
+      return (await namedSessions.current(this.namedSessionOwner(envelope)))
+        ?.name;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendNamedSessionError(
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
-      error instanceof Error
+      (await this.worktreeRecoveryMessage(envelope, error)) ??
+      (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
-        : 'Named-session operation failed.';
+        : 'Named-session operation failed.');
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
@@ -3234,7 +3659,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /sessions [all]',
+        `Usage: ${this.prefixedCommand('/sessions [all]')}`,
       );
       return true;
     }
@@ -3287,25 +3712,31 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+              : `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
           );
           return true;
         }
         case 'new': {
-          if (parts.includes('--worktree')) {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'Worktree tasks are not available in Part 2 yet. Create a shared task with /session new <name>.',
-            );
-            return true;
+          const isolation =
+            parts.length === 2 && parts[1] === '--worktree'
+              ? 'worktree'
+              : 'shared';
+          if (
+            (isolation === 'shared' && parts.length !== 1) ||
+            (isolation === 'worktree' && parts.length !== 2) ||
+            parts[0]?.startsWith('-')
+          ) {
+            break;
           }
-          if (parts.length !== 1) break;
-          const created = await namedSessions.create(owner, parts[0]!);
+          const created = await namedSessions.create(
+            owner,
+            parts[0]!,
+            isolation,
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Created and selected task "${created.name}" (shared workspace).`,
+            `Created and selected task "${created.name}" (${created.isolation} workspace).`,
           );
           return true;
         }
@@ -3321,7 +3752,12 @@ export abstract class ChannelBase {
         }
         case 'close': {
           if (parts.length !== 1) break;
+          const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+            this.onSessionRetiring(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
@@ -3331,13 +3767,51 @@ export abstract class ChannelBase {
           );
           return true;
         }
-        case 'cancel':
+        case 'cancel': {
+          if (parts.length > 1) break;
+          const taskName = parts[0];
+          const task = taskName
+            ? await namedSessions.lookup(owner, taskName)
+            : await namedSessions.current(owner);
+          if (!task) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              taskName
+                ? `Task "${sanitizeQuotedText(taskName, 32)}" was not found.`
+                : 'No task is currently selected.',
+            );
+            return true;
+          }
+          if (task.status !== 'open') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `Task "${task.name}" is closed.`,
+            );
+            return true;
+          }
+          if (!this.activePrompts.has(task.sessionId)) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `No request is currently running for task "${task.name}".`,
+            );
+            return true;
+          }
+          const cancelled = await this.requestActivePromptCancellation(
+            task.sessionId,
+            'cancel_command',
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+            cancelled
+              ? `Cancelled task "${task.name}".`
+              : `Failed to cancel task "${task.name}".`,
           );
           return true;
+        }
         default:
           break;
       }
@@ -3348,7 +3822,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      `Usage: ${this.prefixedCommand('/session current')} | ${this.prefixedCommand('/session new <name> [--worktree]')} | ${this.prefixedCommand('/session use <name>')} | ${this.prefixedCommand('/session close <name>')} | ${this.prefixedCommand('/session cancel [<name>]')}`,
     );
     return true;
   }
@@ -3357,15 +3831,42 @@ export abstract class ChannelBase {
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
+      let resetWorktreeKept = false;
       let removedIds: string[];
+      const retiringSessionId = this.namedSessions
+        ? undefined
+        : this.router.getSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+          );
+      if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
         try {
           const reset = await this.namedSessions.reset(
             this.namedSessionOwner(envelope),
           );
           resetTaskName = reset?.name;
+          resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
+          // The reset route's busy signal has its own wording; every other
+          // typed failure goes through the shared named-session surface.
+          const code = readDaemonHttpErrorCode(error);
+          if (code !== undefined) {
+            process.stderr.write(
+              `[${sanitizeLogText(this.name, 64)}] worktree reset failed (${sanitizeLogText(code, 64)}): ${this.lifecycleError(error)}\n`,
+            );
+          }
+          if (code === 'worktree_reset_active') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+            );
+            return;
+          }
           await this.sendNamedSessionError(envelope, error);
           return;
         }
@@ -3380,6 +3881,8 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          if (id !== retiringSessionId) this.onSessionRetiring(id);
+          this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
           // stable senderId) and which session — mirrors the file's stderr audit
@@ -3487,7 +3990,9 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           resetTaskName
-            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            ? resetWorktreeKept
+              ? `Task "${resetTaskName}" reset with a fresh conversation; its worktree and files were kept.`
+              : `Task "${resetTaskName}" reset with a fresh conversation.`
             : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
@@ -3516,7 +4021,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. ${this.prefixedCommand('/clear confirm')}) to proceed.`,
         );
         return true;
       }
@@ -3527,6 +4032,7 @@ export abstract class ChannelBase {
     this.registerCommand('clear', clearHandler);
     this.registerCommand('reset', clearHandler);
     this.registerCommand('new', clearHandler);
+    this.registerCommand('btw', () => Promise.resolve(false));
     if (this.namedSessions) {
       this.registerCommand('sessions', (envelope, args) =>
         this.handleNamedSessionsCommand(envelope, args),
@@ -3603,19 +4109,24 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        '/help — Show this help',
+        `${this.prefixedCommand('/help')} — Show this help`,
         this.isSharedSession(envelope)
-          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
-          : '/clear — Clear your session (aliases: /reset, /new)',
-        '/who — Show current session & workspace',
-        '/status — Show session info',
-        '/approve [request-id] — Approve a pending permission request',
-        '/approve-always [request-id] — Always approve a pending permission request',
-        '/deny [request-id] — Deny a pending permission request',
+          ? `${this.prefixedCommand('/clear confirm')} — Clear the shared session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`
+          : `${this.prefixedCommand('/clear')} — Clear your session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`,
+        `${this.prefixedCommand('/who')} — Show current session & workspace`,
+        `${this.prefixedCommand('/status')} — Show session info`,
+        `${this.prefixedCommand('/approve [request-id]')} — Approve a pending permission request`,
+        `${this.prefixedCommand('/approve-always [request-id]')} — Always approve a pending permission request`,
+        `${this.prefixedCommand('/deny [request-id]')} — Deny a pending permission request`,
+        ...(this.bridge.btw
+          ? [
+              `${this.prefixedCommand('/btw <question>')} — Ask a side question without interrupting the current task`,
+            ]
+          : []),
         ...(this.namedSessions
           ? [
-              '/sessions [all] — List your named tasks',
-              '/session current|new|use|close — Manage your named tasks',
+              `${this.prefixedCommand('/sessions [all]')} — List your named tasks`,
+              `${this.prefixedCommand('/session current|new|use|close|cancel')} — Manage your named tasks`,
             ]
           : []),
       ];
@@ -3629,6 +4140,7 @@ export abstract class ChannelBase {
         'approve',
         'approve-always',
         'deny',
+        'btw',
         'remember-channel',
         'channel-memory',
         'forget-channel',
@@ -3642,22 +4154,38 @@ export abstract class ChannelBase {
       );
       if (platformCmds.length > 0) {
         for (const cmd of platformCmds) {
-          lines.push(`/${cmd}`);
+          lines.push(this.prefixedCommand(`/${cmd}`));
         }
       }
 
       const sessionId = await this.currentSessionId(envelope);
-      const agentCommands = sessionId
-        ? this.getAgentCommandsForSession(sessionId)
-        : this.bridge.availableCommands;
+      const agentCommands = (
+        sessionId
+          ? this.getAgentCommandsForSession(sessionId)
+          : this.bridge.availableCommands
+      ).filter(
+        (command) =>
+          !this.commands.has(command.name) ||
+          // `btw` is registered unconditionally but only handled locally when
+          // the bridge supports it. Without that capability the agent's entry
+          // is the working one, so it must stay listed.
+          (command.name === 'btw' && !this.bridge.btw),
+      );
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
-          lines.push(`/${cmd.name} — ${cmd.description}`);
+          lines.push(
+            `${this.prefixedCommand(`/${cmd.name}`)} — ${cmd.description}`,
+          );
         }
       }
 
-      lines.push('', 'Send any text to chat with the agent.');
+      lines.push(
+        '',
+        this.messagePrefix
+          ? `Start each message with ${this.messagePrefix} to chat with the agent.`
+          : 'Send any text to chat with the agent.',
+      );
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -3745,7 +4273,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+          `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')} | ${this.prefixedCommand('/loop list')} | ${this.prefixedCommand('/loop inspect <id>')} | ${this.prefixedCommand('/loop cancel <id>')}`,
         );
         return true;
     }
@@ -3778,7 +4306,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop add "<cron>" <prompt>',
+        `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')}`,
       );
       return true;
     }
@@ -4005,7 +4533,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop inspect <id>',
+        `Usage: ${this.prefixedCommand('/loop inspect <id>')}`,
       );
       return true;
     }
@@ -4085,7 +4613,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop cancel <id>',
+        `Usage: ${this.prefixedCommand('/loop cancel <id>')}`,
       );
       return true;
     }
@@ -4281,6 +4809,8 @@ export abstract class ChannelBase {
     if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
       return false;
     }
+
+    this.forgetPendingGroupHistory(envelope);
 
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
@@ -5276,11 +5806,15 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
+    // An adapter placeholder is not something a member typed, so quoting it
+    // back as history would inject `(image)` into the next prompt as user
+    // text.
+    if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
@@ -5324,12 +5858,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -5382,6 +5932,23 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    // Ahead of both pairing gates on purpose: a pairing request is a reply,
+    // and replying to every unprefixed message would be exactly the traffic
+    // the prefix exists to suppress. First contact carries the prefix too.
+    if (this.messagePrefixRejectedEnvelopes.has(envelope)) return false;
+    if (!this.messagePrefixCheckedEnvelopes.has(envelope)) {
+      this.messagePrefixCheckedEnvelopes.add(envelope);
+      if (!applyMessagePrefix(envelope, this.messagePrefix)) {
+        this.messagePrefixRejectedEnvelopes.add(envelope);
+        if (
+          !(envelope.isGroup && !envelope.isMentioned && !envelope.isReplyToBot)
+        ) {
+          this.logPreflightRejected('message_prefix_mismatch');
+        }
+        return false;
+      }
+    }
+
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -5474,6 +6041,10 @@ export abstract class ChannelBase {
         80,
       )}\n`,
     );
+  }
+
+  protected wasMessagePrefixRejected(envelope: Envelope): boolean {
+    return this.messagePrefixRejectedEnvelopes.has(envelope);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -5751,14 +6322,18 @@ export abstract class ChannelBase {
       MAX_DISPLAY_PROJECTION_CHARS,
     );
 
+    const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parseChannelMemoryIntent(envelope.text);
+      parsed?.command === 'btw'
+        ? null
+        : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
       !memoryIntent &&
+      parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
       memoryIntent = await this.classifyChannelMemoryIntent(envelope);
@@ -5778,19 +6353,62 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
 
     // 3. Slash command handling — before session/agent routing
-    const parsed = this.parseCommand(envelope.text);
+    let btwQuestion: string | undefined;
     if (parsed) {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
+      // Intercept /btw only where the bridge can answer it out of band. With no
+      // btw capability this is not a locally handled command at all: it falls
+      // through to the agent, which serves /btw as its own slash command, the
+      // same path it took before this interception existed.
+      if (parsed.command === 'btw' && this.bridge.btw) {
+        if (!this.isAuthorizedForSharedSession(envelope)) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Only authorized members can use ${this.prefixedCommand('/btw')} in this shared session.`,
+          );
+          return;
+        }
+        btwQuestion = parsed.args.trim();
+        if (!btwQuestion) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Usage: ${this.prefixedCommand('/btw <question>')}`,
+          );
+          return;
+        }
+        if (btwQuestion.length > CHANNEL_BTW_MAX_INPUT_LENGTH) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `BTW questions are limited to ${CHANNEL_BTW_MAX_INPUT_LENGTH} characters.`,
+          );
+          return;
+        }
+        if (envelope.imageBase64 || envelope.attachments?.length) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `${this.prefixedCommand('/btw')} supports text-only questions.`,
+          );
+          return;
+        }
+      }
     }
 
     // 3.5. Bang (!) shell command — refuse outside a private 1:1 chat BEFORE
@@ -5855,17 +6473,20 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        sessionId = await this.namedSessions.resolve(
+        sessionId = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
+        if (sessionId && sessionId !== namedTurn.sessionId) {
+          this.moveNamedTurnBinding(namedTurn, sessionId);
+        }
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;
       }
       if (!sessionId) {
         process.stderr.write(
-          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: selected task changed before it ran\n`,
+          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: reserved task is no longer available\n`,
         );
         return;
       }
@@ -5873,7 +6494,6 @@ export abstract class ChannelBase {
       try {
         sessionId = await this.namedSessions.resolve(
           this.namedSessionOwner(envelope),
-          undefined,
           (resolvedSessionId) => {
             const binding = this.bindNamedTurn(envelope, resolvedSessionId);
             namedTurn = binding;
@@ -5888,7 +6508,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'No task is currently selected. Use /session new <name> or /session use <name>.',
+          `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
         );
         return;
       }
@@ -5910,8 +6530,13 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not identify the selected task. Use /sessions, select it again, and retry.',
+        `Could not identify the selected task. Use ${this.prefixedCommand('/sessions')}, select it again, and retry.`,
       );
+      return;
+    }
+
+    if (btwQuestion !== undefined) {
+      await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
       return;
     }
 
@@ -6313,6 +6938,9 @@ export abstract class ChannelBase {
         recallRead?.generation === recallRead?.state.generation
           ? recallContext
           : undefined;
+      if (recognizedSlashCommand) {
+        this.forgetPendingGroupHistory(envelope);
+      }
       const groupHistoryEntries = recognizedSlashCommand
         ? []
         : this.drainPendingGroupHistory(envelope);

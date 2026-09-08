@@ -10,7 +10,9 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
+import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
+import type { SessionContentGenerator } from './AssistantMessage';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -70,6 +72,7 @@ function rerender(
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
 ): void {
   act(() =>
     root!.render(
@@ -79,6 +82,7 @@ function rerender(
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
           planTodos={planTodos}
+          generateContent={generateContent}
         />
       </I18nProvider>,
     ),
@@ -90,11 +94,12 @@ function render(
   req: PermissionRequest = request,
   planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, planTodos, language);
+  rerender(keyboardActive, req, planTodos, language, generateContent);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -118,6 +123,159 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('renders generic parameter content even when it equals the title', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-input',
+        kind: 'permission',
+        requestId: 'request-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const preview = container!.querySelector('pre');
+    expect(preview?.textContent).toBe('{}');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby')
+      ?.split(' ');
+    expect(describedBy).toContain(preview?.id);
+    pressKey(container!.querySelector('[role="alertdialog"]')!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-input',
+      'reject',
+    );
+  });
+
+  it('keeps the complete literal parameter body available without interpreting markup', () => {
+    const input = {
+      content: '<b>' + '😀'.repeat(3970) + '\n LAST_CHARACTER </b>  ',
+    };
+    render(undefined, {
+      ...request,
+      title: 'Save',
+      contentIsInput: true,
+      content: [{ type: 'text', text: JSON.stringify(input, null, 2) }],
+    });
+    const preview = container!.querySelector('pre');
+    expect(JSON.parse(preview?.textContent ?? '')).toEqual(input);
+    expect(preview?.querySelector('b')).toBeNull();
+  });
+
+  it('explains Shell commands through session generation', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-1',
+        seq: 0,
+        text: '该命令会删除临时数据。',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 10,
+        outputTokens: 6,
+      };
+    });
+    render(undefined, execRequest, undefined, 'zh-CN', generateContent);
+
+    const explain =
+      container!.querySelector<HTMLButtonElement>('button[title="解释"]');
+    expect(explain?.textContent).toContain('解释');
+
+    await act(async () => explain?.click());
+
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.stringContaining('rm -rf /tmp/data'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(generateContent.mock.calls[0]?.[0]).toContain('Simplified Chinese');
+    expect(document.body.textContent).toContain('该命令会删除临时数据。');
+
+    const popover = document.body.querySelector(
+      '[data-approval-shortcuts-ignore]:not(button)',
+    )!;
+    pressKey(popover, '1');
+    pressKey(popover, 'Escape');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('only offers explanations for Shell commands', () => {
+    const generateContent = async function* () {};
+    render(undefined, request, undefined, 'en', generateContent);
+
+    expect(container!.querySelector('button[title="Explain"]')).toBeNull();
+  });
+
+  it('resets an open explanation when a new request arrives', async () => {
+    const generateContent = vi.fn(async function* (prompt: string) {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-reset',
+        seq: 0,
+        text: prompt.includes('pwd') ? 'New explanation' : 'Old explanation',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-reset',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    render(undefined, execRequest, undefined, 'en', generateContent);
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('Old explanation');
+
+    rerender(
+      true,
+      {
+        ...execRequest,
+        id: 'req-exec-2',
+        rawInput: { command: 'pwd', description: 'Print directory' },
+      },
+      undefined,
+      'en',
+      generateContent,
+    );
+    expect(document.body.textContent).not.toContain('Old explanation');
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('New explanation');
+  });
+
+  it('keeps Escape rejection when the closed explanation trigger is focused', () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+    const explain = container!.querySelector<HTMLButtonElement>(
+      'button[title="Explain"]',
+    )!;
+    explain.focus();
+
+    pressKey(explain, 'Escape');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-exec', 'reject');
+  });
+
   it('shows the active Todo workflow before exiting Plan Mode', () => {
     render(undefined, planRequest, [
       { id: 'prepare', content: 'Prepare', status: 'completed' },
@@ -135,6 +293,64 @@ describe('ToolApproval accessibility', () => {
     expect(container!.textContent).toContain(
       'Implement the approved workflow.',
     );
+  });
+
+  it('localizes Workflow approval without changing ordinary approvals', () => {
+    const planTodos = [
+      { id: 'review', content: 'Review', status: 'pending' as const },
+    ];
+    render(undefined, planRequest, planTodos, 'zh-CN');
+
+    expect(container!.textContent).toContain('计划并审阅');
+    expect(container!.textContent).toContain('确认计划并开始协作？');
+    expect(optionLabels()).toEqual(['继续完善计划', '确认并开始']);
+
+    rerender(undefined, planRequest, planTodos, 'en');
+    expect(container!.textContent).toContain('Plan & Review');
+    expect(container!.textContent).toContain(
+      'Confirm the plan and start collaboration?',
+    );
+    expect(optionLabels()).toEqual(['Continue planning', 'Confirm and start']);
+
+    rerender(undefined, request, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('是否继续？');
+    expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
+  it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
+    // The production exit_plan_mode option set: two `allow_once` options whose
+    // outcomes differ materially, so they must never share one label.
+    const productionPlanRequest: PermissionRequest = {
+      ...planRequest,
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode (yolo)',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_always',
+          label: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'cancel', label: 'No, keep planning (esc)', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, productionPlanRequest, [
+      { id: 'review', content: 'Review', status: 'pending' },
+    ]);
+
+    const labels = optionLabels();
+    expect(labels).toContain('Confirm and start');
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      labels.filter((label) => label === 'Confirm and start'),
+    ).toHaveLength(1);
   });
 
   it('keeps the text-only Plan Mode approval when there are no Todos', () => {
@@ -697,6 +913,56 @@ describe('ToolApproval accessibility', () => {
     act(() => optionButtons()[1]!.click());
     expect(onConfirm).toHaveBeenCalledTimes(2);
     expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm the submit guard on a stale rejection from a previous request', async () => {
+    let rejectStale: ((err: Error) => void) | undefined;
+    const staleSubmission = new Promise<void>((_resolve, reject) => {
+      rejectStale = reject;
+    });
+    const successorSubmission = new Promise<void>(() => {});
+    onConfirm
+      .mockReturnValueOnce(staleSubmission)
+      .mockReturnValueOnce(successorSubmission);
+    render(undefined);
+
+    // Confirm request A; its submission stays in flight.
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    // The daemon replaces A with request B (this instance is reused — no key
+    // at the mount sites); the id-keyed reset effect re-arms the guard, and
+    // confirming B arms it again while B's submission is in flight.
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+
+    // A's stale submission rejects late (the daemon answers duplicates with
+    // "No pending permission request"). It must not disarm B's guard.
+    await act(async () => {
+      rejectStale?.(new Error('No pending permission request'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[0]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
   });
 
   it('does not re-arm the submit guard when the same request changes options', () => {

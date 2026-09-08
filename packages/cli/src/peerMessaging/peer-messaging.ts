@@ -18,19 +18,31 @@
  * that it needed to wait.
  */
 
+import { randomBytes } from 'node:crypto';
+import {
+  clearInheritedPeerMessagingEnv,
+  MESSAGING_SOCKET_ENV,
+  MESSAGING_TOKEN_ENV,
+} from './env.js';
 import {
   type ApprovalMode,
+  canonicalizeMsgId,
   createDebugLogger,
   formatPeerDisplay,
   formatPeerEnvelope,
+  getPeerControllerRegistryPath,
   InboundGate,
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
+  type PolicyScope,
   type PeerDeliveryStatus,
   type PeerFrame,
   type PeerInbox,
+  type PeerOrigin,
   type PeerUserFrame,
+  readPeerControllerRegistrySync,
+  resolveControllerToken,
   sendDeliveryStatus,
   type SettledPeerReceipt,
   settleSentPeerMessage,
@@ -43,8 +55,15 @@ const debugLogger = createDebugLogger('PEER_MESSAGING');
 export interface PeerQueuedDelivery {
   msgId: string;
   from?: string;
+  replyToken?: string;
   toSessionId?: string;
 }
+
+export {
+  clearInheritedPeerMessagingEnv,
+  MESSAGING_SOCKET_ENV,
+  MESSAGING_TOKEN_ENV,
+} from './env.js';
 
 /**
  * Submit an already-formatted message into the session's input queue.
@@ -82,7 +101,17 @@ export interface PeerReceipt {
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
-  updateSessionRegistryIpcPath: (ipcPath: string | undefined) => Promise<void>;
+  /**
+   * How long a held message waits, in milliseconds, or null for "until
+   * the session ends". Omitted in tests, which take the default.
+   */
+  getHeldExpiryMs?: () => number | null;
+  /** Which scope set the policy, for wording a hold cause. See the gate. */
+  getPolicyScope?: () => PolicyScope | undefined;
+  updateSessionRegistryIpcPath: (
+    ipcPath: string | undefined,
+    ipcToken?: string,
+  ) => Promise<void>;
   /**
    * Apply a receipt to the send it answers, returning the send only when
    * the receipt moved it to a new state. Defaults to the send-side
@@ -106,6 +135,26 @@ export interface PeerMessagingOptions {
    */
   getSessionId?: () => string;
   socketPath?: string;
+  /**
+   * Overrides the generated inbox token. A test seam like `socketPath`:
+   * a frame staged before `start` resolves must already authenticate,
+   * and the generated token is not observable until after.
+   */
+  ipcToken?: string;
+  /** Overrides the generated child token. Same seam, same reason. */
+  childToken?: string;
+  /**
+   * Read controller grants from here instead of the Qwen home. A test
+   * seam only: production reads the one file per home, which is what
+   * makes a grant apply to whichever sessions the user is running.
+   */
+  controllerRegistryPath?: string;
+}
+
+/** An accepted message waiting for the TUI's submit function. */
+interface BufferedDelivery {
+  frame: PeerUserFrame;
+  origin: PeerOrigin;
 }
 
 export class PeerMessaging {
@@ -113,6 +162,7 @@ export class PeerMessaging {
   private gate: InboundGate | null = null;
   private updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
+    ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
   private settleSentMessage: (
@@ -122,7 +172,9 @@ export class PeerMessaging {
   private reassertSessionRecord: (() => Promise<void>) | null = null;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private submitFn: PeerSubmitFn | null = null;
-  private readonly buffered: PeerUserFrame[] = [];
+  private readonly buffered: BufferedDelivery[] = [];
+  private controllerRegistryPath: string | null = null;
+  private validControllerIds: ReadonlySet<string> | null = null;
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
    * still buffered here or still queued in the session's input queue.
@@ -151,19 +203,33 @@ export class PeerMessaging {
     options: PeerMessagingOptions,
   ): Promise<PeerMessaging | null> {
     const messaging = new PeerMessaging();
+    const controllerRegistryPath =
+      options.controllerRegistryPath ?? getPeerControllerRegistryPath();
+    messaging.controllerRegistryPath = controllerRegistryPath;
 
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      ...(options.getHeldExpiryMs !== undefined
+        ? { getHeldExpiryMs: options.getHeldExpiryMs }
+        : {}),
+      ...(options.getPolicyScope
+        ? { getPolicyScope: options.getPolicyScope }
+        : {}),
+      isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
       getSessionId: options.getSessionId,
-      deliver: (frame) => messaging.deliver(frame),
+      deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
-        return sendDeliveryStatus(frame.from, {
-          status,
-          origMsgId: frame.msgId,
-          from: messaging.inbox?.socketPath,
-        });
+        return sendDeliveryStatus(
+          frame.from,
+          {
+            status,
+            origMsgId: frame.msgId,
+            from: messaging.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
       },
       onHeldChange: (held) => messaging.emitHeldChange(held),
     });
@@ -181,11 +247,35 @@ export class PeerMessaging {
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
 
+    // Any pair still in the environment at this point was inherited from an
+    // ancestor session, and every exit below this line other than a bound
+    // inbox must leave nothing for children to pick up. Dropped before the
+    // bind rather than on each failure branch so a future early return
+    // cannot reintroduce the leak; the success path re-exports this
+    // session's own pair once the socket is accepting.
+    clearInheritedPeerMessagingEnv();
+
+    // Two tokens for two audiences. The first is published in the registry
+    // record for peers; the second exists only in this process's
+    // environment, so presenting it proves descent from this session.
+    const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
+    const childToken = options.childToken ?? randomBytes(32).toString('hex');
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
-      onFrame: (frame) => messaging.onFrame(frame),
+      requiredToken: ipcToken,
+      childToken,
+      // Read from disk per auth line rather than captured here: a grant
+      // the user mints or revokes mid-session must take effect on the
+      // next connection, with nothing to restart.
+      resolveController: (presented) =>
+        resolveControllerToken(presented, controllerRegistryPath),
+      onFrame: (frame, auth, controller) =>
+        messaging.onFrame(frame, {
+          selfSent: auth === 'child',
+          ...(controller ? { controller } : {}),
+        }),
     });
     if (!inbox) return null;
 
@@ -196,7 +286,17 @@ export class PeerMessaging {
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses
     // connections, which reads to them as "the session just exited".
-    await messaging.updateSessionRegistryIpcPath(inbox.socketPath);
+    // The token travels in the same record: discovering the address and
+    // being able to authenticate to it are one capability.
+    await messaging.updateSessionRegistryIpcPath(inbox.socketPath, ipcToken);
+
+    // Exported even if the registry publish above failed: children inherit
+    // the environment, not the record, and the inbox is accepting either
+    // way. Children get the child token, never the published one: what
+    // makes a child's message recognizable as the session's own is that
+    // nothing else ever holds this value.
+    process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
+    process.env[MESSAGING_TOKEN_ENV] = childToken;
 
     return messaging;
   }
@@ -211,14 +311,16 @@ export class PeerMessaging {
    */
   setSubmitFn(fn: PeerSubmitFn): void {
     if (this.closed) return;
-    this.submitFn = fn;
-    // A refused frame means the queue is full; leave it and the rest
-    // buffered — `deliver` retries them, in order, on the next arrival.
-    while (this.buffered.length > 0) {
-      const head = this.buffered[0];
-      if (!head || !this.submit(head)) break;
-      this.buffered.shift();
-    }
+    this.withControllerValidity(() => {
+      this.submitFn = fn;
+      // A refused frame means the queue is full; leave it and the rest
+      // buffered — `deliver` retries them, in order, on the next arrival.
+      while (this.buffered.length > 0) {
+        const head = this.buffered[0];
+        if (!head || !this.submit(head.frame, head.origin)) break;
+        this.buffered.shift();
+      }
+    });
   }
 
   /**
@@ -233,7 +335,15 @@ export class PeerMessaging {
   }
 
   getHeld(): readonly HeldMessage[] {
-    return this.gate?.getHeld() ?? [];
+    return this.withControllerValidity(() => this.gate?.getHeld() ?? []);
+  }
+
+  /**
+   * How long a held message has to live, in milliseconds, or null when
+   * holds do not expire. Used by `/peers` to show what is left.
+   */
+  getHeldExpiryMs(): number | null {
+    return this.gate?.getHeldExpiryMs() ?? null;
   }
 
   /**
@@ -255,32 +365,79 @@ export class PeerMessaging {
     }));
   }
 
-  /** True when the held set no longer matches the last recorded listing. */
+  /**
+   * True when the held set no longer matches the last recorded listing.
+   *
+   * Entries *leaving* the set are not a change. The expiry timer removes
+   * them with no peer or user activity -- a fourth mover the rationale
+   * above does not name -- and a shrinking set can never make a printed
+   * handle resolve to a different message: `resolveHeld` prefix-matches
+   * over the current set, so removing entries only narrows it. Bouncing
+   * those refuses a decision that would have been correct, and tells the
+   * user the list changed when what they can still uniquely name is
+   * exactly what they reviewed.
+   *
+   * Dropping an expired entry is safe because the gate tombstones it
+   * before it leaves the set, so a re-admitted id arrives with a fresh
+   * `heldAt` and still mismatches the pin below.
+   *
+   * What must still bounce: an arrival, and a re-sent id whose body may
+   * have been swapped, which the `heldAt` pin is what catches.
+   */
   heldSetChangedSinceListing(): boolean {
     const listed = this.listedHeld;
     if (listed === null) return true;
-    const held = this.getHeld();
-    return (
-      held.length !== listed.length ||
-      held.some((entry, index) => {
-        const snapshot = listed[index];
-        return (
-          entry.frame.msgId !== snapshot.id || entry.heldAt !== snapshot.heldAt
-        );
-      })
+    const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+    const current = this.getHeld();
+    if (current.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt))
+      return true;
+
+    // A departure is normally harmless -- `resolveHeld` prefix-matches
+    // over the current set, so a smaller set only narrows what a printed
+    // handle can mean. The exception is an id that *extends* the departed
+    // one: `msgId` is peer-chosen and only shape-checked, so a peer can
+    // park `abc` beside `abc12345`. While both are held the handles are
+    // distinct, and `resolveHeld`'s exact-match tier gives `abc` to the
+    // shorter. Once `abc` expires, that same handle falls through to
+    // prefix-matching and silently decides `abc12345` -- a different
+    // message than the one the user reviewed, released under the reviewed
+    // one's handle.
+    //
+    // Canonicalized the way `resolveHeld` canonicalizes, or the check
+    // would miss the dashed forms it matches on.
+    const liveIds = current.map((entry) =>
+      canonicalizeMsgId(entry.frame.msgId),
     );
+    const liveSet = new Set(liveIds);
+    for (const id of pinned.keys()) {
+      const departed = canonicalizeMsgId(id);
+      if (liveSet.has(departed)) continue;
+      if (liveIds.some((live) => live.startsWith(departed))) return true;
+    }
+    return false;
   }
 
   decide(
     msgId: string,
     decision: 'approve' | 'deny',
   ): 'done' | 'failed' | 'gone' {
-    return this.gate?.decide(msgId, decision) ?? 'gone';
+    return this.withControllerValidity(
+      () => this.gate?.decide(msgId, decision) ?? 'gone',
+    );
+  }
+
+  /** Remove a revoked grant's authority from messages already waiting. */
+  forgetController(id: string): number {
+    return this.withControllerValidity(
+      () => this.gate?.forgetController(id) ?? 0,
+    );
   }
 
   /** Release everything the gate now considers acceptable. */
   reevaluate(reason: string): number {
-    return this.gate?.reevaluate(reason) ?? 0;
+    return this.withControllerValidity(
+      () => this.gate?.reevaluate(reason) ?? 0,
+    );
   }
 
   onHeldChange(listener: (held: readonly HeldMessage[]) => void): () => void {
@@ -331,6 +488,8 @@ export class PeerMessaging {
     await this.gate?.shutdown();
     await this.settleUnconsumed();
     await this.inbox?.close();
+    // Same pair, same removal as the startup scrub — one writer for it.
+    clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
   }
 
@@ -349,16 +508,25 @@ export class PeerMessaging {
     const receipts = dropped
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
-        sendDeliveryStatus(frame.from!, {
-          status: 'expired',
-          origMsgId: frame.msgId,
-          from: this.inbox?.socketPath,
-        }),
+        sendDeliveryStatus(
+          frame.from!,
+          {
+            status: 'expired',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        ),
       );
     await Promise.allSettled(receipts);
   }
 
-  private onFrame(frame: PeerFrame): void {
+  /**
+   * `origin` is what the transport established from the connection's auth
+   * line — the child token, or a controller grant the user minted. None
+   * of it is ever read off the frame.
+   */
+  private onFrame(frame: PeerFrame, origin: PeerOrigin): void {
     if (frame.type === 'control') {
       // A receipt for a message this session sent. Any process that can
       // reach the socket can write one for any id, so only ids the
@@ -400,11 +568,15 @@ export class PeerMessaging {
         `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
       );
       if (frame.from) {
-        void sendDeliveryStatus(frame.from, {
-          status: 'misaddressed',
-          origMsgId: frame.msgId,
-          from: this.inbox?.socketPath,
-        });
+        void sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'misaddressed',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
       }
       void this.reassertSessionRecord?.().catch((error) => {
         debugLogger.debug(
@@ -415,26 +587,30 @@ export class PeerMessaging {
       });
       return;
     }
-    this.gate?.admit(frame);
+    this.gate?.admit(frame, origin);
   }
 
-  private deliver(frame: PeerUserFrame): void {
+  private deliver(frame: PeerUserFrame, origin: PeerOrigin): void {
     if (!this.submitFn) {
       if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
         throw new Error('accepted-message backlog is full');
       }
-      this.buffered.push(frame);
+      this.buffered.push({ frame, origin });
       this.trackOutstanding(frame);
       return;
     }
-    while (this.buffered.length > 0) {
-      const head = this.buffered[0];
-      if (!head || !this.submit(head)) {
-        throw new Error('accepted-message backlog is full');
-      }
-      this.buffered.shift();
+    if (this.buffered.length > 0) {
+      this.withControllerValidity(() => {
+        while (this.buffered.length > 0) {
+          const head = this.buffered[0];
+          if (!head || !this.submit(head.frame, head.origin)) {
+            throw new Error('accepted-message backlog is full');
+          }
+          this.buffered.shift();
+        }
+      });
     }
-    if (!this.submit(frame)) {
+    if (!this.submit(frame, origin)) {
       throw new Error('accepted-message backlog is full');
     }
     this.trackOutstanding(frame);
@@ -451,23 +627,64 @@ export class PeerMessaging {
     }
   }
 
-  private submit(frame: PeerUserFrame): boolean {
-    const from = frame.from ?? 'unknown session';
+  private withControllerValidity<T>(action: () => T): T {
+    if (this.controllerRegistryPath === null || this.validControllerIds) {
+      return action();
+    }
+    this.validControllerIds = new Set(
+      readPeerControllerRegistrySync(
+        this.controllerRegistryPath,
+      ).controllers.map((controller) => controller.id),
+    );
+    for (const delivery of this.buffered) {
+      const controller = delivery.origin.controller;
+      if (controller && !this.validControllerIds.has(controller.id)) {
+        delete delivery.origin.controller;
+      }
+    }
+    try {
+      return action();
+    } finally {
+      this.validControllerIds = null;
+    }
+  }
+
+  private submit(frame: PeerUserFrame, origin: PeerOrigin): boolean {
+    // A script injecting into its own session rarely listens for a reply,
+    // so it usually has no address to give; say what it is instead. A
+    // controller often has none either — it drives the session rather
+    // than conversing with it.
+    const from =
+      frame.from ??
+      (origin.controller
+        ? 'controller'
+        : origin.selfSent
+          ? 'own process'
+          : 'unknown session');
+    const attribution = {
+      selfSent: origin.selfSent,
+      ...(origin.controller ? { controller: origin.controller } : {}),
+    };
     return (
       this.submitFn?.(
         formatPeerEnvelope({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          ...attribution,
         }),
         formatPeerDisplay({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          ...attribution,
         }),
         {
           msgId: frame.msgId,
           ...(frame.from !== undefined ? { from: frame.from } : {}),
+          ...(frame.replyToken !== undefined
+            ? { replyToken: frame.replyToken }
+            : {}),
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
@@ -490,11 +707,15 @@ export class PeerMessaging {
       `dropping queued peer message ${delivery.msgId}: addressed to session ${delivery.toSessionId}, this is ${ownSessionId}`,
     );
     if (delivery.from) {
-      void sendDeliveryStatus(delivery.from, {
-        status: 'misaddressed',
-        origMsgId: delivery.msgId,
-        from: this.inbox?.socketPath,
-      });
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'misaddressed',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
     }
     return false;
   }

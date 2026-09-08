@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
+} from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -63,8 +66,10 @@ const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const setReasoningEffort = vi.fn(async () => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
@@ -75,8 +80,10 @@ const daemonActions = {
   cancel,
   setApprovalMode,
   setModel,
+  setReasoningEffort,
   loadArtifacts,
   getTasks,
+  getWorkflowTasks,
   getGoal,
   controlGoal,
   readAttachment,
@@ -141,7 +148,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
-  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
+  useDaemonActivePromptBridge: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -190,8 +197,8 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
-vi.mock('./MessageList', () => ({
-  MessageList: (props: any) => (
+vi.mock('./TranscriptViewport', () => ({
+  TranscriptViewport: (props: any) => (
     <div
       data-testid="pane-messages"
       data-approval={props.pendingApproval ? 'yes' : 'no'}
@@ -428,6 +435,7 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getWorkflowTasks.mockReset();
   getGoal.mockReset();
   controlGoal.mockReset();
   readAttachment.mockReset();
@@ -449,6 +457,7 @@ beforeEach(() => {
   cancel.mockClear();
   setApprovalMode.mockClear();
   setModel.mockClear();
+  setReasoningEffort.mockClear();
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -518,6 +527,36 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
+    connectionState.supportedCommands = { workflowsEnabled: true };
+    messagesState = [
+      {
+        id: 'workflow-group',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
+        ],
+      },
+    ];
+    getWorkflowTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 1_000,
+      tasks: [],
+    });
+
+    render({ sessionWorkflowEnabled: false });
+    await act(async () => Promise.resolve());
+
+    expect(getWorkflowTasks).toHaveBeenCalledWith({ silent: true });
+    expect(getTasks).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       'images',
@@ -826,6 +865,7 @@ describe('ChatPane', () => {
       action: 'pause',
       expectedGoalId: 'goal-1',
       expectedRevision: 9,
+      reason: GOAL_PAUSE_REASON_COMMAND,
     });
 
     // `/goal set` maps to a versioned replace against the same fresh snapshot.
@@ -1612,6 +1652,7 @@ describe('ChatPane', () => {
       kind: 'attachment',
       title: 'data.json',
       turnId: 'sess-1',
+      attachmentId: 'attachment-1',
       mimeType: 'application/json',
       data: expect.any(Blob),
       workspaceCwd: '/w',
@@ -2483,6 +2524,22 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'keeps reasoning persistence scoped with standalone=%s',
+    async (standalone) => {
+      connectionState.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      render();
+      await act(async () => {
+        await latestChatEditorProps.onSelectReasoningEffort('medium');
+      });
+      expect(setReasoningEffort).toHaveBeenCalledWith('medium', {
+        persist: !standalone,
+      });
+    },
+  );
+
   it('renders no maximize toggle without onToggleMaximize', () => {
     render({ onClose: () => {} });
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
@@ -2496,6 +2553,7 @@ describe('ChatPane', () => {
       '[aria-label="Maximize pane"]',
     );
     expect(maximizeBtn).not.toBeNull();
+    expect(maximizeBtn!.querySelector('.lucide-expand')).not.toBeNull();
     // A toggle button always exposes its pressed state; not maximized here.
     expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
     act(() =>
@@ -2508,6 +2566,7 @@ describe('ChatPane', () => {
     render({ onToggleMaximize: () => {}, isMaximized: true });
     const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
     expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.querySelector('.lucide-shrink')).not.toBeNull();
     expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
     // The label flips to "restore" — no stale "maximize" affordance remains.
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();

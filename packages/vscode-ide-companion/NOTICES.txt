@@ -4356,7 +4356,7 @@ SOFTWARE.
 
 
 ============================================================
-fast-uri@3.1.5
+fast-uri@3.1.7
 (git+https://github.com/fastify/fast-uri.git)
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -5052,7 +5052,7 @@ THE SOFTWARE.
 
 
 ============================================================
-qs@6.15.2
+qs@6.16.0
 (https://github.com/ljharb/qs.git)
 
 BSD 3-Clause License
@@ -5087,7 +5087,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ============================================================
-side-channel@1.1.0
+side-channel@1.1.1
 (git+https://github.com/ljharb/side-channel.git)
 
 MIT License
@@ -5141,7 +5141,7 @@ SOFTWARE.
 
 
 ============================================================
-side-channel-list@1.0.0
+side-channel-list@1.0.1
 (git+https://github.com/ljharb/side-channel-list.git)
 
 MIT License
@@ -17013,7 +17013,7 @@ SOFTWARE.
 
 
 ============================================================
-react-markdown@10.1.0
+react-markdown@9.1.0
 (https://github.com/remarkjs/react-markdown)
 
 The MIT License (MIT)
@@ -25429,33 +25429,6 @@ SOFTWARE.
 MIT License
 
 Copyright (c) 2022 WorkOS
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-============================================================
-react-markdown@9.1.0
-(https://github.com/remarkjs/react-markdown)
-
-The MIT License (MIT)
-
-Copyright (c) Espen Hovlandsdal
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

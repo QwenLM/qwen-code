@@ -437,7 +437,14 @@ import {
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
 import { logger } from '../../utils/logger.js';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -492,6 +499,7 @@ async function setupAttachedProvider(options?: {
   context?: unknown;
 }) {
   let messageHandler: WebViewMessageHandler | undefined;
+  const viewDisposeListeners: Array<() => void> = [];
 
   const postMessage = vi.fn();
   const webview = {
@@ -521,12 +529,21 @@ async function setupAttachedProvider(options?: {
       webview,
       visible: true,
       onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn((listener: () => void) => {
+        viewDisposeListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
     } as never,
     'qwen-code.chatView.sidebar',
   );
 
-  return { webview, postMessage, provider, messageHandler };
+  return {
+    webview,
+    postMessage,
+    provider,
+    messageHandler,
+    viewDisposeListeners,
+  };
 }
 
 beforeEach(() => {
@@ -2274,6 +2291,50 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     };
   }
 
+  /**
+   * A view-host context whose Memento only answers the keys it is seeded with,
+   * and writes through — so a migration that retires an entry is observable.
+   */
+  function createSessionStateContext(entries: Record<string, string>) {
+    return {
+      subscriptions: [],
+      workspaceState: {
+        get: vi.fn((key: string) => entries[key]),
+        update: vi.fn((key: string, value: string | undefined) => {
+          if (value === undefined) {
+            delete entries[key];
+          } else {
+            entries[key] = value;
+          }
+          return Promise.resolve();
+        }),
+      },
+    };
+  }
+
+  const WEB_SHELL_SESSION_KEY_PREFIX = 'qwenCode.webShellSessionId:';
+
+  /** Run `body` against a folder reachable only through a symlink. */
+  async function withSymlinkedWorkspace<T>(
+    body: (paths: { alias: string; canonical: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const target = path.join(root, 'workspace');
+    const alias = path.join(root, 'workspace-link');
+    mkdirSync(target);
+    symlinkSync(
+      target,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    try {
+      setWorkspaceFolders([alias]);
+      return await body({ alias, canonical: realpathSync.native(target) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockMessageHandlerInstances.length = 0;
@@ -2290,6 +2351,189 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
       'initializeAgentConnection',
     ).mockResolvedValue(undefined);
+  });
+
+  it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Seed a restorable id ONLY under the canonical key. The write side keys
+      // off the canonical payload, so a read still keyed off the raw alias
+      // would split the very identity this PR exists to unify.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'session-restored-1',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(daemonMocks.instances[0].boundCwd).toBe(canonical);
+      expect(context.workspaceState.get).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+      );
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            // Every `activeEditorChanged` sender posts VS Code's raw
+            // `uri.fsPath`, which keeps the alias spelling; the webview needs
+            // it to relativize the active file.
+            editorWorkspaceCwd: alias,
+            sessionId: 'session-restored-1',
+          }),
+        }),
+      );
+    });
+  });
+
+  it('restores a session id persisted under the pre-canonicalization key', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // Someone who chatted in this folder before the state key was
+      // canonicalized has their id under the raw spelling. Without a legacy
+      // read the upgrade silently opens a fresh sidebar conversation.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({
+            workspaceCwd: canonical,
+            sessionId: 'pre-upgrade-session-id',
+          }),
+        }),
+      );
+
+      // Clearing the session posts `sessionId: undefined` against the
+      // canonical cwd, which deletes only the canonical key. Without the
+      // legacy entry being retired by the bootstrap above, the next bootstrap
+      // resurrects the id the user just cleared.
+      await setup.messageHandler?.({
+        type: 'webShellSessionChanged',
+        data: { sessionId: undefined, workspaceCwd: canonical },
+      });
+      setup.postMessage.mockClear();
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as {
+              type?: string;
+              data?: { sessionId?: string };
+            },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap).toBeDefined();
+      expect(secondBootstrap?.data?.sessionId).toBeUndefined();
+      expect(context.workspaceState.update).toHaveBeenCalledWith(
+        `${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`,
+        undefined,
+      );
+    });
+  });
+
+  it('keeps the binding when the bootstrap is interrupted before the echo', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // The canonical key's only other writer (`webShellSessionChanged`) runs
+      // after the shell attaches. Retiring the alias without moving the id
+      // first would lose the folder->session binding for good if the window
+      // reloads inside that window.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'pre-upgrade-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+      setup.postMessage.mockClear();
+      // No `webShellSessionChanged` in between: this is the interrupted path.
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const secondBootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(secondBootstrap?.data?.sessionId).toBe('pre-upgrade-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('pre-upgrade-session-id');
+    });
+  });
+
+  it('does not let the alias id overwrite an existing canonical one', async () => {
+    await withSymlinkedWorkspace(async ({ alias, canonical }) => {
+      // A user who opened the same folder under both spellings before
+      // upgrading has an entry under each. The canonical one is authoritative;
+      // the alias is retired without clobbering it.
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`]: 'canonical-session-id',
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`]: 'alias-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      const bootstrap = setup.postMessage.mock.calls
+        .map(
+          ([message]) =>
+            message as { type?: string; data?: { sessionId?: string } },
+        )
+        .find((message) => message.type === 'webShellBootstrap');
+      expect(bootstrap?.data?.sessionId).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${canonical}`,
+        ),
+      ).toBe('canonical-session-id');
+      expect(
+        context.workspaceState.get(`${WEB_SHELL_SESSION_KEY_PREFIX}${alias}`),
+      ).toBeUndefined();
+    });
+  });
+
+  it('leaves the stored id alone when the folder is not symlinked', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-workspace-'));
+    const workspace = realpathSync.native(root);
+    try {
+      // Here the legacy and canonical keys are the same string, so a
+      // retirement that is not gated on an alias actually existing would
+      // delete the entry it just read.
+      setWorkspaceFolders([workspace]);
+      const context = createSessionStateContext({
+        [`${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`]: 'existing-session-id',
+      });
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+
+      await setup.messageHandler?.({ type: 'webShellReady' });
+
+      expect(
+        context.workspaceState.get(
+          `${WEB_SHELL_SESSION_KEY_PREFIX}${workspace}`,
+        ),
+      ).toBe('existing-session-id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('surfaces the failure to an attached webview when another host switches the shared daemon workspace', async () => {
@@ -2399,5 +2643,170 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         (message as { type?: string }).type === 'webShellBootstrapError',
     );
     expect(firstErrors).toHaveLength(0);
+  });
+});
+
+describe('WebViewProvider web-shell permission bridge', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function setupPendingWebShellPermission(requestId = 'req-1') {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId },
+    });
+    return setup;
+  }
+
+  function decisionCalls(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellPermissionDecision',
+    );
+  }
+
+  it('routes accept to the request-owner webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'allow', requestId: 'req-1' },
+    });
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('routes cancel as a reject decision', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('cancel', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'reject', requestId: 'req-1' },
+    });
+  });
+
+  it('does not vote when a diff command has no exact request id', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not route an unknown request id to the active webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-not-yet-mapped',
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('does not vote when the trigger is the original workspace file', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    // qwen.diff.isVisible is also true on the user's own file while a diff
+    // is open, so Ctrl+S there invokes qwen.diff.accept with a file: uri.
+    // That must not resolve an approval the user may never have looked at.
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: false,
+      permissionRequestId: 'req-1',
+    });
+    provider.respondToPendingPermission('allow');
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not vote before permission ownership state arrives', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    setup.provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(decisionCalls(setup.postMessage)).toHaveLength(0);
+  });
+
+  it('reports hasPendingPermission from the webview-pushed state', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    // The extension command gate consults hasPendingPermission() before
+    // asking the provider to vote; it must track the state the webview
+    // pushes, not only the legacy ACP resolver.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: false },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+  });
+
+  it('clears the pending flag when the hosting view is disposed', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    for (const listener of setup.viewDisposeListeners) listener();
+
+    // Without a webview there is no route for the decision; leaving the
+    // ownership entry would let a diff-editor accept find hasPendingPermission()
+    // true, skip the vote, and close the diff while the daemon stays
+    // blocked. The panel dispose path already resets it; the view-hosted
+    // path must too.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
   });
 });

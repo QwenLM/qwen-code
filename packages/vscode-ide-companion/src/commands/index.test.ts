@@ -173,6 +173,7 @@ describe('registerNewCommands', () => {
       '/workspace/src/app.ts',
       'old',
       'new',
+      { readOnly: false, permissionRequestId: undefined },
     );
   });
 
@@ -196,7 +197,11 @@ describe('registerNewCommands', () => {
       { fsPath: '/workspace' },
       'src/foo.ts',
     );
-    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
   });
 
   it('closeDiff keeps absolute paths unchanged', async () => {
@@ -216,7 +221,11 @@ describe('registerNewCommands', () => {
     await getRegisteredHandler(closeDiffCommand)('/workspace/src/foo.ts');
 
     expect(joinPath).not.toHaveBeenCalled();
-    expect(closeDiff).toHaveBeenCalledWith('/workspace/src/foo.ts', true);
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
   });
 
   it('showDiff keeps UNC paths absolute', async () => {
@@ -243,6 +252,35 @@ describe('registerNewCommands', () => {
       '\\\\server\\share\\app.ts',
       'old',
       'new',
+      { readOnly: false, permissionRequestId: undefined },
+    );
+  });
+
+  it('showDiff forwards the readOnly flag', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: '/workspace/src/app.ts',
+      oldText: 'old',
+      newText: 'new',
+      readOnly: true,
+    });
+
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '/workspace/src/app.ts',
+      'old',
+      'new',
+      { readOnly: true, permissionRequestId: undefined },
     );
   });
 });

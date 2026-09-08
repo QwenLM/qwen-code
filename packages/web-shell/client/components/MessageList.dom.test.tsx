@@ -27,6 +27,7 @@ const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
+  scrollToIndex: vi.fn(),
   renderItems: true,
 }));
 const messageItemTestState = vi.hoisted(() => ({
@@ -145,7 +146,8 @@ vi.mock('@tanstack/react-virtual', () => ({
       measureElement: () => {},
       resizeItem: virtualizerTestState.resizeItem,
       itemSizeCache: virtualizerTestState.itemSizeCache,
-      scrollToIndex: () => {},
+      scrollToIndex: virtualizerTestState.scrollToIndex,
+      getOffsetForIndex: () => [320, 'center'],
     };
   },
 }));
@@ -318,6 +320,7 @@ function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
   opts: {
+    frozenViewport?: boolean;
     hideSessionTimeline?: boolean;
     loadingTranscript?: boolean;
     catchingUp?: boolean;
@@ -368,6 +371,7 @@ function mount(
             >
               <MessageList
                 ref={ref}
+                frozenViewport={opts.frozenViewport}
                 messages={messages}
                 pendingApproval={opts.pendingApproval ?? null}
                 hideSessionTimeline={opts.hideSessionTimeline}
@@ -513,6 +517,42 @@ const nextFrame = () =>
     () =>
       new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
   );
+// A fixed frame budget expires early on a loaded CI host: the frames still
+// tick, but the effect they were meant to flush is queued behind everything
+// else on the box. Poll frames against a wall-clock deadline instead, so the
+// wait stretches with the machine rather than with a frame count. The bound
+// stays well inside the lane's per-test budget (60s on shared ECS runners,
+// vitest's 5s default elsewhere), so a wait that never resolves still fails
+// as an assertion.
+const FLUSH_DEADLINE_MS = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 10_000
+  : 4_000;
+const waitForFrames = async (predicate: () => boolean) => {
+  const deadline = Date.now() + FLUSH_DEADLINE_MS;
+  while (!predicate() && Date.now() < deadline) {
+    await nextFrame();
+  }
+};
+// `handleScroll` only paginates while the reader is at the top
+// (MessageList.tsx:4862, `curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX`), and the
+// auto-scroll driver keeps snapping the container back to the bottom for as
+// long as it is following (MessageList.tsx:5542 -> 4123). jsdom stores
+// `scrollTop` rather than recomputing it, so a single commit landing after the
+// one-frame `scrollCooldown` releases (4119/4148) parks the list at the bottom
+// and silently swallows every later scroll dispatch — and because that position
+// reads back as "near bottom", it re-arms the driver, so the state absorbs
+// instead of recovering. Whether the cooldown has released by then is a race
+// between jsdom's ~16.7ms rAF interval and React `act`'s macrotask yield, which
+// an idle host wins and a contended one (load 218-270) loses deterministically.
+// Re-assert the reader's position inside the same `act` as the dispatch so no
+// commit can slip a re-follow in between.
+const dispatchTopScroll = async (list: HTMLElement) => {
+  await act(async () => {
+    list.scrollTop = 0;
+    list.dispatchEvent(new Event('scroll'));
+    await Promise.resolve();
+  });
+};
 const mockMessageListWidth = (width: number) =>
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     width,
@@ -916,6 +956,113 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), sourceBlockIds: ['b1'] },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), sourceBlockIds: ['b2'] },
+        toolMsg('g2'),
+        asstMsg('a2'),
+        { ...userMsg('u3'), sourceBlockIds: ['b3'] },
+        toolMsg('g3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(
+      [...c.querySelectorAll<HTMLElement>('[data-source-block-ids="b2"]')].map(
+        (row) => row.dataset.messageRowKey,
+      ),
+    ).toEqual(['msg:u2', 'tc:tc-u2']);
+  });
+
+  it('locates frozen virtual rows without leaving a recentering target behind', () => {
+    const ref = createRef<MessageListHandle>();
+    const c = mount(
+      Array.from({ length: 220 }, (_, index) => userMsg(`u${index}`)),
+      ref,
+      { frozenViewport: true },
+    );
+    virtualizerTestState.scrollToIndex.mockClear();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      expect(ref.current?.scrollToMessage('u210')).toBe(true);
+    });
+    expect(list.scrollTop).toBe(320);
+    expect(virtualizerTestState.scrollToIndex).not.toHaveBeenCalled();
+  });
+
+  it('keeps historical edge fragments expanded while collapsing complete interior turns', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g2'),
+        asstMsg('a2'),
+        userMsg('u3'),
+        toolMsg('g3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+    expect(toggleRow(c, 'u2').getAttribute('aria-expanded')).toBe('false');
+    expect(toggleRow(c, 'u3').getAttribute('aria-expanded')).toBe('true');
+    expect(isCollapsed(c, 'g1')).toBe(false);
+    expect(isCollapsed(c, 'g2')).toBe(true);
+    expect(isCollapsed(c, 'g3')).toBe(false);
+  });
+
+  it('never reloads or follows the bottom in a frozen viewport', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    const ref = createRef<MessageListHandle>();
+    const container = mount([userMsg('u1'), asstMsg('a1')], ref, {
+      frozenViewport: true,
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    Object.defineProperties(list, {
+      scrollHeight: { value: 1200 },
+      clientHeight: { value: 400 },
+    });
+    list.scrollTop = 150;
+    act(() => ref.current?.scrollToBottom());
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+    expect(list.scrollTop).toBe(150);
+  });
+
+  it('omits incomplete history fragment totals', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), timestamp: 1_000 },
+        { ...toolMsg('g1'), timestamp: 2_000 },
+        {
+          ...asstMsg('a1'),
+          timestamp: 13_400,
+          usage: { inputTokens: 3100, outputTokens: 5100, cachedTokens: 2800 },
+        },
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+    expect(c.textContent).not.toContain('13s');
+    expect(c.textContent).not.toContain('↑3.1k');
+    expect(c.textContent).not.toContain('1 tool call');
+    expect(has(c, 'g1')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+  });
+
   it('does not reload a responding transcript when pause is implicit', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
@@ -1409,13 +1556,34 @@ describe('MessageList — turn collapse (DOM)', () => {
       writable: true,
       value: 0,
     });
+    // Re-drives rather than only ticking frames: when a commit has parked the
+    // list at the bottom, the dispatch meant to start this page never reached
+    // `loadOlderHistory`, and no number of frames recovers it. Idempotent by
+    // construction — `loadOlderHistory` rejects a duplicate at its own
+    // in-flight guard (MessageList.tsx:4596), and this page's promise stays
+    // pending until the test calls `resolveLoad()`, so re-driving cannot
+    // inflate the exact counts asserted below. Exhaustion throws naming the
+    // position that caused it, instead of falling through to an assertion that
+    // reads like a product bug.
+    const waitForLoadCount = async (count: number) => {
+      const deadline = Date.now() + FLUSH_DEADLINE_MS;
+      while (onLoadOlderHistory.mock.calls.length < count) {
+        await dispatchTopScroll(list);
+        if (onLoadOlderHistory.mock.calls.length >= count) return;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `waitForLoadCount(${count}) exhausted ${FLUSH_DEADLINE_MS}ms at ` +
+              `${onLoadOlderHistory.mock.calls.length} call(s), ` +
+              `scrollTop=${list.scrollTop}`,
+          );
+        }
+        await nextFrame();
+      }
+    };
 
     try {
       // Page 1 completes the split turn's head: the keep-open expands it.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
       rerenderMessages(c, completed, {
         hasOlderHistory: true,
         onLoadOlderHistory,
@@ -1425,13 +1593,12 @@ describe('MessageList — turn collapse (DOM)', () => {
         await Promise.resolve();
       });
       await nextFrame();
+      await nextFrame();
       expect(has(c, 't1')).toBe(true);
 
       // Page 2 anchors on the now-visible t1 row while the fetch is in flight.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
+      await waitForLoadCount(2);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
 
       // The user collapses the turn before the page commits.
@@ -1445,13 +1612,12 @@ describe('MessageList — turn collapse (DOM)', () => {
         await Promise.resolve();
       });
       await nextFrame();
+      await nextFrame();
       expect(isCollapsed(c, 't1')).toBe(true);
 
       // ...and pagination is not stuck: a third load still fires.
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      await dispatchTopScroll(list);
+      await waitForLoadCount(3);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
 
       // The superseded load's snapshot must not wedge later detection: page 3
@@ -1464,15 +1630,14 @@ describe('MessageList — turn collapse (DOM)', () => {
         resolveLoad();
         await Promise.resolve();
       });
+      await nextFrame();
+      await nextFrame();
       // ...page 4 then completes that turn's head while its tail is already
-      // on screen, so it stays expanded.
-      // Re-top the container: re-renders snap it to the bottom while
-      // following; the scroll event must start near the top to trigger.
-      list.scrollTop = 0;
-      await act(async () => {
-        list.dispatchEvent(new Event('scroll'));
-        await Promise.resolve();
-      });
+      // on screen, so it stays expanded. This dispatch already re-topped the
+      // container before the other three did; `dispatchTopScroll` is that
+      // workaround promoted to the only way this test scrolls.
+      await dispatchTopScroll(list);
+      await waitForLoadCount(4);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(4);
       rerenderMessages(
         c,
@@ -2520,7 +2685,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         resolveLoad();
         await Promise.resolve();
       });
-      await nextFrame();
+      await waitForFrames(() => list.scrollTop === 600);
       // The keep-open re-expanded the turn, and the anchor restore followed
       // the re-keyed run to a visible row instead of dropping: the scroll
       // position moved with the prepended history.
@@ -2793,6 +2958,127 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
+  it('does not render final actions while AskUserQuestion is waiting', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [
+        userMsg('review-request'),
+        asstMsg('critical-findings'),
+        standaloneToolMsg('ask-user', 'AskUserQuestion'),
+      ],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(assistantActions(c, 'critical-findings')).toBe('false');
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
+  });
+
+  it('restores final actions and collapses the intermediate report after matched agent notifications', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount(
+      [
+        userMsg('review-request'),
+        asstMsg('critical-findings'),
+        standaloneToolMsg('ask-user', 'AskUserQuestion'),
+        userMsg('ask-user-answer'),
+        firstAgent,
+        secondAgent,
+        asstMsg('report'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        backgroundNotificationMsg('bg-2', 'call-agent-2'),
+        thinkingMsg('late-thinking'),
+        asstMsg('final-supplement'),
+      ],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(isCollapsed(c, 'report')).toBe(true);
+    expect(assistantActions(c, 'final-supplement')).toBe('true');
+    expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual(
+      expect.arrayContaining([
+        {
+          turnId: 'ask-user-answer',
+          message: {
+            id: 'final-supplement',
+            content: 'answer',
+            isStreaming: undefined,
+            timestamp: undefined,
+          },
+        },
+      ]),
+    );
+    expect(
+      renderAssistantTurnFooter.mock.calls.every(
+        ([info]) => info.message.id === 'final-supplement',
+      ),
+    ).toBe(true);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+  });
+
+  it('releases the latest turn after matched delayed agent notifications', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    const staleFirstAgent = agentMsg('agent-1');
+    const staleSecondAgent = agentMsg('agent-2');
+    staleFirstAgent.tools[0]!.status = 'pending';
+    staleSecondAgent.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      staleFirstAgent,
+      staleSecondAgent,
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(parallelAgentsSummary(c)?.textContent).toContain('2/2 done');
+  });
+
+  it('does not release an older turn for another agent completion', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      asstMsg('a1'),
+      userMsg('u2'),
+      secondAgent,
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+    expect(assistantActions(c, 'a2')).toBe('true');
+  });
+
   it('keeps actions suppressed for stale agents until they reconcile terminal', () => {
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
@@ -2826,6 +3112,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
 
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('restores the custom footer during readonly transcript replay', () => {
+    const staleAgent = agentMsg('agent-1');
+    staleAgent.tools[0]!.status = 'pending';
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount([userMsg('u1'), staleAgent, asstMsg('a1')], undefined, {
+      transcriptRenderMode: 'readonly',
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(renderAssistantTurnFooter).toHaveBeenCalledWith({
+      turnId: 'u1',
+      message: {
+        id: 'a1',
+        content: 'answer',
+        isStreaming: undefined,
+        timestamp: undefined,
+      },
+    });
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
   });
 
   it('keeps final actions for a pending foreground agent in a completed turn', () => {

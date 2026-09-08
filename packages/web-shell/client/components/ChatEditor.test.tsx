@@ -2,7 +2,11 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonWorkspaceGitStatus,
+  ReasoningSelection,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -11,7 +15,7 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
@@ -392,11 +396,17 @@ interface ChatEditorRenderProps {
   onShowContextUsage?: () => void;
   disabled?: boolean;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
+  language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  reasoning?: DaemonReasoningControls;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
 
 function renderChatEditorInto(
@@ -409,6 +419,7 @@ function renderChatEditorInto(
     pastedImages,
     pastedFiles,
     customization,
+    language = 'en',
     renderComposerTagTooltip,
     onComposerTagClick,
     ...chatEditorProps
@@ -433,7 +444,7 @@ function renderChatEditorInto(
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -523,6 +534,27 @@ describe('ChatEditor add menu (+)', () => {
       visibleToolbarActions: ['approvalMode', 'voice'],
     });
     expect(trigger(container)).toBeNull();
+  });
+
+  it('keeps session attachments available without workspace actions', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file-attach"]'),
+    ).not.toBeNull();
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-file-upload"]:not([data-disabled])',
+      ),
+    ).toBeNull();
   });
 
   it('stays off by default when the host passes no toolbar list', () => {
@@ -986,6 +1018,33 @@ describe('ChatEditor context usage ring', () => {
 });
 
 describe('ChatEditor attachment reporting', () => {
+  it('renders attachments with a file icon, title, and type', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'report.html',
+          media_type: 'text/html',
+          text: '<h1>Report</h1>',
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(
+      attachments?.querySelector('[data-file-type-icon="html"]'),
+    ).not.toBeNull();
+    expect(
+      attachments?.querySelector('[title="report.html"]')?.textContent,
+    ).toBe('report.html');
+    expect(attachments?.querySelector('[title="HTML"]')?.textContent).toBe(
+      'HTML',
+    );
+    expect(
+      attachments?.querySelector('button[aria-label="Remove report.html"]'),
+    ).not.toBeNull();
+  });
+
   it('reports whether the composer has tags or pasted images', () => {
     const onEmptyAttachmentsChange = vi.fn();
     renderChatEditor({
@@ -1093,7 +1152,10 @@ describe('ChatEditor composer tag icons', () => {
 
     expect(
       container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      container.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('rejects unsafe custom icon URLs for top composer tags', () => {
@@ -1164,6 +1226,59 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('controls the workspace selector with the workspace action', () => {
+    const props = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/main',
+          label: 'main',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'api',
+          cwd: '/work/api',
+          label: 'api',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      onSelectWorkspace: vi.fn(),
+    };
+
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: [],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+  });
+
+  it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
+    renderChatEditor({
+      composerScopeKey: 'live',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(false);
+
+    renderChatEditor({
+      composerScopeKey: 'standalone',
+      workspaceFeaturesEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+  });
+
   it('shows the workspace indicator when the workspace action is visible', () => {
     const container = renderChatEditor({
       workspaceName: 'api',
@@ -1665,6 +1780,76 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it('localizes every fixed effort tier after a runtime language change', () => {
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'max',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+    };
+    const container = renderChatEditor(props);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    let controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('High');
+    expect(controls?.textContent).toContain('Max');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    rerenderChatEditor(container, { ...props, language: 'zh-CN' });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('高');
+    expect(controls?.textContent).toContain('最高');
+    expect(controls?.textContent).not.toContain('High');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+  });
+
+  it('renders an unknown provider default as Thinking without a Default effort', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'default',
+        efforts: ['low', 'max'],
+      },
+    });
+
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(modelButton?.textContent).toContain('Thinking');
+    expect(modelButton?.textContent).not.toContain('Default');
+    expect(modelButton?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => modelButton?.click());
+    const controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).not.toContain('Default');
+    expect(
+      Array.from(
+        controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+      ).every((button) => button.getAttribute('aria-pressed') === 'false'),
+    ).toBe(true);
+  });
+
   it('displays the model label instead of an opaque route id', () => {
     const routeId = 'qwen-route:v1:abcdefghijklmnop';
     const container = renderChatEditor({
@@ -1741,6 +1926,28 @@ describe('ChatEditor toolbar popovers', () => {
         '[data-web-shell-toolbar-popover] input[type="search"]',
       ),
     ).toBeNull();
+  });
+
+  it('localizes the approval-mode button accessible name', () => {
+    const english = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'en',
+    });
+    const chinese = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'zh-CN',
+    });
+
+    expect(
+      english
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Approval mode');
+    expect(
+      chinese
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('审批模式');
   });
 });
 
@@ -2054,10 +2261,28 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
-  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+  it('fileUploadEnabled={false} keeps attachment drag-and-drop enabled', () => {
     uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
     renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('disables attachment drag feedback when attachments are disabled', () => {
+    renderChatEditor({ attachmentsEnabled: false });
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('does not advertise upload for an attach-only drop preference', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'attach' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'dragenter',
+      ['Files'],
+    );
+    expect(container.querySelector('[data-upload-drag-active]')).toBeNull();
   });
 
   it('enables file drag-and-drop in the composer core by default', () => {
@@ -2066,7 +2291,7 @@ describe('ChatEditor file upload gating', () => {
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
   });
 
-  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+  it('fileUploadEnabled={false} routes drops to attachments without asking', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
@@ -2083,13 +2308,131 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['abc'], 'notes.txt')],
     );
-    // Cancelled so the browser cannot navigate to the dropped file, but no
-    // lane — upload or inline image/text — reacts.
     expect(drop.defaultPrevented).toBe(true);
-    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it.each([
+    ['upload', true],
+    ['attach', true],
+    [undefined, false],
+    ['attach', false],
+  ] as const)(
+    'routes default %s with attachments %s without asking',
+    async (fileDropAction, attachmentsEnabled) => {
+      const workspace = makeWorkspace(['workspace_file_upload']);
+      workspace.client.uploadWorkspaceFile.mockResolvedValue({
+        kind: 'file_upload',
+        path: 'uploads/notes.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({
+        attachmentsEnabled,
+        customization: { fileDropAction, fileUploadDirectory: 'uploads' },
+      });
+      const files = [new File(['abc'], 'notes.txt')];
+      const drop = dispatchDrag(
+        container.querySelector('[data-web-shell-composer-editor]')!,
+        'drop',
+        ['Files'],
+        files,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(drop.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-drop-choice-dialog]'),
+      ).toBeNull();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      if (fileDropAction === 'attach' && attachmentsEnabled) {
+        expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+        expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+      } else {
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            path: 'uploads/notes.txt',
+            data: files[0],
+          }),
+        );
+        expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('falls back to attachments when the preferred upload is unavailable', () => {
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'upload' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it('cancels drops when neither destination is available', () => {
+    const workspace = makeWorkspace([]);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      attachmentsEnabled: false,
+      customization: { fileDropAction: 'upload' },
+    });
+    const onDrop = vi.fn();
+    container.addEventListener('drop', onDrop);
+    const drop = dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    { attachmentsEnabled: false },
+    { customization: { fileDropAction: 'attach' as const } },
+  ])('closes a pending choice when routing changes: %j', (props) => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, props);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('asks whether dropped files should be referenced or uploaded', () => {
@@ -2734,6 +3077,9 @@ describe('ChatEditor file upload gating', () => {
       '[data-web-shell-upload-strip] [data-status="done"]',
     );
     expect(row?.textContent).toContain('Saved as report (1).txt');
+    expect(
+      row?.querySelector('[title="Saved as report (1).txt"]'),
+    ).not.toBeNull();
   });
 
   it('shows the plain Uploaded copy when the file kept its name', async () => {

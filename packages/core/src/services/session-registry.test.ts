@@ -1386,6 +1386,21 @@ describe('readOwnSessionRecord', () => {
     });
   });
 
+  it('round-trips the inbox token beside the address, dropping both on clear', async () => {
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    await patchSessionRecord({ ipcPath: '/tmp/self.sock', ipcToken: 'tok-1' });
+    expect(await readOwnSessionRecord()).toMatchObject({
+      ipcPath: '/tmp/self.sock',
+      ipcToken: 'tok-1',
+    });
+
+    await patchSessionRecord({ ipcPath: undefined, ipcToken: undefined });
+    const cleared = await readOwnSessionRecord();
+    expect(cleared).not.toBeNull();
+    expect(cleared).not.toHaveProperty('ipcPath');
+    expect(cleared).not.toHaveProperty('ipcToken');
+  });
+
   it("is null for a foreign record sitting at this pid's path", async () => {
     // Same guard patchSessionRecord applies: a record whose pid does not
     // match this process is not ours to read back, whatever its filename.

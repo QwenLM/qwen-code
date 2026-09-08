@@ -10,7 +10,7 @@ import {
   SkillCommandLoader,
 } from './SkillCommandLoader.js';
 import { skillArgsPath } from './skill-args-file.js';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
@@ -45,9 +45,19 @@ describe('SkillCommandLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: { listSkills: ReturnType<typeof vi.fn> };
   let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
+  let mockAddSessionHook: ReturnType<typeof vi.fn>;
+  let mockSessionHooksManager: {
+    addSessionHook: ReturnType<typeof vi.fn>;
+    getHooksForEvent: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAddSessionHook = vi.fn();
+    mockSessionHooksManager = {
+      addSessionHook: mockAddSessionHook,
+      getHooksForEvent: vi.fn().mockReturnValue([]),
+    };
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -60,10 +70,19 @@ describe('SkillCommandLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn(
+        (skill: SkillConfig) =>
+          !mockConfig.getDisabledSkillNames().has(skill.name.toLowerCase()),
+      ),
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getHookSystem: vi.fn().mockReturnValue({
+        getSessionHooksManager: () => mockSessionHooksManager,
+      }),
     } as unknown as Config;
   });
 
@@ -265,6 +284,48 @@ describe('SkillCommandLoader', () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  describe('project skill allowedTools require a trusted folder', () => {
+    async function runProjectSkill(): Promise<void> {
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(curl *)', 'Write'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/my-skill', args: '' } } as never,
+        '',
+      );
+    }
+
+    it('grants no session allow rules in an untrusted folder', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('grants them in a trusted folder — marked trust-gated for the live revocation check', async () => {
+      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
+      await runProjectSkill();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      // Exactly `{ trustGated: true }`: suspension keys solely off the
+      // flag, so a `/my-skill`-invoked project skill whose grants shipped
+      // ungated would silently escape the mid-session revocation.
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(curl *)',
+        { trustGated: true },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Write', {
+        trustGated: true,
+      });
+    });
   });
 
   it('should submit skill body as prompt', async () => {
@@ -485,8 +546,16 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(git *)',
+        {
+          trustGated: false,
+        },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+        trustGated: false,
+      });
     });
 
     it('does not grant when the skill declares no allowedTools', async () => {
@@ -504,7 +573,140 @@ describe('SkillCommandLoader', () => {
     });
   });
 
+  describe('frontmatter hooks registration (#11067)', () => {
+    const gateHooks = {
+      PreToolUse: [
+        {
+          matcher: 'Shell',
+          hooks: [
+            { type: 'command', command: '$QWEN_SKILL_ROOT/scripts/gate.sh' },
+          ],
+        },
+      ],
+    } as unknown as SkillConfig['hooks'];
+
+    async function runSkillCommand(skill: SkillConfig) {
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === skill.level ? [skill] : []),
+      );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+    }
+
+    it('registers the skill hooks when the user invokes it via /<skill-name>', async () => {
+      // Regression: the slash-command path used to grant allowedTools but
+      // never register hooks, so a skill's PreToolUse gate silently failed
+      // open when the user started the skill by hand.
+      await runSkillCommand(
+        makeSkill({
+          level: 'user',
+          skillRoot: '/skills/my-skill',
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledTimes(1);
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.objectContaining({
+          type: 'command',
+          command: '$QWEN_SKILL_ROOT/scripts/gate.sh',
+          env: expect.objectContaining({ QWEN_SKILL_ROOT: '/skills/my-skill' }),
+        }),
+        expect.objectContaining({ skillRoot: '/skills/my-skill' }),
+      );
+    });
+
+    it("marks a project skill's hooks trust-gated", async () => {
+      await runSkillCommand(
+        makeSkill({
+          level: 'project',
+          filePath: '/repo/.qwen/skills/my-skill/SKILL.md',
+          skillRoot: '/repo/.qwen/skills/my-skill',
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).toHaveBeenCalledWith(
+        'session-1',
+        'PreToolUse',
+        'Shell',
+        expect.anything(),
+        expect.objectContaining({ trustGated: true }),
+      );
+    });
+
+    it('registers no hooks for a project skill in an untrusted folder', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+
+      await runSkillCommand(
+        makeSkill({
+          level: 'project',
+          filePath: '/repo/.qwen/skills/my-skill/SKILL.md',
+          skillRoot: '/repo/.qwen/skills/my-skill',
+          allowedTools: ['Edit'],
+          hooks: gateHooks,
+        }),
+      );
+
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('does not register anything when the skill declares no hooks', async () => {
+      await runSkillCommand(makeSkill({ level: 'user' }));
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+    });
+  });
+
   describe('skills.disabled filter', () => {
+    it('rejects a stale action before granting tools or writing arguments', async () => {
+      const skill = makeSkill({
+        name: 'stale-extension-action',
+        level: 'extension',
+        extensionName: 'suite',
+        allowedTools: ['Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'extension' ? [skill] : []),
+      );
+      const [command] = await new SkillCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+      vi.mocked(mockConfig.isSkillEnabled).mockReturnValue(false);
+      const dir = mkdtempSync(join(tmpdir(), 'stale-skill-action-'));
+      const cwd = process.cwd();
+      process.chdir(dir);
+      try {
+        const result = await command.action?.(
+          {
+            invocation: {
+              raw: '/stale-extension-action payload',
+              args: 'payload',
+            },
+          } as CommandContext,
+          'payload',
+        );
+
+        expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        expect(existsSync(skillArgsPath(skill.name))).toBe(false);
+        expect(
+          await new SkillCommandLoader(mockConfig).loadCommands(signal),
+        ).toEqual([]);
+      } finally {
+        process.chdir(cwd);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('omits disabled skills (case-insensitive) from the command list', async () => {
       mockSkillManager.listSkills.mockImplementation(
         ({ level }: { level: string }) => {
