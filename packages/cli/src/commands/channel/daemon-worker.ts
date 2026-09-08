@@ -16,6 +16,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
@@ -546,6 +547,11 @@ export async function runChannelDaemonWorker(
     settings.merged.proxy as string | undefined,
   );
   const locale = resolveChannelLocale(settings.merged.general?.language);
+  const displayLanguage = resolveLanguage(
+    resolveLanguageSetting(
+      settings.merged.general?.language as string | undefined,
+    ),
+  );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await abortableStartup(
@@ -678,6 +684,7 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             locale,
             ...(proxy ? { proxy } : {}),
+            ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
@@ -735,7 +742,7 @@ export async function runChannelDaemonWorker(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
-          channel.disconnect();
+          await channel.disconnect();
         } catch {
           // best-effort
         }

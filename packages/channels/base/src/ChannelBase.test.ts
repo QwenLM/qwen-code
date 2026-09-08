@@ -11316,6 +11316,36 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: none');
     });
 
+    it('notifies the channel when the bridge disconnects', () => {
+      const ch = createChannel();
+      const disconnected = vi.spyOn(ch, 'onBridgeDisconnected');
+
+      (bridge as unknown as EventEmitter).emit('disconnected', null, 'SIGKILL');
+
+      expect(disconnected).toHaveBeenCalledOnce();
+    });
+
+    it('moves the disconnect notification to the new bridge on setBridge', () => {
+      const ch = createChannel();
+      const disconnected = vi.spyOn(ch, 'onBridgeDisconnected');
+      const oldBridge = bridge;
+      const nextBridge = createBridge();
+      ch.setBridge(nextBridge);
+
+      (oldBridge as unknown as EventEmitter).emit(
+        'disconnected',
+        null,
+        'SIGKILL',
+      );
+      expect(disconnected).not.toHaveBeenCalled();
+      (nextBridge as unknown as EventEmitter).emit(
+        'disconnected',
+        null,
+        'SIGKILL',
+      );
+      expect(disconnected).toHaveBeenCalledOnce();
+    });
+
     it('forgets instructions for a session when the bridge reports that it died', async () => {
       const ch = createChannel({ instructions: 'Be concise.' });
       await ch.handleInbound(envelope({ text: 'first' }));
@@ -15369,7 +15399,10 @@ describe('ChannelBase', () => {
             kind: `run_shell_command\n${'k'.repeat(100)}`,
             title: `Run shell command: echo $SECRET\n${'x'.repeat(100)}`,
             status: `running\n${'s'.repeat(100)}`,
-            rawInput: { command: 'echo $SECRET' },
+            rawInput: {
+              command: 'echo $SECRET',
+              description: 'Check disk health\nwithout exposing commands',
+            },
           });
           return Promise.resolve('done');
         },
@@ -15387,6 +15420,7 @@ describe('ChannelBase', () => {
           toolCallId: 'tool-1',
         }),
       });
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('description');
       expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
       expect(lifecycleToolCall!.toolCall.kind).not.toContain('\n');
       expect(lifecycleToolCall!.toolCall.status).not.toContain('\n');
@@ -15401,7 +15435,10 @@ describe('ChannelBase', () => {
         Array.from(lifecycleToolCall!.toolCall.title).length,
       ).toBeLessThanOrEqual(81);
       expect(ch.toolCalls[0]!.event).toMatchObject({
-        rawInput: { command: 'echo $SECRET' },
+        rawInput: {
+          command: 'echo $SECRET',
+          description: 'Check disk health\nwithout exposing commands',
+        },
       });
     });
 
