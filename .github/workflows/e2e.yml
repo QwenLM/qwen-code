@@ -249,9 +249,9 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-          # Mapped for integration-tests/vitest.config.ts, which caps each
-          # shared-pool shard at one fork and exempts pressure-flake unhandled
-          # errors.
+          # Mapped for integration-tests/vitest.config.ts, which exempts
+          # pressure-flake unhandled errors on shared-pool runners. The test
+          # commands below override its one-fork default for this job.
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
@@ -302,8 +302,8 @@ jobs:
                 echo "::error::docker daemon read lock not acquired within 30 minutes"
                 exit 1
               fi
-              # Per-commit coordinator: one shard per host builds the image,
-              # its siblings wait here and then find it present.
+              # Per-commit coordinator: one job builds the image; a concurrent
+              # run at the same SHA waits here and then finds it present.
               exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
               if ! flock --wait 1800 8; then
                 echo "::error::docker build coordinator lock not acquired within 30 minutes"

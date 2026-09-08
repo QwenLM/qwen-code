@@ -8776,10 +8776,11 @@ export class Config {
     const runtime = createGoalRuntime({
       journal: recorder,
       evidenceSource: recorder,
-      // The recorder already sees every assistant turn's usage stamped with
-      // the Goal permit that produced it, so the spend is Goal-scoped at the
-      // point it is recorded rather than reconstructed from session totals.
-      tokenLedger: recorder,
+      // The recorder already sees every assistant turn's usage and every
+      // tool result stamped with the Goal permit that produced it, so both
+      // the spend and the turn's output are Goal-scoped at the point they
+      // are recorded rather than reconstructed from session totals.
+      ledger: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
