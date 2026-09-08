@@ -34,6 +34,7 @@ import {
   createGoalCheckpointVerifier,
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
 } from '../goals/goal-checkpoint-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -3604,6 +3605,16 @@ describe('Server Config (config.ts)', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0]?.[0]).toBe(config);
       expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+    });
+
+    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
+      // The checkpoint call is streamed, so past the stream lifetime guard it
+      // is the guard that ends the call and the verifier's own timer never
+      // fires. A cap above it would let the setting validate, and the getter
+      // report, a ceiling no default deployment can reach.
+      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
     });
 
     it('normalizes the goalCheckpointTimeoutSeconds setting', () => {

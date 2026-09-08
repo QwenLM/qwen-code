@@ -229,7 +229,7 @@ export function validateGoalCheckpointTimeoutSeconds(value: unknown): number {
   }
   if (value > GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP) {
     throw new Error(
-      `model.goalCheckpointTimeoutSeconds ${value} exceeds the supported ceiling (${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}s, one hour).`,
+      `model.goalCheckpointTimeoutSeconds ${value} exceeds the supported ceiling (${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}s, the default stream lifetime cap; a longer ceiling also needs QWEN_STREAM_MAX_LIFETIME_MS raised).`,
     );
   }
   return value;

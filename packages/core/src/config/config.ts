@@ -187,6 +187,7 @@ import {
   GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
 } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
@@ -1521,13 +1522,24 @@ export function isValidGoalTokenBudget(value: unknown): value is number {
 }
 
 /**
- * Largest accepted `model.goalCheckpointTimeoutSeconds`: one hour.
+ * Largest accepted `model.goalCheckpointTimeoutSeconds`, in seconds.
  *
- * A typo guard like `GOAL_TOKEN_BUDGET_CAP`. A checkpoint blocks the Goal's
- * next turn while it runs, so a value past this is a Goal that sits for an
- * hour on one stuck call; nobody types that on purpose.
+ * Derived from the stream lifetime cap rather than picked as a round number,
+ * because the checkpoint call is streamed: past that cap the guard throws
+ * `StreamLifetimeExceededError` and the verifier's own timer never fires, so
+ * a larger ceiling is a timer that cannot go off. Accepting one would let the
+ * setting promise a wait the default wire does not honour -- an operator who
+ * raised it to survive a slow model would wait the lifetime cap, get no
+ * checkpoint, and see exactly the behaviour they had before touching it.
+ *
+ * A deployment that genuinely needs longer has to raise the lifetime cap too,
+ * and that knob is `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
+ * `ContentGeneratorConfig.streamMaxLifetimeMs`) rather than anything in
+ * `settings.json`, so it cannot be reached from this setting alone. This also
+ * keeps the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
  */
-export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP = 3_600;
+export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP =
+  DEFAULT_STREAM_MAX_LIFETIME_MS / 1000;
 
 /**
  * True for the values `normalizeGoalCheckpointTimeoutSeconds` honours: a

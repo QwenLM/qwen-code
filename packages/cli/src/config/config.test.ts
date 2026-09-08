@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_TOKEN_BUDGET_CAP,
   ToolNames,
@@ -1335,22 +1336,20 @@ describe('loadCliConfig', () => {
       expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
     });
 
-    it.each([0, -1, 1.5, 3_601, '30' as unknown as number])(
-      'rejects invalid settings value %s at startup',
-      async (value) => {
-        process.argv = ['node', 'script.js'];
-        const argv = await parseArguments();
+    it.each([
+      0,
+      -1,
+      1.5,
+      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
+      '30' as unknown as number,
+    ])('rejects invalid settings value %s at startup', async (value) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
 
-        await expect(
-          loadCliConfig(
-            { model: { goalCheckpointTimeoutSeconds: value } },
-            argv,
-          ),
-        ).rejects.toThrow(
-          /settings\.json: model\.goalCheckpointTimeoutSeconds/,
-        );
-      },
-    );
+      await expect(
+        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
+      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
+    });
 
     it('uses the built-in default when the setting is unset', async () => {
       process.argv = ['node', 'script.js'];
