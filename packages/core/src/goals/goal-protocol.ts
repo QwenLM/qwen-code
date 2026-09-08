@@ -21,6 +21,14 @@ export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
  * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+
+/**
+ * How many consecutive autonomous turns a Goal may make no progress on before
+ * it stops. Same three as the checkpoint stall bound, and for the same
+ * reason: one quiet turn is a pause for thought, two is a pattern, three is
+ * the loop.
+ */
+export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
 export const GOAL_CHECKPOINT_STALLED_REASON =
   'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list, came back with a result that could not be folded into claims, or did not come back at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
@@ -198,6 +206,16 @@ export interface GoalRecord {
    * an evidence-limited Goal.
    */
   checkpointStalls?: number;
+  /**
+   * Consecutive autonomous turns that recorded neither a tool result nor a
+   * terminal proposal. A model that only restates status never reaches the
+   * verifier and never spends a checkpoint, so nothing else bounds it short
+   * of the token budget. Persisted like `checkpointStalls` so a restart
+   * cannot launder the count; absent means zero. Reset by any turn that
+   * records a tool result or a proposal, by a turn the user's own text
+   * drove, and by edit, replace, and resume.
+   */
+  noProgressTurns?: number;
   lastReason?: string;
   /**
    * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
@@ -390,6 +408,19 @@ export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
  */
 export const GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED =
   'The headless run finished before the Goal did. Resume the Goal in a later run.';
+/**
+ * A Goal whose autonomous turns stopped producing anything to judge. The
+ * next step is the user's: resume to try the same objective again, or edit
+ * it into one the model can act on and then resume it -- editing alone
+ * leaves a paused Goal paused.
+ *
+ * Runtime-emitted and headless-reachable, so it names no slash command; and
+ * it says "nothing to judge" rather than "no tool results", because
+ * `get_goal` and `update_goal` results are recorded but deliberately do not
+ * count as progress.
+ */
+export const GOAL_PAUSE_REASON_NO_PROGRESS =
+  'Three Goal turns in a row recorded nothing to judge and no proposal. Resume the Goal to try again, or edit its objective into one the model can act on and then resume it.';
 
 function truncateGoalPauseReason(reason: string): string {
   const codePoints = [...reason];
