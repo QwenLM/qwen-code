@@ -45,10 +45,16 @@ export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 // terminator. Scoped to this strip rather than the shared
 // TERMINAL_*_REGEX constants, whose banner/label consumers replace with
 // a space and pin the narrower grammar.
-const TAIL_OSC_REGEX = /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=\x1b)|$)/g;
+// The OSC rule's newline lookahead strips an unterminated leader whole,
+// payload included, instead of leaking it as text. The Fe rule requires
+// an intermediate byte: a bare residual ESC falls to the per-character
+// backstop, which deletes only the ESC instead of eating the real byte
+// after it.
+const TAIL_OSC_REGEX =
+  /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
 const TAIL_STRING_REGEX = /\x1b[PX^_][^\x1b\n\r]*(?:\x1b\\|(?=\x1b)|$)/g;
 const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
-const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]*[\x30-\x7e]/g;
+const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+[\x30-\x7e]/g;
 /* eslint-enable no-control-regex */
 
 function stripOutputControlChars(text: string): string {

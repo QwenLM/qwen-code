@@ -93,14 +93,28 @@ describe('readTaskOutputTail', () => {
 
   it('keeps real lines after an OSC leader whose terminator was lost', () => {
     // An OSC payload can never cross a newline, so a leader whose BEL was
-    // lost can no longer swallow the real lines that follow it; only the
-    // malformed leader's ESC and the stray BEL are removed.
+    // lost can no longer swallow the real lines that follow it; the
+    // malformed leader is stripped whole, payload included, and only the
+    // stray BEL is removed from what remains.
     const outputFile = makeOutputFile(
       '\u001b]2;stale line1\nline2\nline3\n\u0007after\n',
     );
 
     expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
-      text: '2;stale line1\nline2\nline3\nafter',
+      text: '\nline2\nline3\nafter',
+      truncated: false,
+    });
+  });
+
+  it('deletes only the ESC of a residual lone ESC, keeping the byte after it', () => {
+    // A bare ESC that survives to the capture file (a child writing one,
+    // or the tail window opening mid-escape) is not an Fe leader, so the
+    // per-character backstop removes just the ESC and the real character
+    // that followed it survives.
+    const outputFile = makeOutputFile('alpha\u001bW313 beta\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'alphaW313 beta',
       truncated: false,
     });
   });

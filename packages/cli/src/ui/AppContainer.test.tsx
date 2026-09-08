@@ -60,8 +60,12 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
@@ -306,6 +310,24 @@ describe('AppContainer State Management', () => {
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
+  // Every render runs the real config.initialize() in an un-awaited mount
+  // IIFE whose extension-store I/O lands under QWEN_HOME. Give the suite a
+  // private scratch dir so a leftover store lock (ELOCKED) or a harness
+  // reclaiming the inherited HOME mid-flight (ENOENT) cannot fail it. The
+  // dir is never deleted: that store work can still be in flight at
+  // afterAll, and deleting the tree under it is the same race again.
+  const savedQwenHome = process.env['QWEN_HOME'];
+  process.env['QWEN_HOME'] = mkdtempSync(
+    join(tmpdir(), 'qwen-appcontainer-test-'),
+  );
+  afterAll(() => {
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
+  });
 
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
