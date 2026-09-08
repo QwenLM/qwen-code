@@ -3126,14 +3126,19 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
-  it('enforces the minimal API profile across HTTP, assets, webhooks and WebSockets', async () => {
+  it('enforces the minimal API profile across HTTP, webhooks and WebSockets', async () => {
     const bridge = fakeBridge();
     const app = createServeApp(
-      { ...baseOpts, token: 'secret', apiProfile: 'minimal' },
+      {
+        ...baseOpts,
+        token: 'secret',
+        apiProfile: 'minimal',
+        promptDeadlineMs: 10000,
+        writerIdleTimeoutMs: 10000,
+      },
       undefined,
       {
         bridge,
-        webShellDir: '/unused-minimal-profile-assets',
         enqueueChannelWebhookTask: vi.fn(),
       },
     );
@@ -3160,6 +3165,13 @@ describe('createServeApp', () => {
       .expect(200);
     expect(caps.body.apiProfile).toBe('minimal');
     expect(caps.body.features).toContain('session_prompt');
+    expect(caps.body.features).toEqual(
+      expect.arrayContaining([
+        'non_blocking_prompt',
+        'prompt_absolute_deadline',
+        'writer_idle_timeout',
+      ]),
+    );
     expect(caps.body.features).not.toContain('workspace_settings');
     expect(caps.body.features).not.toContain('acp_http');
     await request(app).get('/health').set('Host', host).expect(200);
@@ -3201,7 +3213,8 @@ describe('createServeApp', () => {
             reject(new Error('Unexpected WebSocket upgrade'));
           });
           ws.on('error', (error) => {
-            if (error.message.includes('timeout')) reject(error);
+            if (error.message !== 'Unexpected server response: 403')
+              reject(error);
             else resolve();
           });
         });
@@ -4109,6 +4122,23 @@ describe('createServeApp', () => {
 
     afterEach(async () => {
       await fsp.rm(webShellDir, { recursive: true, force: true });
+    });
+
+    it('blocks real Web Shell GET requests in the minimal profile', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', apiProfile: 'minimal' },
+        undefined,
+        { bridge: fakeBridge(), webShellDir },
+      );
+      for (const route of ['/', '/assets/app.js']) {
+        await request(app).get(route).set('Host', host).expect(401);
+        const response = await request(app)
+          .get(route)
+          .set('Host', host)
+          .set('Authorization', 'Bearer secret')
+          .expect(403);
+        expect(response.body.code).toBe('api_profile_disabled');
+      }
     });
 
     it('serves the shell at the root with security headers', async () => {

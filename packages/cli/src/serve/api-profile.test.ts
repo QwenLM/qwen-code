@@ -7,10 +7,36 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { MINIMAL_FEATURES, apiProfileGate } from './api-profile.js';
-import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
+import {
+  MINIMAL_FEATURES,
+  apiProfileGate,
+  profileFeatures,
+} from './api-profile.js';
+import {
+  SERVE_CAPABILITY_REGISTRY,
+  getAdvertisedServeFeatures,
+} from './capabilities.js';
 
 describe('API profile gate', () => {
+  it('preserves enabled prompt features without advertising disabled timeouts', () => {
+    const enabled = getAdvertisedServeFeatures(undefined, {
+      promptDeadlineMs: 10000,
+      writerIdleTimeoutMs: 10000,
+    });
+    expect(profileFeatures(enabled, 'minimal')).toEqual(
+      expect.arrayContaining([
+        'non_blocking_prompt',
+        'prompt_absolute_deadline',
+        'writer_idle_timeout',
+      ]),
+    );
+    const defaults = profileFeatures(getAdvertisedServeFeatures(), 'minimal');
+    expect(defaults).toContain('non_blocking_prompt');
+    expect(defaults).not.toContain('prompt_absolute_deadline');
+    expect(defaults).not.toContain('writer_idle_timeout');
+    expect(profileFeatures(enabled, 'full')).toEqual(enabled);
+  });
+
   it('leaves full routing unchanged', () => {
     expect(apiProfileGate()).toBeUndefined();
     expect(apiProfileGate('full')).toBeUndefined();
