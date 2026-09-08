@@ -905,19 +905,13 @@ export class ContentGenerationPipeline {
     }
     // A `reasoning` object the user put in `samplingParams` ships verbatim (the
     // contract `clampConfiguredReasoningEffort` keeps), so the capability
-    // mapping must leave it for the provider hook to translate. The same
-    // holds for `extra_body.reasoning`: `extra_body` merges after the
-    // capability mapping inside the provider hook, so flattening the
-    // configured tier here would make the hook's no-clobber guard read the
-    // pipeline's own `reasoning_effort` as the user's override and delete
-    // the `extra_body` reasoning instead of letting it win.
+    // mapping must leave it for the provider hook to translate.
     // OpenRouter's effort knob is the nested `reasoning` parameter: the
     // gateway ignores the flat `reasoning_effort` the capability mapping
     // writes, so flattening would stop delivering the tier. The disable
     // path below special-cases OpenRouter for the same reason.
     if (
       this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
-      this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined &&
       !isOpenRouterHostname(this.contentGeneratorConfig)
     ) {
       baseRequest = applyConfiguredReasoningEffort(
@@ -1048,13 +1042,7 @@ export class ContentGenerationPipeline {
           };
         }
       }
-      // Qwen-family wire models already emitted their route-correct disable
-      // shape in the branch above: re-emitting the declared field here would
-      // resurrect the top-level `enable_thinking` that branch deleted (an
-      // unknown field a validating gateway rejects, failing the AUTO-mode
-      // classifier closed) or pair it with `reasoning_effort: 'none'` on
-      // tiered DashScope — two competing knobs for one setting.
-      if (!thinkingMandatory && !isQwenFamilyWireModel(model)) {
+      if (!thinkingMandatory) {
         if (reasoningCapabilities?.disableField === 'reasoning_effort') {
           delete typed['enable_thinking'];
           delete typed['thinking_budget'];

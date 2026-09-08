@@ -1804,48 +1804,6 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
-    it('emits only the route-correct disable shape for a qwen-family capability', async () => {
-      // A qwen wire model's disable already shipped from the qwen-family
-      // branch; re-emitting the declared field after it would resurrect the
-      // deleted top-level enable_thinking (an unknown field a validating
-      // gateway rejects, failing the AUTO-mode classifier closed).
-      const apiCall = await executeWithCapability(
-        {
-          thinking: true,
-          efforts: ['low', 'high'],
-          defaultEffort: 'high',
-          disableField: 'enable_thinking',
-        },
-        { reasoning: false },
-        'qwen3-plus',
-      );
-      expect(apiCall['enable_thinking']).toBeUndefined();
-      expect(apiCall['chat_template_kwargs']).toEqual({
-        enable_thinking: false,
-      });
-      expect(apiCall['reasoning_effort']).toBeUndefined();
-    });
-
-    it('ships exactly one disable knob for a tiered qwen model on DashScope', async () => {
-      // The tiered branch emits reasoning_effort: 'none' in place of
-      // enable_thinking; the declared field must not pair the two knobs.
-      const apiCall = await executeWithCapability(
-        {
-          thinking: true,
-          efforts: ['low', 'high'],
-          defaultEffort: 'high',
-          disableField: 'enable_thinking',
-        },
-        {
-          reasoning: false,
-          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        },
-        'qwen3.8-max',
-      );
-      expect(apiCall['reasoning_effort']).toBe('none');
-      expect(apiCall['enable_thinking']).toBeUndefined();
-    });
-
     it('emits no disable shape for a capability that forbids disabling', async () => {
       const apiCall = await executeWithCapability(
         {
@@ -1906,32 +1864,6 @@ describe('ContentGenerationPipeline', () => {
       );
       expect(apiCall['reasoning']).toEqual({ effort: 'xhigh' });
       expect(apiCall['reasoning_effort']).toBeUndefined();
-    });
-
-    it('leaves an extra_body reasoning override for the provider merge', async () => {
-      // `extra_body` merges after the capability mapping inside the
-      // provider hook — the documented sibling of the `samplingParams`
-      // case above — so flattening the configured tier here makes the hook's
-      // no-clobber guard read the pipeline's own `reasoning_effort` as
-      // the user's override and delete the `extra_body` reasoning
-      // instead of letting it win. This harness's identity provider performs
-      // no merge, so what is pinned here is the flatten step itself being
-      // skipped: the nested tier survives for the real hook's merge to
-      // replace wholesale.
-      const apiCall = await executeWithCapability(
-        {
-          thinking: true,
-          efforts: ['high', 'max'],
-          defaultEffort: 'high',
-          disableField: 'thinking',
-        },
-        {
-          reasoning: { effort: 'high' },
-          extra_body: { reasoning: { effort: 'xhigh' } },
-        },
-      );
-      expect(apiCall['reasoning_effort']).toBeUndefined();
-      expect(apiCall['reasoning']).toEqual({ effort: 'high' });
     });
 
     it('keeps the nested reasoning object on an OpenRouter route', async () => {
