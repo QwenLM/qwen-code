@@ -1352,6 +1352,15 @@ describe('HookRunner', () => {
         expect.anything(),
         expect.anything(),
       );
+      // The surviving hook pid is still reaped even though the supervisor has
+      // already exited: gating the reap on `survivingHookPid && child.exitCode
+      // === null` would skip this, leaving the hook's cmd.exe tree running.
+      expect(mockExecFile).toHaveBeenCalledWith(
+        expect.stringMatching(/\\System32\\taskkill\.exe$/i),
+        ['/f', '/t', '/pid', '9913'],
+        expect.anything(),
+        expect.any(Function),
+      );
     });
 
     it('falls back to a direct SIGKILL when taskkill of a surviving Windows hook fails', async () => {

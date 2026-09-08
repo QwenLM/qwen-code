@@ -254,10 +254,17 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    this.sdkConnection = new ClientSideConnection(
+    // Capture the connection in a local so the inbound callbacks below can
+    // detect that THIS connection has been retired. disconnect() nulls both
+    // this.child and this.sdkConnection, then a re-connect() installs a
+    // replacement — but the superseded connection's stdout is still live and
+    // dispatching through the grace window. Comparing against the captured
+    // connection (not this.child, which is nulled before the grace timer and
+    // re-runs on the still-current child) stays correct across that window.
+    const wiredConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
-          if (this.child !== ownChild) {
+          if (this.sdkConnection !== wiredConnection) {
             // A fire-and-forget notifier on a superseded connection must not
             // re-enter callbacks that read `this.*` at call time.
             return Promise.resolve();
@@ -269,7 +276,7 @@ export class AcpConnection {
         requestPermission: async (
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
-          if (this.child !== ownChild) {
+          if (this.sdkConnection !== wiredConnection) {
             throw RequestError.internalError({
               details: 'connection superseded',
             });
@@ -360,7 +367,7 @@ export class AcpConnection {
         readTextFile: async (
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> => {
-          if (this.child !== ownChild) {
+          if (this.sdkConnection !== wiredConnection) {
             throw RequestError.internalError({
               details: 'connection superseded',
             });
@@ -381,7 +388,7 @@ export class AcpConnection {
         writeTextFile: async (
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> => {
-          if (this.child !== ownChild) {
+          if (this.sdkConnection !== wiredConnection) {
             throw RequestError.internalError({
               details: 'connection superseded',
             });
@@ -398,7 +405,7 @@ export class AcpConnection {
           method: string,
           params: Record<string, unknown>,
         ): Promise<void> => {
-          if (this.child !== ownChild) {
+          if (this.sdkConnection !== wiredConnection) {
             // A fire-and-forget notifier on a superseded connection must not
             // re-enter `this.*` callbacks; drop it instead of erroring.
             return;
@@ -408,6 +415,7 @@ export class AcpConnection {
       }),
       stream,
     );
+    this.sdkConnection = wiredConnection;
 
     // Race the SDK initialize against process exit so we don't hang forever
     // if the CLI crashes before responding.
@@ -550,6 +558,12 @@ export class AcpConnection {
       sessionId: this.sessionId,
       prompt: promptBlocks,
     });
+    // A stale prompt can resolve after disconnect() (or a re-connect) retired
+    // this connection. Firing onEndTurn then would clear the replacement
+    // session's streaming state, so bail out before touching onEndTurn.
+    if (this.sdkConnection !== conn) {
+      return response;
+    }
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
       this.onEndTurn(response.stopReason);

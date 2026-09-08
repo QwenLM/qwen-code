@@ -314,6 +314,11 @@ describe('AcpConnection child exit cleanup', () => {
   });
 
   it('does not end stdin that is already closed', () => {
+    // Even when stdin cannot be ended (already closed), the escalation timer
+    // must still be armed: an early return here would leave the CLI's process
+    // group running forever. Assert the force-kill still fires past the grace.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
     const end = vi.fn();
     const conn = createConnection({
       child: createMockChild({
@@ -324,9 +329,17 @@ describe('AcpConnection child exit cleanup', () => {
     (conn as unknown as AcpConnection).disconnect();
 
     expect(end).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
+    expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGKILL');
   });
 
   it('handles a synchronous stdin close failure', () => {
+    // A synchronous stdin.end() failure (e.g. EPIPE) must not short-circuit
+    // disconnect(): the escalation timer still has to be armed, or a failing
+    // stdin close leaves the CLI's process group running forever.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
     const closeError = new Error('EPIPE');
     const once = vi.fn();
     const logError = vi.spyOn(logger, 'error').mockImplementation(() => {});
@@ -349,6 +362,9 @@ describe('AcpConnection child exit cleanup', () => {
       '[ACP] Failed to close CLI stdin during disconnect:',
       closeError,
     );
+
+    vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
+    expect(killSpy).toHaveBeenCalledWith(-4242, 'SIGKILL');
   });
 
   it('disconnect force-kills the CLI process group only after it fails to exit on its own', () => {
@@ -466,13 +482,55 @@ describe('AcpConnection child exit cleanup', () => {
     await Promise.resolve();
   });
 
+  it('a live child exiting clears the connection and fires onDisconnected', async () => {
+    // The exit-handler teardown is keyed on the connection still being
+    // current. For the CURRENT direction (no supersede), a live child exit
+    // must clear child/sdkConnection/sessionId and fire onDisconnected, or
+    // the teardown silently never runs. A mutant like
+    // `if (this.child === ownChild && !ownChild)` (always false) reds this.
+    let exitHandler:
+      | ((code: number | null, signal: string | null) => void)
+      | undefined;
+    const child = createMockChild({
+      on: vi.fn((event: string, listener: unknown) => {
+        if (event === 'exit') {
+          exitHandler = listener as (
+            code: number | null,
+            signal: string | null,
+          ) => void;
+        }
+      }),
+    });
+    const conn = createConnection({ child });
+    const acpConn = conn as unknown as AcpConnection;
+    const onDisconnected = vi.fn();
+    acpConn.onDisconnected = onDisconnected;
+    conn.sdkConnection = { initialize: vi.fn() };
+    conn.sessionId = 'test-session';
+
+    // Only the listener wiring matters here; the rest of the setup (its 1s
+    // settle, the web-stream conversion) has nothing to assert on these mocks.
+    void (conn as unknown as { setupChildProcessHandlers: () => Promise<void> })
+      .setupChildProcessHandlers()
+      .catch(() => {});
+
+    exitHandler?.(0, null);
+
+    expect(conn.child).toBeNull();
+    expect(conn.sdkConnection).toBeNull();
+    expect(conn.sessionId).toBeNull();
+    expect(onDisconnected).toHaveBeenCalledWith(0, null);
+    await Promise.resolve();
+  });
+
   it('a superseded connection stops dispatching inbound callbacks', async () => {
     // The five inbound callbacks on the SDK Client object read `this.*` at
     // call time. `disconnect()` ends stdin and nulls sdkConnection but does
     // not close the superseded child's stdout, so its ClientSideConnection
-    // stays live. Each callback must gate on `this.child !== ownChild`, or the
-    // retired connection keeps dispatching into callbacks bound to the live
-    // replacement. Removing any guard makes one of these spies fire.
+    // stays live. Each callback must gate on the connection it was built for
+    // (`this.sdkConnection !== wiredConnection`), or the retired connection
+    // keeps dispatching into callbacks bound to the live replacement.
+    // Removing any guard makes one of these spies fire.
     vi.useFakeTimers();
     try {
       const stdout = new PassThrough();
@@ -511,8 +569,10 @@ describe('AcpConnection child exit cleanup', () => {
         }
       ).sessionUpdate;
 
-      // Supersede the child after the connection has been built.
-      conn.child = createMockChild();
+      // Supersede the connection the way a re-connect() does: disconnect()
+      // nulls both child and sdkConnection, while the superseded connection's
+      // stdout (still open) keeps its ClientSideConnection dispatching.
+      (conn as unknown as AcpConnection).disconnect();
 
       await expect(
         writeTextFile({ path: '/tmp/x', content: 'x', sessionId: 's' }),
