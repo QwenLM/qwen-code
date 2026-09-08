@@ -1,4 +1,5 @@
 import './styles/globals.css';
+import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import {
   forwardRef,
   memo,
@@ -9,7 +10,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
@@ -88,7 +88,11 @@ import {
   isRetryableTurnErrorKind,
   transcriptBlocksToDaemonMessages,
 } from './adapters/transcriptToMessages';
-import { MessageList, type MessageListHandle } from './components/MessageList';
+import type {
+  MessageListProps,
+  MessageListHandle,
+} from './components/MessageList';
+import { TranscriptViewport } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -110,7 +114,7 @@ import {
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   useSessionCatalogController,
-  useDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
@@ -167,7 +171,7 @@ import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
-import { GaugeIcon } from 'lucide-react';
+import { GaugeIcon, LayersIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
@@ -238,6 +242,7 @@ import {
 } from './shadowDom';
 import {
   WebShellSidebar,
+  DEFAULT_SESSION_ACTION_ITEMS,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -883,7 +888,7 @@ function buildDisplayMessages(
 }
 
 type LiveMessageListProps = Omit<
-  ComponentPropsWithoutRef<typeof MessageList>,
+  MessageListProps,
   'messages' | 'transcriptBlockCount'
 > & {
   baselineBlocks: readonly DaemonTranscriptBlock[];
@@ -944,7 +949,7 @@ const LiveMessageList = memo(
     }, [live.blocks, onTranscriptChange]);
 
     return (
-      <MessageList
+      <TranscriptViewport
         {...props}
         ref={ref}
         messages={displayMessages}
@@ -1184,12 +1189,17 @@ export interface WebShellProps {
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /**
    * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: `false` force-
    * disables upload even when the daemon advertises the capability, while
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /** Preferred file-drop destination. Omitted: ask only when both are available.
+   * If the preference is unavailable, use the sole available destination.
+   */
+  fileDropAction?: 'upload' | 'attach';
   /**
    * Directory that drag-and-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
@@ -1662,6 +1672,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'context_usage' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
     >;
@@ -1819,10 +1833,11 @@ function parsePersistedArtifactPanelTab(
         workspaceCwd: tab['workspaceCwd'],
       } as PersistedArtifactPanelTab;
     case 'token_usage':
+    case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
       return {
         ...common,
-        kind: 'token_usage',
+        kind: tab['kind'],
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
@@ -1957,6 +1972,7 @@ function serializeArtifactPanelTabs(
           },
         ];
       case 'token_usage':
+      case 'context_usage':
         return tab.sessionId
           ? [
               {
@@ -2882,6 +2898,7 @@ export function App({
   fileUploadEnabled,
   fileUploadDirectory,
   artifact,
+  fileDropAction,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2974,6 +2991,8 @@ export function App({
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
+  const contextUsageHeaderItemVisible =
+    chatHeaderItems.includes('contextUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
@@ -3162,6 +3181,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     }),
     [
       artifact,
@@ -3191,6 +3211,7 @@ export function App({
       loadingPhrases,
       fileUploadEnabled,
       fileUploadDirectory,
+      fileDropAction,
     ],
   );
   const mainChatCustomization = useMemo(
@@ -3253,6 +3274,7 @@ export function App({
       .map((entry) => entry.cwd);
   }, [sidebarOptions.enabled, workspaces]);
   useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
       sidebarlessLiveStateWorkspaceCwds.length > 0 &&
         connection.capabilities?.features?.includes(
@@ -3276,7 +3298,10 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const {
+    hasActivePrompt: sessionHasActivePrompt,
+    activeWorkState: sessionActiveWorkState,
+  } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
@@ -3490,6 +3515,17 @@ export function App({
   const standaloneWorkingDirectory =
     effectiveStandaloneSession?.workingDirectory;
   const standaloneDirectoryErrorCode = effectiveStandaloneSession?.errorCode;
+  const standaloneWriterBlocked = Boolean(
+    connection.sessionId &&
+      connection.error &&
+      connection.sessionContext?.kind === 'standalone' &&
+      isSessionWriterBlockedCode(connection.standaloneSession?.errorCode),
+  );
+  const standaloneRetryRef = useRef<{ sessionId: string } | undefined>(
+    undefined,
+  );
+  const [standaloneRetrySessionId, setStandaloneRetrySessionId] =
+    useState<string>();
   const [standaloneRecoveryResolution, setStandaloneRecoveryResolution] =
     useState<StandaloneRecoveryResolution>('idle');
   const standaloneRecoveryRequestRef = useRef(0);
@@ -4498,6 +4534,16 @@ export function App({
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
   ] = useState(initialArtifactPanelOpen);
+  const resetEmptyArtifactPanel = useCallback(() => {
+    setArtifactPanelOpen(false);
+    setArtifactPanelFullscreen(false);
+    setSuppressArtifactDockOpenAnimation(false);
+    setActiveArtifactPanelTabId(null);
+    setReviewChanges([]);
+    setSelectedReviewPath(null);
+    setArtifactPanelExtraArtifacts([]);
+    setPaneArtifactSnapshots(new Map());
+  }, []);
   const [waitForSubagentPanelAnimation, setWaitForSubagentPanelAnimation] =
     useState(false);
   // In-tree portal target for the docked panel (display:contents keeps the
@@ -5109,6 +5155,35 @@ export function App({
         id: `token-usage:${sourceSessionId}`,
         kind: 'token_usage',
         title: t('tokenUsage.title'),
+        sessionId: sourceSessionId,
+        ...(closeWithPane ? { closeWithPane: true } : {}),
+        ...(sourceSessionActions
+          ? { sessionActions: sourceSessionActions }
+          : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
+  const openContextUsagePanel = useCallback(
+    (
+      sourceSessionId: string,
+      sourceSessionActions?: DaemonSessionActions,
+      closeWithPane = false,
+    ) => {
+      const tab: ArtifactPanelTab = {
+        id: `context-usage:${sourceSessionId}`,
+        kind: 'context_usage',
+        title: t('contextUsage.title'),
         sessionId: sourceSessionId,
         ...(closeWithPane ? { closeWithPane: true } : {}),
         ...(sourceSessionActions
@@ -5941,6 +6016,7 @@ export function App({
                   return webTerminalAvailable
                     ? { ...tab, initialized: false }
                     : undefined;
+                case 'context_usage':
                 case 'token_usage': {
                   if (!tab.sessionId) return undefined;
                   const sessionId = tab.sessionId;
@@ -5949,11 +6025,20 @@ export function App({
                     sessionActions:
                       sessionId === connection.sessionId
                         ? sessionActions
-                        : {
-                            ...sessionActions,
-                            getStats: () =>
-                              workspace.client.sessionStats(sessionId),
-                          },
+                        : tab.kind === 'token_usage'
+                          ? {
+                              ...sessionActions,
+                              getStats: () =>
+                                workspace.client.sessionStats(sessionId),
+                            }
+                          : {
+                              ...sessionActions,
+                              getContextUsage: (opts) =>
+                                workspace.client.sessionContextUsage(
+                                  sessionId,
+                                  opts,
+                                ),
+                            },
                   };
                 }
                 case 'workflow':
@@ -5982,10 +6067,26 @@ export function App({
       const newlyOpenedIds = new Set(
         tabsOpenedDuringRestore.map((tab) => tab.id),
       );
-      const mergedTabs = [
+      const candidateTabs = [
         ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
         ...tabsOpenedDuringRestore,
       ];
+      const mergedTabs = candidateTabs.filter(
+        (tab) =>
+          // Once the split decision is final, drop stale pane-bound tabs before
+          // they can be selected active and mount a foreign collection; while
+          // the decision is pending, commit and let the settled sweep reclaim.
+          !splitViewSettledRef.current ||
+          !(
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane &&
+            (mainViewRef.current !== 'split' ||
+              tab.sessionId === undefined ||
+              !splitSessionIdsRef.current.includes(tab.sessionId))
+          ),
+      );
+      const reclaimEmptiedPanel =
+        mergedTabs.length === 0 && candidateTabs.length > 0;
       const activeTabId = mergedTabs.some(
         (tab) => tab.id === activeArtifactPanelTabIdRef.current,
       )
@@ -5998,10 +6099,16 @@ export function App({
           ? { ...tab, initialized: true }
           : tab,
       );
-      setSuppressArtifactDockOpenAnimation(restoredOpen);
-      setArtifactPanelOpen(artifactPanelOpenRef.current);
       setArtifactPanelTabs(activatedTabs);
-      setActiveArtifactPanelTabId(activeTabId);
+      if (reclaimEmptiedPanel) {
+        // The reclaim removed every restored tab; apply the canonical empty
+        // panel reset so no stale panel state is persisted as open.
+        resetEmptyArtifactPanel();
+      } else {
+        setSuppressArtifactDockOpenAnimation(restoredOpen);
+        setArtifactPanelOpen(artifactPanelOpenRef.current);
+        setActiveArtifactPanelTabId(activeTabId);
+      }
       if (previousSessionId !== nextSessionId) {
         setReviewChanges(restoreInputs.latestReviewChanges);
         setArtifactPanelWidth(
@@ -6034,6 +6141,7 @@ export function App({
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
     logicalSessionKey,
+    resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
     webTerminalAvailable,
@@ -6378,14 +6486,7 @@ export function App({
         const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
         if (nextTabs.length === tabs.length) return tabs;
         if (nextTabs.length === 0) {
-          setArtifactPanelOpen(false);
-          setArtifactPanelFullscreen(false);
-          setSuppressArtifactDockOpenAnimation(false);
-          setActiveArtifactPanelTabId(null);
-          setReviewChanges([]);
-          setSelectedReviewPath(null);
-          setArtifactPanelExtraArtifacts([]);
-          setPaneArtifactSnapshots(new Map());
+          resetEmptyArtifactPanel();
           return nextTabs;
         }
         if (
@@ -6413,13 +6514,17 @@ export function App({
         return nextTabs;
       });
     },
-    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+    [
+      hydratePendingArtifactPanelTab,
+      hydrateRestoredAttachmentTab,
+      resetEmptyArtifactPanel,
+    ],
   );
   const closeArtifactPanelTab = useCallback(
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
     [closeArtifactPanelTabs],
   );
-  const closeTokenUsageTabs = useCallback(
+  const closeUsageTabs = useCallback(
     (sessionIds?: readonly string[], paneOnly = false) => {
       const sessions = sessionIds ? new Set(sessionIds) : undefined;
       closeArtifactPanelTabs(
@@ -6427,7 +6532,7 @@ export function App({
           artifactPanelTabsRef.current
             .filter(
               (tab) =>
-                tab.kind === 'token_usage' &&
+                (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
                 (!paneOnly || tab.closeWithPane) &&
                 (!sessions ||
                   (tab.sessionId !== undefined && sessions.has(tab.sessionId))),
@@ -7956,23 +8061,82 @@ export function App({
   }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
+  const [outerSplitPanePending, setOuterSplitPanePending] = useState(false);
+  const handleSplitPendingPanesChange = useCallback(
+    (ids: string[]) =>
+      setOuterSplitPanePending(ids.includes(connection.sessionId ?? '')),
+    [connection.sessionId],
+  );
+  // False until the split bootstrap has decided whether a split view is
+  // coming (URL deep link, per-tab sessionStorage, or controlled prop). The
+  // pane-tab reclaim below must wait for it: at restore-commit time
+  // mainView/splitSessionIds are still their useState initials.
+  const [splitViewSettled, setSplitViewSettled] = useState(false);
+  const splitViewSettledRef = useRef(splitViewSettled);
+  splitViewSettledRef.current = splitViewSettled;
   // Latest pane list, readable from the shrink-close effect without making it a
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  // Generation recorded when the latest classification started; differs from
+  // the live generation only while a superseded classification is in flight.
+  const splitClassificationStartGenerationRef = useRef(0);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
     const nextIds = new Set(splitSessionIds);
-    closeTokenUsageTabs(
+    closeUsageTabs(
       previousSplitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
       true,
     );
     previousSplitSessionIdsRef.current = splitSessionIds;
-  }, [closeTokenUsageTabs, splitSessionIds]);
+  }, [closeUsageTabs, splitSessionIds]);
+  // Signature of the pane-bound usage tabs, so the sweep below re-runs when
+  // restoration lands them even if no other dependency moves.
+  const paneBoundUsageTabsSignature = useMemo(
+    () =>
+      artifactPanelTabs
+        .filter(
+          (tab) =>
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane,
+        )
+        .map((tab) => tab.id)
+        .join('\0'),
+    [artifactPanelTabs],
+  );
+  // Pane-bound usage tabs restored from storage are reclaimed only once the
+  // split bootstrap has settled: deciding at restore-commit time reads
+  // mainView/splitSessionIds before the split lands, dropping tabs whose
+  // panes arrive a moment later — and the drop is written back to storage.
   useEffect(() => {
-    if (mainView !== 'split') closeTokenUsageTabs(undefined, true);
-  }, [closeTokenUsageTabs, mainView]);
+    if (!splitViewSettled || artifactPanelRestoring) return;
+    if (mainView === 'split') {
+      const live = new Set(splitSessionIds);
+      const orphans = Array.from(
+        new Set(
+          artifactPanelTabsRef.current.flatMap((tab) =>
+            (tab.kind === 'token_usage' || tab.kind === 'context_usage') &&
+            tab.closeWithPane &&
+            tab.sessionId !== undefined &&
+            !live.has(tab.sessionId)
+              ? [tab.sessionId]
+              : [],
+          ),
+        ),
+      );
+      if (orphans.length > 0) closeUsageTabs(orphans, true);
+    } else {
+      closeUsageTabs(undefined, true);
+    }
+  }, [
+    artifactPanelRestoring,
+    closeUsageTabs,
+    mainView,
+    paneBoundUsageTabsSignature,
+    splitSessionIds,
+    splitViewSettled,
+  ]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
@@ -8145,7 +8309,12 @@ export function App({
   // onPanesChange — so it must be preserved across entries, not blindly reset.
   const openSplitView = useCallback(
     (sessionIds?: readonly string[]) => {
-      if (!projectFeaturesAvailable) return;
+      if (!projectFeaturesAvailable) {
+        // No classification can start past this guard, so the split decision
+        // is final here: settle so pane-bound reclaim is not stranded.
+        setSplitViewSettled(true);
+        return;
+      }
       setActivePanel(null);
       // See openScheduledTasks: leaving the cockpit must strip its deep link.
       showChat();
@@ -8154,6 +8323,10 @@ export function App({
       ).slice(0, MAX_SPLIT_PANES);
       const generation = splitClassificationGenerationRef.current + 1;
       splitClassificationGenerationRef.current = generation;
+      splitClassificationStartGenerationRef.current = generation;
+      // A new decision is pending: un-settle so reclaim waits for it. The
+      // empty-request branch below settles without classifying.
+      if (requested.length > 0) setSplitViewSettled(false);
       if (requested.length === 0) {
         const currentWorkspaceSessionId =
           connection.sessionId !== undefined &&
@@ -8170,13 +8343,23 @@ export function App({
               : [],
         );
         setMainView('split');
+        setSplitViewSettled(true);
         return;
       }
       void sanitizeSplitSessionIds(requested).then((sanitized) => {
-        if (
-          splitClassificationGenerationRef.current !== generation ||
-          sanitized.length === 0
-        ) {
+        if (splitClassificationGenerationRef.current !== generation) {
+          // Superseded: settle only when no newer classification started,
+          // otherwise the newer one owns the decision.
+          if (
+            splitClassificationStartGenerationRef.current !==
+            splitClassificationGenerationRef.current
+          ) {
+            setSplitViewSettled(true);
+          }
+          return;
+        }
+        setSplitViewSettled(true);
+        if (sanitized.length === 0) {
           return;
         }
         setSplitSessionIds(sanitized);
@@ -8230,23 +8413,44 @@ export function App({
       : [];
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
+    splitClassificationStartGenerationRef.current = generation;
+    // A new decision is pending: un-settle so reclaim waits for it. The
+    // empty-request branch below settles without classifying.
+    if (requested.length > 0) setSplitViewSettled(false);
     if (requested.length > 0 && cockpitViewRequested()) {
       updateCockpitLocation(false, true);
     }
     if (requested.length === 0) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
+      setSplitViewSettled(true);
       return;
     }
-    if (!workspaceCapabilitiesReady) return;
+    if (!workspaceCapabilitiesReady) {
+      // A terminal capabilities error means no classification can start, so
+      // the split decision is final here; a merely pending load must not
+      // settle, or the latch would license the premature drop it prevents.
+      if (workspace.status === 'error') setSplitViewSettled(true);
+      return;
+    }
     if (!projectFeaturesAvailable) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
       onSplitSessionIdsChangeRef.current?.([]);
+      setSplitViewSettled(true);
       return;
     }
     void sanitizeSplitSessionIds(requested).then((sanitized) => {
-      if (splitClassificationGenerationRef.current !== generation) return;
+      if (splitClassificationGenerationRef.current !== generation) {
+        if (
+          splitClassificationStartGenerationRef.current !==
+          splitClassificationGenerationRef.current
+        ) {
+          setSplitViewSettled(true);
+        }
+        return;
+      }
+      setSplitViewSettled(true);
       setSplitSessionIds((previous) =>
         areSessionIdsEqual(previous, sanitized) ? previous : sanitized,
       );
@@ -8266,12 +8470,13 @@ export function App({
     effectiveSessionContext,
     projectFeaturesAvailable,
     sanitizeSplitSessionIds,
+    workspace.status,
     workspaceCapabilitiesReady,
   ]);
   const handleSplitPanesChange = useCallback(
     (sessionIds: string[]) => {
       const nextIds = new Set(sessionIds);
-      closeTokenUsageTabs(
+      closeUsageTabs(
         splitSessionIdsRef.current.filter((id) => !nextIds.has(id)),
         true,
       );
@@ -8280,7 +8485,7 @@ export function App({
       }
       onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
-    [closeTokenUsageTabs, externalSplitControlled],
+    [closeUsageTabs, externalSplitControlled],
   );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
@@ -8304,13 +8509,28 @@ export function App({
     setSettingsInitialCategory('Daemon');
     openPanel('settings');
   }, [openPanel]);
-  // Built-in pane actions: Local Control QR entry is always shown; the token
-  // usage action follows the same tokenUsage opt-in as the chat header.
+  // Built-in pane actions: Local Control QR entry is always shown; usage
+  // actions follow the same opt-ins as the chat header.
   // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
   const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
     ({ sessionId, sessionActions }) => (
       <>
         <LocalControlQrButton onOpenSettings={handleOpenLocalControlSettings} />
+        {contextUsageHeaderItemVisible && (
+          <button
+            type="button"
+            className={styles.tokenUsageHeaderButton}
+            aria-label={t('contextUsage.title')}
+            title={t('contextUsage.title')}
+            disabled={!sessionActions}
+            onClick={() =>
+              sessionActions &&
+              openContextUsagePanel(sessionId, sessionActions, true)
+            }
+          >
+            <LayersIcon size={16} aria-hidden="true" />
+          </button>
+        )}
         {tokenUsageHeaderItemVisible && (
           <button
             type="button"
@@ -8331,8 +8551,10 @@ export function App({
     [
       handleOpenLocalControlSettings,
       openTokenUsagePanel,
+      openContextUsagePanel,
       t,
       tokenUsageHeaderItemVisible,
+      contextUsageHeaderItemVisible,
     ],
   );
   const resolvedPaneHeaderActions =
@@ -8360,7 +8582,11 @@ export function App({
     // restores nothing.
     if (externalSplitControlled) return;
     const saved = loadSplitSessions();
-    if (saved.length > 0) openSplitView(saved);
+    if (saved.length > 0) {
+      openSplitView(saved);
+      return;
+    }
+    setSplitViewSettled(true);
   }, [externalSplitControlled, openSplitView, workspace.capabilities]);
   // Mirror the live split session set to per-tab storage while the split is the
   // active view, so a refresh restores exactly these panes. Not written when the
@@ -9912,7 +10138,7 @@ export function App({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     connected,
-    writeBlocked: sessionWriteBlocked,
+    writeBlocked: sessionWriteBlocked || standaloneWriterBlocked,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -11191,11 +11417,15 @@ export function App({
       lastReportedConnectionErrorRef.current = undefined;
       return;
     }
+    if (standaloneWriterBlocked) {
+      lastReportedConnectionErrorRef.current = connection.error;
+      return;
+    }
     if (lastReportedConnectionErrorRef.current === connection.error) return;
     if (!onError) return;
     lastReportedConnectionErrorRef.current = connection.error;
     onError(new Error(connection.error));
-  }, [connection.error, onError]);
+  }, [connection.error, onError, standaloneWriterBlocked]);
 
   const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
@@ -12442,6 +12672,22 @@ export function App({
       setPendingSessionContext,
     ],
   );
+
+  const handleRetryStandaloneSession = useCallback(() => {
+    const sessionId = connectionRef.current.sessionId;
+    if (!sessionId || standaloneRetryRef.current?.sessionId === sessionId)
+      return;
+    const request = { sessionId };
+    standaloneRetryRef.current = request;
+    setStandaloneRetrySessionId(sessionId);
+    void loadSidebarSession(sessionId, undefined, { kind: 'standalone' })
+      .catch(() => undefined)
+      .finally(() => {
+        if (standaloneRetryRef.current !== request) return;
+        standaloneRetryRef.current = undefined;
+        setStandaloneRetrySessionId(undefined);
+      });
+  }, [loadSidebarSession]);
 
   const handleCheckStandaloneRecovery = useCallback(async () => {
     const recovery = connectionRef.current.standaloneSession?.creationRecovery;
@@ -15116,6 +15362,7 @@ export function App({
 
   const standaloneInteractionBlocked = Boolean(
     standaloneCreationRecovery ||
+      standaloneWriterBlocked ||
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
@@ -16250,7 +16497,7 @@ export function App({
               <DeleteSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onDeleted={(sessionIds) => {
-                  closeTokenUsageTabs(sessionIds);
+                  closeUsageTabs(sessionIds);
                   store.dispatch([
                     {
                       type: 'status',
@@ -16486,7 +16733,7 @@ export function App({
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
-                  onSessionsDeleted={closeTokenUsageTabs}
+                  onSessionsDeleted={closeUsageTabs}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
@@ -16648,6 +16895,15 @@ export function App({
                         onEnvironmentPanelOpenChange:
                           handleEnvironmentPanelOpenChange,
                         onRightPanelOpenChange: handleRightPanelOpenChange,
+                        ...(contextUsageHeaderItemVisible && connection.sessionId
+                          ? {
+                              onOpenContextUsage: () =>
+                                openContextUsagePanel(
+                                  connection.sessionId!,
+                                  sessionActions,
+                                ),
+                            }
+                          : {}),
                         ...(tokenUsageHeaderItemVisible && connection.sessionId
                           ? {
                               onOpenTokenUsage: () =>
@@ -16686,6 +16942,15 @@ export function App({
                       }
                       onToggleRightPanel={() =>
                         handleRightPanelOpenChange(!artifactPanelOpen)
+                      }
+                      onOpenContextUsage={
+                        contextUsageHeaderItemVisible && connection.sessionId
+                          ? () =>
+                              openContextUsagePanel(
+                                connection.sessionId!,
+                                sessionActions,
+                              )
+                          : undefined
                       }
                       onOpenTokenUsage={
                         tokenUsageHeaderItemVisible && connection.sessionId
@@ -17376,9 +17641,10 @@ export function App({
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
                       split (it would own ghost keyboard shortcuts). If that
-                      session isn't one of the panes, the approval would be
-                      invisible — surface a notice with a way back to it. */}
-                  {approvalOverlayActive && (
+                      session's pane hasn't surfaced its approval (including
+                      failed or still-attaching panes), show a way back to it. */}
+                  {approvalOverlayActive &&
+                    !outerSplitPanePending && (
                     <div
                       className={styles.splitApprovalNotice}
                       role="status"
@@ -17397,11 +17663,16 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
                         sessionIds={splitSessionIds}
+                        showSessionDetails={
+                          (sidebarOptions.sessionActions?.items ??
+                            DEFAULT_SESSION_ACTION_ITEMS).includes('details')
+                        }
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Keep this
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
@@ -17734,8 +18005,13 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            hasLiveActivity={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
                             onOpen={
-                              showFloatingTodos
+                              sessionWorkflowEnabled && showFloatingTodos
                                 ? floatingTodosUseSessionWorkflow
                                   ? openWorkflowInspector
                                   : openTasksPanel
@@ -17798,6 +18074,26 @@ export function App({
                             : styles.composer
                         }
                       >
+                        {standaloneWriterBlocked && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="alert"
+                            data-testid="standalone-writer-blocked"
+                          >
+                            <span className={styles.composerActionTipText}>
+                              {connection.sessionId?.slice(0, 8)}:{' '}
+                              {t('session.writerBlocked')}
+                            </span>
+                            <button
+                              type="button"
+                              className={styles.composerActionTipButton}
+                              disabled={standaloneRetrySessionId === connection.sessionId}
+                              onClick={handleRetryStandaloneSession}
+                            >
+                              {t('common.retry')}
+                            </button>
+                          </div>
+                        )}
                         {standaloneCreationRecovery && (
                           <div
                             className={styles.composerActionTip}

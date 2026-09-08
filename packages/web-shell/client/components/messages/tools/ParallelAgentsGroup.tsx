@@ -524,7 +524,10 @@ export function ParallelAgentsGroup({
                     </>
                   );
                   return (
-                    <div key={agent.callId}>
+                    <div
+                      key={agent.callId}
+                      data-transcript-tool-call-id={agent.callId}
+                    >
                       {approvalPending || documentMode ? (
                         <div
                           className={styles.row}

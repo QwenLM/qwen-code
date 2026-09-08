@@ -27,6 +27,7 @@ import {
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
   type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
@@ -74,6 +75,7 @@ import { buildGoalControlRequest } from '../utils/goalControlRequest';
 import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { formatDateTime } from '../utils/formatDateTime';
 import {
   hasMultipleWorkspaces,
   workspaceLabelForCwd,
@@ -93,7 +95,8 @@ import {
   useSessionCatalogController,
   useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
-import { MessageList } from './MessageList';
+import type { MessageListHandle } from './MessageList';
+import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
@@ -115,6 +118,7 @@ import {
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import { PaneHeaderActions } from './PaneHeaderActions';
+import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
@@ -165,6 +169,12 @@ interface UnknownPromptAdmission {
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
+  /** Session-list metadata for the shared title details. */
+  sessionSummary?: DaemonSessionSummary;
+  /** Last interacted pane, independent of whether its session is running. */
+  isActive?: boolean;
+  /** Must be referentially stable; reports pending state and unmount cleanup. */
+  onApprovalChange?: (sessionId: string, pending: boolean) => void;
   /**
    * The workspace this pane's session lives in. Passed explicitly by the split
    * view (which knows it per session) and shown as a composer-toolbar chip on a
@@ -236,6 +246,9 @@ export interface ChatPaneProps {
  */
 export function ChatPane({
   title,
+  sessionSummary,
+  isActive = false,
+  onApprovalChange,
   workspaceCwd,
   renderHeaderActions,
   onClose,
@@ -512,6 +525,7 @@ export function ChatPane({
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
+  const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,
     onAcceptFollowup,
@@ -556,6 +570,12 @@ export function ChatPane({
   pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId || !onApprovalChange) return;
+    onApprovalChange(sessionId, approvalActive);
+    return () => onApprovalChange(sessionId, false);
+  }, [connection.sessionId, approvalActive, onApprovalChange]);
   const paneVoiceCwd =
     connection.sessionId &&
     connection.workspaceCwd &&
@@ -750,6 +770,7 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
       // main composer — otherwise an override works on one surface only.
@@ -1189,6 +1210,7 @@ export function ChatPane({
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
+  const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
   // On a multi-workspace daemon, surface this pane's workspace as a composer-
   // toolbar chip (next to where the git-branch chip sits), so it's clear which
@@ -1238,6 +1260,8 @@ export function ChatPane({
     <section
       className={`${styles.pane} ${embedded ? styles.paneEmbedded : ''}`.trim()}
       data-testid="chat-pane"
+      data-pane-active={isActive ? '' : undefined}
+      aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
       {goalEditOpen && connection.goalState?.goal && (
@@ -1272,9 +1296,25 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          <span className={styles.title} title={headerLabel}>
-            {headerLabel}
-          </span>
+          {sessionSummary && !hidden ? (
+            <SessionDetailsTooltip
+              session={{
+                ...sessionSummary,
+                hasActivePrompt: sessionHasActivePrompt,
+              }}
+              label={headerLabel}
+              time={sessionStamp ? formatDateTime(sessionStamp) : ''}
+              completedUnread={false}
+              workspaceLabel={workspaceLabel}
+              side="bottom"
+            >
+              <span className={styles.title}>{headerLabel}</span>
+            </SessionDetailsTooltip>
+          ) : (
+            <span className={styles.title} title={headerLabel}>
+              {headerLabel}
+            </span>
+          )}
           <PaneHeaderActions
             trailing={
               onToggleMaximize || onClose ? (
@@ -1352,7 +1392,8 @@ export function ChatPane({
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
             <WorkflowDetailsProvider tasks={sessionTasks}>
-              <MessageList
+              <TranscriptViewport
+                ref={transcriptViewportRef}
                 messages={messages}
                 pendingApproval={pendingToolApproval}
                 loadingTranscript={connection.loadingTranscript}
