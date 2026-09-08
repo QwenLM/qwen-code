@@ -83,8 +83,8 @@ import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import {
+  armCapturedInputInjection,
   drainCapturedInputAsText,
-  injectCapturedInput,
 } from './early-input.js';
 
 const debugLogger = createDebugLogger('OPEN_TUI_START');
@@ -146,7 +146,7 @@ function OpenTuiEntryApp({
     setText: (text: string) => void;
   } | null>(null);
   useEffect(
-    () => injectCapturedInput(() => composerHandle.current, capturedText),
+    () => armCapturedInputInjection(() => composerHandle.current, capturedText),
     [capturedText],
   );
 

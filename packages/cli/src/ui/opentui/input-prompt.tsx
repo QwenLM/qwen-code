@@ -581,6 +581,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         setSuggestions([]);
         setAttachments([]);
         onSubmit(finalText, images.length > 0 ? images : undefined);
+        // Same dismissal as the real submit path below: a submitOnAccept
+        // command that only opens a dialog never flips streaming, so without
+        // this the consumed suggestion survives as the ghost placeholder
+        // (R6-1).
+        dismissFollowup();
+        onPromptSuggestionDismiss?.();
         return;
       }
       // Directory accepts keep the dropdown closed until the query changes
@@ -600,6 +606,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       onSubmit,
       attachments,
       currentCompletionTarget,
+      dismissFollowup,
+      onPromptSuggestionDismiss,
     ],
   );
 

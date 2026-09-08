@@ -127,6 +127,25 @@ describe('OpenTuiTranscriptView', () => {
     expect(settled.container.textContent).toContain('... last');
   });
 
+  it('folds newlines in a live description before the cap measures it (R6-2)', () => {
+    // A live shell command can carry embedded newlines: each renders a
+    // physical row while costing zero columns in capToolCardDescription's
+    // math, so a many-line command slipped under the 5-row budget and the
+    // card flooded the column. The cap must measure the same folded text
+    // the render prints.
+    const multiLine = Array.from(
+      { length: 10 },
+      (_, i) => `cmd-${i}-aaaaaaaaaaaaaaaa`,
+    ).join('\n');
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={[toolItem({ description: multiLine, confirm: 'approved' })]}
+      />,
+    );
+    expect(container.textContent).not.toContain('\n');
+    expect(container.textContent).toContain('cmd-0-aaaaaaaaaaaaaaaa');
+  });
+
   it('shows the description once approval resolves or the call is done', () => {
     const { container } = render(
       <OpenTuiTranscriptView

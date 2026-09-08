@@ -36,6 +36,7 @@ import {
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
+  toolCardText,
   toolStatusMeta,
   truncateResultDisplayChars,
   userMessageMeta,
@@ -253,8 +254,12 @@ function ToolCard({
   // flood the column and push the dialog off-screen.
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
+  // Measure on the same basis the render uses: a live description (e.g. a
+  // shell command) can carry newlines that each become a physical row while
+  // costing zero columns in the cap math, so fold them first like the
+  // fallback path does (R6-2).
   const cap = capToolCardDescription(
-    description,
+    toolCardText(description),
     name,
     width,
     item.confirm === 'pending' && !item.done

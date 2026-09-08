@@ -125,6 +125,7 @@ vi.mock('./exit-lifecycle.js', () => ({
 vi.mock('./early-input.js', () => ({
   drainCapturedInputAsText: () => '',
   injectCapturedInput: () => () => {},
+  armCapturedInputInjection: () => () => {},
 }));
 vi.mock('./resume-session.js', () => ({
   resumeEventsFromConfig: () => null,

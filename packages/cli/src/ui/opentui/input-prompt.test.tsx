@@ -1426,6 +1426,49 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
     expect(mocks.state.textareaProps?.['placeholder']).toBe(SUGGESTION);
   });
 
+  it('dismisses the ghost when a submitOnAccept completion submits (R6-1)', async () => {
+    // A submitOnAccept command only opens a dialog — streaming never flips,
+    // so the entry's turn-boundary clear never runs. The submit path itself
+    // must dismiss, or the consumed suggestion survives as the ghost.
+    mocks.state.slashCommands = [
+      {
+        name: 'skills',
+        description: 'Manage skills',
+        kind: 'built-in',
+        submitOnAccept: true,
+      },
+    ];
+    const dismiss = vi.fn();
+    const submitted: string[] = [];
+    function SuggestionParent() {
+      const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={(text) => {
+            submitted.push(text);
+          }}
+          userMessages={[]}
+          promptSuggestion={suggestion}
+          onPromptSuggestionDismiss={() => {
+            dismiss();
+            setSuggestion(null);
+          }}
+          onPromptSuggestionAbort={() => {}}
+        />
+      );
+    }
+    render(<SuggestionParent />);
+    // Let loadInteractiveCommands resolve into commandsRef.
+    await act(async () => {});
+    await typeText('/skil');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual(['/skills']);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(mocks.state.textareaProps?.['placeholder']).not.toBe(SUGGESTION);
+  });
+
   it('paste dismisses the ghost before inserting (R1-53)', async () => {
     // Ink dismisses on key.paste too: a paste into an empty buffer must not
     // leave the suggestion acceptable behind the inserted content.
