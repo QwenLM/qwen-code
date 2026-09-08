@@ -12,7 +12,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon } from 'lucide-react';
 import {
   useActions,
   useConnection,
@@ -91,9 +91,10 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
-import { MessageList } from './MessageList';
+import type { MessageListHandle } from './MessageList';
+import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
@@ -271,7 +272,9 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
+  // live prompt state into its own provider (#9487).
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
@@ -510,6 +513,7 @@ export function ChatPane({
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
+  const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,
     onAcceptFollowup,
@@ -748,6 +752,7 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
       // main composer — otherwise an override works on one surface only.
@@ -1294,11 +1299,10 @@ export function ChatPane({
                           : 'splitView.maximizePane',
                       )}
                     >
-                      {/* Same icon vocabulary as the dialog fullscreen toggle. */}
                       {isMaximized ? (
-                        <Minimize2Icon size={16} aria-hidden />
+                        <ShrinkIcon size={16} aria-hidden />
                       ) : (
-                        <Maximize2Icon size={16} aria-hidden />
+                        <ExpandIcon size={16} aria-hidden />
                       )}
                     </button>
                   )}
@@ -1351,7 +1355,8 @@ export function ChatPane({
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
             <WorkflowDetailsProvider tasks={sessionTasks}>
-              <MessageList
+              <TranscriptViewport
+                ref={transcriptViewportRef}
                 messages={messages}
                 pendingApproval={pendingToolApproval}
                 loadingTranscript={connection.loadingTranscript}
@@ -1409,6 +1414,11 @@ export function ChatPane({
               onConfirm={handleConfirm}
               variant="floating"
               planTodos={planTodos}
+              generateContent={
+                connection.capabilities?.features.includes('session_generation')
+                  ? actions.generateSessionContent
+                  : undefined
+              }
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval

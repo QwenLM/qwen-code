@@ -61,6 +61,7 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
+import { isTransientSessionReadError } from '../../utils/sessionErrors.js';
 import {
   getPersistedClientId,
   persistStableClientId,
@@ -74,6 +75,7 @@ import {
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
+  DaemonActivePromptState,
   DaemonConnectionState,
   DaemonNoticeOperation,
   DaemonPromptFile,
@@ -185,6 +187,29 @@ export interface CreateDaemonSessionActionsArgs {
   manualSessionClearRef: RefBox<boolean>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
+  /**
+   * Daemon-authoritative "a prompt is in flight" state and its owner,
+   * published by the host through `setDaemonActivePrompt`.
+   * `undefined` means no authority is available (a daemon without
+   * `workspace_session_live_state`, or a host that never wires it) and the
+   * silence-based heuristics stay in charge.
+   */
+  daemonActivePromptRef: RefBox<DaemonActivePromptState | undefined>;
+  /**
+   * Settle the current session's restored-prompt snapshot (the `hasActivePrompt`
+   * flag `/load` returned). A restored prompt has no terminal handling in this
+   * browser — it can only be settled by the event stream — so the
+   * `setDaemonActivePrompt` backstop settles it when the daemon reports the
+   * turn finished. Returns whether a restored prompt was settled.
+   */
+  settleRestoredActivePrompt: () => boolean;
+  /**
+   * Apply the provider's buffered transcript batch (`TRANSCRIPT_DISPATCH_BATCH_MS`)
+   * so a read of the store sees every event delivered so far. Every
+   * provider-side settle path flushes first; an action that settles a turn has
+   * to do the same or it reads a store up to one batch window stale.
+   */
+  flushTranscript: () => void;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
@@ -348,6 +373,9 @@ export function createDaemonSessionActions({
   manualSessionClearRef,
   skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
+  daemonActivePromptRef,
+  settleRestoredActivePrompt,
+  flushTranscript,
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
@@ -754,6 +782,7 @@ export function createDaemonSessionActions({
     if (currentSessionId) {
       activePromptsRef.current.delete(currentSessionId);
     }
+    daemonActivePromptRef.current = undefined;
     resetCurrentSessionActivePrompt();
     const reloadingCurrentSession =
       mode === 'load' &&
@@ -860,6 +889,83 @@ export function createDaemonSessionActions({
   }
 
   return {
+    setDaemonActivePrompt(
+      active,
+      owner = {
+        workspaceCwd: sessionRef.current?.workspaceCwd,
+        sessionId: sessionRef.current?.sessionId,
+      },
+    ) {
+      const previous = daemonActivePromptRef.current;
+      daemonActivePromptRef.current = { active, ...owner };
+      const backstopSession = sessionRef.current;
+      // A fresh `false` is a settle signal even when this provider has not seen
+      // the preceding `true`; that is how a restored prompt is released after
+      // the first post-attach live-state poll. The bridge withholds cached
+      // answers until that fresh poll. `undefined` settles only when it loses a
+      // previously known `true` authority.
+      // Gaining `true` never revives a finished turn: the live-state poll
+      // trails the event stream, so reviving would flash the indicator back on
+      // for one poll interval after every turn_complete. A turn that really is
+      // still running is revived by its next event, as it was before this
+      // signal existed.
+      const lostAuthority =
+        previous?.active === true &&
+        previous.workspaceCwd === owner.workspaceCwd &&
+        previous.sessionId === owner.sessionId;
+      if (
+        backstopSession === undefined ||
+        backstopSession.workspaceCwd !== owner.workspaceCwd ||
+        backstopSession.sessionId !== owner.sessionId ||
+        active === true ||
+        (!lostAuthority && active !== false)
+      ) {
+        return;
+      }
+      // Terminal events normally settle the turn well before this. This is the
+      // backstop for the ones that never arrive (dropped stream, daemon
+      // restart mid-turn), so a pane held alive through silent tool gaps
+      // cannot stay stuck on a turn the daemon already finished (#9487).
+      // A prompt this browser submitted settles via its own terminal handling;
+      // a lagging live-state sample must not cut it short. A *restored* prompt
+      // (the /load snapshot after a refresh) has no local terminal handling —
+      // the event stream is its only settle path, which is exactly the failure
+      // this backstop covers — so settle it here rather than deferring to it.
+      if (
+        hasLocallySubmittedPrompt(
+          activePromptsRef.current,
+          backstopSession.sessionId,
+        )
+      ) {
+        return;
+      }
+      const settledRestoredPrompt = settleRestoredActivePrompt();
+      if (!lostAuthority && !settledRestoredPrompt) return;
+      // Commit the buffered batch before reading the store. Without this the
+      // read races the 16ms window: a chunk burst still buffered at flip time
+      // lands *after* the `assistant.done` below, and the reducer mints a fresh
+      // `streaming: true` block that nothing is left to close — the final
+      // message then renders a streaming cursor forever. Flushing first folds
+      // that burst into the block this settle closes.
+      flushTranscript();
+      if (store.getSnapshot().activeAssistantBlockId) {
+        store.dispatch({ type: 'assistant.done', reason: 'daemon_idle' });
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      }
+      // Still no active block after the flush: nothing to close, and an armed
+      // passive timer (if any) stays armed harmlessly — it no-ops without an
+      // active block.
+      // A turn settled from live state rather than from a terminal event is
+      // the interesting case for an oncall report: it says the event stream
+      // never delivered one.
+      console.debug(
+        '[DaemonSessionActions] settled turn from daemon prompt state (sessionId=%s, daemonActivePrompt=%s)',
+        backstopSession.sessionId,
+        String(active),
+      );
+      setPromptStatus('idle');
+    },
+
     async sendPrompt(text, options) {
       const session = requireSessionForAction(
         addNotice,
@@ -1969,23 +2075,41 @@ export function createDaemonSessionActions({
     },
 
     async getContextUsage(opts) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load context usage failed',
-        'load_context_usage',
-      );
+      // Mirrors getStats: a missing session rethrows raw without a notice.
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(
           session.contextUsage(opts),
           'Load context usage timed out',
         );
       } catch (error) {
+        // Opt-in silence for surfaces that re-collect automatically (the
+        // context panel): notifying there would stack identical notices for
+        // as long as the session is down. User-initiated callers keep the
+        // attributed notice and the suppressed duplicate toast.
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
+        // Route through noticeForSession so the dedupe registry stays
+        // session-scoped, and only register dedupe keys while this session is
+        // still live, so a stale in-flight failure neither toasts for a
+        // session the user left nor suppresses the current session's notice.
+        const live = sessionRef.current === session;
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Load context usage failed',
           error,
           'load_context_usage',
+          opts?.silent && live
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey(
+                  'load_context_usage',
+                  error,
+                ),
+              }
+            : undefined,
         );
       }
     },
@@ -2321,7 +2445,7 @@ export function createDaemonSessionActions({
         'Shell command failed',
         'send_shell_command',
       );
-      const shellKey = `${session.sessionId}:shell`;
+      const shellKey = getShellPromptKey(session.sessionId);
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(shellKey, { controller: ctrl });
@@ -2839,6 +2963,33 @@ function waitForAcceptedPromptCompletion(
     });
     controller.signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/**
+ * Key under which a shell command tracks its prompt in the active-prompt map.
+ * Shell commands run as their own prompt alongside a conversation turn, so they
+ * cannot share the plain session key.
+ */
+export function getShellPromptKey(sessionId: string): string {
+  return `${sessionId}:shell`;
+}
+
+/**
+ * Whether this browser has a prompt of any kind in flight for `sessionId`.
+ *
+ * Every active-prompt key scheme lives here. Readers that hand-rolled the
+ * membership check would silently miss a new prompt kind, and a reader that
+ * answers "no local prompt" for one that is running lets a lagging live-state
+ * sample settle a turn this browser is still driving (#9487).
+ */
+export function hasLocallySubmittedPrompt(
+  activePrompts: ReadonlyMap<string, ActivePrompt>,
+  sessionId: string,
+): boolean {
+  return (
+    activePrompts.has(sessionId) ||
+    activePrompts.has(getShellPromptKey(sessionId))
+  );
 }
 
 export function getPromptSettledKey(
