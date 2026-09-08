@@ -3408,6 +3408,9 @@ export const MessageList = memo(
     const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const locateScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
@@ -4487,6 +4490,10 @@ export const MessageList = memo(
 
     useEffect(
       () => () => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+          locateScrollTimer.current = null;
+        }
         if (sessionTimelineFrame.current !== null) {
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
@@ -4550,7 +4557,11 @@ export const MessageList = memo(
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
         // a frame or two later after measuring the target row).
-        setTimeout(() => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+        }
+        locateScrollTimer.current = setTimeout(() => {
+          locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
