@@ -14,6 +14,9 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
+const longBranch =
+  'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports';
+
 test('persists collapsed session groups across reload @smoke', async ({
   page,
 }, testInfo) => {
@@ -111,25 +114,31 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     await expect(copyAction).toBeVisible();
   }
 
-  for (const value of [
+  for (const [name, value] of Object.entries({
     title,
-    details.getByTitle(scenario.workspaceCwd, { exact: true }),
-    details.locator('[data-web-shell-session-id]'),
-    details.getByTitle(
-      'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports',
-      { exact: true },
-    ),
-  ]) {
-    const metrics = await value.evaluate((element) => ({
-      clientHeight: element.clientHeight,
-      scrollHeight: element.scrollHeight,
-      lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
-    expect(metrics.clientHeight).toBeGreaterThan(metrics.lineHeight);
-    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
-    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
+    workspace: details.getByTitle(scenario.workspaceCwd, { exact: true }),
+    sessionId: details.locator('[data-web-shell-session-id]'),
+    branch: details.getByTitle(longBranch, { exact: true }),
+  })) {
+    await test.step(`${name} wraps without clipping`, async () => {
+      await expect(value).toHaveCount(1);
+      const metrics = await value.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }));
+      expect(metrics.clientHeight, `${name} wraps`).toBeGreaterThan(
+        metrics.lineHeight,
+      );
+      expect(metrics.scrollHeight, `${name} height`).toBeLessThanOrEqual(
+        metrics.clientHeight + 1,
+      );
+      expect(metrics.scrollWidth, `${name} width`).toBeLessThanOrEqual(
+        metrics.clientWidth + 1,
+      );
+    });
   }
   expect(
     await copyAction.evaluate((button) => {
@@ -205,7 +214,7 @@ function createOrganizedScenario(
         updatedAt: '2026-07-03T00:00:00.000Z',
         displayName: currentSessionDisplayName,
         branch: {
-          name: 'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports',
+          name: longBranch,
           baseBranch: 'main',
         },
         clientCount: 1,

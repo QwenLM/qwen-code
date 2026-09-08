@@ -116,7 +116,18 @@ export function SessionDetailsTooltip({
     cancelClose();
     if (open) return;
     window.clearTimeout(openTimerRef.current);
-    openTimerRef.current = window.setTimeout(() => setOpen(true), 300);
+    openTimerRef.current = window.setTimeout(() => {
+      const anchor = anchorRef.current;
+      // Move focus before replacing its owner so the new hover stays open.
+      if (
+        anchor?.ownerDocument.activeElement?.closest(
+          '[data-web-shell-session-details-content]',
+        )
+      ) {
+        anchor.focus({ preventScroll: true });
+      }
+      setOpen(true);
+    }, 300);
   };
   const close = () => {
     window.clearTimeout(openTimerRef.current);
@@ -177,6 +188,7 @@ export function SessionDetailsTooltip({
         updatePositionStrategy="always"
         showArrow
         role="dialog"
+        data-web-shell-session-details-content
         aria-label={label}
         onOpenAutoFocus={(event) => {
           if (!openOnClick) {

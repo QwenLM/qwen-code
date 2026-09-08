@@ -16,6 +16,8 @@ uses only its Git-specific variant.
 - Use a two-line session cell: title first, then workspace, branch, and PR.
   Move the complete ID and path into the shared details popover.
 - Show distinct permission, question, running, and idle states in the table.
+  Keep a compact active/attention cue beside the pinned title so narrow
+  layouts do not hide the row's state behind the pinned actions.
   Add an all/needs-attention/running/idle filter and keep workspace selection
   visible in the toolbar. Search titles, IDs, branches, and PR numbers.
 - Reuse the sidebar details popover on title hover. Provide an explicit
@@ -23,6 +25,9 @@ uses only its Git-specific variant.
   copying inside the popover, with events isolated from row navigation.
   Only one overview details popover is open at a time. Long values wrap in
   an internally scrolling surface; keyboard focus stays visible when it opens.
+  When hover replaces focused details, move focus to the incoming title
+  before opening its preview. Ordinary hover preserves an external input's
+  focus, and Tab continues from the row after the preview closes.
 - Make the popover status agree with the overview's derived live state,
   including older daemons that provide pending approvals via status reports.
 - Open a session when its row or title is clicked. Checkboxes exclusively
@@ -30,6 +35,10 @@ uses only its Git-specific variant.
   behavior. Show batch actions only when a selection exists.
   Dragging to select text does not navigate. Clicking a plain cell during an
   inline rename preserves the draft; Enter saves and Escape cancels.
+  Starting rename closes details. If the edited row leaves the visible page,
+  discard the hidden draft so it cannot disable navigation or return later.
+  Preserve row state across the temporary empty page while a shrinking catalog
+  clamps pagination, then reconcile against the final visible identities.
 - Keep the existing shared table and portal primitives. Popovers must stay
   within the Web Shell boundary and preserve React 18 ref forwarding.
 

@@ -305,6 +305,120 @@ test('replaces clicked details when hovering another entry @smoke', async ({
   await expect(
     page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
   ).toHaveAttribute('data-state', 'open');
+  const title = panel.getByRole('button', {
+    name: 'Approve fixture',
+    exact: true,
+  });
+  await expect(title).toBeFocused();
   await page.mouse.move(0, 0);
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(title).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(
+    panel
+      .getByRole('row')
+      .filter({
+        has: page.getByRole('button', { name: 'Approve fixture', exact: true }),
+      })
+      .getByRole('link', { name: /#4567/ }),
+  ).toBeFocused();
+});
+
+test('hover details preserve a focused search field @smoke', async ({
+  page,
+}) => {
+  const panel = page.locator('[data-web-shell-session-panel]');
+  const search = panel.getByRole('textbox', {
+    name: 'Search title, branch, PR or ID…',
+  });
+  await search.focus();
+  await panel
+    .getByRole('button', { name: 'Approve fixture', exact: true })
+    .hover();
+  await expect(
+    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+  ).toBeVisible();
+  await expect(search).toBeFocused();
+  await search.fill('Running fixture');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(search).toBeFocused();
+});
+
+test('overview details stay inside an embedded shell @smoke', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const shell = page.locator('[data-web-shell-root]');
+  await shell.evaluate((element) =>
+    Object.assign((element as HTMLElement).style, {
+      position: 'fixed',
+      inset: '140px auto auto 180px',
+      width: '800px',
+      height: '420px',
+      minHeight: '0',
+    }),
+  );
+  await page
+    .getByRole('button', { name: 'Details for Question fixture', exact: true })
+    .click();
+  const dialog = page.getByRole('dialog', {
+    name: 'Question fixture',
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+  await expect
+    .poll(async () => {
+      const bounds = await shell.boundingBox();
+      const details = await dialog.boundingBox();
+      return (
+        !!bounds &&
+        !!details &&
+        details.x >= bounds.x - 1 &&
+        details.y >= bounds.y - 1 &&
+        details.x + details.width <= bounds.x + bounds.width + 1 &&
+        details.y + details.height <= bounds.y + bounds.height + 1
+      );
+    })
+    .toBe(true);
+});
+
+test('attention cues stay visible in the pinned title at narrow widths @smoke', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 499, height: 720 });
+  const panel = page.locator('[data-web-shell-session-panel]');
+  const scroller = panel.locator('[data-slot="table-container"]');
+  for (const position of ['start', 'end'] as const) {
+    await scroller.evaluate((element, position) => {
+      element.scrollLeft = position === 'start' ? 0 : element.scrollWidth;
+    }, position);
+    if (position === 'start') {
+      await expect
+        .poll(() => scroller.evaluate((element) => element.scrollLeft))
+        .toBe(0);
+    } else {
+      await expect
+        .poll(() => scroller.evaluate((element) => element.scrollLeft))
+        .toBeGreaterThan(0);
+    }
+    for (const status of ['needsApproval', 'askUserQuestion', 'running']) {
+      const cue = panel.locator(
+        `[data-web-shell-session-status-cue="${status}"]`,
+      );
+      await expect(cue).toBeVisible();
+      await expect
+        .poll(() =>
+          cue.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(
+                rect.x + rect.width / 2,
+                rect.y + rect.height / 2,
+              ),
+            );
+          }),
+        )
+        .toBe(true);
+    }
+  }
 });

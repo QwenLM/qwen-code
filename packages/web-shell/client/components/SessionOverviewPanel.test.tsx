@@ -711,6 +711,15 @@ describe('SessionOverviewPanel', () => {
       'input[aria-label="Rename: One"]',
     )!;
     act(() => setInputValue(input, 'Renamed'));
+    for (const target of [input, rowActionButton(rows()[0]!, 'Rename')]) {
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => target.dispatchEvent(mouseDown));
+      expect(mouseDown.defaultPrevented).toBe(false);
+    }
     const cell = rows()[0]!.querySelectorAll('td')[2]!;
     const mouseDown = new MouseEvent('mousedown', {
       bubbles: true,
@@ -720,6 +729,7 @@ describe('SessionOverviewPanel', () => {
       cell.dispatchEvent(mouseDown);
       if (!mouseDown.defaultPrevented) input.blur();
     });
+    expect(mouseDown.defaultPrevented).toBe(true);
     act(() => click(cell));
     expect(onOpenSession).not.toHaveBeenCalled();
     expect(input.isConnected).toBe(true);
@@ -745,20 +755,189 @@ describe('SessionOverviewPanel', () => {
           target.dispatchEvent(new Event('pointerover', { bubbles: true }));
           vi.advanceTimersByTime(300);
         });
+        await act(async () => vi.advanceTimersByTime(0));
         const dialogs = document.querySelectorAll('[role="dialog"]');
         expect(dialogs).toHaveLength(1);
         expect(dialogs[0]?.getAttribute('aria-label')).toBe(
           sameRow ? 'Alpha' : 'Bravo',
         );
+        expect(dialogs[0]?.getAttribute('data-state')).toBe('open');
+        expect(document.activeElement).toBe(target);
         await act(async () => {
           target.dispatchEvent(new Event('pointerout', { bubbles: true }));
           vi.advanceTimersByTime(100);
         });
         expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+        expect(document.activeElement).toBe(target);
         expect(onOpenSession).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
+    },
+  );
+
+  it.each(['Escape', 'blur'])(
+    'does not reopen hover details after cancelling rename with %s',
+    async (dismissal) => {
+      connectionState.sessionId = 'a';
+      sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+      vi.useFakeTimers();
+      try {
+        render();
+        const title = titleTrigger(rows()[0]!);
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(50);
+          click(rowActionButton(rows()[0]!, 'Rename'));
+        });
+        const input = container!.querySelector<HTMLInputElement>(
+          'input[aria-label="Rename: Alpha"]',
+        )!;
+        expect(input).not.toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        await act(async () => {
+          if (dismissal === 'blur') input.blur();
+          else
+            input.dispatchEvent(
+              new KeyboardEvent('keydown', {
+                key: 'Escape',
+                bubbles: true,
+              }),
+            );
+        });
+        await act(async () => vi.advanceTimersByTime(300));
+        expect(
+          container!.querySelector('input[aria-label="Rename: Alpha"]'),
+        ).toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['details', 'rename'])(
+    'preserves %s when a catalog shrink clamps its still-visible row to the last page',
+    async (mode) => {
+      connectionState.sessionId = 's12';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: 15 }, (_, i) =>
+        session(`s${i}`, { displayName: `Session ${i}` }),
+      );
+      render();
+      act(() => click(footerButton('Next')!));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Session 12',
+      )!;
+      await act(async () =>
+        click(
+          rowActionButton(
+            row,
+            mode === 'details' ? 'Details for Session 12' : 'Rename',
+          ),
+        ),
+      );
+      if (mode === 'rename')
+        act(() =>
+          setInputValue(
+            container!.querySelector<HTMLInputElement>(
+              'input[aria-label="Rename: Session 12"]',
+            )!,
+            'Preserved draft',
+          ),
+        );
+      sessionsState.sessions = sessionsState.sessions.slice(5);
+      rerender();
+      await flushAsync();
+      expect(container!.textContent).toContain('Page 1 of 1');
+      if (mode === 'details') {
+        expect(rowTitles()).toContain('Session 12');
+        expect(
+          document.querySelector('[role="dialog"]')?.getAttribute('aria-label'),
+        ).toBe('Session 12');
+      } else {
+        expect(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Session 12"]',
+          )?.value,
+        ).toBe('Preserved draft');
+      }
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'cancels an invisible rename after a live update changes its %s',
+    async (mode) => {
+      connectionState.sessionId = 'target';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        session('question', {
+          displayName: 'Question',
+          isWaitingForUserQuestion: true,
+        }),
+        ...Array.from({ length: 9 }, (_, i) => session(`idle-${i}`)),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Target',
+      )!;
+      act(() => click(rowActionButton(row, 'Rename')));
+      act(() =>
+        setInputValue(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Target"]',
+          )!,
+          'Hidden draft',
+        ),
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      const cell = rows()[0]!.querySelectorAll('td')[2]!;
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => cell.dispatchEvent(mouseDown));
+      expect(mouseDown.defaultPrevented).toBe(false);
+      act(() => click(cell));
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('question', '/w');
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
     },
   );
 
@@ -987,6 +1166,14 @@ describe('SessionOverviewPanel', () => {
         ?.getAttribute('title'),
     ).toBe('feature/a-very-long-branch-name');
     expect(titleCell?.querySelector('a')?.textContent).toBe('#123 +2');
+    for (const selector of [
+      '[data-web-shell-session-git]',
+      '[data-web-shell-session-workspace]',
+    ]) {
+      expect(titleCell?.querySelector(selector)?.className).toContain(
+        'truncate',
+      );
+    }
     expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
@@ -1747,6 +1934,7 @@ describe('SessionOverviewPanel', () => {
       false,
     );
     expect((headers[2] as HTMLElement).style.width).toBe('144px');
+    expect(cells[2]?.firstElementChild?.className).toContain('truncate');
     expect((timeHeader as HTMLElement).style.width).toBe('96px');
     const timeSortButton = timeHeader?.querySelector('button');
     expect(timeSortButton?.className).toContain('px-0');

@@ -765,6 +765,7 @@ function SessionOverviewPanelInner({
 
   const startRename = useCallback((card: SessionCard) => {
     setActionError(null);
+    setDetailsOpen(null);
     setEditingCard(card);
     setEditingName(card.label);
   }, []);
@@ -1110,6 +1111,28 @@ function SessionOverviewPanelInner({
                   </form>
                 ) : (
                   <div className="flex min-w-0 flex-1 items-center gap-1 px-1 font-semibold text-current">
+                    {card.status !== 'idle' && (
+                      <span
+                        className={cx('inline-flex shrink-0', styles.attention)}
+                        data-web-shell-session-status-cue={card.status}
+                        aria-hidden="true"
+                        title={t(`sessionsOverview.status.${card.status}`)}
+                      >
+                        {card.status === 'running' ? (
+                          <span className={styles.loading} aria-hidden="true" />
+                        ) : card.status === 'needsApproval' ? (
+                          <ShieldQuestionIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <CircleHelpIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </span>
+                    )}
                     <SessionDetailsTooltip {...sessionDetailsProps(card)}>
                       <button
                         type="button"
@@ -1385,13 +1408,23 @@ function SessionOverviewPanelInner({
     autoResetPageIndex: false,
   });
   const visibleRows = table.getRowModel().rows;
+  const clampPending =
+    pagination.pageIndex > Math.max(0, table.getPageCount() - 1);
   useEffect(() => {
+    // A shrinking catalog can leave the page empty until the clamp commits.
+    if (clampPending) return;
+    if (
+      editingIdentity &&
+      !visibleRows.some((row) => row.id === editingIdentity)
+    ) {
+      cancelRename();
+    }
     setDetailsOpen((current) =>
       current && !visibleRows.some((row) => row.id === current.identity)
         ? null
         : current,
     );
-  }, [visibleRows]);
+  }, [visibleRows, clampPending, editingIdentity, cancelRename]);
   const selectedCards = table
     .getSortedRowModel()
     .rows.filter((row) => row.getIsSelected())

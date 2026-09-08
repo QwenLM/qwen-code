@@ -73,7 +73,13 @@ for (const theme of THEMES) {
           sessionId: `overview-${index}`,
           workspaceCwd,
           updatedAt: '2026-07-01T12:00:00.000Z',
-          branch: { name: 'feature/session-overview', baseBranch: 'main' },
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
         })),
       });
       const daemon = await installScenario(
@@ -89,6 +95,19 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-session-panel]'),
       ).toContainText('Review release approval');
       await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
     test(`session transcript`, async ({ page }, testInfo) => {
