@@ -246,7 +246,7 @@ const {
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
-  mockUseDaemonActivePromptBridge,
+  mockUseDaemonSessionActivityBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -717,7 +717,7 @@ const {
     mockReleaseWebTerminal: vi.fn(),
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
-    mockUseDaemonActivePromptBridge: vi.fn(),
+    mockUseDaemonSessionActivityBridge: vi.fn(),
   };
 });
 
@@ -1614,7 +1614,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     hasActivePrompt: testState.sessionHasActivePrompt,
     authoritative: true,
   }),
-  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -9381,10 +9381,11 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockUseWorkspaceSessionLiveState.mockClear();
-  mockUseDaemonActivePromptBridge.mockReset();
-  mockUseDaemonActivePromptBridge.mockImplementation(
-    () => testState.sessionHasActivePrompt,
-  );
+  mockUseDaemonSessionActivityBridge.mockReset();
+  mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
+    hasActivePrompt: testState.sessionHasActivePrompt,
+    activeWorkState: undefined,
+  }));
   mockWorkspace.status = 'connected';
   mockWorkspace.refreshCapabilities.mockReset();
   mockWorkspace.refreshCapabilities.mockResolvedValue(
@@ -11022,7 +11023,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseDaemonActivePromptBridge).toHaveBeenCalledWith(
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalledWith(
       mockWorkspace.client,
       '/tmp/live',
       'session-1',
