@@ -292,13 +292,9 @@ describe('SessionMcpView', () => {
     expect(registered).not.toBe(snapshotTool);
   });
 
-  it('applyTools skips clone when metadata and recovery ownership match', () => {
+  it('applyTools clones a discovered tool to delegate recovery without mutating the snapshot', () => {
     const { tools, prompts, resources } = mkRegistries();
-    const snapshotTool = mkTool('srv', 'foo', /*trust*/ true).withSessionConfig(
-      true,
-      false,
-      false,
-    );
+    const snapshotTool = mkTool('srv', 'foo', /*trust*/ true);
     const viewA = new SessionMcpView(
       tools,
       prompts,
@@ -322,7 +318,15 @@ describe('SessionMcpView', () => {
     const registered = (
       tools as unknown as { _toolMap: Map<string, DiscoveredMCPTool> }
     )._toolMap.get(snapshotTool.name);
-    expect(registered).toBe(snapshotTool);
+    expect(registered).toBeDefined();
+    expect(registered).not.toBe(snapshotTool);
+    expect(registered!.withSessionConfig(true, false, false)).toBe(registered);
+    expect(snapshotTool.withSessionConfig(true, false, true)).toBe(
+      snapshotTool,
+    );
+    viewA.applyTools([snapshotTool]);
+    expect(tools._toolMap.size).toBe(1);
+    expect(tools._toolMap.get(snapshotTool.name)).not.toBe(snapshotTool);
   });
 
   it('applyTools projects alwaysLoadTools per session without mutating the shared snapshot', () => {

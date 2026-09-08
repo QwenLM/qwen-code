@@ -146,6 +146,9 @@ describe('Session.pendingWorktreeNotice', () => {
         setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue({
+          recoverFailedConnections: vi.fn().mockResolvedValue([]),
+        }),
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
       }),

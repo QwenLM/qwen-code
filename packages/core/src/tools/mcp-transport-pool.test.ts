@@ -286,6 +286,31 @@ describe('McpTransportPool', () => {
       await pool.drainAll();
     });
 
+    it('expires abandoned cooldown records without another acquire', async () => {
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockRejectedValue(new Error('server unavailable'));
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const r = mkSessionRegistries();
+      await expect(
+        pool.acquireForRecovery(
+          'srv',
+          new MCPServerConfig('node'),
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        ),
+      ).rejects.toThrow();
+      const cooldowns = (
+        pool as unknown as { recoveryRetryAfter: Map<string, number> }
+      ).recoveryRetryAfter;
+      expect(cooldowns.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(cooldowns.size).toBe(0);
+      expect(mocked.connect).toHaveBeenCalledTimes(1);
+      await pool.drainAll();
+    });
+
     it('does not throttle an explicit acquire after recovery failure', async () => {
       const mocked = mockMcpSuccess();
       mocked.connect.mockRejectedValueOnce(new Error('server unavailable'));

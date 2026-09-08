@@ -217,7 +217,16 @@ export class McpTransportPool {
     } catch (error) {
       // One attempt per demand, with a workspace-wide cooldown on failure.
       // Explicit discovery/restart continues to use the normal acquire path.
-      this.recoveryRetryAfter.set(id, Date.now() + 5_000);
+      const retryAfter = Date.now() + 5_000;
+      this.recoveryRetryAfter.set(id, retryAfter);
+      // Expire even if this configuration is removed and never acquired again.
+      // An older failure must not clear a newer cooldown for the same key.
+      const expiry = setTimeout(() => {
+        if (this.recoveryRetryAfter.get(id) === retryAfter) {
+          this.recoveryRetryAfter.delete(id);
+        }
+      }, 5_000);
+      expiry.unref?.();
       throw error;
     }
   }

@@ -1777,7 +1777,7 @@ export class McpClientManager {
             this.failedPooledConnections.get(name) === failure &&
             this.cliConfig.isTrustedFolder() &&
             !this.cliConfig.isMcpServerDisabled(name) &&
-            !this.cliConfig.isMcpServerPendingApproval?.(name) &&
+            !this.cliConfig.isMcpServerPendingApproval(name) &&
             connectionIdOf(name, this.getEffectiveMcpServers()[name] ?? {}) ===
               failure.transportId;
           if (!config || !stillWanted()) return;

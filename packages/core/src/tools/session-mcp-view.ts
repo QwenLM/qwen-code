@@ -211,9 +211,9 @@ export class SessionMcpView {
         continue;
       }
       // Per-session metadata copy. The shared snapshot must not bake in the
-      // first subscriber's trust or eager-loading choice. The helper returns
-      // the same instance when both values already match, so the common case
-      // pays zero allocation.
+      // first subscriber's trust or eager-loading choice. Discovered tools
+      // also need a clone here to delegate reconnect to the owning session;
+      // the standalone snapshot keeps its reconnect behavior.
       const sessionTool = tool.withSessionConfig(
         this.cfg.trust,
         this.cfg.alwaysLoadTools === true,
