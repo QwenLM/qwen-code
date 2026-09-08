@@ -945,15 +945,19 @@ presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
 Field descriptors can expose nested object metadata through `properties`.
-Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
-that do not render an advertised field kind must preserve its existing config
-value instead of coercing or deleting it. Object fields cannot be required,
-and nested properties cannot be secrets or environment-resolvable fields;
-those management protocols remain top-level only. A nested `required` property
-is enforced only while its parent object is present in the write; omitting the
-parent object leaves its nested requirements unchecked. Writes replace each
-field's stored value wholesale, so preserving an object means resending the
-stored object; the daemon does not merge partial objects.
+Numeric descriptors can use `exclusiveMinimum` for open lower bounds. String
+and secret descriptors can use `multiline` to ask clients for a multi-line text
+area; the descriptor types allow it only on top-level fields. Clients that do
+not render an advertised field kind must preserve its existing config value
+instead of coercing or deleting it, and a client that renders a `multiline`
+field in a single-line control must preserve the stored value verbatim instead
+of writing back its newline-stripped input value. Object fields cannot be
+required, and nested properties cannot be secrets or environment-resolvable
+fields; those management protocols remain top-level only. A nested `required`
+property is enforced only while its parent object is present in the write;
+omitting the parent object leaves its nested requirements unchecked. Writes
+replace each field's stored value wholesale, so preserving an object means
+resending the stored object; the daemon does not merge partial objects.
 
 Configuration writes use optimistic concurrency and the strict operator-authority
 gate:
