@@ -8,7 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -9447,11 +9447,12 @@ describe('runQwenServe runtime startup failures', () => {
     });
     try {
       // Pin the premises, not just the statuses: the daemon really bound the
-      // wildcard, and every request below is answered by the bootstrap app —
-      // the runtime bridge has not started, so a widened deferred-route
-      // classifier or a dropped override flips these instead of silently
-      // turning the test into a loopback/warm-app probe.
-      expect(new URL(handle.url).hostname).toBe('0.0.0.0');
+      // wildcard (read from the socket, not from the option echoed back), and
+      // every request below is answered by the bootstrap app — the runtime
+      // bridge has not started, so a widened deferred-route classifier or a
+      // dropped override flips these instead of silently turning the test
+      // into a loopback/warm-app probe.
+      expect((handle.server.address() as AddressInfo).address).toBe('0.0.0.0');
       // The single-workspace bootstrap capabilities handler answers 200; a
       // multi-workspace boot would be 503, which the guard's own retry loop
       // tolerates but this exception test is not about.
@@ -9474,6 +9475,47 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(crossOrigin.status).toBe(403);
       expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('runs the Host gate ahead of the CORS wall during the bootstrap window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-order-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // A DNS-rebinding probe carries a bad Host AND an Origin, so which gate
+      // answers decides the reject body: the bootstrap chain must match the
+      // runtime app (hostAllowlist before the CORS wall). fetch cannot set
+      // Host, so drive the raw socket.
+      const port = new URL(handle.url).port;
+      const raw = await new Promise<string>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/capabilities',
+            method: 'GET',
+            headers: {
+              Host: `evil.example:${port}`,
+              Origin: 'http://evil.example',
+              Authorization: 'Bearer secret-token',
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => (data += chunk));
+            res.on('end', () => resolve(`${res.statusCode} ${data}`));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      expect(raw).toContain('403');
+      expect(raw).toContain('Invalid Host header');
     } finally {
       await handle.close();
     }
@@ -12628,6 +12670,9 @@ describe('runQwenServe channel worker supervisor', () => {
   it('prints the quickstart with the resolved listener arguments', async () => {
     mockRemoteQuickstart.print.mockClear();
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-args-')),
+    );
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe({
@@ -12635,6 +12680,7 @@ describe('runQwenServe channel worker supervisor', () => {
         hostname: '0.0.0.0',
         mode: 'http-bridge',
         serveWebShell: false,
+        workspace: tmpDir,
       });
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       const arg = mockRemoteQuickstart.print.mock.calls[0][0];
@@ -12685,6 +12731,9 @@ describe('runQwenServe channel worker supervisor', () => {
   it('reports the wildcard bound address, not the inet_aton spelling', async () => {
     mockRemoteQuickstart.print.mockClear();
     vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-aton-')),
+    );
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe(
@@ -12693,6 +12742,7 @@ describe('runQwenServe channel worker supervisor', () => {
           hostname: '0',
           mode: 'http-bridge',
           serveWebShell: false,
+          workspace: tmpDir,
         },
         { bridge: makeFakeBridge() },
       );
@@ -12736,6 +12786,9 @@ describe('runQwenServe channel worker supervisor', () => {
 
   it('boots non-loopback --require-auth on the generated bearer', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-requireauth-gen-')),
+    );
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe(
@@ -12745,6 +12798,7 @@ describe('runQwenServe channel worker supervisor', () => {
           mode: 'http-bridge',
           serveWebShell: false,
           requireAuth: true,
+          workspace: tmpDir,
         },
         { bridge: makeFakeBridge() },
       );
@@ -12757,6 +12811,9 @@ describe('runQwenServe channel worker supervisor', () => {
 
   it('boots non-loopback --allow-origin * on the generated bearer', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-anyorigin-gen-')),
+    );
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe(
@@ -12766,6 +12823,7 @@ describe('runQwenServe channel worker supervisor', () => {
           mode: 'http-bridge',
           serveWebShell: false,
           allowOrigins: ['*'],
+          workspace: tmpDir,
         },
         { bridge: makeFakeBridge() },
       );
@@ -12778,6 +12836,9 @@ describe('runQwenServe channel worker supervisor', () => {
 
   it('boots non-loopback --allow-origin with a remote HTTP(S) origin on the generated bearer', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-remoteorigin-gen-')),
+    );
     let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       started = await runQwenServe(
@@ -12787,6 +12848,7 @@ describe('runQwenServe channel worker supervisor', () => {
           mode: 'http-bridge',
           serveWebShell: false,
           allowOrigins: ['https://app.example.com'],
+          workspace: tmpDir,
         },
         { bridge: makeFakeBridge() },
       );

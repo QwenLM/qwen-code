@@ -2003,14 +2003,15 @@ export function createServeApp(
   // Access logging and trace-id capture sit ahead of the origin wall and the
   // same-origin credential check so their 403/401 short-circuits are recorded
   // like every other reject (the pre-change chain logged them because
-  // bearerAuth ran below the access log). The access log excludes GET /health
-  // and POST */heartbeat by path before attaching its finish logger, so
-  // liveness probes stay unlogged at any mount position; wall rejects on
-  // those exempt paths are likewise not logged. Capture the caller trace id
-  // BEFORE authenticate / rate limiter / body parser: those layers
-  // short-circuit (401/429/400) before the telemetry middleware ever runs,
-  // and the access log still needs the captured id to join their log lines
-  // (and 404s) with the caller's trace.
+  // bearerAuth ran below the access log). The access log excludes the exact
+  // paths GET /health and POST */heartbeat before attaching its finish
+  // logger, so those liveness probes stay unlogged at any mount position
+  // (HEAD /health and GET /health/ are logged like any request); wall
+  // rejects on those exempt paths are likewise not logged. Capture the
+  // caller trace id BEFORE authenticate / rate limiter / body parser: those
+  // layers short-circuit (401/429/400) before the telemetry middleware ever
+  // runs, and the access log still needs the captured id to join their log
+  // lines (and 404s) with the caller's trace.
   installAccessLogMiddleware(app, daemonLog);
   app.use(daemonInboundTraceIdCaptureMiddleware);
 

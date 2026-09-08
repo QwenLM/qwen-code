@@ -3611,8 +3611,10 @@ async function runQwenServeImpl(
 
   if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
-      `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
-        `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
+      `Refusing to bind ${opts.hostname}:${opts.port} without a bearer ` +
+        `token (an explicitly empty --token or ${QWEN_SERVER_TOKEN_ENV} ` +
+        `counts as none, since a blank source never generates one). Set ` +
+        `${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
         `(127.0.0.0/8, localhost, ::1, or [::1]).`,
     );
   }

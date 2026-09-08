@@ -100,8 +100,10 @@ reject and the log line still joins the caller's trace id; both also precede
 route so the DNS-rebinding defense covers it. Pre-auth `/health` sits below
 the origin wall (matched cross-origin probes carry CORS headers); the access
 log exempts `GET /health` and `POST */heartbeat` by path before attaching its
-finish logger, so liveness probes stay unlogged at any mount position and wall
-rejects on those exempt paths are likewise unlogged. Normal API rate limiting
+finish logger, so exact-path `GET /health` and `POST */heartbeat` probes stay
+unlogged at any mount position and wall rejects on those exempt paths are
+likewise unlogged (`HEAD /health` and `GET /health/` are logged like any
+request). Normal API rate limiting
 runs after `bearerAuth` and before `express.json()`, so only authenticated
 requests count and large bodies are rejected before parsing when a limit is
 exceeded. Channel webhook ingress branches before bearer auth and applies its
@@ -161,7 +163,7 @@ Control is enabled (the LAN origin is added/removed with the listener):
 - Non-matching `Origin` values receive the same deterministic
   `403 { error: 'Request denied by CORS policy' }` as deny mode.
 - `--allow-origin '*'` requires a bearer token; on loopback binds boot refuses when none is configured, while on non-loopback binds the generated ephemeral token satisfies the guard (the refusal is loopback-only).
-- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts on loopback binds; on non-loopback binds the generated token satisfies the same guard. A non-loopback browser origin authenticates with the bearer on every API route because it could otherwise exercise the full operator API, including code execution as the daemon user; the pre-auth exceptions are the Web Shell document/asset routes and the MCP App sandbox (`/`, `/assets*`, `/mcp-app-sandbox`, exact `/session/:id` navigations), plus the channel webhook ingress, which branches ahead of `bearerAuth` and authenticates with its own `x-qwen-webhook-secret` instead of the bearer.
+- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts on loopback binds; on non-loopback binds the generated token satisfies the same guard. A non-loopback browser origin authenticates with the bearer on every API route because it could otherwise exercise the full operator API, including code execution as the daemon user; the pre-auth exceptions are the Web Shell document/asset routes and the MCP App sandbox (`/`, `/assets*`, `/mcp-app-sandbox`, exact `/session/:id` navigations), plus the channel webhook ingress, which branches ahead of `bearerAuth` and authenticates with its own `x-qwen-webhook-secret` instead of the bearer, and — on loopback binds only — `/health` (bearer-gated elsewhere).
 - Explicit browser-extension origins retain their tokenless local-automation path. Startup logs that any tokenless allowed browser origin receives full operator authority.
 - `parseAllowOriginPatterns()` validates pattern syntax at boot.
 - The `allow_origin` capability tag is advertised only when this mode is
