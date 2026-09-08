@@ -63,79 +63,97 @@ export function sendGitError(
   let detail: string;
   if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
     const e = err as { stdout?: string; stderr?: string };
-    detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+    // Empty parts are dropped so a genuine single-line message always sits
+    // at line 1: the anchored shapes below match line 1 (or the documented
+    // two-line lock chain) ONLY, because a config-chosen value (a URL or a
+    // fetch refspec) can carry a real newline and inject a line-initial
+    // prefix of the attacker's choice deeper in the text.
+    detail = [e.stdout, e.stderr]
+      .filter((part) => typeof part === 'string' && part.length > 0)
+      .join('\n');
   } else {
     detail = err instanceof Error ? err.message : String(err);
   }
 
-  const message = redactGitMessage(detail, cwd);
+  // Classification reads the FULL redacted detail: slicing before
+  // matching would cut a long lock line's second line off before its
+  // `could not …` prefix (a deeply nested workspace path pushes the
+  // two-line lock chain past 512 chars) and misread a config-write
+  // failure as an unclassified 500. Only the client-visible message is
+  // bounded.
+  const fullMessage = redactGitPaths(detail, cwd);
+  const message = fullMessage.slice(0, GIT_ERROR_MESSAGE_MAX);
 
   // git's remote config-write failures echo the name as `remote.<name>`
-  // (no space) and the URL verbatim — including inside quotes, so an echoed
-  // name or URL can itself contain "no such remote" or "already exists".
-  // These anchored git message prefixes therefore run FIRST: every message
-  // carrying them is a config-write failure regardless of the echo, while no
-  // genuine duplicate/no-such message carries them. `git remote remove`
-  // unsets the pointing branches' `branch.*.remote` keys before it deletes
-  // refs and removes the section, so a lock can also surface as a failed
-  // `could not unset 'branch.<x>.remote'` — the same config-write failure.
+  // (no space) and the URL verbatim. Every remote-shape branch below is
+  // anchored to git's own message START (line 1 of the composed detail),
+  // because a config-chosen name or URL can carry any keyword — `a remote
+  // b already exists`, `no such remote`, even `could not remove config
+  // section` — and a config-chosen VALUE can carry a real newline, so any
+  // deeper line is attacker-controllable. A lock surfaces as git's own
+  // two-line chain (`could not lock config file …` followed by the write
+  // failure); everything else git reports in these shapes is single-line.
   if (
-    /could not remove config section|could not set 'remote\.|could not unset 'branch\./i.test(
-      message,
+    /^(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
+      fullMessage,
+    ) ||
+    /^(?:error|fatal): could not lock config file [^\n]*\n(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
+      fullMessage,
     )
   ) {
     res.status(409).json({ error: 'git_config_write_failed', message });
     return;
   }
-  // Remote-specific shapes next: git echoes the user-chosen remote name in
-  // these messages, so a remote named e.g. `not a git repository` or
-  // `dirty-cache` would otherwise be claimed by an earlier keyword branch
-  // (wrong code, and for `no such remote` a wrong status too).
-  if (/remote .* already exists/i.test(message)) {
+  if (/^(?:error|fatal): remote .+ already exists\.?\s*$/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_already_exists', message });
     return;
   }
-  if (/no such remote/i.test(message)) {
+  if (/^(?:error|fatal): No such remote: /i.test(fullMessage)) {
     res.status(404).json({ error: 'no_such_remote', message });
     return;
   }
-  // The removal verification re-read the config and found the section
-  // still there (an included config file, or a concurrent re-add). The
-  // message carries no name, so no keyword branch can claim it.
-  if (/remote still configured after removal/i.test(message)) {
+  // Our own removal-verification throw (a plain Error, no git prefix): a
+  // remote NAMED after this text must not be claimed by it.
+  if (/^remote still configured after removal$/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_still_configured', message });
     return;
   }
   // git dies parsing a configured fetch refspec before mutating anything:
   // the row stays, nothing was destroyed, and the cause is nameable.
-  if (/invalid refspec/i.test(message)) {
+  if (/^(?:error|fatal): invalid refspec/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_config_unparsable', message });
     return;
   }
+  // Our own add pre-flight refusal (a plain Error, no git prefix): the
+  // name exists in an inherited scope git's duplicate check cannot see.
+  if (/^remote already configured in an inherited scope$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_shadows_inherited', message });
+    return;
+  }
   if (
-    /not a git repository/i.test(message) ||
-    /invalid reference/i.test(message)
+    /not a git repository/i.test(fullMessage) ||
+    /invalid reference/i.test(fullMessage)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
+  if (/dirty|uncommitted|would be overwritten/i.test(fullMessage)) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
-  if (/already exists/i.test(message)) {
+  if (/already exists/i.test(fullMessage)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
-  if (/nothing to commit/i.test(message)) {
+  if (/nothing to commit/i.test(fullMessage)) {
     res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
-  if (/detached HEAD/i.test(message)) {
+  if (/detached HEAD/i.test(fullMessage)) {
     res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream|no tracking information/i.test(message)) {
+  if (/no upstream|no tracking information/i.test(fullMessage)) {
     res.status(400).json({ error: 'no_upstream', message });
     return;
   }

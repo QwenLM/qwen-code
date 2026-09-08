@@ -344,6 +344,38 @@ describe('fetchGitRemotes', () => {
     expect(remotes.map((r) => r.name)).toEqual(['origin']);
   });
 
+  it('refuses to add a name an inherited scope already configures', async () => {
+    const dir = makeRepo();
+    // git's duplicate check does NOT see the inherited section, so the
+    // panel's own Add would silently create a fetch/push divergence.
+    fs.writeFileSync(
+      path.join(tmpHome, '.gitconfig'),
+      '[remote "origin"]\n\turl = https://global.example/g.git\n',
+    );
+    await expect(
+      gitRemoteAdd(dir, 'origin', 'https://example.com/o/r.git', fixtureEnv),
+    ).rejects.toThrow(/inherited scope/);
+    // The inherited row shows in `git remote` by design; the refusal must
+    // leave the repository config untouched.
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'remote.origin.url',
+    );
+  });
+
+  it('reports not-a-repo before the inherited-scope pre-flight', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-notrepo-'));
+    tmpRoots.push(dir);
+    // Outside a repository the scope read exits 0 with the inherited
+    // config: the shadow refusal must not mask git's canonical answer.
+    fs.writeFileSync(
+      path.join(tmpHome, '.gitconfig'),
+      '[remote "origin"]\n\turl = https://global.example/g.git\n',
+    );
+    await expect(
+      gitRemoteAdd(dir, 'origin', 'https://example.com/o/r.git', fixtureEnv),
+    ).rejects.toThrow(/not a git repository/);
+  });
+
   it('reports the configured url, not an insteadOf-rewritten one', async () => {
     const dir = makeRepo();
     fs.writeFileSync(
@@ -795,6 +827,63 @@ describe('fetchGitRemotes repository scope', () => {
     expect(remotes).toEqual([]);
     expect(git(wt, 'for-each-ref', 'refs/remotes')).toBe('');
     expect(git(wt, 'config', '--list')).not.toContain('remote.dup.url');
+  });
+
+  it('refuses success when an inherited-scope survivor keeps resolving', async () => {
+    const dir = makeRepo();
+    // Same name in local AND global: git removes the local section and
+    // exits 0, but the name still resolves from the global file.
+    fs.writeFileSync(
+      path.join(tmpHome, '.gitconfig'),
+      '[remote "origin"]\n\turl = https://global.example/g.git\n',
+    );
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    const err = await gitRemoteRemove(dir, 'origin', fixtureEnv).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(
+      /remote still configured after removal/,
+    );
+    expect(fs.readFileSync(path.join(tmpHome, '.gitconfig'), 'utf8')).toContain(
+      'remote "origin"',
+    );
+  });
+
+  it('does not complete a worktree section shadowed by an inherited scope', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    fs.writeFileSync(
+      path.join(tmpHome, '.gitconfig'),
+      '[remote "dup"]\n\turl = https://global.example/d.git\n',
+    );
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.dup.url',
+      'https://example.com/wt.git',
+    );
+    // git fails on the section it cannot edit; the completion must NOT
+    // fire over an inherited-scope survivor (a 200 would certify a removal
+    // the global file still resolves).
+    const err = await gitRemoteRemove(wt, 'dup', fixtureEnv).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const e = err as { stderr?: unknown; message?: unknown };
+    expect(
+      `${typeof e.stderr === 'string' ? e.stderr : ''}${
+        typeof e.message === 'string' ? e.message : ''
+      }`,
+    ).toMatch(/could not remove config section/i);
+    expect(git(wt, 'config', '--list')).toContain('remote.dup.url');
+    expect(fs.readFileSync(path.join(tmpHome, '.gitconfig'), 'utf8')).toContain(
+      'remote "dup"',
+    );
   });
 });
 

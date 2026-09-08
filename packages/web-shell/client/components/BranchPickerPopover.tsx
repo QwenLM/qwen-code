@@ -413,6 +413,10 @@ export function BranchPickerPopover({
   // the inputs blurs them in real browsers, so focus is restored once the
   // mutation settles (see the busyAction effect below).
   const addFocusRestoreRef = useRef<string | null>(null);
+  // The row whose removal is in flight: disabling every remove button
+  // blurs the armed one, and success unmounts its row, so focus is
+  // restored once the mutation settles (back button if the row is gone).
+  const removeFocusRestoreRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
   // Separate from requestIdRef: handleRemoteRemove calls fetchBranches,
   // which would otherwise invalidate the remotes request it is paired with.
@@ -480,11 +484,14 @@ export function BranchPickerPopover({
   }, [fetchBranches, fetchStatus]);
 
   // A status or remotes list fetched for a previous workspace must not
-  // seed the next one.
+  // seed the next one; focus the user lent to that workspace's controls
+  // must not be restored onto the next workspace's panel either.
   useEffect(() => {
     setLiveStatus(undefined);
     statusRequestIdRef.current++;
     remotesRequestIdRef.current++;
+    addFocusRestoreRef.current = null;
+    removeFocusRestoreRef.current = null;
   }, [ws, gitCwd]);
 
   const effectiveStatus = useMemo(
@@ -801,16 +808,50 @@ export function BranchPickerPopover({
   }, [view]);
 
   useEffect(() => {
-    if (busyAction !== null || view !== 'remotes') return;
-    const testId = addFocusRestoreRef.current;
-    if (!testId) return;
-    addFocusRestoreRef.current = null;
+    if (view !== 'remotes') {
+      // A mutation left mid-view has no blurred control left to restore;
+      // drop the refs so a later re-entry cannot consume them stale.
+      addFocusRestoreRef.current = null;
+      removeFocusRestoreRef.current = null;
+      return;
+    }
+    if (busyAction !== null) return;
     // Disabling the add inputs while the mutation ran blurred them; put
     // focus back once they are enabled again.
-    const input = document.body.querySelector<HTMLInputElement>(
-      `input[data-testid="${testId}"]`,
-    );
-    if (input && !input.disabled) input.focus();
+    const testId = addFocusRestoreRef.current;
+    if (testId) {
+      addFocusRestoreRef.current = null;
+      const el = document.body.querySelector<HTMLElement>(
+        `[data-testid="${testId}"]`,
+      );
+      const disabled =
+        el instanceof HTMLInputElement || el instanceof HTMLButtonElement
+          ? el.disabled
+          : false;
+      if (el && !disabled) el.focus();
+      return;
+    }
+    // A remove that blurred its row's button: refocus it, or the panel's
+    // back button when the row itself is gone (a successful removal).
+    const removedName = removeFocusRestoreRef.current;
+    if (!removedName) return;
+    removeFocusRestoreRef.current = null;
+    let target: HTMLElement | null = null;
+    for (const button of document.body.querySelectorAll<HTMLButtonElement>(
+      '[data-testid^="remote-remove-"]',
+    )) {
+      if (
+        button.dataset.testid === `remote-remove-${removedName}` &&
+        !button.disabled
+      ) {
+        target = button;
+        break;
+      }
+    }
+    (
+      target ??
+      document.body.querySelector<HTMLElement>('[data-testid="remotes-back"]')
+    )?.focus();
   }, [busyAction, view]);
 
   const handleRemoteAdd = useCallback(async () => {
@@ -828,9 +869,10 @@ export function BranchPickerPopover({
     setConfirmRemove(null);
     const active = document.activeElement;
     addFocusRestoreRef.current =
-      active instanceof HTMLInputElement &&
+      active instanceof HTMLElement &&
       (active.dataset.testid === 'remote-add-name' ||
-        active.dataset.testid === 'remote-add-url')
+        active.dataset.testid === 'remote-add-url' ||
+        active.dataset.testid === 'remote-add-submit')
         ? active.dataset.testid
         : null;
     setBusyAction('remoteAdd');
@@ -879,6 +921,16 @@ export function BranchPickerPopover({
       if (busyAction) return;
       const requestId = remotesRequestIdRef.current;
       setConfirmRemove(null);
+      // Restore only focus the user actually lent: on platforms whose
+      // buttons do not take focus on click (Safari) or on programmatic
+      // triggers, the row button never held focus, so there is nothing to
+      // restore and the settle effect must not yank focus elsewhere.
+      const active = document.activeElement;
+      removeFocusRestoreRef.current =
+        active instanceof HTMLElement &&
+        active.dataset.testid === `remote-remove-${name}`
+          ? name
+          : null;
       setBusyAction('remoteRemove');
       try {
         const result = await ws.workspaceGitRemoteRemove(name, gitCwd);
@@ -905,16 +957,19 @@ export function BranchPickerPopover({
         // A refused remove usually means the list is stale (git answered
         // "No such remote" for a row still on screen — a terminal removed
         // it first); re-read silently so the panel converges instead of
-        // offering the same doomed click forever.
-        if (mutationMeansStaleList(err)) void fetchRemotes(true);
+        // offering the same doomed click forever. Awaited: the converged
+        // list must commit before the settle effect restores focus, or the
+        // restore lands on a row the re-read is about to unmount.
+        if (mutationMeansStaleList(err)) await fetchRemotes(true);
         // git deletes refs/remotes/<name>/* and the pointing branches'
         // upstream config BEFORE the section write, so every refusal that
-        // leaves a surviving section — a lock-failed write, or a split
-        // section whose other half survives the verification — leaves the
-        // refs gone while the row survives: refresh the branch list and
-        // the upstream chip as well.
+        // proves or leaves that destruction — no-such-remote (another
+        // client already removed it, refs and all), a lock-failed write,
+        // or a split section whose other half survives the verification —
+        // leaves the branch list and the upstream chip stale as well.
         const code = daemonErrorBody(err)?.['error'];
         if (
+          code === 'no_such_remote' ||
           code === 'git_config_write_failed' ||
           code === 'remote_still_configured'
         ) {

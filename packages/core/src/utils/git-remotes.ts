@@ -166,6 +166,18 @@ function isGitBoolTrue(value: string, valueless: boolean): boolean {
   return n !== null && n !== 0;
 }
 
+// The config dump's stdout can carry every scope's records — global and
+// system URLs, credential helpers, identities — and the route forwards
+// error text to the client, so it must not leave this module (git's
+// diagnostics live on stderr, which stays). Runs AFTER the no-match
+// discrimination: blanking stdout earlier would turn an exit-1-with-dump
+// failure into a false no-match.
+function stripConfigDump(err: unknown): void {
+  if (err && typeof err === 'object' && 'stdout' in err) {
+    (err as { stdout: unknown }).stdout = '';
+  }
+}
+
 interface RemoteSection {
   urls: string[];
   pushUrls: string[];
@@ -223,6 +235,7 @@ export async function fetchGitRemotes(
     raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
   } catch (err) {
     if (isNoMatchConfigError(err)) return [];
+    stripConfigDump(err);
     throw err;
   }
   const sections = new Map<string, RemoteSection>();
@@ -304,6 +317,25 @@ export async function gitRemoteAdd(
   if (!isValidRemoteUrl(trimmedUrl)) {
     throw new Error('invalid remote url');
   }
+  // Probe repository-ness first, before the inherited-scope pre-flight:
+  // outside a repository the scope read exits 0 with the inherited config,
+  // so a same-named global remote would otherwise surface the shadow
+  // refusal (409) where git's canonical not-a-repository answer (404)
+  // belongs — the same ordering fetchGitRemotes keeps with its probe.
+  await runGit(cwd, ['rev-parse', '--git-dir'], env);
+  // git's remote family resolves only the repository scope (local,
+  // include-sourced, worktree), so the duplicate check is blind to an
+  // inherited section: the panel's own Add would silently create a
+  // same-name collision with one, and git then resolves fetch/push from
+  // records the panel does not show (a multi-valued url pushes to both).
+  // Refuse up front — a deliberate shadow belongs to the terminal, not to
+  // a 200 from here.
+  const existing = await remoteSectionScopes(cwd, name, env);
+  for (const scope of existing) {
+    if (scope !== 'local' && scope !== 'worktree') {
+      throw new Error('remote already configured in an inherited scope');
+    }
+  }
   // `--` terminates options so a config-held name can never read as a flag.
   await runGit(cwd, ['remote', 'add', '--', name, trimmedUrl], env);
   return fetchGitRemotes(cwd, env);
@@ -353,6 +385,12 @@ export async function gitRemoteRemove(
     // a config-chosen name could carry a keyword another branch claims.
     throw new Error('remote still configured after removal');
   }
+  // The repository-scope listing cannot see a same-name survivor in an
+  // inherited scope, but git still resolves it — fetch/push keep reaching
+  // the remote the panel just said was removed. Verify resolution too.
+  if ((await remoteSectionScopes(cwd, name, env)).size > 0) {
+    throw new Error('remote still configured after removal');
+  }
   return remotes;
 }
 
@@ -378,8 +416,14 @@ async function remoteSectionScopes(
   let raw: string;
   try {
     raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
-  } catch {
-    return scopes;
+  } catch (err) {
+    // The verification gates below use an empty answer in fail-OPEN
+    // polarity ("no survivor"), so only a true no-match may be read as
+    // empty: a killed or failed read must surface, or the add pre-flight
+    // and the removal verification would certify past their own guard.
+    if (isNoMatchConfigError(err)) return scopes;
+    stripConfigDump(err);
+    throw err;
   }
   const prefix = `remote.${name}.`;
   const records = raw.split('\0');
@@ -404,15 +448,17 @@ async function remoteSectionScopes(
 // `git remote remove` cannot edit a per-worktree config.worktree; finish
 // such a removal there. Gated on the survivor living ONLY at worktree
 // scope: without extensions.worktreeConfig the `--worktree` selector
-// silently means `--local`, and a local-scope survivor is the
-// included-config case that must keep answering remote_still_configured.
+// silently means `--local`, a local-scope survivor is the included-config
+// case that must keep answering remote_still_configured, and a survivor in
+// any OTHER scope (global/system/command) is git's own resolution surface
+// the caller's scope-complete check must still see.
 async function removeWorktreeScopeSection(
   cwd: string,
   name: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
   const scopes = await remoteSectionScopes(cwd, name, env);
-  if (!scopes.has('worktree') || scopes.has('local')) return false;
+  if (scopes.size !== 1 || !scopes.has('worktree')) return false;
   try {
     await runGit(
       cwd,

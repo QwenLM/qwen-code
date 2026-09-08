@@ -101,13 +101,25 @@ test('remotes panel surfaces a duplicate add as an error', async ({
   await popover
     .locator('[data-testid="remote-add-url"]')
     .fill('https://example.com/other.git');
-  await popover.locator('[data-testid="remote-add-submit"]').click();
+  // Submit from the focused BUTTON (mouse or Tab+Enter): the in-flight
+  // disable blurs it, and the restore must put focus back on it.
+  await popover.locator('[data-testid="remote-add-submit"]').focus();
+  await page.keyboard.press('Enter');
 
   await expect(
     popover.getByText('error: remote origin already exists.'),
   ).toBeVisible();
   // The failed add changed nothing: still exactly one remote row.
   await expect(popover.locator('[class*="remoteRow"]')).toHaveCount(1);
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (document.activeElement as HTMLElement | null)?.dataset?.['testid'] ??
+          null,
+      ),
+    )
+    .toBe('remote-add-submit');
 });
 
 test('remotes panel search filters by name and URL', async ({

@@ -15,7 +15,9 @@ vi.mock('./git-branches.js', () => ({
   gitEnv: (base?: unknown) => base,
 }));
 
-const { fetchGitRemotes } = await import('./git-remotes.js');
+const { fetchGitRemotes, gitRemoteAdd, gitRemoteRemove } = await import(
+  './git-remotes.js'
+);
 
 function killError(): Error {
   return Object.assign(new Error('spawn git SIGTERM'), {
@@ -57,6 +59,20 @@ function exit1WithStderr(): Error {
   });
 }
 
+// A killed read that already dumped partial config (every scope included)
+// to stdout: the route forwards error text to the client, so the dump must
+// not leave the module. stderr carries git's diagnostics and must SURVIVE
+// the strip — the anchored classifier shapes match on it.
+function killedDumpError(): Error {
+  return Object.assign(new Error('spawn git SIGTERM'), {
+    stdout: 'global\u0000remote.leak.url\nhttps://global.example/x.git\u0000',
+    stderr: 'fatal: unable to read config file',
+    code: null,
+    signal: 'SIGTERM',
+    killed: true,
+  });
+}
+
 describe('fetchGitRemotes config-read failure discrimination', () => {
   it('rethrows a killed config read instead of answering an empty list', async () => {
     runGit
@@ -90,5 +106,54 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     await expect(fetchGitRemotes('/repo')).rejects.toMatchObject({
       code: 1,
     });
+  });
+
+  it('strips the config dump from a killed read before rethrowing', async () => {
+    runGit
+      .mockResolvedValueOnce('.git\n')
+      .mockRejectedValueOnce(killedDumpError());
+    const err = await fetchGitRemotes('/repo').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('fails the add pre-flight closed on a killed scope read', async () => {
+    // A killed scope read must not read as "no inherited collision", and
+    // its partial all-scope dump must not reach the client.
+    runGit
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockRejectedValueOnce(killedDumpError()); // scope read
+    const err = await gitRemoteAdd(
+      '/repo',
+      'origin',
+      'https://example.com/o/r.git',
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('fails the removal verification closed on a killed scope read', async () => {
+    // remove ok → probe ok → repo-scope re-read lists nothing → the
+    // all-scope verification read is killed: reject, never certify, and
+    // never leak the partial dump.
+    runGit
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // repo-scope read
+      .mockRejectedValueOnce(killedDumpError()); // all-scope verification
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
   });
 });

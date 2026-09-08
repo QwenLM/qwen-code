@@ -98,25 +98,40 @@ export async function gitRemoteRemove(
 - `gitRemoteAdd` / `gitRemoteRemove` run `git remote add -- <name> <url>` /
   `git remote remove -- <name>` (the `--` terminator is what lets removal
   work on config-held names the add predicate rejects) and then return
-  `fetchGitRemotes`, so each mutation response carries the fresh list.
-  Removal verifies the section is gone from the repository scope
-  afterwards and throws otherwise, so a refused removal — including a
-  split section whose included half survives — can never be reported as
-  success. One scope needs help: `git remote remove` cannot edit a
-  per-worktree `config.worktree`, and fails with "Could not remove config
-  section" AFTER deleting the tracking refs, so a worktree-scope row would
-  be listed yet permanently un-removable, every retry repeating the
+  `fetchGitRemotes`, so each mutation response carries the fresh list. Add
+  pre-flights the name across ALL config scopes first: git's remote
+  family resolves only the repository scope (local, include-sourced,
+  worktree), so the duplicate check is blind to an inherited
+  (`global`/`system`/`command`) section, and the panel's own Add would
+  otherwise silently create a same-name collision with one — git then
+  resolves fetch/push from records the panel does not show, and a
+  multi-valued url pushes to both destinations. That shape refuses with
+  409 `remote_shadows_inherited` (a deliberate shadow belongs to the
+  terminal). Removal verifies the section is gone from the repository
+  scope afterwards, AND that the name no longer resolves in ANY scope —
+  otherwise a same-name inherited survivor keeps receiving pushes after a
+  "Removed" success. A refused removal — including a split section whose
+  included half survives — can never be reported as success. One scope
+  needs help: `git remote remove` cannot edit a per-worktree
+  `config.worktree`, and fails with "Could not remove config section"
+  AFTER deleting the tracking refs, so a worktree-scope row would be
+  listed yet permanently un-removable, every retry repeating the
   destruction. When the surviving section lives ONLY at worktree scope,
   removal completes it with `git config --worktree --remove-section` and
   re-verifies; a local-scope survivor (the included-config case) keeps
-  answering `remote_still_configured`, and without
+  answering `remote_still_configured`, a survivor in any other scope
+  surfaces the way the removal itself failed — git's refusal as 409
+  `git_config_write_failed` when `git remote remove` itself failed, and
+  the all-scope verification answering `remote_still_configured` when git
+  exited 0 but the name still resolves — and without
   `extensions.worktreeConfig` the completion never runs (there the
   `--worktree` selector would silently mean `--local`). When the section
-  lives ONLY in an included file, `git remote remove` fails with "Could not
-  remove config section" before any verification re-read, so that shape
-  surfaces as 409 `git_config_write_failed` (a config-write failure — a
-  lock contention, or a section in a file git will not edit), while a split
-  local+included section exits 0 and the verification re-read answers
+  lives ONLY in an included file, `git remote remove` fails with "Could
+  not remove config section" before any verification re-read, so that
+  shape surfaces as 409
+  `git_config_write_failed` (a config-write failure — a lock contention,
+  or a section in a file git will not edit), while a split local+included
+  section exits 0 and the verification re-read answers
   `remote_still_configured`.
 - `runGit` stays the single exec wrapper: export it from `git-branches.ts`
   (add one keyword) and import it here; `gitEnv` is already exported.
@@ -185,34 +200,44 @@ true })` → `resolveTrustedRuntime` → `generationGuard.assertOpen()` →
   name surface git's own `error: No such remote` (see below) rather than a
   pre-check, keeping the route race-free against concurrent CLI use.
 - Error mapping: the shared `sendGitError` in `workspace-git-branches.ts`
-  (exported; its `redactGitMessage` helper stays private) gains five
+  (exported; its `redactGitMessage` helper stays private) gains six
   remote-specific branches **ahead of every keyword branch**, because git
   echoes the user-chosen remote name (and, for config-write failures, the
-  URL verbatim) in these messages:
-  - `/could not remove config section|could not set 'remote\.|could not
-unset 'branch\./i` → 409 `git_config_write_failed` (a config-write
-    failure — a lock contention, or a section in a file git will not edit —
-    not a dirty tree; `git remote remove` unsets the pointing branches'
-    `branch.*.remote` keys before it deletes refs and removes the section,
-    so a lock can surface in any of the three shapes). Runs FIRST of the
-    five: its alternatives are git's own anchored message prefixes, while
-    the two loose shapes below echo names/URLs that can themselves contain
-    "no such remote" or "already exists" inside quotes.
-  - `/remote .* already exists/i` → 409 `remote_already_exists`
-  - `/no such remote/i` → 404 `no_such_remote`
-  - `/remote still configured after removal/i` → 409
+  URL verbatim) in these messages. Every branch matches ONLY at the start
+  of the composed detail — line 1; the config-write branch additionally
+  accepts git's documented two-line `could not lock config file …` chain
+  (the lock line is git's own, not echoed content): a config-chosen name
+  can carry any keyword, and a config-chosen VALUE (a URL or a fetch
+  refspec) can carry a real newline — git unescapes `\n` in quoted
+  values — so any deeper line-initial text is attacker-controllable and
+  must never be claimed:
+  - `^(?:error|fatal): could not remove config section ` /
+    `^(?:error|fatal): could not set 'remote\.` /
+    `^(?:error|fatal): could not unset 'branch\.` → 409
+    `git_config_write_failed` (a config-write failure — a lock contention,
+    or a section in a file git will not edit — not a dirty tree;
+    `git remote remove` unsets the pointing branches' `branch.*.remote`
+    keys before it deletes refs and removes the section, so a lock can
+    surface in any of the three shapes)
+  - `^(?:error|fatal): remote .+ already exists\.?\s*$` → 409
+    `remote_already_exists`
+  - `^(?:error|fatal): No such remote: ` → 404 `no_such_remote`
+  - `^remote still configured after removal$` → 409
     `remote_still_configured` (the removal-verification failure; the
     message carries no name, so no keyword branch can claim it)
-  - `/invalid refspec/i` → 409 `remote_config_unparsable` (git dies parsing
-    a configured fetch refspec before mutating anything: the row stays,
-    nothing was destroyed, and the cause is nameable)
+  - `^(?:error|fatal): invalid refspec` → 409 `remote_config_unparsable`
+    (git dies parsing a configured fetch refspec before mutating anything:
+    the row stays, nothing was destroyed, and the cause is nameable)
+  - `^remote already configured in an inherited scope$` → 409
+    `remote_shadows_inherited` (the add pre-flight refusal; a plain Error
+    with no git prefix)
     The remotes routes delegate to it unchanged; everything else
     (not-a-repo → 404 `not_a_git_repository`, redacted 500 fall-through)
     keeps its existing classification. Blast radius: this classifier is
     shared by all git routes, so the table is pinned from the owning file
     by a collocated `sendGitError` classification-table test (message in →
-    status/code out), including the precedence of the remote branches over
-    the keyword branches.
+    status/code out), including keyword-carrying remote names and the
+    stdout half of the classified detail.
 
 ### 3. SDK — `packages/sdk-typescript`
 
@@ -283,11 +308,13 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
   `git remote remove` deletes `refs/remotes/<name>/*`, so the branches
   view's remote groups must refresh before the user navigates back; an add
   creates no remote-tracking refs, so it does not. A remove refused with
-  409 `git_config_write_failed` or `remote_still_configured` refreshes the
-  branch list and status too: git deletes the tracking refs (and the
-  tracking config of the branches that pointed at them) BEFORE the section
-  write, so any refusal that leaves a surviving section leaves the refs
-  gone while the row survives.
+  404 `no_such_remote`, 409 `git_config_write_failed` or
+  `remote_still_configured` refreshes the branch list and status too: git
+  deletes the tracking refs (and the tracking config of the branches that
+  pointed at them) BEFORE the section write, so any refusal that proves
+  or leaves that destruction — another client having removed the remote
+  first, a lock-failed write, or a split section whose other half
+  survives the verification — leaves the refs gone on screen otherwise.
   A **refused** mutation re-reads the remotes list **silently** (no loading
   placeholder, no error replacement) and **only** when the daemon's code
   says the list is stale (`remote_already_exists`, `no_such_remote`,
@@ -295,6 +322,16 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
   draining, transport failure) leaves the usable rows and the typed draft
   on screen and speaks through the footer alone. Mutation errors land in
   the existing footer status bar (`statusType: 'error'`).
+- Focus: entering the view focuses the back button; leaving restores the
+  manage-remotes row (search box when it is disabled). Disabling the add
+  inputs or the remove buttons for an in-flight mutation blurs a focused
+  control in real browsers, and a successful removal unmounts the focused
+  row entirely, so focus is restored when the mutation settles: the name
+  input after a successful add, the remembered field or the submit button
+  otherwise. A removal restores the row's remove button when the row
+  survives — including a refused removal whose silent re-read keeps it —
+  and the panel's back button when the row is gone, whether the removal
+  succeeded or the refused removal's awaited re-read converged it away.
 - i18n (en + zh), following the existing `branchPicker.*` block:
   `branchPicker.action.manageRemotes`, `branchPicker.remotes.title`,
   `.empty`, `.noMatches`, `.loading`, `.namePlaceholder`, `.urlPlaceholder`,
@@ -325,13 +362,13 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
 
 ### 6. Tests (collocated)
 
-| File                                                                | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/utils/git-remotes.test.ts`                       | config-read listing contract (config order, push-url override via `git remote set-url --push`, promisor/partial-clone remote, url-less section → empty urls, multi-valued urls, space-bearing subsection and embedded-newline values under the NUL framing, inherited-scope exclusion, `insteadOf` immunity, invalid-refspec survival, `otherSettings` count), repository-scope cases (include.path listing, split-section removal refusal, worktree-scope listing and worktree-scope removal completion incl. the dotted-sibling gate, killed/no-match config-read discrimination in `git-remotes-kill.test.ts`), add/remove round-trips in a tmp repo incl. dash/TAB/predicate-legal names, predicate tables incl. the add/remove leniency divergence and the NUL floor, trimmed-url storage, helper-URL rejection before spawn |
-| `packages/cli/src/serve/routes/workspace-git-remotes.test.ts`       | mirrors `workspace-git-branches.test.ts`: trust gate, generation guard (503 `workspace_runtime_unavailable` on all three endpoints), `invalid_cwd` 400, `invalid_remote_name`/`invalid_remote_url` 400, add→list, duplicate → 409 `remote_already_exists`, remove→list, remove-missing → 404 `no_such_remote`, config-lock → 409 `git_config_write_failed`, non-repo → 404 `not_a_git_repository`, unknown workspace → `workspace_mismatch`, path redaction, NUL-name 400 on remove; the collocated classification table in `workspace-git-branches.test.ts` pins every `sendGitError` remote branch incl. precedence over the keyword branches and the dirty-named remote shapes                                                                                                                                                 |
-| `packages/sdk-typescript/test/unit/DaemonClient.test.ts`            | URL/method/body composition for the three new methods, with and without `cwd`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `packages/web-shell/client/components/BranchPickerPopover.test.tsx` | open panel → list renders; add success/failure; local dash guard; remove two-click confirm + counted post-remove refreshes + `onBranchChanged`; back button; search filters; filtered-to-empty copy; load-failure rendering; sticky-warning survival across the round trip; reopen reset/disarm; Escape leaves the view first (cancelable-event witness for the anti-dismissal guard); focus restore to the manage row on exit with a search-box fallback while a mutation disables the row; `(invisible name)` label and armed-confirm aria-label; lookalike-row marking incl. URL tooltips; removal-consequence badge; silent re-read only on stale-list codes; rows kept while a re-read is in flight; still-configured re-read; config-write-failure and still-configured branch refreshes                                    |
-| `packages/web-shell/client/e2e/web-shell.git-remotes.spec.ts`       | Playwright + mockDaemon: sidebar pill → panel → list/add/remove (two-click), duplicate-add error, search filtering, add-form geometry inside the popover clip, and a stressed 15-row fixture pinning row/remove-button width inside the clip plus sticky header/form at both scroll extremes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| File                                                                | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/utils/git-remotes.test.ts`                       | config-read listing contract (config order, push-url override via `git remote set-url --push`, promisor/partial-clone remote, url-less section → empty urls, multi-valued urls, space-bearing subsection and embedded-newline values under the NUL framing, inherited-scope exclusion, `insteadOf` immunity, invalid-refspec survival, `otherSettings` count), repository-scope cases (include.path listing, split-section removal refusal, worktree-scope listing and worktree-scope removal completion incl. the dotted-sibling gate, killed/no-match config-read discrimination and the killed-read stdout dump strip in `git-remotes-kill.test.ts`, inherited-scope add refusal and removal refusal, and the inherited-shadowed worktree gate), add/remove round-trips in a tmp repo incl. dash/TAB/predicate-legal names, predicate tables incl. the add/remove leniency divergence and the NUL floor, trimmed-url storage, helper-URL rejection before spawn |
+| `packages/cli/src/serve/routes/workspace-git-remotes.test.ts`       | mirrors `workspace-git-branches.test.ts`: trust gate, generation guard (503 `workspace_runtime_unavailable` on all three endpoints), `invalid_cwd` 400, `invalid_remote_name`/`invalid_remote_url` 400, add→list, duplicate → 409 `remote_already_exists`, remove→list, remove-missing → 404 `no_such_remote`, config-lock → 409 `git_config_write_failed`, non-repo → 404 `not_a_git_repository`, unknown workspace → `workspace_mismatch`, path redaction, NUL-name 400 on remove; the collocated classification table in `workspace-git-branches.test.ts` pins every `sendGitError` remote branch incl. precedence over the keyword branches, keyword-carrying remote names, the dirty-named remote shapes, and the stdout half of the detail                                                                                                                                                                                                                   |
+| `packages/sdk-typescript/test/unit/DaemonClient.test.ts`            | URL/method/body composition for the three new methods, with and without `cwd`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `packages/web-shell/client/components/BranchPickerPopover.test.tsx` | open panel → list renders; add success/failure; local dash guard; remove two-click confirm + counted post-remove refreshes + `onBranchChanged`; back button; search filters; filtered-to-empty copy; load-failure rendering; sticky-warning survival across the round trip; reopen reset/disarm; Escape leaves the view first (cancelable-event witness for the anti-dismissal guard); focus restore to the manage row on exit with a search-box fallback while a mutation disables the row; `(invisible name)` label and armed-confirm aria-label; lookalike-row marking incl. URL tooltips; removal-consequence badge; silent re-read only on stale-list codes; rows kept while a re-read is in flight; still-configured re-read; config-write-failure and still-configured and no-such-remote branch refreshes; focus restores (add-form fields after settle, back button after a successful removal)                                                           |
+| `packages/web-shell/client/e2e/web-shell.git-remotes.spec.ts`       | Playwright + mockDaemon: sidebar pill → panel → list/add/remove (two-click), duplicate-add error incl. submit-button focus restore, search filtering, add-form geometry inside the popover clip, and a stressed 15-row fixture pinning row/remove-button width inside the clip plus sticky header/form at both scroll extremes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ## Files affected
 
@@ -342,7 +379,7 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
   `git-branches.test.ts` (env-isolation and normalization witnesses)
 - `packages/core/src/index.ts` (one export line)
 - `packages/cli/src/serve/routes/workspace-git-remotes.ts` (new) + `.test.ts` (new)
-- `packages/cli/src/serve/routes/workspace-git-branches.ts` (export `sendGitError`; the shared classifier gains the five remote-specific branches) + `workspace-git-branches.test.ts` (collocated `sendGitError` classification table)
+- `packages/cli/src/serve/routes/workspace-git-branches.ts` (export `sendGitError`; the shared classifier gains the six remote-specific branches) + `workspace-git-branches.test.ts` (collocated `sendGitError` classification table)
 - `packages/cli/src/serve/server.ts` (mount new register fn)
 - `packages/sdk-typescript/src/daemon/types.ts`, `daemon/index.ts`, `daemon/DaemonClient.ts`
 - `packages/sdk-typescript/test/unit/DaemonClient.test.ts`
@@ -392,11 +429,20 @@ workspaceCwd; remotes }` (mutations answer the fresh list without
 - Mutations inherit the full strict chain: mutation gate → trusted-runtime
   resolution → generation guard → workspace-contained `cwd`.
 - Error responses pass through the existing redaction (`redactGitMessage`)
-  so absolute paths never reach the client.
+  so absolute paths never reach the client. On top of that, the config
+  read's own failure path strips its stdout before the error leaves core:
+  a killed `git config --list --show-scope -z` can carry a partial dump of
+  EVERY scope's records (global/system URLs, credential helpers,
+  identities), and only git's stderr diagnostics belong in the
+  client-visible message.
 - Removal is verified: after `git remote remove`, the repository-scope
-  listing is re-read and a surviving section throws, so a removal git
-  refused — or a split section whose included half survives — can never be
-  reported to the client as success. A survivor held only at worktree
+  listing is re-read and a surviving section throws, AND the name's
+  resolution across ALL scopes is checked — a same-name inherited
+  (`global`/`system`) survivor keeps receiving pushes after what would
+  otherwise look like a successful removal, so that shape throws
+  `remote_still_configured` too. The Add side refuses the same collision
+  up front (`remote_shadows_inherited`), because git's duplicate check
+  cannot see the inherited section. A survivor held only at worktree
   scope is completed there (`git config --worktree --remove-section`),
   because `git remote remove` cannot edit `config.worktree` and would
   otherwise leave a listed row permanently un-removable after destroying

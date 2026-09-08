@@ -178,6 +178,7 @@ function mount(
     open: boolean;
     onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
+    gitCwd: string;
   }> = {},
 ): void {
   act(() => {
@@ -187,6 +188,7 @@ function mount(
           open={overrides.open ?? true}
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
+          gitCwd={overrides.gitCwd}
           status={overrides.status}
           onStatusRefreshed={overrides.onStatusRefreshed}
           onBranchChanged={overrides.onBranchChanged}
@@ -2171,10 +2173,16 @@ describe('BranchPickerPopover remotes view', () => {
     );
     await openRemotesView();
     let calls = workspaceGitRemotes.mock.calls.length;
+    const branchCalls = workspaceGitBranches.mock.calls.length;
+    const statusCalls = workspaceGit.mock.calls.length;
     clickTestId('remote-remove-origin');
     clickTestId('remote-remove-origin');
     await flush();
     expect(workspaceGitRemotes.mock.calls.length).toBeGreaterThan(calls);
+    // no_such_remote proves the refs and upstream config are gone too:
+    // refresh the branch list and the sidebar chip.
+    expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
     // A refused removal disarms the two-click confirm on the surviving
     // row: the next single click must re-arm, not execute.
     expect(
@@ -2277,27 +2285,79 @@ describe('BranchPickerPopover remotes view', () => {
       document.body.querySelector('[data-testid="remote-remove-origin"]'),
     ).toBeTruthy();
     expect(document.body.textContent).not.toContain('Loading remotes');
-
-    // A mutation that completes while the silent re-read is in flight has
-    // precedence: the older read must not repaint its stale snapshot.
-    workspaceGitRemoteRemove.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/repo',
-      remotes: [],
-    });
-    clickTestId('remote-remove-origin');
-    clickTestId('remote-remove-origin');
-    await flush();
-    expect(
-      document.body.querySelector('[data-testid="remote-remove-origin"]'),
-    ).toBeNull();
+    // The refusal catch AWAITS the re-read, so the settle-time effects
+    // (focus restore, busy release) only run after the list converges.
     await act(async () => {
-      release?.(defaultRemotesResult());
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
     });
     await flush();
     expect(
       document.body.querySelector('[data-testid="remote-remove-origin"]'),
     ).toBeNull();
+
+    // The add path keeps the fire-and-forget re-read: a mutation that
+    // completes while that read is in flight still wins when it lands.
+    let releaseAdd: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          409,
+          {
+            error: 'remote_already_exists',
+            message: 'error: remote fork already exists.',
+          },
+          'POST /workspaces/:workspace/git/remote: remote_already_exists',
+        ),
+      )
+      .mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/repo',
+        remotes: [
+          {
+            name: 'fork',
+            fetchUrl: 'https://example.com/f/r.git',
+            pushUrl: 'https://example.com/f/r.git',
+            extraFetchUrls: 0,
+            extraPushUrls: 0,
+            promisor: false,
+            customRefspec: false,
+            otherSettings: 0,
+          },
+        ],
+      });
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (releaseAdd = resolve)),
+    );
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      setter?.call(nameInput, 'fork');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      setter?.call(urlInput, 'https://example.com/f/r.git');
+      urlInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // First submit is refused (stale re-read held); the retry succeeds.
+    clickTestId('remote-add-submit');
+    await flush();
+    clickTestId('remote-add-submit');
+    await flush();
+    await act(async () => {
+      releaseAdd?.(defaultRemotesResult());
+    });
+    await flush();
+    // The older read must not repaint its stale snapshot over the row the
+    // successful add just put on screen.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fork"]'),
+    ).toBeTruthy();
   });
 
   it('Escape leaves the remotes view instead of dismissing the popover', async () => {
@@ -2567,27 +2627,105 @@ describe('BranchPickerPopover remotes view', () => {
     // git deletes refs/remotes/<name>/* before removing the config
     // section, so a lock-failed section write leaves the branch list
     // stale even though the remote row itself survives.
-    workspaceGitRemoteRemove.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        {
-          error: 'git_config_write_failed',
-          message: "error: Could not remove config section 'remote.origin'",
-        },
-        'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
-      ),
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((_, reject) => (release = reject)),
     );
     await openRemotesView();
     const branchCalls = workspaceGitBranches.mock.calls.length;
     const remoteCalls = workspaceGitRemotes.mock.calls.length;
     const statusCalls = workspaceGit.mock.calls.length;
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
     clickTestId('remote-remove-origin');
     clickTestId('remote-remove-origin');
+    await flush();
+    // jsdom never blurs a control when it becomes disabled, unlike real
+    // browsers: simulate the in-flight blur so the settle restore is
+    // what puts focus back.
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    await act(async () => {
+      release?.(
+        new DaemonHttpError(
+          409,
+          {
+            error: 'git_config_write_failed',
+            message: "error: Could not remove config section 'remote.origin'",
+          },
+          'POST /workspaces/:workspace/git/remote/remove: git_config_write_failed',
+        ),
+      );
+    });
     await flush();
     expect(workspaceGitBranches.mock.calls.length).toBeGreaterThan(branchCalls);
     expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusCalls);
     // The remote list is not stale here (the section survived): no re-read.
     expect(workspaceGitRemotes.mock.calls.length).toBe(remoteCalls);
+    // ...and the surviving row's button takes the focus back.
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    );
+  });
+
+  it('leaves search focus alone when the remove button never held focus', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    act(() => {
+      search?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // Programmatic/Safari-style activation never moved focus onto the row
+    // button, so the settle effect must not move it anywhere either.
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('resets the remotes view and restores no focus after a workspace switch', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches(undefined, { gitCwd: '/repo' });
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The workspace switches while the mutation is in flight: the view
+    // resets to branches, so focus lent to workspace A's control can
+    // never be restored onto workspace B's panel — carried by the view
+    // reset plus the settle effect's view-exit clearing.
+    mount({ gitCwd: '/repo2' });
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo2', remotes: [] });
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.dataset.testid).not.toBe('remote-remove-origin');
   });
 
   it('refreshes the branch list when the removal verification survives', async () => {
@@ -2686,6 +2824,68 @@ describe('BranchPickerPopover remotes view', () => {
         'input[data-testid="remote-add-name"]',
       )?.disabled,
     ).toBe(false);
+  });
+
+  it('restores focus to the back button after a successful removal', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+    // The row is gone with its focused button: land on the panel's back
+    // button rather than document.body.
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('restores focus to the back button when a refused removal unmounts the row', async () => {
+    // no_such_remote: the silent re-read drops the ghost row, so the
+    // settle-time focus restore must land on the back button, not on a
+    // remove button that is about to unmount.
+    workspaceGitRemoteRemove.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { error: 'no_such_remote', message: "error: No such remote: 'gone'" },
+        'POST /workspaces/:workspace/git/remote/remove: no_such_remote',
+      ),
+    );
+    await openRemotesView();
+    // The silent re-read after the refusal converges on the terminal's
+    // truth: origin is gone.
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
   });
 
   it('restores add-form focus after a mutation settles', async () => {

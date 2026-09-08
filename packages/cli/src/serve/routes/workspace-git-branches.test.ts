@@ -374,8 +374,63 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       // A remote whose NAME matches an earlier keyword branch must still
       // classify by the remote-specific shape.
       ["error: No such remote: 'not a git repository'", 404, 'no_such_remote'],
+      // Keyword-carrying names: the anchored shapes must keep git's own
+      // line-initial message prefix as the match, not the echoed name.
+      [
+        "error: No such remote: 'a remote b already exists'",
+        404,
+        'no_such_remote',
+      ],
+      [
+        'error: remote no such remote already exists.',
+        409,
+        'remote_already_exists',
+      ],
+      [
+        "error: No such remote: 'could not remove config section'",
+        404,
+        'no_such_remote',
+      ],
+      [
+        "error: No such remote: 'remote still configured after removal'",
+        404,
+        'no_such_remote',
+      ],
+      // The remaining keyword branches must stay behind the anchored
+      // remote shapes too: a remote can be named after any of them.
+      ["error: No such remote: 'nothing to commit'", 404, 'no_such_remote'],
+      ["error: No such remote: 'detached HEAD'", 404, 'no_such_remote'],
+      ["error: No such remote: 'no upstream'", 404, 'no_such_remote'],
+      // And for the remaining anchored remote branches.
+      ["error: No such remote: 'invalid refspec'", 404, 'no_such_remote'],
+      [
+        "error: No such remote: 'remote already configured in an inherited scope'",
+        404,
+        'no_such_remote',
+      ],
+      // A config-chosen VALUE can carry a real newline (git unescapes \n
+      // in quoted values), so an injected line-2 prefix must never be
+      // claimed: only line 1 (or git's two-line lock chain) classifies.
+      [
+        "fatal: invalid refspec '+refs/heads/*\nfatal: No such remote: 'spoofed''",
+        409,
+        'remote_config_unparsable',
+      ],
+      [
+        "fatal: invalid refspec '+refs/heads/*\nerror: could not remove config section 'remote.x''",
+        409,
+        'remote_config_unparsable',
+      ],
       [
         "error: could not lock config file .git/config\nerror: Could not remove config section 'remote.dirty-cache'",
+        409,
+        'git_config_write_failed',
+      ],
+      // A long lock line (a deeply nested config path) must not push the
+      // write failure's line-2 prefix past the client-message slice:
+      // classification reads the full redacted detail.
+      [
+        `error: could not lock config file ${'/p'.repeat(300)}/.git/config\nerror: could not remove config section 'remote.origin'`,
         409,
         'git_config_write_failed',
       ],
@@ -419,10 +474,41 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       ],
       ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
       ['remote still configured after removal', 409, 'remote_still_configured'],
+      [
+        'remote already configured in an inherited scope',
+        409,
+        'remote_shadows_inherited',
+      ],
     ])('maps %j to %i %s', (stderr, status, code) => {
       const out = classify(stderr);
       expect(out.status).toBe(status);
       expect(out.body['error']).toBe(code);
+    });
+
+    it('classifies the stdout half of the detail too', () => {
+      // Empty stdout/stderr parts are dropped before the join, so a shape
+      // arriving on stdout alone sits at line 1 — the anchored branches
+      // match line 1 only.
+      const out = { status: 0, body: {} as Record<string, unknown> };
+      const res = {
+        status(code: number) {
+          out.status = code;
+          return res;
+        },
+        json(body: Record<string, unknown>) {
+          out.body = body;
+          return res;
+        },
+      };
+      sendGitError(
+        res as never,
+        { stdout: "error: No such remote: 'gone'", stderr: '' },
+        'test-route',
+        sendBridgeError,
+        '/work/main',
+      );
+      expect(out.status).toBe(404);
+      expect(out.body['error']).toBe('no_such_remote');
     });
   });
 
