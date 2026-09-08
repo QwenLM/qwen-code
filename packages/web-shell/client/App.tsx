@@ -5028,24 +5028,40 @@ export function App({
     ],
   );
   useEffect(() => {
-    setArtifactPanelTabs((tabs) => {
-      const next = tabs.filter(
-        (tab) =>
-          tab.kind !== 'source' ||
-          (tab.owner.isCurrent() &&
-            Boolean(artifactWorkspaceTarget) &&
-            tab.workspaceId === artifactWorkspaceTarget?.workspaceId &&
-            sourcesState.supported &&
-            (tab.sourceSessionId !== connection.sessionId ||
-              !sourcesState.hydrated ||
-              sourcesState.sources.some(
-                (source) => source.id === tab.source.id,
-              ))),
+    const tabs = artifactPanelTabsRef.current;
+    const next = tabs.flatMap<ArtifactPanelTab>((tab) => {
+      if (tab.kind !== 'source') return [tab];
+      const fresh = sourcesState.sources.find(
+        (source) => source.id === tab.source.id,
       );
-      return next.length === tabs.length ? tabs : next;
+      if (
+        !tab.owner.isCurrent() ||
+        artifactWorkspaceCwd === undefined ||
+        tab.workspaceId !== artifactWorkspaceTarget?.workspaceId ||
+        !sourcesState.supported ||
+        (tab.sourceSessionId === connection.sessionId &&
+          sourcesState.hydrated &&
+          !fresh)
+      )
+        return [];
+      return fresh && fresh !== tab.source
+        ? [{ ...tab, source: fresh, title: fresh.title }]
+        : [tab];
     });
+    if (next.length === tabs.length && next.every((tab, i) => tab === tabs[i]))
+      return;
+    setArtifactPanelTabs(next);
+    if (
+      activeArtifactPanelTabId &&
+      !next.some((tab) => tab.id === activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
   }, [
-    artifactWorkspaceTarget,
+    activeArtifactPanelTabId,
+    artifactWorkspaceCwd,
+    artifactWorkspaceTarget?.workspaceId,
     sourcesState.owner,
     sourcesState.sources,
     sourcesState.hydrated,
@@ -5272,7 +5288,7 @@ export function App({
           resolvedFile.attachmentId !== undefined;
         const tab: ArtifactPanelTab = {
           id: previewOnly
-            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            ? `${sourcePreview ? 'source-attachment' : 'attachment'}:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
             : `file:${workspaceCwd ?? ''}:${workspacePath}`,
           kind: 'file',
           title: resolvedFile.name,

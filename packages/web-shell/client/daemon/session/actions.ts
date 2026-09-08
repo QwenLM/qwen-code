@@ -605,6 +605,7 @@ export function createDaemonSessionActions({
   const registerAcceptedAttachmentSources = (
     session: DaemonSessionClient,
     references: readonly DaemonSessionAttachmentReference[],
+    fileReferences: readonly DaemonSessionAttachmentReference[],
     files: readonly { name: string }[],
   ): void => {
     if (
@@ -614,10 +615,10 @@ export function createDaemonSessionActions({
       return;
     const sessionId = session.sessionId;
     const clientId = session.clientId;
-    let remaining = references.map((reference, index) => ({
+    let remaining = references.map((reference) => ({
       reference,
       title:
-        files[index - (references.length - files.length)]?.name ??
+        files[fileReferences.indexOf(reference)]?.name ??
         reference.attachmentId,
     }));
     const retry = async (): Promise<void> => {
@@ -637,9 +638,16 @@ export function createDaemonSessionActions({
           ),
         ),
       );
-      remaining = remaining.filter(
-        (_, index) => results[index]?.status === 'rejected',
-      );
+      remaining = remaining.filter((_, index) => {
+        const result = results[index];
+        if (result?.status !== 'rejected') return false;
+        const code = getDaemonErrorCode(result.reason);
+        return (
+          code !== 'source_limit_reached' &&
+          code !== 'invalid_source' &&
+          code !== 'source_attachment_not_found'
+        );
+      });
       if (sessionRef.current !== session || !remaining.length) return;
       noticeForSession(session)({
         severity: 'warning',
@@ -1163,6 +1171,7 @@ export function createDaemonSessionActions({
         registerAcceptedAttachmentSources(
           session,
           uploaded.references,
+          uploaded.fileReferences,
           displayedFiles,
         );
         // The prompt is admitted to the session here — signal it before we wait
@@ -1323,11 +1332,6 @@ export function createDaemonSessionActions({
         label: text,
         ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
       });
-      registerAcceptedAttachmentSources(
-        session,
-        uploaded.references,
-        displayedFiles,
-      );
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
@@ -1352,6 +1356,14 @@ export function createDaemonSessionActions({
             recoverable: true,
           });
         }
+      }
+      registerAcceptedAttachmentSources(
+        session,
+        uploaded.references,
+        uploaded.fileReferences,
+        displayedFiles,
+      );
+      if (options?.signal?.aborted) {
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );

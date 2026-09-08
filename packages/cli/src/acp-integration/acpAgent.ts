@@ -8496,6 +8496,9 @@ class QwenAgent implements Agent {
           'qwen/session/sources/copy',
         ].includes(method)
       ) {
+        if (!(error instanceof SessionSourceError)) {
+          debugLogger.error('[ACP] Session source ext-method error:', error);
+        }
         return {
           sourceError:
             error instanceof SessionSourceError
@@ -10286,6 +10289,13 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const sourceConfig = session.getConfig();
         const service = sourceConfig.getSessionSourceService();
+        if (
+          method === 'qwen/session/sources/copy' &&
+          !service &&
+          !sourceConfig.getChatRecordingService()
+        ) {
+          return { warnings: [] };
+        }
         if (!service)
           throw new SessionSourceError(
             'source_persistence_unavailable',
@@ -10368,8 +10378,13 @@ class QwenAgent implements Agent {
             attachmentIds as string[],
           );
         } finally {
-          if (temporaryConfig)
-            await this.cleanupUnstoredConfig(temporaryConfig);
+          if (temporaryConfig) {
+            try {
+              await this.cleanupUnstoredConfig(temporaryConfig);
+            } catch (error) {
+              debugLogger.warn('Failed to clean up source copy config:', error);
+            }
+          }
         }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
@@ -14129,43 +14144,8 @@ class QwenAgent implements Agent {
         });
       });
     }
-    if (
-      this.isTrustedManagedParent() &&
-      chatRecording !== false &&
-      !provisionalWorkspace &&
-      config.getChatRecordingService()
-    ) {
-      config.setSessionSourceServiceFactory(() => {
-        const sourceSessionId = config.getSessionId();
-        const recording = config.getChatRecordingService();
-        const sourceSessions = config.getSessionService();
-        return new SessionSourceService({
-          sessionId: sourceSessionId,
-          workspaceCwd: () => config.getTargetDir(),
-          load: async () => {
-            if (!recording)
-              throw new SessionSourceError(
-                'source_persistence_unavailable',
-                'Chat recording service unavailable',
-              );
-            await recording.flush();
-            return sourceSessions.readSessionSources(sourceSessionId);
-          },
-          persist: async (snapshot) => {
-            if (!recording)
-              throw new SessionSourceError(
-                'source_persistence_unavailable',
-                'Chat recording service unavailable',
-              );
-            await recording.recordSessionSourcesSnapshot(snapshot);
-          },
-          notify: (revision) =>
-            this.connection.extNotification(
-              'qwen/notify/session/sources-changed',
-              { sessionId: sourceSessionId, revision },
-            ),
-        });
-      });
+    if (!provisionalWorkspace && chatRecording !== false) {
+      this.bindSessionSourceService(config);
     }
     try {
       await config.initialize({
@@ -14193,6 +14173,43 @@ class QwenAgent implements Agent {
       void this.surfaceMcpFailuresWhenReady(config);
     }
     return config;
+  }
+
+  private bindSessionSourceService(config: Config): void {
+    if (this.isTrustedManagedParent() && config.getChatRecordingService()) {
+      config.setSessionSourceServiceFactory(() => {
+        const sourceSessionId = config.getSessionId();
+        const recording = config.getChatRecordingService();
+        const sourceSessions = config.getSessionService();
+        const workspaceCwd = config.storage.getProjectRoot();
+        return new SessionSourceService({
+          sessionId: sourceSessionId,
+          workspaceCwd: () => workspaceCwd,
+          load: async () => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.flush();
+            return sourceSessions.readSessionSources(sourceSessionId);
+          },
+          persist: async (snapshot) => {
+            if (!recording)
+              throw new SessionSourceError(
+                'source_persistence_unavailable',
+                'Chat recording service unavailable',
+              );
+            await recording.recordSessionSourcesSnapshot(snapshot);
+          },
+          notify: (revision) =>
+            this.connection.extNotification(
+              'qwen/notify/session/sources-changed',
+              { sessionId: sourceSessionId, revision },
+            ),
+        });
+      });
+    }
   }
 
   private async surfaceMcpFailuresWhenReady(config: Config): Promise<void> {
@@ -14516,6 +14533,9 @@ class QwenAgent implements Agent {
           this.assertManagedSessionAdmission();
           await config.activateProvisionalWorkspace();
           this.assertManagedSessionAdmission();
+          this.bindSessionSourceService(config);
+          await config.registerSessionSourceTool();
+          await config.getLlmClient().setTools();
           this.setupFileSystem(config);
           config.hydrateSessionRestoreFileHistory?.();
           if (sessionData?.fileHistorySnapshots?.length) {
@@ -14525,6 +14545,7 @@ class QwenAgent implements Agent {
           }
           await replaySessionHistory();
           await options.beforeStartPostReplayServices?.(session);
+          await config.getLlmClient().refreshStartupContextReminder();
           session.installRewriter();
           config.finalizeSessionRestore?.();
           startNonInteractiveOpenAILogHousekeeping(config, settings);

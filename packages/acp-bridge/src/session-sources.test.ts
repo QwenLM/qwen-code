@@ -5,6 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import { SessionAttachmentStore } from './sessionAttachments.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 
@@ -14,6 +18,107 @@ const link = {
 };
 
 describe('session source bridge', () => {
+  it.each([
+    { persistedOnly: false, attachmentRoot: false },
+    { persistedOnly: false, attachmentRoot: true },
+    { persistedOnly: true, attachmentRoot: false },
+    { persistedOnly: true, attachmentRoot: true },
+  ])(
+    'copies sources once for fork $persistedOnly / attachment storage $attachmentRoot',
+    async ({ persistedOnly, attachmentRoot }) => {
+      const root = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-source-fork-'),
+      );
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch)
+            return { newSessionId: 'fork-1', title: 'Fork' };
+          if (method === 'qwen/session/sources/copy')
+            return { warnings: ['One reference was omitted'] };
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        ...(attachmentRoot ? { sessionAttachmentsRoot: root } : {}),
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attachment = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Buffer.from('reference'),
+          'text/plain',
+          { clientId: session.clientId },
+          'reference.txt',
+        );
+        const fork = await bridge.branchSession(session.sessionId, {
+          ...(persistedOnly
+            ? { atRecordId: '11111111-1111-4111-8111-111111111111' }
+            : {}),
+        });
+        const copies = handle.agent.extMethodCalls.filter(
+          ({ method }) => method === 'qwen/session/sources/copy',
+        );
+        expect(copies).toEqual([
+          {
+            method: 'qwen/session/sources/copy',
+            params: {
+              sessionId: session.sessionId,
+              targetSessionId: 'fork-1',
+              targetCwd: WS_A,
+              attachmentIds:
+                attachmentRoot || !persistedOnly
+                  ? [attachment.attachmentId]
+                  : [],
+            },
+          },
+        ]);
+        expect(fork.sourceWarnings).toEqual(['One reference was omitted']);
+        expect(handle.agent.loadSessionCalls).toHaveLength(
+          persistedOnly ? 0 : 1,
+        );
+      } finally {
+        await bridge.shutdown();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { result: { warnings: [] }, warning: false },
+    {
+      result: { sourceError: { code: 'source_persistence_unavailable' } },
+      warning: true,
+    },
+    { result: { sourceError: { code: 'invalid_source' } }, warning: true },
+  ])(
+    'preserves fork source-copy warning semantics for $result',
+    async ({ result, warning }) => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch)
+            return { newSessionId: 'fork-1', title: 'Fork' };
+          if (method === 'qwen/session/sources/copy') return result;
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const fork = await bridge.branchSession(session.sessionId, {
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        });
+        if (warning)
+          expect(fork.sourceWarnings).toEqual([
+            'Session sources could not be copied.',
+          ]);
+        else expect(fork).not.toHaveProperty('sourceWarnings');
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
   it('never sends an attachment mutation to a replaced owner after the existence check', async () => {
     const handles: Array<ReturnType<typeof makeChannel>> = [];
     const bridge = makeBridge({

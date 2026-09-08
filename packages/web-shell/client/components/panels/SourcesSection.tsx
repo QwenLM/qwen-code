@@ -175,7 +175,7 @@ export function SourcesSection({
           ),
         )}
       </ul>
-      {loading && (
+      {loading && !entries.length && (
         <ul
           className={styles.attachmentFiles}
           data-testid="environment-file-list-skeleton"
@@ -252,7 +252,7 @@ function AddSourceDialog({
           ? { type, workspacePath: locator }
           : { type, url: locator };
       await state.upsert({
-        title: title.trim() || resolved,
+        title: title.trim() || resolved.trim().slice(0, 200),
         locator: sourceLocator,
         ...(description ? { description } : {}),
       });

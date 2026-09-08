@@ -286,6 +286,13 @@ export function sendBridgeError(
             ? 404
             : undefined;
   if (sourceErrorStatus !== undefined) {
+    const sourceError =
+      err instanceof Error ? err : new Error('Source operation failed');
+    if (sourceErrorStatus >= 500) {
+      reportBridgeError(sourceError, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(sourceError, ctx, daemonLog);
+    }
     res.status(sourceErrorStatus).json({
       error: err instanceof Error ? err.message : 'Source operation failed',
       code: sourceErrorKind,

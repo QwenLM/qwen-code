@@ -3035,15 +3035,17 @@ function SourceDetail({
         <h3>{source.title}</h3>
         {source.description && <p>{source.description}</p>}
         <p className="break-all text-sm text-muted-foreground">{locator.url}</p>
-        <a
-          className="text-primary underline"
-          href={locator.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(event) => openExternal(event, locator.url)}
-        >
-          {t('sources.openOriginal')}
-        </a>
+        {isSafeHref(locator.url) && (
+          <a
+            className="text-primary underline"
+            href={locator.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => openExternal(event, locator.url)}
+          >
+            {t('sources.openOriginal')}
+          </a>
+        )}
       </div>
     );
   const unsupported =

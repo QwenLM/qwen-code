@@ -223,11 +223,64 @@ describe('SessionTranscriptReader', () => {
     expect(await service.readSessionSources(sessionId)).toEqual({
       sourcesSnapshot: { version: 1, revision: 1, sources: [] },
     });
+    await fs.appendFile(
+      filePath,
+      JSON.stringify(record('first-turn', null, 'prompt')) + '\n',
+    );
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(restored?.runtime.sourcesSnapshot).toEqual(metadata.systemPayload);
+    expect(live?.sourcesSnapshot).toEqual(metadata.systemPayload);
     await fs.unlink(filePath);
     await fs.mkdir(filePath);
     await expect(service.readSessionSources(sessionId)).resolves.toEqual({
       sourcesUnavailable: true,
     });
+  });
+
+  it('marks source projections unavailable after an identity-invalid physical record', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('sources', 'u1', ''),
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        message: undefined,
+        systemPayload: { version: 1, revision: 1, sources: [] },
+      },
+    ]);
+    await fs.appendFile(
+      filePath,
+      JSON.stringify({
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        sessionId,
+        cwd: workspaceDir,
+        systemPayload: { version: 1, revision: 2, sources: [] },
+      }) + '\n',
+    );
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(
+      (await service.loadSession(sessionId))?.conversation.messages.map(
+        ({ uuid }) => uuid,
+      ),
+    ).toEqual(['u1']);
   });
 
   it('never resurrects an earlier source list after a truncated last snapshot', async () => {

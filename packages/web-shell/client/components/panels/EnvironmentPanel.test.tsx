@@ -806,6 +806,38 @@ describe('EnvironmentPanel', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('bounds the default source title without shortening its location', async () => {
+    const state = sourceState();
+    const view = mount({ sources: state });
+    await act(async () =>
+      view
+        .querySelector<HTMLButtonElement>('[aria-label="Add source"]')
+        ?.click(),
+    );
+    const location = document.querySelector<HTMLInputElement>(
+      'input[placeholder="docs/requirements.md"]',
+    )!;
+    const path = 'a'.repeat(250);
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(location, path);
+      location.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      document
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(state.upsert).toHaveBeenCalledWith({
+      title: 'a'.repeat(200),
+      locator: { type: 'workspace_file', workspacePath: path },
+    });
+  });
+
   it('releases a floating panel after source capability disappears while adding', async () => {
     const state = sourceState();
     const onDismiss = vi.fn();
@@ -903,7 +935,7 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('historical.html');
     expect(view.textContent).toContain('Source listing unavailable');
     expect(view.textContent).toContain('Upload listing unavailable');
-    expect(view.querySelector('[role="status"]')).not.toBeNull();
+    expect(view.querySelector('[role="status"]')).toBeNull();
     const alerts = view.querySelectorAll('[role="alert"]');
     act(() => alerts[1]?.querySelector<HTMLButtonElement>('button')?.click());
     expect(onRetryAttachments).toHaveBeenCalledOnce();

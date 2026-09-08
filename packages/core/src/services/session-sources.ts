@@ -151,7 +151,8 @@ export function validateSessionSourceInput(value: unknown): SessionSourceInput {
       break;
     case 'url': {
       object(raw, ['type', 'url']);
-      const url = text(raw['url'], 'url', 2048);
+      const maxUrlLength = 2048;
+      const url = text(raw['url'], 'url', maxUrlLength);
       let parsed: URL;
       try {
         parsed = new URL(url);
@@ -162,10 +163,14 @@ export function validateSessionSourceInput(value: unknown): SessionSourceInput {
         !['http:', 'https:'].includes(parsed.protocol) ||
         !parsed.hostname ||
         parsed.username ||
-        parsed.password ||
-        parsed.href.length > 2048
+        parsed.password
       ) {
         return invalid('Source URL must be HTTP(S) without credentials');
+      }
+      if (parsed.href.length > maxUrlLength) {
+        return invalid(
+          `Source URL is too long (maximum ${maxUrlLength} characters after normalization)`,
+        );
       }
       locator = { type: 'url', url: parsed.href };
       break;

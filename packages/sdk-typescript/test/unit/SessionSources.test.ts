@@ -77,8 +77,16 @@ describe('session sources', () => {
       reduceDaemonSessionEvent(createDaemonSessionViewState(), event)
         .unrecognizedKnownEventCount,
     ).toBe(0);
-    expect(
-      normalizeDaemonEvent({ ...event, data: { revision: 'invalid' } }),
-    ).toEqual([]);
+    expect(normalizeDaemonEvent({ ...event, data: { revision: 2 } })).toEqual(
+      [],
+    );
+    for (const revision of ['invalid', -1, 1.5]) {
+      expect(
+        normalizeDaemonEvent({
+          ...event,
+          data: { sessionId: 'session-a', revision },
+        }),
+      ).toEqual([]);
+    }
   });
 });

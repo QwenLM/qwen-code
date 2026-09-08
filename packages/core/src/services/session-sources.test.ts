@@ -102,6 +102,16 @@ describe('session sources', () => {
     );
   });
 
+  it('reports normalized URL length overflow separately from invalid credentials', () => {
+    expect(() =>
+      validateSessionSourceInput(
+        link(`https://example.com/${'文'.repeat(230)}`),
+      ),
+    ).toThrow(
+      'Source URL is too long (maximum 2048 characters after normalization)',
+    );
+  });
+
   it.each([
     { ...file(), extra: true },
     { ...file(), title: ' ' },
