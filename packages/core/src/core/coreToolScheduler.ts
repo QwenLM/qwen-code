@@ -2233,7 +2233,7 @@ export class CoreToolScheduler {
     this.setStatusInternal(
       callId,
       'cancelled',
-      'Tool call cancelled by user.',
+      TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
       'not_started',
     );
     this.finalizeBlockedSpan(callId, 'aborted', 'system');
@@ -2373,7 +2373,7 @@ export class CoreToolScheduler {
           this.setStatusInternal(
             callId,
             'cancelled',
-            'Tool call cancelled by user.',
+            TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
             'not_started',
           );
           if (this.blockedSpans.has(callId)) {
@@ -4313,7 +4313,7 @@ export class CoreToolScheduler {
             this.setStatusInternal(
               reqInfo.callId,
               'cancelled',
-              'Tool call cancelled by user.',
+              TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
               'not_started',
             );
             // If this tool was waiting on the user, end the blocked span
@@ -4490,7 +4490,7 @@ export class CoreToolScheduler {
         this.setStatusInternal(
           callId,
           'cancelled',
-          'Tool call cancelled by user.',
+          TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
           'not_started',
         );
       } else {
