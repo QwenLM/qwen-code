@@ -577,11 +577,14 @@ the ordinary session catalog, but the sidebar's Tasks filter hid them. The
 existing session-source switch now has an Agents tab backed by the same
 `WorkspaceSection` and ordinary session page; no second conversation list was
 added. A run row links to the ordinary task session. The current automatic title
-is only the Agent name, so two task sessions owned by the same Agent are not
-distinguishable in the list; it must become `Agent · Task` without overwriting a
-person's `/rename`. The store carries transcript-offset fields, but the session
-adapter does not produce them and the REST/UI path does not consume them, so a
-run row currently opens the whole task session rather than a proven run slice.
+is now `Agent · Task`, while a person's `/rename` remains authoritative. The
+shared ledger still exists because it is the only record spanning several
+Agents, but it reuses the existing Markdown renderer and the ordinary session
+list instead of duplicating either. Root tasks appear once, child tasks stay
+under their parent, and the child links back to that parent. The store carries
+transcript-offset fields, but the session adapter does not produce them and the
+REST/UI path does not consume them, so a run row currently opens the whole task
+session rather than a proven run slice.
 
 Stage C landed items 1 and 2 of the four. Labels, project and due date are
 still display-only work and are not done.
@@ -593,9 +596,10 @@ in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
 The creation endpoint accepts those identity fields in its first roster write,
 and the list reports status from live task sessions. The primary New Agent
-action opens Qwen Code's existing manual/model-assisted builder and submits that
-form directly to the roster. Linking an existing definition is a secondary
-compatibility action. This is one product object and one durable write.
+action first offers model-assisted generation or manual configuration, then
+submits Qwen Code's existing builder directly to the roster. Linking an existing
+definition is a secondary compatibility action, not a competing create form.
+This is one product object and one durable write.
 
 ### How this branch was verified
 

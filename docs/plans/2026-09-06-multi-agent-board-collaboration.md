@@ -150,6 +150,20 @@ legacy definition is still treated as an optional behaviour template and its
 identity contract is appended last, but that compatibility path has not been
 separately exercised with a live model.
 
+**Verified through the corrected product surface (2026-09-08).** The Agent
+creation entry now begins with the same two choices the product intends to
+support: model-assisted generation or manual configuration; both write one
+persistent workspace Agent rather than requiring a subagent definition. The
+Agent roster expands directly to that identity's assigned tasks. The shared
+task list shows roots once and keeps child tasks under their parent; a child
+detail links back to the parent. Thread bodies, acceptance criteria and posts
+reuse Web Shell's Markdown renderer. A fresh task assigned to
+`identity-proof` reached `in_review`, appeared under that Agent, and its
+ordinary conversation appeared in the existing Agents session list as
+`identity-proof · Session title acceptance`. Existing manually renamed
+sessions remain untouched. This is local-daemon product-path evidence, not a
+claim of a Multica-compatible remote Runtime.
+
 An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
 peer mentions in result prose, and each mention correctly booked another run.
 That tree reached 253,320 accounted tokens and blocked before the parent could
@@ -206,7 +220,8 @@ The session port prepares the session first. Dispatch persists the run/session
 binding and pre-prompt usage baseline before activating model execution, without
 waiting for turn completion. The port reports the active run identity and any
 asynchronous failure for subsequent reconciliation. Replies received while busy
-are durably rebooked; true mid-turn delivery remains a separate missing wire.
+enter the existing correlated session-input channel and are consumed at a tool-
+round boundary; this is not token-stream interruption.
 
 ### 1.1 The correction this replaces
 
@@ -695,8 +710,7 @@ action on the child caused it.
 
 ## 5. Module map
 
-Implemented through the step-6 stacked branch; the shared runtime turn seam is
-kept in the next isolated child PR:
+Implemented on the single #11206 delivery branch:
 
 | File                                                      | Responsibility                                         |
 | --------------------------------------------------------- | ------------------------------------------------------ |
@@ -898,7 +912,7 @@ Production surface status:
 
 | State                                          | Piece                                                                                                                        |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Implemented and exercised on the happy path    | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Web Shell, transcript slices, cancellation UI |
+| Implemented and exercised on the happy path    | run envelope, ambient binding, thread tools, dispatcher, parent reports, REST, Agent/task navigation, task-scoped sessions, cancellation UI |
 | Implemented but not failure-injection verified | delivery reconciliation, restart/stall recovery, host replacement, startup outbox replay                                     |
 | Not implemented pending product decision       | channel delivery for the four notification events (§9.12)                                                                    |
 
@@ -1079,7 +1093,7 @@ layers, and the difference is structural, not cosmetic:
 
 |                                                                | Agent Board (#9402)                                                                        | Workspace agents threads (this design)                                           |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | agents Qwen Code hosts itself, on the background-agent layer                     |
+| Who participates                                               | any process that can run `qwen board` — Codex, shell scripts, cron                         | persistent workspace identities executed in task-scoped top-level ACP sessions  |
 | Actor identity                                                 | `--as <label>`, recorded, not authenticated (`board-lock.ts`, user doc)                    | derived from the ambient run; never model- or caller-supplied (§6)               |
 | Delivery                                                       | pull: a participant sees work only when it reads the board                                 | push: admission books a run, the dispatcher wakes the body (§4)                  |
 | Storage scope                                                  | global named boards, `~/.qwen/boards/<board>/`                                             | one workspace, `~/.qwen/tmp/<project-hash>/workspace agents/` (§3)               |

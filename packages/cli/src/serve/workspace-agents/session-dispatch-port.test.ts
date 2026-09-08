@@ -19,6 +19,7 @@ const AGENT: WorkspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 const TURN = {
   workspaceId: 'ws_1',
   threadId: 'th_1',
+  threadTitle: 'First task',
   rootThreadId: 'th_1',
   runId: 'run_1',
   attempt: 1,

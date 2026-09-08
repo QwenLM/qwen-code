@@ -60,6 +60,7 @@ export function groupThreads(
   const idle: ThreadSummaryView[] = [];
   const done: ThreadSummaryView[] = [];
   for (const thread of threads) {
+    if (thread.parentThreadId) continue;
     if (thread.status === 'done') done.push(thread);
     else if (thread.status === 'blocked' || thread.status === 'in_review') {
       needsYou.push(thread);
@@ -234,6 +235,8 @@ export function formatBudget(budget: {
 export interface RoutingPreviewTarget {
   agentName: string;
   willWake: boolean;
+  kind?: 'dispatch' | 'coalesce' | 'skip';
+  into?: 'queued' | 'running';
   /** Present when `willWake` is false. A skip reason from the rules layer. */
   reason?: string;
   /** True when the name matched no agent, so it renders as a warning. */
@@ -321,8 +324,11 @@ export function summarizePreview(
 ): string {
   const waking = targets.filter((target) => target.willWake);
   if (waking.length === 0) return 'Nobody will be woken by this reply.';
-  if (waking.length === 1) return `${waking[0]!.agentName} will start working.`;
-  const names = waking.map((target) => target.agentName);
-  const last = names.pop()!;
-  return `${names.join(', ')} and ${last} will start working.`;
+  return waking
+    .map((target) =>
+      target.kind === 'coalesce'
+        ? `${target.agentName} will receive this in ${target.into === 'running' ? 'the running task' : 'queued work'}.`
+        : `${target.agentName} will start working.`,
+    )
+    .join(' ');
 }

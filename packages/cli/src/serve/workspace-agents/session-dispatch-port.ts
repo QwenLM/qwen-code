@@ -43,7 +43,8 @@ export type AgentSessionBridge = Pick<
   | 'listWorkspaceSessions'
   | 'cancelSession'
   | 'getSessionStatsStatus'
->;
+> &
+  Partial<Pick<AcpSessionBridge, 'updateSessionMetadata'>>;
 
 export interface CreateSessionDispatchPortInput {
   bridge: AgentSessionBridge;
@@ -150,6 +151,7 @@ export function createSessionDispatchPort(
       runId,
       workspaceId,
       threadId,
+      threadTitle,
       rootThreadId,
       attempt,
       contextThroughSequence,
@@ -188,6 +190,19 @@ export function createSessionDispatchPort(
           contextThroughSequence,
         };
         const sessionId = session.sessionId;
+        const summary = sessionFor(
+          bridge,
+          workspaceCwd,
+          agent,
+          threadId,
+          sessionId,
+        );
+        if (summary?.titleSource !== 'manual') {
+          bridge.updateSessionMetadata?.(sessionId, {
+            displayName: `${agent.name} · ${threadTitle}`.slice(0, 256),
+            titleSource: 'auto',
+          });
+        }
         return {
           status: 'started',
           sessionId,

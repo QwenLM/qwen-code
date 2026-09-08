@@ -8,6 +8,7 @@ import { useMemo, useState } from 'react';
 import { ArrowLeftIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { Markdown } from '../messages/Markdown';
 import {
   buildRunRows,
   explainSkip,
@@ -42,6 +43,7 @@ export interface ThreadDetailView {
   /** What "done" means here, in the author's words. */
   acceptanceCriteria?: string;
   priority?: 'urgent' | 'high' | 'normal' | 'low';
+  parent?: { id: string; title: string };
   assigneeName?: string;
   status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done';
   /** The resolver's sentence. Rendered verbatim. */
@@ -253,6 +255,16 @@ export function ThreadView({
         >
           <ArrowLeftIcon />
         </Button>
+        {thread.parent && onOpenThread ? (
+          <button
+            type="button"
+            className={styles.parentLink}
+            onClick={() => onOpenThread(thread.parent!.id)}
+          >
+            {thread.parent.title}
+            <span aria-hidden="true"> /</span>
+          </button>
+        ) : null}
         <h1 className={styles.title}>{thread.title}</h1>
         {onAssign ? (
           <select
@@ -334,13 +346,17 @@ export function ThreadView({
           </p>
 
           {thread.body ? (
-            <p className={styles.threadBody}>{thread.body}</p>
+            <div className={styles.threadBody}>
+              <Markdown content={thread.body} />
+            </div>
           ) : null}
 
           {thread.acceptanceCriteria ? (
             <section className={styles.criteria}>
               <h2 className={styles.criteriaTitle}>Done when</h2>
-              <p className={styles.criteriaText}>{thread.acceptanceCriteria}</p>
+              <div className={styles.criteriaText}>
+                <Markdown content={thread.acceptanceCriteria} />
+              </div>
             </section>
           ) : null}
 
@@ -378,7 +394,14 @@ export function ThreadView({
                   {post.authorDeleted ? ' (removed)' : ''}
                 </span>
                 <span className={styles.time}>{formatTime(post.at)}</span>
-                <p className={styles.postText}>{post.text}</p>
+                <div className={styles.postText}>
+                  <Markdown
+                    content={post.text}
+                    {...(post.authorKind === 'agent'
+                      ? { source: 'assistant' as const }
+                      : {})}
+                  />
+                </div>
                 {post.outcomes?.map((outcome, index) => {
                   const skipped =
                     outcome.kind === 'skip'

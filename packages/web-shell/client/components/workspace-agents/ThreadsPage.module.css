@@ -145,6 +145,30 @@
   white-space: nowrap;
 }
 
+.agentName,
+.agentActivityLink {
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.agentName {
+  font-weight: 600;
+}
+
+.agentName:hover,
+.agentActivityLink:hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
 .agentWaiting {
   font-variant-numeric: tabular-nums;
 }
@@ -315,6 +339,31 @@
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+.agentWorkspace {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.agentWorkspaceHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 8px 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.agentWorkspaceHeader strong {
+  color: var(--foreground);
+  font-size: 13px;
 }
 
 .configLabel {

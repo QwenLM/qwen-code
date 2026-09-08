@@ -12,6 +12,7 @@ import {
   explainSkip,
   groupThreads,
   needsAttention,
+  summarizePreview,
   type RoutingPreviewTarget,
   type ThreadGroup,
   type ThreadSummaryView,
@@ -45,11 +46,9 @@ export interface ThreadsPageProps {
   view: AgentWorkspaceView;
   onViewChange: (view: AgentWorkspaceView) => void;
   onOpenThread: (threadId: string) => void;
-  onCreateAgent: (input: NewWorkspaceAgent) => void;
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
-  agentDefinitions?: readonly string[];
   onOpenAgentBuilder?: () => void;
   onOpenDefinitions?: () => void;
   capabilities?: AgentCapabilitiesView;
@@ -188,11 +187,9 @@ export function ThreadsPage({
   view,
   onViewChange,
   onOpenThread,
-  onCreateAgent,
   onDeleteAgent,
   onSetAgentEnabled,
   onUpdateAgent,
-  agentDefinitions = [],
   onOpenAgentBuilder,
   onOpenDefinitions,
   capabilities,
@@ -203,8 +200,9 @@ export function ThreadsPage({
   loading,
 }: ThreadsPageProps) {
   const groups = useMemo(() => groupThreads(threads), [threads]);
-  const [creating, setCreating] = useState<'agent' | 'thread' | undefined>();
+  const [creating, setCreating] = useState<'thread' | undefined>();
   const [configuring, setConfiguring] = useState<string>();
+  const [openAgentId, setOpenAgentId] = useState<string>();
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
@@ -228,25 +226,6 @@ export function ThreadsPage({
       });
       setConfiguring(undefined);
     };
-
-  const submitAgent = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const description = String(data.get('description') ?? '').trim();
-    const agentType = String(data.get('agentType') ?? '').trim();
-    const model = String(data.get('model') ?? '').trim();
-    const instructions = String(data.get('instructions') ?? '').trim();
-    const maxConcurrentRuns = Number(data.get('maxConcurrentRuns') ?? 1);
-    onCreateAgent({
-      name: String(data.get('name') ?? '').trim(),
-      ...(description ? { description } : {}),
-      ...(agentType ? { agentType } : {}),
-      ...(model ? { model } : {}),
-      ...(instructions ? { instructions } : {}),
-      maxConcurrentRuns,
-    });
-    setCreating(undefined);
-  };
 
   const submitThread = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -275,6 +254,7 @@ export function ThreadsPage({
     onViewChange(next);
     setCreating(undefined);
     setConfiguring(undefined);
+    setOpenAgentId(undefined);
     onPreviewThread?.(undefined);
   };
 
@@ -313,21 +293,9 @@ export function ThreadsPage({
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
             <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setCreating('agent')}
-            >
-              Link definition
-            </Button>
-          ) : null}
-          {view === 'agents' ? (
-            <Button
               variant="outline"
               size="sm"
-              onClick={() => {
-                if (onOpenAgentBuilder) onOpenAgentBuilder();
-                else setCreating('agent');
-              }}
+              onClick={onOpenAgentBuilder}
             >
               <PlusIcon data-icon="inline-start" />
               Agent
@@ -348,77 +316,6 @@ export function ThreadsPage({
         </div>
       </header>
       <div className={styles.pageBody}>
-        {view === 'agents' && creating === 'agent' ? (
-          <form className={styles.createForm} onSubmit={submitAgent}>
-            <strong>Link an existing definition</strong>
-            <input
-              className={styles.field}
-              name="name"
-              placeholder="Name, e.g. alice"
-              required
-            />
-            <input
-              className={styles.field}
-              name="description"
-              placeholder="Role or specialty"
-            />
-            <textarea
-              className={styles.field}
-              name="instructions"
-              rows={4}
-              placeholder="How this agent should work"
-            />
-            <label className={styles.configLabel}>
-              Agent definition
-              <select className={styles.field} name="agentType" defaultValue="">
-                <option value="">Workspace default</option>
-                {agentDefinitions.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <input
-              className={styles.field}
-              name="model"
-              placeholder="Model (workspace default)"
-            />
-            <label className={styles.configLabel}>
-              Threads at once
-              <input
-                className={styles.field}
-                name="maxConcurrentRuns"
-                type="number"
-                min={1}
-                max={8}
-                defaultValue={1}
-              />
-            </label>
-            <p className={styles.configNote}>
-              Runtime: this local daemon · one conversation per Agent and task ·
-              not a separate OS process
-            </p>
-            <p className={styles.configNote}>
-              Workspace agents are read-only. Definitions can narrow that
-              boundary, never widen it.
-            </p>
-            <div className={styles.formActions}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setCreating(undefined)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" size="sm" disabled={pending}>
-                Create agent
-              </Button>
-            </div>
-          </form>
-        ) : null}
-
         {view === 'tasks' && creating === 'thread' ? (
           <form className={styles.createForm} onSubmit={submitThread}>
             <strong>New task</strong>
@@ -471,14 +368,7 @@ export function ThreadsPage({
                 role="status"
                 className="space-y-1 text-xs text-muted-foreground"
               >
-                <strong>
-                  {createPreview.some((target) => target.willWake)
-                    ? `Will start ${createPreview
-                        .filter((target) => target.willWake)
-                        .map((target) => `@${target.agentName}`)
-                        .join(', ')}.`
-                    : 'No agent will start.'}
-                </strong>
+                <strong>{summarizePreview(createPreview)}</strong>
                 {createPreview
                   .filter((target) => !target.willWake)
                   .map((target) => {
@@ -543,17 +433,34 @@ export function ThreadsPage({
                   style={agent.color ? { color: agent.color } : undefined}
                   aria-hidden="true"
                 />
-                <strong>{agent.name}</strong>
+                <button
+                  type="button"
+                  className={styles.agentName}
+                  aria-expanded={openAgentId === agent.id}
+                  onClick={() =>
+                    setOpenAgentId(
+                      openAgentId === agent.id ? undefined : agent.id,
+                    )
+                  }
+                >
+                  {agent.name}
+                </button>
                 <span className={styles.agentDescription}>
                   {agent.description || 'general agent'} · {agent.runtime.label}
                 </span>
-                <span className={styles.agentActivity}>
-                  {agent.retiredAt
-                    ? 'retired'
-                    : agent.workingOn
-                      ? `${agent.workingOn.state} · ${agent.workingOn.title}`
-                      : agent.status}
-                </span>
+                {agent.workingOn ? (
+                  <button
+                    type="button"
+                    className={`${styles.agentActivity} ${styles.agentActivityLink}`}
+                    onClick={() => onOpenThread(agent.workingOn!.id)}
+                  >
+                    {agent.workingOn.state} · {agent.workingOn.title}
+                  </button>
+                ) : (
+                  <span className={styles.agentActivity}>
+                    {agent.retiredAt ? 'retired' : agent.status}
+                  </span>
+                )}
                 <span className={styles.agentWaiting}>
                   {agent.waiting ? `${agent.waiting} waiting` : '—'}
                 </span>
@@ -670,6 +577,36 @@ export function ThreadsPage({
                       </Button>
                     </div>
                   </form>
+                ) : null}
+                {openAgentId === agent.id ? (
+                  <section className={styles.agentWorkspace}>
+                    <div className={styles.agentWorkspaceHeader}>
+                      <strong>Tasks</strong>
+                      <span>
+                        {agent.runtime.label} · {agent.status}
+                      </span>
+                    </div>
+                    {threads.some(
+                      (thread) => thread.assigneeName === agent.name,
+                    ) ? (
+                      threads
+                        .filter(
+                          (thread) => thread.assigneeName === agent.name,
+                        )
+                        .sort((a, b) => b.updatedAt - a.updatedAt)
+                        .map((thread) => (
+                          <ThreadRow
+                            key={thread.id}
+                            thread={thread}
+                            onOpen={onOpenThread}
+                          />
+                        ))
+                    ) : (
+                      <p className={styles.emptyRoster}>
+                        No tasks assigned to this Agent yet.
+                      </p>
+                    )}
+                  </section>
                 ) : null}
               </div>
             ))

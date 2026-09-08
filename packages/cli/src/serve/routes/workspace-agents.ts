@@ -248,10 +248,7 @@ function runView(
     trigger: triggerText(thread, run),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
-    // The session this run's turn was taken in. An agent is its own local
-    // session, so this is where the whole of what it did is readable — the
-    // thread-scoped slice below answers the narrower question of what it did
-    // *here*, which a session serving several threads cannot.
+    // The task-scoped session this run's turn was taken in.
     ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
   };
 }
@@ -611,6 +608,9 @@ export function registerWorkspaceAgentRoutes(
         return;
       }
       const resolution = resolve(thread, threads);
+      const parent = thread.parentThreadId
+        ? threads.find((candidate) => candidate.id === thread.parentThreadId)
+        : undefined;
       const treeTokens = threads
         .filter((candidate) => candidate.rootThreadId === thread.rootThreadId)
         .reduce(
@@ -632,6 +632,14 @@ export function registerWorkspaceAgentRoutes(
           ? { acceptanceCriteria: thread.acceptanceCriteria }
           : {}),
         priority: thread.priority ?? DEFAULT_THREAD_PRIORITY,
+        ...(thread.parentThreadId
+          ? {
+              parent: {
+                id: thread.parentThreadId,
+                title: parent?.title ?? 'Parent task',
+              },
+            }
+          : {}),
         ...(thread.assigneeAgentId
           ? { assigneeName: agentName(agents, thread.assigneeAgentId) }
           : {}),
@@ -760,6 +768,8 @@ export function registerWorkspaceAgentRoutes(
           {
             agentName: target?.name ?? assigneeName,
             willWake: decision.kind !== 'skip',
+            kind: decision.kind,
+            ...(decision.kind === 'coalesce' ? { into: decision.into } : {}),
             ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
             unknown: !target,
           },
@@ -852,6 +862,8 @@ export function registerWorkspaceAgentRoutes(
           return {
             agentName: target?.name ?? agentId,
             willWake: decision.kind !== 'skip',
+            kind: decision.kind,
+            ...(decision.kind === 'coalesce' ? { into: decision.into } : {}),
             ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
           };
         }),

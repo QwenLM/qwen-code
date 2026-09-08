@@ -130,6 +130,7 @@ export interface AgentDispatchPort {
     prompt: string;
     workspaceId: string;
     threadId: string;
+    threadTitle: string;
     rootThreadId: string;
     runId: string;
     attempt: number;
@@ -813,6 +814,7 @@ export async function dispatchOnce(
       prompt: prompt.text,
       workspaceId: workspace.workspaceId,
       threadId: thread.id,
+      threadTitle: thread.title,
       rootThreadId: thread.rootThreadId,
       runId: run.id,
       attempt: claimed.run.attempts,

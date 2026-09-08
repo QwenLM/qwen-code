@@ -25,6 +25,24 @@
   color: var(--muted-foreground);
 }
 
+.parentLink {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.parentLink:hover {
+  color: var(--foreground);
+}
+
 .title {
   min-width: 0;
   overflow: hidden;

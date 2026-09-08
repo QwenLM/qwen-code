@@ -326,7 +326,6 @@ export function AgentsManagerPage({
         {navigation}
         <ThreadsRoute
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
-          agentDefinitions={agents.map((agent) => agent.name)}
           onOpenDefinitions={() => setAgentsOpen(false)}
         />
       </div>

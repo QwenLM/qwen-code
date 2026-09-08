@@ -23,7 +23,7 @@ Current run ids, timestamps and limitations are recorded in
 
 | Requirement                                         | Current evidence / remaining work                                                                                                                                                                  |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Persistent identities and separate sessions         | Existing leader/worker reused across tasks; leader continuation preserves its session id. A fresh no-definition Agent reproduced its durable marker and independent workspace-Agent role from the corrected live system instruction. Sessions share one ACP process. |
+| Persistent identities and separate sessions         | Existing leader/worker reused across tasks; leader continuation preserves its session id. A fresh no-definition Agent reproduced its durable marker and independent workspace-Agent role from the corrected live system instruction. A later task appeared as `identity-proof · Session title acceptance` in the ordinary session list. Sessions share one ACP process. |
 | Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded.                                                                           |
 | Child delegation and parent report                  | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run.                                                                                     |
 | Live human input                                    | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open.                                                               |
@@ -395,6 +395,20 @@ and the local Runtime card. The already-running daemon was not restarted, so
 its new `runtime: online` response and idle-without-session status were source
 checked but not claimed as a browser observation. No test suite, build, lint,
 typecheck or CI ran.
+
+**Product-linking observation (2026-09-08).** The primary New Agent action now
+starts with model-assisted or manual creation and no longer competes with a
+second inline definition-linking form. Expanding `identity-proof` in the roster
+showed both of its assigned tasks and opened either task in the shared ledger.
+The root task list showed the seven root completions once and omitted the
+delegated child from the top level; opening that child from its parent displayed
+a parent breadcrumb. The worker's bullet list and inline code rendered through
+the existing Markdown component. A fresh assigned task reached `in_review`, and
+the existing Agents session tab displayed its ordinary conversation as
+`identity-proof · Session title acceptance`; older sessions kept their prior
+titles, and manual-title preservation is enforced by the adapter but was not
+changed in this browser pass. No local test suite, build, lint, typecheck or CI
+ran.
 Tool responses now report booking as queued work rather than claiming the peer
 has already started, and `thread_block` reports the durable blocked state
 without promising channel delivery while §9.12 remains open.

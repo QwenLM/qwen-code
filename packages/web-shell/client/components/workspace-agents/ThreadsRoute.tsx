@@ -127,14 +127,12 @@ export interface ThreadsRouteProps {
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
   onOpenAgentSession?: (sessionId: string) => void;
-  agentDefinitions?: readonly string[];
   onOpenDefinitions?: () => void;
 }
 
 export function ThreadsRoute({
   api,
   onOpenAgentSession,
-  agentDefinitions,
   onOpenDefinitions,
 }: ThreadsRouteProps) {
   const workspace = useWorkspace();
@@ -382,7 +380,6 @@ export function ThreadsRoute({
         createPreview={createPreview}
         pending={pending}
         onOpenThread={openThread}
-        onCreateAgent={(input) => void mutate(() => client.createAgent(input))}
         onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
         onSetAgentEnabled={(id, enabled) =>
           void mutate(() => client.setAgentEnabled(id, enabled))
@@ -390,7 +387,6 @@ export function ThreadsRoute({
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
-        {...(agentDefinitions ? { agentDefinitions } : {})}
         onOpenAgentBuilder={() => setCreatingAgent(true)}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}

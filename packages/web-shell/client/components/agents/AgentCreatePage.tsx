@@ -147,6 +147,9 @@ export function AgentCreatePage({
   const [hooks, setHooks] = useState(
     agent?.hooks ? JSON.stringify(agent.hooks, null, 2) : '',
   );
+  const [workspaceCreateMethod, setWorkspaceCreateMethod] = useState<
+    'model' | 'manual'
+  >();
   const [generationOpen, setGenerationOpen] = useState(false);
   const [generationPrompt, setGenerationPrompt] = useState('');
   const [generatedDescription, setGeneratedDescription] = useState('');
@@ -550,6 +553,59 @@ export function AgentCreatePage({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (workspaceAgentMode && !workspaceCreateMethod) {
+    return (
+      <div className="flex w-full max-w-3xl flex-col gap-6">
+        <div>
+          <h1 className="text-xl font-semibold text-balance">Create Agent</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Give this workspace a durable teammate. Each task gets its own
+            conversation while the Agent keeps the same identity.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto justify-start p-5 text-left"
+            onClick={() => {
+              setWorkspaceCreateMethod('model');
+              setGenerationOpen(true);
+            }}
+          >
+            <SparklesIcon className="size-5 self-start" />
+            <span>
+              <strong className="block">Build with AI</strong>
+              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
+                Recommended. Describe the teammate you need, then review the
+                generated role and instructions.
+              </span>
+            </span>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto justify-start p-5 text-left"
+            onClick={() => setWorkspaceCreateMethod('manual')}
+          >
+            <span>
+              <strong className="block">Configure manually</strong>
+              <span className="mt-1 block whitespace-normal text-xs text-muted-foreground">
+                Set the Agent name, durable instructions, model, and task
+                concurrency yourself.
+              </span>
+            </span>
+          </Button>
+        </div>
+        <div>
+          <Button type="button" variant="outline" onClick={onCancel}>
+            {t('common.cancel')}
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   return (
