@@ -56,6 +56,7 @@ function fixture(minimumNativeY?: number) {
     'toggleLive',
     'newConversation',
     'positionOverlay',
+    'sendRequiredPlaybackReceipt',
   ]);
   const functions = tree.statements
     .filter(
@@ -80,6 +81,7 @@ function fixture(minimumNativeY?: number) {
   const states: HostPublicState[] = [];
   const offsets: Array<{ x: number; y: number }> = [];
   const actions: string[] = [];
+  const playback: Array<{ kind: string; epoch: number; outputId: number }> = [];
   const flags = { hostReady: false };
   const resources = { audio: false, camera: false, shortcut: false };
   const timers = new Set<object>();
@@ -165,6 +167,14 @@ function fixture(minimumNativeY?: number) {
     },
     daemon: {
       getEpoch: () => 1,
+      sendPlaybackStarted: (epoch: number, outputId: number) => {
+        playback.push({ kind: 'started', epoch, outputId });
+        return true;
+      },
+      sendPlaybackCompleted: (epoch: number, outputId: number) => {
+        playback.push({ kind: 'completed', epoch, outputId });
+        return true;
+      },
       requestQuit: () =>
         new Promise<void>((resolve, reject) => {
           quitResolves = resolve;
@@ -193,6 +203,9 @@ function fixture(minimumNativeY?: number) {
     },
     appshotReadiness: { start() {}, stop() {} },
     failClosedForReadinessLoss: () => {},
+    failRequiredDaemonMessage: () => {
+      throw new Error('Unexpected failed playback receipt');
+    },
     shell: {
       openExternal: async () => {
         throw new Error('Unexpected external settings');
@@ -298,6 +311,7 @@ registerIpc();
     states,
     offsets,
     actions,
+    playback,
     flags,
     connect: () => {
       context.connection = { phase: 'ready' };
@@ -312,6 +326,48 @@ registerIpc();
 }
 
 describe('native overlay interaction', () => {
+  it('accepts playback receipts only from the current ready renderer with valid epoch and output identity', () => {
+    const host = fixture();
+    const window = host.controls.create(false);
+    const event = { sender: window.webContents };
+    const receipt = { epoch: 1, outputId: 7 };
+    for (const channel of [
+      'live:audio:playback-started',
+      'live:audio:playback-completed',
+    ]) {
+      const handle = host.ipc.get(channel)!;
+      handle(event, receipt);
+      assert.equal(host.playback.length, 0);
+    }
+    window.events.get('did-finish-load')?.();
+    for (const channel of [
+      'live:audio:playback-started',
+      'live:audio:playback-completed',
+    ]) {
+      const handle = host.ipc.get(channel)!;
+      handle({ sender: {} }, receipt);
+      for (const invalid of [
+        null,
+        1,
+        { epoch: 0, outputId: 7 },
+        { epoch: 1, outputId: -1 },
+        { epoch: 1, outputId: 1.5 },
+        { epoch: 1 },
+      ])
+        handle(event, invalid);
+    }
+    assert.equal(host.playback.length, 0);
+    host.ipc.get('live:audio:playback-started')!(event, receipt);
+    host.ipc.get('live:audio:playback-completed')!(event, receipt);
+    assert.deepEqual(host.playback, [
+      { kind: 'started', epoch: 1, outputId: 7 },
+      { kind: 'completed', epoch: 1, outputId: 7 },
+    ]);
+    host.controls.create();
+    host.ipc.get('live:audio:playback-started')!(event, receipt);
+    assert.equal(host.playback.length, 2);
+  });
+
   it('places both first-run layouts at bottom-right with margins and retains a later drag', () => {
     const host = fixture();
     const window = host.controls.create();

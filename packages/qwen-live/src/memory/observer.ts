@@ -1,7 +1,9 @@
 /**
  * @license
+ * Copyright 2026 Alibaba Group Holding Limited
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
+ * Adapted to TypeScript from qwen-omni-realtime-agent; modified for Qwen Live.
  */
 
 import type { DatabaseSync } from 'node:sqlite';

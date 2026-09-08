@@ -50,7 +50,7 @@ export function persistMemoryPreferences(
 ): MemoryConfig {
   const path = join(dataDir, 'config.json');
   const raw: unknown = existsSync(path)
-    ? JSON.parse(readFileSync(path, 'utf8'))
+    ? JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/u, ''))
     : {};
   if (!record(raw)) throw new Error('Live configuration must be an object.');
   resolveMemoryConfig(raw['memory'], dataDir, path);

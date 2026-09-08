@@ -240,7 +240,7 @@ describe('LiveHostCoordinator', () => {
       expect(
         socket
           .messages()
-          .some((message) => message.type === 'host.capture_screen_context'),
+          .some((message) => message.type === 'host.capture_visual'),
       ).toBe(false);
     },
   );

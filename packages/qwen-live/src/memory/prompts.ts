@@ -1,7 +1,9 @@
 /**
  * @license
+ * Copyright 2026 Alibaba Group Holding Limited
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
+ * Adapted to TypeScript from qwen-omni-realtime-agent; modified for Qwen Live.
  */
 
 export const UPDATER_PROMPT = `You are a memory management system. After a video call ends, your job is to update the user's Long-Term Memory (LTM) and Short-Term Memory (STM) from the Working Memory of that call.

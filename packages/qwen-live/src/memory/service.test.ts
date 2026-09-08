@@ -106,6 +106,33 @@ afterEach(async () => {
 });
 
 describe('persistMemoryPreferences', () => {
+  it('updates UTF-8 BOM configurations while retaining unrelated fields', () => {
+    const { dataDir, configPath, raw } = fixture({
+      updater: { timeoutMs: 4567 },
+      observer: { intervalSec: 12 },
+    });
+    writeFileSync(configPath, `\uFEFF${JSON.stringify(raw)}`);
+    const resolved = persistMemoryPreferences(dataDir, {
+      enabled: false,
+      defaultId: 'work',
+      model: 'custom-memory-model',
+      visualEnabled: true,
+    });
+    const saved = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(saved.realtime).toEqual(raw.realtime);
+    expect(saved.customTopLevel).toEqual(raw.customTopLevel);
+    expect(saved.memory).toMatchObject({
+      enabled: false,
+      defaultId: 'work',
+      updater: { timeoutMs: 4567, model: 'custom-memory-model' },
+      observer: { intervalSec: 12, enabled: true },
+      retrieve: { useVector: false },
+    });
+    expect(resolved.updater.model).toBe('custom-memory-model');
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dataDir)).toEqual(['config.json']);
+  });
+
   it('retains a failed session finish and blocks duplicate attachment until its persistence recovers', async () => {
     const { create, attach } = fixture();
     const service = create();

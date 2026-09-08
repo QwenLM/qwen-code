@@ -525,13 +525,24 @@ place until authorization succeeds, then the switch is applied atomically.
 Incubating inside the qwen-code monorepo, tracking M1–M5 of the Live split
 roadmap (issue #10118):
 
-- **M1+M2** (merged): daemon, host stack, 8 base tools, injector, permissions,
+- **M1+M2** (merged): daemon, host stack, base tools, injector, permissions,
   steering, JSONL logs, Host installer
 - **M4** (merged): AcpAdaptor, multi-backend routing, capability gating
-- **M5** (this PR): protocol v9 visual input, fenced playback receipts, the
-  `qwen-live init` wizard, 6 configurable Proactive tools, and 2 Memory tools
-  with local multi-library storage (both features enabled by default)
+- **M5** (merged in #10769): protocol v7 playback receipts and the interactive
+  `qwen-live init` wizard
+- **This extension**: protocol v9 visual input and fenced playback receipts,
+  6 configurable Proactive tools, 2 Memory tools with local multi-library
+  storage (both features enabled by default), and configurable desktop controls
 - **M3** (blocked): session registry + cross-session messaging — depends on
   upstream #9576
 - Built-in Live module retirement: deferred until the standalone daemon is
   stable in production
+
+## Attribution
+
+The Proactive and Memory implementations include TypeScript adaptations of
+`qwen-omni-realtime-agent` v0.1.0 (`qwen_omni_realtime_agent/proactive` and
+`qwen_omni_realtime_agent/memory`), Copyright 2026 Alibaba Group Holding Limited,
+licensed under Apache-2.0. This port modifies those components for Qwen Live's
+DashScope connection, tool authority, playback queue, local storage and Host
+interface. Original copyright notices are retained in adapted source files.
