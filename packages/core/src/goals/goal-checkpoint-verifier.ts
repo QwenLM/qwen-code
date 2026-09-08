@@ -170,9 +170,8 @@ export function createGoalCheckpointVerifier(
           thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
         },
         // Parsing stays out of a validate hook: runSideQuery re-wraps hook
-        // failures into plain Errors, dropping the InvalidGoalCheckpointError
-        // class the runtime's checkpoint stall breaker counts unusable
-        // results by.
+        // failures into plain Errors, erasing the InvalidGoalCheckpointError
+        // class and message the verifier's own tests assert on.
       });
       return parseGoalCheckpointVerifierText(result.text);
     } finally {
