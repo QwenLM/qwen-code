@@ -90,6 +90,18 @@ describe('DefaultOpenAICompatibleProvider', () => {
     );
   });
 
+  it('preserves the explicit output cap on a non-GPT batch route', () => {
+    const request = provider.buildRequest(
+      {
+        model: 'google/gemini-2.5-flash:batch',
+        messages: [],
+        max_tokens: 65536,
+      },
+      'test',
+    );
+    expect(request.max_tokens).toBe(65536);
+  });
+
   afterEach(() => {
     if (savedMaxOutputTokensEnv === undefined) {
       delete process.env[MAX_OUTPUT_TOKENS_ENV];

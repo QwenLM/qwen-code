@@ -672,7 +672,7 @@ test('keeps mandatory qwen3.8-max effort switchable before lazy session creation
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
 });
 
-test('discards an incompatible welcome effort when switching away and back @smoke', async ({
+test('keeps the target welcome preference when switching away and back @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -729,34 +729,14 @@ test('discards an incompatible welcome effort when switching away and back @smok
     .locator('[data-web-shell-toolbar-popover]:visible')
     .getByRole('button', { name: 'qwen3.8-max', exact: true })
     .click();
-  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
-  await expect(modelButton).not.toContainText('Medium');
+  await expect(modelButton).toContainText('qwen3.8-max · Medium');
 
   await page.keyboard.press('Escape');
-  await fillComposer(page, 'Use the reset model default');
+  await fillComposer(page, 'Use the existing model preference');
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
-  expect(
-    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({
-    configId: 'reasoning_effort',
-    value: 'default',
-    persist: true,
-  });
-  const configRequestIndex = daemon.requests.findIndex(
-    (request) =>
-      request.method === 'POST' &&
-      /\/session\/[^/]+\/config-option$/.test(request.path),
-  );
-  const promptRequestIndex = daemon.requests.findIndex(
-    (request) =>
-      request.method === 'POST' &&
-      /\/session\/[^/]+\/prompt\/?$/.test(request.path),
-  );
-  expect(configRequestIndex).toBeGreaterThanOrEqual(0);
-  expect(configRequestIndex).toBeLessThan(promptRequestIndex);
+  expect(daemon.configOptionRequests()).toEqual([]);
 });
 
 test('cancels the first prompt when live reasoning capability is missing @smoke', async ({

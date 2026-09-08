@@ -11,8 +11,10 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
+  getConfiguredModelReasoning,
   getModelConfiguration,
   getGptReasoningOverrideState,
+  type ModelReasoningConfiguration,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
@@ -117,6 +119,100 @@ describe('model configuration manifest', () => {
       expect(generation).toEqual(original);
     },
   );
+  it('keeps configured GPT tiers and defaults ahead of the built-in fallback', () => {
+    const reasoning = {
+      thinking: true,
+      efforts: ['medium', 'max'],
+      defaultEffort: 'max',
+      disableField: 'reasoning_effort',
+    } as const;
+    expect(
+      buildModelReasoningConfigOption('gpt-5.4', {}, reasoning),
+    ).toMatchObject({
+      currentValue: 'max',
+      options: [{ value: 'none' }, { value: 'medium' }, { value: 'max' }],
+    });
+    expect(
+      resolvePersistedReasoningConfigState('gpt-5.4', 'max', false, reasoning),
+    ).toEqual({ thinkingMandatory: false, enabled: true, effort: 'max' });
+    expect(
+      isReasoningSelectionSupported('gpt-5.4', 'low', false, reasoning),
+    ).toBe(false);
+    expect(
+      buildModelReasoningConfigOption(
+        'gpt-6-astra',
+        { enabled: false },
+        reasoning,
+      ),
+    ).toMatchObject({
+      currentValue: 'max',
+      options: [{ value: 'medium' }, { value: 'max' }],
+      _meta: { 'qwenCode/reasoning': { thinkingMandatory: true } },
+    });
+  });
+
+  it('projects reasoning declared by the resolved provider model', () => {
+    const reasoning = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    } as const;
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getContentGeneratorConfig: () => ({
+        model: 'deepseek-v4-pro',
+        authType: 'openai',
+        baseUrl: 'https://api.deepseek.com',
+      }),
+      getResolvedModelConfig: () => ({ capabilities: { reasoning } }),
+    } as unknown as Config;
+
+    expect(getConfiguredModelReasoning(config)).toBe(reasoning);
+    for (const guarded of [
+      { getActiveRuntimeModelSnapshot: () => ({ id: 'runtime-model' }) },
+      { getModel: () => 'qwen-route:v1:opaque' },
+    ]) {
+      expect(
+        getConfiguredModelReasoning({
+          ...config,
+          ...guarded,
+        } as unknown as Config),
+      ).toBeUndefined();
+    }
+    expect(
+      buildModelReasoningConfigOption('deepseek-v4-pro', {}, reasoning),
+    ).toMatchObject({
+      currentValue: 'high',
+      options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+    });
+    expect(
+      isReasoningSelectionSupported('deepseek-v4-pro', 'low', false, reasoning),
+    ).toBe(false);
+
+    expect(
+      buildModelReasoningConfigOption(
+        'deepseek-v4-pro',
+        {},
+        {
+          ...reasoning,
+          canDisable: false,
+        },
+      )?.options,
+    ).toMatchObject([{ value: 'high' }, { value: 'max' }]);
+  });
+
+  it('ignores an incomplete user-provided reasoning capability', () => {
+    const config = {
+      getModel: () => 'custom-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: { reasoning: { thinking: true } },
+      }),
+    } as unknown as Config;
+    expect(getConfiguredModelReasoning(config)).toBeUndefined();
+  });
 
   it('registers the exact stable qwen3.8-max reasoning controls', () => {
     expect(getModelConfiguration('qwen3.8-max')).toEqual({
@@ -323,107 +419,160 @@ describe('model configuration manifest', () => {
 });
 
 describe('GPT raw reasoning reporting', () => {
-  it.each([null, { effort: 'low' }])(
-    'reports mandatory cleanup before an opaque nested override %j',
-    (reasoning) => {
-      expect(
-        getGptReasoningOverrideState({
-          model: 'gpt-6-astra',
-          reasoning: { effort: 'high' },
-          extra_body: { reasoning_effort: 'none', reasoning },
-        } as ContentGeneratorConfig),
-      ).toEqual({
-        enabled: true,
-        useDefaultEffort: true,
-        opaqueOverride: true,
-      });
-    },
-  );
-
   it.each([
     [{ model: 'custom-model', extra_body: { reasoning: false } }, undefined],
     [{ reasoning: false, extra_body: { reasoning: false } }, undefined],
     [
       { extra_body: { reasoning: false } },
-      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+      { enabled: true, useDefaultEffort: true },
     ],
     [
       { extra_body: { reasoning: null } },
-      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+      { enabled: true, useDefaultEffort: true },
+    ],
+    [
+      { model: 'gpt-5.4', extra_body: { reasoning: { effort: 'high' } } },
+      { enabled: false, useDefaultEffort: true },
     ],
     [
       { extra_body: { reasoning: { effort: 'high' } } },
-      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+      { enabled: true, useDefaultEffort: true },
     ],
     [
       { extra_body: { reasoning: false, reasoning_effort: 'none' } },
-      { enabled: false, useDefaultEffort: false },
+      { enabled: false, useDefaultEffort: true },
+    ],
+    [
+      { extra_body: { reasoning_effort: 'high' } },
+      { enabled: true, effort: 'high', useDefaultEffort: false },
+    ],
+    [
+      { samplingParams: { reasoning_effort: 'high' } },
+      { enabled: true, effort: 'high', useDefaultEffort: false },
     ],
     [
       {
-        baseUrl: 'https://openrouter.ai/api/v1',
-        extra_body: { reasoning: false },
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: 'low' },
       },
-      { enabled: false },
+      { enabled: true, effort: 'low', useDefaultEffort: false },
     ],
     [
       {
-        baseUrl: 'https://openrouter.ai/api/v1',
-        extra_body: { reasoning: { effort: 'high' } },
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: null },
       },
-      { enabled: true },
+      undefined,
+    ],
+    [
+      { model: 'gpt-6-astra', extra_body: { reasoning_effort: 'none' } },
+      { enabled: true, useDefaultEffort: true },
     ],
     [
       {
-        model: 'gpt-6-astra',
-        reasoning: { effort: 'high' },
+        model: 'gpt-5.5',
+        thinkingMandatory: true,
         extra_body: { reasoning_effort: 'none' },
       },
-      { enabled: false, useDefaultEffort: true },
+      { enabled: true, useDefaultEffort: true },
     ],
     [
       {
-        model: 'gpt-6-astra',
-        reasoning: { effort: 'high' },
-        samplingParams: { reasoning_effort: 'none' },
-      },
-      { enabled: false, useDefaultEffort: true },
-    ],
-    [
-      {
-        model: 'gpt-6-astra',
         baseUrl: 'https://openrouter.ai/api/v1',
-        reasoning: { effort: 'high' },
-        extra_body: { reasoning_effort: 'none' },
+        extra_body: { reasoning_effort: 'high' },
       },
-      { enabled: false, useDefaultEffort: false },
+      undefined,
     ],
     [
       {
-        model: 'gpt-6-astra',
         baseUrl: 'https://openrouter.ai/api/v1',
-        reasoning: { effort: 'high' },
-        samplingParams: { reasoning_effort: 'none' },
+        samplingParams: { reasoning_effort: 'high' },
       },
-      { enabled: false, useDefaultEffort: true },
+      { enabled: true, useDefaultEffort: true },
     ],
     [
       {
-        model: 'gpt-6-astra',
         baseUrl: 'https://openrouter.ai/api/v1',
-        extra_body: { reasoning: { effort: 'high' }, reasoning_effort: 'none' },
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: '' },
       },
-      { enabled: true },
+      undefined,
     ],
   ] as const)(
-    'reports %j without inferring gateway behavior',
+    'reports effective raw precedence for %j',
     (overrides, expected) => {
-      const generation = {
-        model: 'gpt-5.5',
-        baseUrl: 'https://api.openai.com/v1',
-        ...overrides,
-      } as ContentGeneratorConfig;
-      expect(getGptReasoningOverrideState(generation)).toEqual(expected);
+      expect(
+        getGptReasoningOverrideState({
+          model: 'gpt-5.5',
+          baseUrl: 'https://api.openai.com/v1',
+          reasoning: { effort: 'xhigh' },
+          ...overrides,
+        } as ContentGeneratorConfig),
+      ).toEqual(expected ? { ...expected, blocksTierChange: true } : undefined);
     },
   );
+
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'projects OpenRouter nested overrides from %s',
+    (layer) => {
+      for (const [model, reasoning, expected] of [
+        ['gpt-5.5', null, { enabled: true, useDefaultEffort: true }],
+        ['gpt-5.5', false, { enabled: false, useDefaultEffort: true }],
+        [
+          'gpt-5.5',
+          { enabled: false },
+          { enabled: false, useDefaultEffort: true },
+        ],
+        [
+          'gpt-5.5',
+          { effort: 'none' },
+          { enabled: false, useDefaultEffort: true },
+        ],
+        ['gpt-5.5', {}, { enabled: true, useDefaultEffort: true }],
+        [
+          'gpt-5.4',
+          { enabled: true },
+          { enabled: true, useDefaultEffort: true },
+        ],
+        [
+          'gpt-5.4',
+          { max_tokens: 1024 },
+          { enabled: true, useDefaultEffort: true },
+        ],
+        [
+          'gpt-5.4',
+          { effort: 'high' },
+          { enabled: true, effort: 'high', useDefaultEffort: false },
+        ],
+        ['gpt-5.4', {}, { enabled: false, useDefaultEffort: true }],
+      ] as const) {
+        expect(
+          getGptReasoningOverrideState({
+            model,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            reasoning: { effort: 'xhigh' },
+            [layer]: { reasoning, reasoning_effort: 'none' },
+          } as ContentGeneratorConfig),
+        ).toEqual({ ...expected, blocksTierChange: true });
+      }
+    },
+  );
+
+  it('allows configured capability injection past an OpenRouter sampling flat override', () => {
+    expect(
+      getGptReasoningOverrideState(
+        {
+          model: 'gpt-5.5',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          reasoning: { effort: 'high' },
+          samplingParams: { reasoning_effort: 'low' },
+        } as ContentGeneratorConfig,
+        {
+          thinking: true,
+          disableField: 'reasoning_effort',
+          efforts: ['low', 'high'],
+        } as ModelReasoningConfiguration,
+      ),
+    ).toBeUndefined();
+  });
 });

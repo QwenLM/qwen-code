@@ -6973,6 +6973,33 @@ describe('Session', () => {
       },
     );
 
+    it('reconciles a GPT preference against explicit configured capabilities', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      Object.assign(mockConfig, {
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'high'],
+              defaultEffort: 'high',
+              disableField: 'reasoning_effort',
+            },
+          },
+        })),
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gpt-5.6-sol(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+    });
+
     it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
       const state = installReasoningPreference('max', { trusted: true });
 

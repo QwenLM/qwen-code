@@ -62,6 +62,7 @@ import type {
 import {
   AuthType,
   getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
   ApprovalMode,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -349,7 +350,7 @@ import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
-  getModelConfiguration,
+  getConfiguredModelReasoning,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
@@ -10769,12 +10770,20 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
-    const gptModel = getGptReasoningCapabilities(modelId) !== undefined;
+    const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
+    const gptModel =
+      getGptReasoningCapabilities(modelId) !== undefined &&
+      !parseModelReasoningCapabilities(modelReasoning);
     const supportsPreference = (value: ReasoningSelection | undefined) =>
       value !== undefined &&
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
-        isReasoningSelectionSupported(modelId, value, thinkingMandatory));
+        isReasoningSelectionSupported(
+          modelId,
+          value,
+          thinkingMandatory,
+          modelReasoning,
+        ));
     let supported = supportsPreference(selection);
 
     const appliesSessionDefault =
@@ -10802,7 +10811,6 @@ export class Session implements SessionContext {
         );
       }
     }
-    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
     if (
       supported &&
       generation &&

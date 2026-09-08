@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { normalize } from './tokenLimits.js';
+import type { ModelReasoningCapabilities } from '../models/types.js';
 
 /**
  * Unified reasoning-effort ladder exposed to users (e.g. via `/effort`).
@@ -49,7 +50,9 @@ export function getGptReasoningCapabilities(model: string | undefined):
       thinkingMandatory: boolean;
     }
   | undefined {
-  const normalized = normalize(model ?? '')
+  const normalized = normalize(
+    (model ?? '').trim().replace(/:batch(?=:|$)/gi, ''),
+  )
     .replace(/-\d{4}-\d{2}-\d{2}$/, '')
     .replace(/^(gpt-5\.\d+)(?:\.\d+)+(?=-|$)/, '$1');
   switch (normalized) {
@@ -226,4 +229,57 @@ export function applyReasoningEffort(
 ): boolean {
   config.setReasoningEffort(effort);
   return config.getReasoningEffort() === effort;
+}
+
+/**
+ * Parse a `ModelConfig.capabilities.reasoning` value into the capability both
+ * the reasoning controls and the request pipeline honour.
+ *
+ * The value arrives from a settings file, so an incomplete entry is reachable,
+ * and `disableField` is its only member with no fallback. Returning `undefined`
+ * for one keeps the model on its pre-capability behavior everywhere: a
+ * capability the pickers refuse must not reshape the wire anyway.
+ */
+export function parseModelReasoningCapabilities(
+  value: unknown,
+): ModelReasoningCapabilities | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (candidate['thinking'] !== true) return undefined;
+  const disableField = candidate['disableField'];
+  if (
+    disableField !== 'enable_thinking' &&
+    disableField !== 'reasoning_effort' &&
+    disableField !== 'thinking'
+  ) {
+    return undefined;
+  }
+  if (
+    ('toggleOnly' in candidate &&
+      typeof candidate['toggleOnly'] !== 'boolean') ||
+    ('canDisable' in candidate && candidate['canDisable'] !== false)
+  ) {
+    return undefined;
+  }
+  if (candidate['toggleOnly'] === true) {
+    return candidate as unknown as ModelReasoningCapabilities;
+  }
+  const efforts = candidate['efforts'];
+  if (
+    !Array.isArray(efforts) ||
+    efforts.length === 0 ||
+    !efforts.every(
+      (effort) =>
+        typeof effort === 'string' &&
+        REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort),
+    ) ||
+    new Set(efforts).size !== efforts.length
+  ) {
+    return undefined;
+  }
+  const defaultEffort = candidate['defaultEffort'];
+  if (defaultEffort !== undefined && !efforts.includes(defaultEffort)) {
+    return undefined;
+  }
+  return candidate as unknown as ModelReasoningCapabilities;
 }

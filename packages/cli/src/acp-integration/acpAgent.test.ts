@@ -373,6 +373,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isOpenRouterHostname: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isOpenRouterHostname,
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -9515,7 +9520,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         baseUrl: 'https://openrouter.ai/api/v1',
         extra_body: { reasoning: { effort: 'high' } },
       },
-      'medium',
+      'high',
     ],
     [{ samplingParams: { reasoning_effort: null } }, 'none'],
     [{ samplingParams: { reasoning: {} } }, 'none'],
@@ -9537,8 +9542,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       'none',
     ],
-    [{ samplingParams: { reasoning_effort: 'high' } }, 'medium'],
-    [{ extra_body: { reasoning_effort: 'high' } }, 'medium'],
+    [{ samplingParams: { reasoning_effort: 'high' } }, 'high'],
+    [{ extra_body: { reasoning_effort: 'high' } }, 'high'],
     [{ samplingParams: { reasoning: { effort: 'high' } } }, 'none'],
     [{ extra_body: { reasoning: { effort: 'high' } } }, 'none'],
     [{ samplingParams: { reasoning_effort: 'none' } }, 'none'],
@@ -9548,7 +9553,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         samplingParams: { reasoning_effort: 'none' },
         extra_body: { reasoning_effort: 'high' },
       },
-      'medium',
+      'high',
     ],
     [{ reasoning: false, extra_body: { reasoning_effort: 'high' } }, 'none'],
   ] as const)(
@@ -9622,46 +9627,186 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
-  it('does not confirm the displayed GPT default through an opaque override', async () => {
-    const sessionId = 'gpt-opaque-override-session';
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getModel = vi.fn(() => 'gpt-5.5');
-    const generation = innerConfig.getContentGeneratorConfig();
-    Object.assign(generation, {
-      model: 'gpt-5.5',
-      reasoning: undefined,
-      extra_body: { reasoning: { effort: 'high' } },
-    });
-    innerConfig.getReasoningEffort = vi.fn(() =>
-      generation.reasoning ? generation.reasoning.effort : undefined,
-    );
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-      await expect(
-        agent.setSessionConfigOption({
+  it.each(['extra_body', 'samplingParams'] as const)(
+    'restores the GPT raw default through switch metadata after off (%s)',
+    async (layer) => {
+      const sessionId = 'gpt-opaque-override-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-5.5',
+        reasoning: undefined,
+        [layer]: { reasoning: { effort: 'high' } },
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        const off = (await agent.setSessionConfigOption({
           sessionId,
           configId: 'reasoning_effort',
-          value: 'medium',
-        }),
-      ).rejects.toThrow('Reasoning selection was not applied: medium');
-      expect(generation.reasoning).toBeUndefined();
-      const result = (await agent.setSessionConfigOption({
-        sessionId,
-        configId: 'reasoning_effort',
-        value: 'none',
-      })) as SetSessionConfigOptionResponse;
-      expect(
-        result.configOptions.find((option) => option.id === 'reasoning_effort')
-          ?.currentValue,
-      ).toBe('none');
-      expect(generation.reasoning).toBe(false);
-      expect(generation.extra_body).toEqual({ reasoning: { effort: 'high' } });
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
+          value: 'none',
+        })) as SetSessionConfigOptionResponse;
+        const option = off.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        );
+        expect(option?.currentValue).toBe('none');
+        expect(option?._meta?.['qwenCode/reasoning']).toMatchObject({
+          enableValue: 'default',
+        });
+        expect(generation.reasoning).toBe(false);
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+            _meta: { 'qwenCode/persistReasoningSelection': true },
+          }),
+        ).rejects.toThrow('Reasoning selection was not applied: medium');
+        expect(generation.reasoning).toBe(false);
+        expect(
+          lastSessionMock?.persistReasoningSelection,
+        ).not.toHaveBeenCalled();
+        const on = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          on.configOptions.find((option) => option.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('medium');
+        expect(generation.reasoning).toBeUndefined();
+        expect(generation[layer]).toEqual({ reasoning: { effort: 'high' } });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    [
+      'native sampling flat',
+      { samplingParams: { reasoning_effort: 'high' } },
+      'high',
+      false,
+    ],
+    [
+      'native extra flat',
+      { extra_body: { reasoning_effort: 'high' } },
+      'high',
+      false,
+    ],
+    [
+      'OpenRouter sampling flat',
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        samplingParams: { reasoning_effort: 'high' },
+      },
+      'medium',
+      false,
+    ],
+    [
+      'OpenRouter extra flat',
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning_effort: 'high' },
+      },
+      'low',
+      true,
+    ],
+    ...(['samplingParams', 'extra_body'] as const).flatMap(
+      (layer) =>
+        [
+          [
+            layer + ' OpenRouter effort',
+            {
+              baseUrl: 'https://openrouter.ai/api/v1',
+              [layer]: { reasoning: { effort: 'high' } },
+            },
+            'high',
+            false,
+          ],
+          [
+            layer + ' OpenRouter enabled',
+            {
+              baseUrl: 'https://openrouter.ai/api/v1',
+              [layer]: { reasoning: { enabled: true } },
+            },
+            'medium',
+            false,
+          ],
+          [
+            layer + ' OpenRouter budget',
+            {
+              baseUrl: 'https://openrouter.ai/api/v1',
+              [layer]: { reasoning: { max_tokens: 1024 } },
+            },
+            'medium',
+            false,
+          ],
+        ] as const,
+    ),
+  ] as const)(
+    'confirms only applied tiers with %s',
+    async (_name, overrides, currentValue, allowed) => {
+      const sessionId = 'gpt-raw-confirmation';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-5.5',
+        reasoning: { effort: 'low' },
+        ...overrides,
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          session.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe(currentValue);
+        const selection = agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        });
+        if (allowed) {
+          await expect(selection).resolves.toMatchObject({
+            _meta: { 'qwenCode/reasoningSelectionPersisted': true },
+          });
+          expect(generation.reasoning).toEqual({ effort: 'xhigh' });
+          expect(
+            lastSessionMock?.persistReasoningSelection,
+          ).toHaveBeenCalledWith('xhigh');
+        } else {
+          await expect(selection).rejects.toThrow(
+            'Reasoning selection was not applied: xhigh',
+          );
+          expect(generation.reasoning).toEqual({ effort: 'low' });
+          expect(
+            lastSessionMock?.persistReasoningSelection,
+          ).not.toHaveBeenCalled();
+        }
+        expect(generation).toMatchObject(overrides);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';

@@ -204,6 +204,9 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
+    ...(reasoningMeta?.['enableValue'] === 'default'
+      ? { enableValue: 'default' as const }
+      : {}),
     ...(thinkingMandatory ? { canDisable: false } : {}),
   };
 }
@@ -645,6 +648,8 @@ function getGoalState(
   const recordId = evidenceCursor?.['recordId'];
   const turnCount = getNumber(source, 'turnCount');
   const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const tokensUsed = getNumber(source, 'tokensUsed');
+  const tokenBudget = getNumber(source, 'tokenBudget');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -683,6 +688,8 @@ function getGoalState(
       evidenceCursor: { recordId },
       turnCount,
       activeTimeMs,
+      ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),

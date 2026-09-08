@@ -17,6 +17,7 @@ import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
   isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
@@ -143,9 +144,19 @@ export class DefaultOpenAICompatibleProvider
   protected supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return (
-      getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
-    );
+    const gpt = getGptReasoningCapabilities(model);
+    if (!gpt) return OPENAI_COMPATIBLE_EFFORTS;
+    const { authType, baseUrl } = this.contentGeneratorConfig;
+    const configured =
+      authType && model
+        ? parseModelReasoningCapabilities(
+            this.cliConfig.getResolvedModelConfig?.(authType, model, baseUrl)
+              ?.capabilities.reasoning,
+          )
+        : undefined;
+    return configured && !configured.toggleOnly
+      ? configured.efforts
+      : gpt.efforts;
   }
 
   /**

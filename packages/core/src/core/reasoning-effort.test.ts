@@ -13,6 +13,7 @@ import {
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
   normalizeReasoningEffort,
+  parseModelReasoningCapabilities,
   type ReasoningEffort,
 } from './reasoning-effort.js';
 
@@ -101,6 +102,13 @@ describe('getGptReasoningCapabilities', () => {
     ['openai/gpt-5:free', ['low', 'medium', 'high'], 'medium', true, true],
     [
       'openai/gpt-5.5-pro:batch',
+      ['medium', 'high', 'xhigh'],
+      'high',
+      true,
+      true,
+    ],
+    [
+      '  OPENAI/GPT-5.5-PRO:BATCH  ',
       ['medium', 'high', 'xhigh'],
       'high',
       true,
@@ -287,5 +295,49 @@ describe('applyReasoningEffort', () => {
 
     const disabled = makeConfig(true);
     expect(applyReasoningEffort(disabled, undefined)).toBe(true);
+  });
+});
+
+describe('parseModelReasoningCapabilities', () => {
+  const valid = {
+    thinking: true,
+    efforts: ['high', 'max'],
+    defaultEffort: 'high',
+    disableField: 'thinking',
+  } as const;
+
+  it('returns a complete capability unchanged', () => {
+    expect(parseModelReasoningCapabilities(valid)).toBe(valid);
+    expect(
+      parseModelReasoningCapabilities({
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      }),
+    ).toEqual({
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    });
+  });
+
+  it.each([
+    ['a missing capability', undefined],
+    ['a non-object', 'high'],
+    ['thinking not true', { ...valid, thinking: false }],
+    ['a missing disableField', { thinking: true, efforts: ['high', 'max'] }],
+    ['an unknown disableField', { ...valid, disableField: 'budget' }],
+    ['a malformed toggleOnly', { ...valid, toggleOnly: 'yes' }],
+    ['a malformed canDisable', { ...valid, canDisable: true }],
+    ['a missing efforts list', { thinking: true, disableField: 'thinking' }],
+    ['an empty efforts list', { ...valid, efforts: [] }],
+    ['duplicate tiers', { ...valid, efforts: ['high', 'high'] }],
+    [
+      'an unknown tier',
+      { thinking: true, efforts: ['ultra'], disableField: 'thinking' },
+    ],
+    ['a defaultEffort outside efforts', { ...valid, defaultEffort: 'low' }],
+  ])('rejects %s', (_label, value) => {
+    expect(parseModelReasoningCapabilities(value)).toBeUndefined();
   });
 });

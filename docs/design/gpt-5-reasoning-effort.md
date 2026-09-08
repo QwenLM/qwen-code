@@ -12,6 +12,8 @@ Share GPT model capabilities in core's existing reasoning-effort module.
 Recognize an explicit list of documented GPT-5 models and GPT-6 Astra; unknown
 minor versions and family suffixes keep the generic provider behavior. Reuse
 the shared model normalizer for provider prefixes, whitespace and routing tags.
+Strip `:batch` locally before normalization; other capability lookups retain
+their existing token-limit and modality behavior.
 Dated snapshots and numeric patch versions inherit a known model's capabilities.
 Chat variants remain excluded. Use the existing `low`, `medium`, `high`, `xhigh`,
 `max` ladder without adding CLI tiers.
@@ -21,12 +23,14 @@ Known GPT-5.2, GPT-5.3 Codex, GPT-5.4 and GPT-5.5 variants support xhigh;
 GPT-5.6 (Sol, Terra and Luna) supports max. Pro variants start at medium
 (GPT-5 Pro only supports high). The listed GPT-5, Codex and Pro models require
 thinking. GPT-5.1, GPT-5.2 and GPT-5.4 default to disabled;
-GPT-5.5 and GPT-5.6 default to medium and support disabling.
+Base GPT-5.5 and GPT-5.6 default to medium and support disabling.
+GPT-5 Pro and GPT-5.5 Pro default to high; GPT-5.2 Pro and GPT-5.4 Pro
+default to medium. These Pro variants require thinking.
 
 GPT-6 Astra supports all five tiers and requires thinking. Recognize its
 exact identifier, dated snapshots, and provider prefixes; do not infer
 capabilities for other GPT-6 variants. Its controls start enabled at medium
-and reject off. Rename the shared helper to cover both GPT generations.
+and reject off. The shared helper covers both GPT generations.
 The pipeline's mandatory-thinking check must consume the same capabilities
 for the wire model, including flat disable values and automatic OpenRouter
 off requests.
@@ -38,30 +42,46 @@ and `extra_body` reasoning overrides keep their existing priority. OpenRouter
 keeps its nested reasoning protocol. Only the translated effort is removed
 from the nested object; sibling values such as the reasoning budget remain.
 Nullish and empty-string flat placeholders do not suppress configured effort.
-Raw nested `reasoning`, including `null`, remains an explicit whole-object
+While reasoning is enabled, raw nested `reasoning`, including `null`, remains an explicit whole-object
 override; it is not interpreted as a cleared flat field.
 Sampling options unrelated to reasoning
-must not suppress GPT's configured effort. The pipeline emits `none` when
-thinking is disabled on models that support it.
+must not suppress GPT's configured effort. The pipeline emits flat `none` on native GPT endpoints when thinking is disabled on models that support it; OpenRouter receives its nested disable shape.
+
+Explicit model reasoning capabilities take precedence over the built-in tier
+list and retain their declared disable field. GPT configured tiers are validated before provider mapping, then translated only after raw request overrides merge. Known mandatory GPT models still
+cannot be disabled. The existing runtime-snapshot and ACP-route guards remain
+in effect.
 
 GPT overrides are excluded from the existing Qwen-specific ACP override
-cleanup. Controls display the same clamped tier as the provider, while the
-global preference survives a GPT model switch for use on other models.
-Raw request overrides may determine a different effective tier. Flat overrides
-inform the enabled state; nested OpenRouter switches are interpreted only on
-OpenRouter hosts. Other raw nested values remain opaque: controls show the
-model default and reject tier changes that cannot replace that override,
-including a tier equal to the displayed default. Explicitly disabling a
-non-mandatory model still works. When mandatory cleanup removes a raw flat
-`none` after it suppressed the configured tier, controls report the model
-default and reject ineffective changes; OpenRouter's retained configured
-nested effort remains distinct. Generalizing CLI/SDK override reporting is
+cleanup. Controls display the same clamped tier as the provider, while a shared
+preference survives a model switch that uses the built-in GPT fallback for use on other models. Explicit configured capabilities retain their stricter reconciliation.
+Raw request overrides may determine a different effective tier. Native flat
+values and supported OpenRouter nested efforts report the effective raw tier;
+OpenRouter enabled flags and token budgets report enabled state with the model
+default tier. Native nested values and unrecognized raw tiers remain opaque.
+Any raw override that prevents replacing the configured tier rejects explicit
+tier changes, including a tier equal to the displayed value, without persisting
+or leaving a live mutation behind. OpenRouter extra-body-only flat fields do
+not block configured nested effort; sampling flat fields do unless explicit
+configured capabilities inject the nested object.
+
+Explicitly disabling a non-mandatory model still works. Blocked raw overrides
+advertise `enableValue: 'default'` so the thinking switch can restore configured
+raw defaults after disabling, while direct tier commands remain strict. This is
+a reset, so a raw configuration or model default that is off stays off. When
+mandatory cleanup removes a raw flat `none` after it suppressed the configured
+tier, controls report the model default and reject ineffective changes.
+Generalizing CLI/SDK override reporting is
 outside this change.
 
 ACP uses the shared capabilities to advertise supported efforts, mandatory
 thinking, and default enabled state. Existing Web Shell consumers use these
 options. The thinking switch selects the advertised default effort when
 turning a tiered model on, so a model whose API default is off can be enabled.
+Welcome keeps switch-generated tiers tied to their source model and discards that
+pending intent on a model change, preserving the target's existing preference;
+an explicit compatible tier still migrates. Welcome model changes do not turn
+existing max or none preferences into reset commands.
 ACP `default` retains its reset semantics. There are no new daemon routes or persistence
 formats. Responses-only models still require a compatible Chat Completions
 gateway; adding a Responses transport is outside this change.
@@ -98,6 +118,20 @@ sampling parameters. Its live verification plan is
 - [GPT-5.4 Pro](https://developers.openai.com/api/docs/models/gpt-5.4-pro)
 - [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)
 - [GPT-6 reasoning and transport requirements](https://developers.openai.com/api/docs/guides/latest-model)
+- [gpt-5-mini](https://developers.openai.com/api/docs/models/gpt-5-mini)
+- [gpt-5-nano](https://developers.openai.com/api/docs/models/gpt-5-nano)
+- [gpt-5.1-codex](https://developers.openai.com/api/docs/models/gpt-5.1-codex)
+- [gpt-5.1-codex-max](https://developers.openai.com/api/docs/models/gpt-5.1-codex-max)
+- [gpt-5.2](https://developers.openai.com/api/docs/models/gpt-5.2)
+- [gpt-5.2-codex](https://developers.openai.com/api/docs/models/gpt-5.2-codex)
+- [gpt-5.2-pro](https://developers.openai.com/api/docs/models/gpt-5.2-pro)
+- [gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex)
+- [gpt-5.4-mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+- [gpt-5.4-nano](https://developers.openai.com/api/docs/models/gpt-5.4-nano)
+- [gpt-5.5-pro](https://developers.openai.com/api/docs/models/gpt-5.5-pro)
+- [gpt-5.6-terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+- [gpt-5.6-luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)
+- [Model catalog, including the GPT-5.6 alias](https://developers.openai.com/api/docs/models)
 
 Raw gateway extensions are preserved; their internal behavior cannot be inferred
 from the native Chat Completions protocol.

@@ -149,6 +149,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isOpenRouterHostname: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isOpenRouterHostname,
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
