@@ -14,9 +14,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 const PACK = fileURLToPath(new URL('./e2e-build-pack.sh', import.meta.url));
 const UNPACK = fileURLToPath(new URL('./e2e-build-unpack.sh', import.meta.url));
+const E2E_WORKFLOW = fileURLToPath(
+  new URL('../workflows/e2e.yml', import.meta.url),
+);
 const SHA = 'a'.repeat(40);
 // Three roots, two entries sharing one of them, one negated entry: the
 // script must scan every non-negated root once, not a list of its own.
@@ -422,5 +426,70 @@ describe('e2e build archive', () => {
     });
     assert.notEqual(result.status, 0);
     assert.ok(!existsSync(join(leg, 'dist/cli.js')));
+  });
+});
+
+describe('e2e build artifact upload retry (e2e.yml build job)', () => {
+  // Run 34208365262 died with "Upload progress stalled." after ten minutes
+  // and skipped every leg: the upload is the single point that feeds all
+  // download-artifact consumers. The workflow's answer is one bounded
+  // retry, and its semantics live entirely in step properties nothing
+  // else asserts on. A regression here — the retry dropped, its trigger
+  // or overwrite removed, the names drifting apart — is silent until the
+  // next transient stall reddens a main run again, so pin the contract.
+  const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  const uploads = doc.jobs.build.steps.filter((s) =>
+    String(s.uses || '').startsWith('actions/upload-artifact@'),
+  );
+  const downloads = Object.values(doc.jobs).flatMap((job) =>
+    (job.steps ?? []).filter((s) =>
+      String(s.uses || '').startsWith('actions/download-artifact@'),
+    ),
+  );
+
+  it('keeps the two-attempt shape with the retry gated on the first outcome', () => {
+    assert.equal(
+      uploads.length,
+      2,
+      'the build job must upload the archive exactly twice: first attempt plus one bounded retry',
+    );
+    const [first, retry] = uploads;
+    // The first attempt's failure must not red the job before the retry
+    // runs; the retry carries no continue-on-error, so a double failure
+    // still fails the job and a deterministic failure (missing archive)
+    // stays red through both attempts.
+    assert.equal(first.id, 'upload-build');
+    assert.equal(first['continue-on-error'], true);
+    assert.equal(retry['continue-on-error'], undefined);
+    assert.match(String(retry.if), /steps\.upload-build\.outcome == 'failure'/);
+    // The stalled first attempt reserves the artifact name for the run,
+    // and v4+ 409s a same-name upload — without overwrite the retry (and
+    // a manual re-run of the job) fails on Conflict, not on the network.
+    assert.equal(retry.with.overwrite, true);
+    // Both attempts publish the same payload under the same name; the
+    // missing-archive guard rides on both so a pack regression fails
+    // fast in either attempt.
+    assert.equal(first.with['if-no-files-found'], 'error');
+    assert.equal(retry.with['if-no-files-found'], 'error');
+    for (const key of ['name', 'path', 'compression-level', 'retention-days']) {
+      assert.deepEqual(
+        retry.with[key],
+        first.with[key],
+        `retry must carry the same ${key} as the first attempt`,
+      );
+    }
+  });
+
+  it('feeds every download leg the artifact name the upload publishes', () => {
+    const consumed = new Set(downloads.map((s) => s.with?.name));
+    assert.ok(
+      consumed.has(uploads[0].with.name),
+      'no leg downloads the artifact name the build job publishes',
+    );
+    assert.deepEqual(
+      [...consumed],
+      [uploads[0].with.name],
+      'a leg downloads a name the build job never uploads, or a second name appeared',
+    );
   });
 });

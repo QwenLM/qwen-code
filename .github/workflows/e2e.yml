@@ -87,7 +87,33 @@ jobs:
       - name: 'Pack build outputs'
         run: 'bash .github/scripts/e2e-build-pack.sh "${RUNNER_TEMP}/e2e-build.tar.gz"'
 
+      # One bounded retry, same contract as the sandbox image build and
+      # sandbox:none shard retries below: upload-artifact dying with
+      # "Upload progress stalled." is a transient runner-to-blobstore
+      # network class — run 34208365262 stalled ten minutes on the ~100MB
+      # archive and reded the whole run before any leg started. A
+      # deterministic failure (missing archive, via if-no-files-found:
+      # error) fails both attempts and keeps the job red. The first
+      # attempt's continue-on-error keeps that failure from failing the
+      # job before the retry runs; the retry's overwrite is load-bearing
+      # because the stalled attempt already reserved the e2e-build name
+      # and upload-artifact v4+ 409s on a same-name upload in one run —
+      # which is also what a manual re-run of this job after a stall
+      # would hit without it.
       - name: 'Upload build artifact'
+        id: 'upload-build'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        continue-on-error: true
+        with:
+          name: 'e2e-build'
+          path: '${{ runner.temp }}/e2e-build.tar.gz'
+          if-no-files-found: 'error'
+          # Already gzip-compressed.
+          compression-level: 0
+          retention-days: 1
+
+      - name: 'Upload build artifact (retry)'
+        if: "${{ steps.upload-build.outcome == 'failure' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'e2e-build'
@@ -96,6 +122,7 @@ jobs:
           # Already gzip-compressed.
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
