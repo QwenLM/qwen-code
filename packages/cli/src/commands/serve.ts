@@ -215,6 +215,9 @@ interface ServeArgs {
   'open-with-auth': boolean;
   'local-control': boolean;
   'local-control-address'?: string;
+  'agent-host-server'?: string;
+  'agent-host-workspace-id'?: string;
+  'agent-host-name'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -400,6 +403,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
+      .option('agent-host-server', {
+        type: 'string',
+        description:
+          'Register this daemon as an Agent Host with a primary Qwen daemon.',
+      })
+      .option('agent-host-workspace-id', {
+        type: 'string',
+        description:
+          'Control-plane workspace id printed by the primary daemon.',
+      })
+      .option('agent-host-name', {
+        type: 'string',
+        description: 'Display name advertised for this Agent Host.',
+      })
       .check((argv) => {
         // A wildcard or LAN primary bind already owns the port Local Control
         // needs on its selected address. Token and Origin settings remain
@@ -423,6 +440,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         }
         if (argv['local-control-address'] === '') {
           throw new Error('--local-control-address must not be empty.');
+        }
+        if (
+          Boolean(argv['agent-host-server']) !==
+          Boolean(argv['agent-host-workspace-id'])
+        ) {
+          throw new Error(
+            '--agent-host-server and --agent-host-workspace-id must be used together.',
+          );
+        }
+        if (argv['agent-host-name'] === '') {
+          throw new Error('--agent-host-name must not be empty.');
         }
         return true;
       })
@@ -672,6 +700,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    const agentHostEnrollmentToken =
+      process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN']?.trim();
+    delete process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN'];
     if (!argv['http-bridge']) {
       writeStderrLine(
         'qwen serve: --no-http-bridge (native mode) is not yet implemented; ' +
@@ -961,6 +992,27 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         applyOpenWithAuth(serveOptions);
       }
       const handle = await runQwenServe(serveOptions);
+      if (argv['agent-host-server'] && argv['agent-host-workspace-id']) {
+        try {
+          const { startAgentHostConnection } = await import(
+            '../serve/agent-host-client.js'
+          );
+          await startAgentHostConnection({
+            serverUrl: argv['agent-host-server'],
+            workspaceId: argv['agent-host-workspace-id'],
+            workspaceCwd: primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
+            ...(agentHostEnrollmentToken
+              ? { enrollmentToken: agentHostEnrollmentToken }
+              : {}),
+            ...(argv['agent-host-name']
+              ? { name: argv['agent-host-name'] }
+              : {}),
+          });
+        } catch (error) {
+          await handle.close().catch(() => undefined);
+          throw error;
+        }
+      }
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

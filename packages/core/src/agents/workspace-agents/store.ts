@@ -5,7 +5,12 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Mutex } from 'async-mutex';
@@ -20,7 +25,11 @@ import {
   HUMAN_AUTHOR_ID,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
+  AGENT_HOSTS_SCHEMA_VERSION,
   AGENTS_SCHEMA_VERSION,
+  type AgentHost,
+  type AgentHostView,
+  type AgentHostsFile,
   type WorkspaceAgent,
   type AgentNotifyTarget,
   type WorkspaceAgentsFile,
@@ -42,7 +51,9 @@ import {
 const AGENTS_DIRNAME = 'agent-host';
 const WORKSPACE_FILENAME = 'workspace.json';
 const AGENTS_FILENAME = 'agents.json';
+const HOSTS_FILENAME = 'hosts.json';
 const THREADS_DIRNAME = 'threads';
+const HOST_ENROLLMENT_TTL_MS = 10 * 60 * 1_000;
 
 export const AGENTS_DISPLAY_PATH = `~/.qwen/tmp/<project-hash>/${AGENTS_DIRNAME}`;
 
@@ -89,6 +100,10 @@ export function getAgentsFilePath(projectRoot: string): string {
   return path.join(getAgentsDir(projectRoot), AGENTS_FILENAME);
 }
 
+export function getAgentHostsFilePath(projectRoot: string): string {
+  return path.join(getAgentsDir(projectRoot), HOSTS_FILENAME);
+}
+
 export function getThreadsDir(projectRoot: string): string {
   return path.join(getAgentsDir(projectRoot), THREADS_DIRNAME);
 }
@@ -97,6 +112,10 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function generateAgentId(): string {
   return `ag_${randomUUID()}`;
+}
+
+function generateAgentHostId(): string {
+  return `host_${randomUUID()}`;
 }
 
 export function generateThreadId(): string {
@@ -444,6 +463,56 @@ function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
     isPositiveInteger(value['nextRunSequence']) &&
     isValidNotifyTarget(value['notifyTarget'])
   );
+}
+
+function isValidAgentHost(value: unknown): value is AgentHost {
+  return (
+    isRecord(value) &&
+    isValidId(value['id']) &&
+    isNonEmptyString(value['name']) &&
+    isNonEmptyString(value['secretHash']) &&
+    isNonEmptyString(value['workspaceCwd']) &&
+    Array.isArray(value['providers']) &&
+    value['providers'].every(isNonEmptyString) &&
+    isFiniteTimestamp(value['createdAt']) &&
+    (value['lastSeenAt'] === undefined ||
+      isFiniteTimestamp(value['lastSeenAt']))
+  );
+}
+
+function isValidAgentHostsFile(value: unknown): value is AgentHostsFile {
+  if (
+    !isRecord(value) ||
+    value['schemaVersion'] !== AGENT_HOSTS_SCHEMA_VERSION ||
+    !Array.isArray(value['hosts']) ||
+    !value['hosts'].every(isValidAgentHost)
+  ) {
+    return false;
+  }
+  const ids = new Set((value['hosts'] as AgentHost[]).map((host) => host.id));
+  if (ids.size !== value['hosts'].length) return false;
+  const enrollment = value['enrollment'];
+  return (
+    enrollment === undefined ||
+    (isRecord(enrollment) &&
+      isNonEmptyString(enrollment['tokenHash']) &&
+      isFiniteTimestamp(enrollment['expiresAt']))
+  );
+}
+
+function hashAgentHostSecret(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex');
+}
+
+function matchesAgentHostSecret(secret: string, expectedHash: string): boolean {
+  const actual = Buffer.from(hashAgentHostSecret(secret), 'hex');
+  const expected = Buffer.from(expectedHash, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function publicAgentHost(host: AgentHost): AgentHostView {
+  const { secretHash: _secretHash, ...view } = host;
+  return view;
 }
 
 function assertKnownVersion(value: unknown, filePath: string): void {
@@ -1068,6 +1137,153 @@ export async function readAgentWorkspace(
       throw new Error('Malformed agent workspace record.');
     }
     return parsed;
+  });
+}
+
+async function readAgentHostsUnlocked(
+  projectRoot: string,
+): Promise<AgentHostsFile> {
+  const filePath = getAgentHostsFilePath(projectRoot);
+  const parsed = await readJsonFile(filePath);
+  if (parsed === undefined) {
+    return { schemaVersion: AGENT_HOSTS_SCHEMA_VERSION, hosts: [] };
+  }
+  if (!isValidAgentHostsFile(parsed)) {
+    throw new Error(`Malformed Agent Host registry in ${filePath}.`);
+  }
+  return parsed;
+}
+
+async function writeAgentHostsUnlocked(
+  projectRoot: string,
+  registry: AgentHostsFile,
+): Promise<void> {
+  if (!isValidAgentHostsFile(registry)) {
+    throw new Error('Refusing to write malformed Agent Host registry.');
+  }
+  await atomicWriteJSON(getAgentHostsFilePath(projectRoot), registry, {
+    noFollow: true,
+  });
+}
+
+export async function readAgentHosts(
+  projectRoot: string,
+): Promise<AgentHostView[]> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    return registry.hosts.map(publicAgentHost);
+  });
+}
+
+export async function issueAgentHostEnrollment(
+  projectRoot: string,
+): Promise<{ token: string; expiresAt: number }> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + HOST_ENROLLMENT_TTL_MS;
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...registry,
+      enrollment: { tokenHash: hashAgentHostSecret(token), expiresAt },
+    });
+    return { token, expiresAt };
+  });
+}
+
+export async function enrollAgentHost(
+  projectRoot: string,
+  input: {
+    token: string;
+    name: string;
+    workspaceCwd: string;
+    providers: string[];
+  },
+): Promise<{ host: AgentHostView; secret: string }> {
+  const name = input.name.trim();
+  const workspaceCwd = input.workspaceCwd.trim();
+  const providers = [...new Set(input.providers.map((value) => value.trim()))];
+  if (!input.token || !name || name.length > 80) {
+    throw new Error('Invalid Agent Host enrollment.');
+  }
+  if (!workspaceCwd || workspaceCwd.length > 4_096) {
+    throw new Error('Invalid Agent Host workspace.');
+  }
+  if (
+    providers.length === 0 ||
+    providers.length > 20 ||
+    providers.some((provider) => !provider || provider.length > 80)
+  ) {
+    throw new Error('Invalid Agent Host providers.');
+  }
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    if (
+      !registry.enrollment ||
+      registry.enrollment.expiresAt < Date.now() ||
+      !matchesAgentHostSecret(input.token, registry.enrollment.tokenHash)
+    ) {
+      throw new Error('Invalid or expired Agent Host enrollment token.');
+    }
+    const secret = randomBytes(32).toString('base64url');
+    const host: AgentHost = {
+      id: generateAgentHostId(),
+      name,
+      secretHash: hashAgentHostSecret(secret),
+      workspaceCwd,
+      providers,
+      createdAt: Date.now(),
+    };
+    const { enrollment: _used, ...rest } = registry;
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...rest,
+      hosts: [...registry.hosts, host],
+    });
+    return { host: publicAgentHost(host), secret };
+  });
+}
+
+export async function heartbeatAgentHost(
+  projectRoot: string,
+  hostId: string,
+  secret: string,
+  input: { workspaceCwd: string; providers: string[] },
+): Promise<AgentHostView | undefined> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    const current = registry.hosts.find((host) => host.id === hostId);
+    if (!current || !matchesAgentHostSecret(secret, current.secretHash)) {
+      return undefined;
+    }
+    const workspaceCwd = input.workspaceCwd.trim();
+    const providers = [
+      ...new Set(input.providers.map((value) => value.trim())),
+    ];
+    if (
+      !workspaceCwd ||
+      workspaceCwd.length > 4_096 ||
+      providers.length === 0 ||
+      providers.length > 20 ||
+      providers.some((provider) => !provider || provider.length > 80)
+    ) {
+      throw new Error('Invalid Agent Host heartbeat.');
+    }
+    const next: AgentHost = {
+      ...current,
+      workspaceCwd,
+      providers,
+      lastSeenAt: Date.now(),
+    };
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...registry,
+      hosts: registry.hosts.map((host) =>
+        host.id === current.id ? next : host,
+      ),
+    });
+    return publicAgentHost(next);
   });
 }
 

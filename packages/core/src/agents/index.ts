@@ -32,12 +32,16 @@ export {
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
 export {
   claimAgentHostSession,
+  enrollAgentHost,
+  heartbeatAgentHost,
+  issueAgentHostEnrollment,
   createThread,
   generateAgentId,
   generateEventId,
   isValidAgentName,
   listThreads,
   readWorkspaceAgents,
+  readAgentHosts,
   readAgentWorkspace,
   readThread,
   releaseAgentHostSession,
@@ -102,12 +106,14 @@ export {
   DEFAULT_THREAD_TOKEN_BUDGET,
   HUMAN_AUTHOR_ID,
   LOCAL_AGENT_RUNTIME_ID,
+  AGENT_HOSTS_SCHEMA_VERSION,
   THREAD_PRIORITY_ORDER,
   DEFAULT_THREAD_PRIORITY,
   threadPriorityRank,
 } from './workspace-agents/types.js';
 export type {
   WorkspaceAgent,
+  AgentHostView,
   AgentWorkspaceState,
   Thread,
   ThreadRun,

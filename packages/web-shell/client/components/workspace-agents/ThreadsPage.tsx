@@ -43,6 +43,8 @@ export interface ThreadsPageProps {
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
   runtime?: WorkspaceAgentRuntimeView;
+  runtimes?: readonly WorkspaceAgentRuntimeView[];
+  hostEnrollment?: AgentHostEnrollmentView;
   view: AgentWorkspaceView;
   onViewChange: (view: AgentWorkspaceView) => void;
   onOpenThread: (threadId: string) => void;
@@ -51,6 +53,7 @@ export interface ThreadsPageProps {
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
   onOpenAgentBuilder?: () => void;
   onOpenDefinitions?: () => void;
+  onCreateHostEnrollment?: () => void;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => void;
   onPreviewThread?: (assignee?: string) => void;
@@ -90,12 +93,18 @@ export interface WorkspaceAgentRuntimeView {
   provider: string;
   status: 'online' | 'offline';
   workspaceId?: string;
+  workspaceCwd?: string;
   hostSessionId?: string;
   lastSeenAt?: number;
   agentCount?: number;
   sessionCount?: number;
   runningTaskCount?: number;
   queuedTaskCount?: number;
+}
+
+export interface AgentHostEnrollmentView {
+  command: string;
+  expiresAt: number;
 }
 
 export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
@@ -192,6 +201,8 @@ export function ThreadsPage({
   agents,
   threads,
   runtime,
+  runtimes,
+  hostEnrollment,
   view,
   onViewChange,
   onOpenThread,
@@ -200,6 +211,7 @@ export function ThreadsPage({
   onUpdateAgent,
   onOpenAgentBuilder,
   onOpenDefinitions,
+  onCreateHostEnrollment,
   capabilities,
   onCreateThread,
   onPreviewThread,
@@ -208,6 +220,7 @@ export function ThreadsPage({
   loading,
 }: ThreadsPageProps) {
   const groups = useMemo(() => groupThreads(threads), [threads]);
+  const runtimeEntries = runtimes ?? (runtime ? [runtime] : []);
   const [creating, setCreating] = useState<'thread' | undefined>();
   const [configuring, setConfiguring] = useState<string>();
   const [openAgentId, setOpenAgentId] = useState<string>();
@@ -307,6 +320,17 @@ export function ThreadsPage({
             >
               <PlusIcon data-icon="inline-start" />
               Agent
+            </Button>
+          ) : null}
+          {view === 'runtime' && onCreateHostEnrollment ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pending}
+              onClick={onCreateHostEnrollment}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Host
             </Button>
           ) : null}
           {view === 'tasks' ? (
@@ -651,63 +675,90 @@ export function ThreadsPage({
           ))
         )}
 
-        {view === 'runtime' && runtime ? (
-          <section className={styles.runtimeCard}>
+        {view === 'runtime' && hostEnrollment ? (
+          <section className={styles.enrollmentCard}>
+            <strong>Run this once on the Host</strong>
+            <code>{hostEnrollment.command}</code>
+            <span>
+              Enrollment expires at{' '}
+              {new Date(hostEnrollment.expiresAt).toLocaleTimeString()}.
+            </span>
+          </section>
+        ) : null}
+
+        {view === 'runtime' && runtimeEntries.length > 0 ? (
+          runtimeEntries.map((runtimeEntry) => (
+            <section className={styles.runtimeCard} key={runtimeEntry.id}>
             <div className={styles.runtimeHeader}>
               <h2 className={styles.runtimeTitle}>
-                {runtime.label}
+                {runtimeEntry.label}
               </h2>
               <p className={styles.configNote}>
-                Hosts top-level Agent sessions for this workspace. Conversation
-                state is isolated per Agent and task.
+                {runtimeEntry.kind === 'local'
+                  ? 'Hosts top-level Agent sessions for this workspace.'
+                  : 'Registered Host. Agent execution is not enabled in H1.'}
               </p>
             </div>
-            <strong className={styles.runtimeStatus}>
-              {runtime.status}
+            <strong
+              className={styles.runtimeStatus}
+              data-runtime-status={runtimeEntry.status}
+            >
+              {runtimeEntry.status}
             </strong>
             <dl className={styles.runtimeFacts}>
               <div>
                 <dt>Runtime</dt>
                 <dd>
-                  <code>{runtime.id}</code>
+                  <code>{runtimeEntry.id}</code>
                 </dd>
               </div>
               <div>
                 <dt>Provider</dt>
-                <dd>{runtime.provider}</dd>
+                <dd>{runtimeEntry.provider}</dd>
               </div>
-              {runtime.hostSessionId ? (
+              {runtimeEntry.workspaceCwd ? (
                 <div>
-                  <dt>Host session</dt>
+                  <dt>Workspace</dt>
                   <dd>
-                    <code>{runtime.hostSessionId}</code>
+                    <code>{runtimeEntry.workspaceCwd}</code>
                   </dd>
                 </div>
               ) : null}
-              {runtime.lastSeenAt ? (
+              {runtimeEntry.hostSessionId ? (
+                <div>
+                  <dt>Host session</dt>
+                  <dd>
+                    <code>{runtimeEntry.hostSessionId}</code>
+                  </dd>
+                </div>
+              ) : null}
+              {runtimeEntry.lastSeenAt ? (
                 <div>
                   <dt>Last heartbeat</dt>
-                  <dd>{new Date(runtime.lastSeenAt).toLocaleTimeString()}</dd>
+                  <dd>
+                    {new Date(runtimeEntry.lastSeenAt).toLocaleTimeString()}
+                  </dd>
                 </div>
               ) : null}
               <div>
                 <dt>Agents</dt>
-                <dd>{runtime.agentCount ?? 0}</dd>
+                <dd>{runtimeEntry.agentCount ?? 0}</dd>
               </div>
               <div>
                 <dt>Sessions</dt>
-                <dd>{runtime.sessionCount ?? 0}</dd>
+                <dd>{runtimeEntry.sessionCount ?? 0}</dd>
               </div>
               <div>
                 <dt>Running tasks</dt>
-                <dd>{runtime.runningTaskCount ?? 0}</dd>
+                <dd>{runtimeEntry.runningTaskCount ?? 0}</dd>
               </div>
               <div>
                 <dt>Queued tasks</dt>
-                <dd>{runtime.queuedTaskCount ?? 0}</dd>
+                <dd>{runtimeEntry.queuedTaskCount ?? 0}</dd>
               </div>
             </dl>
-          </section>
+            </section>
+          ))
         ) : view === 'runtime' ? (
           <div className={styles.emptyState}>
             <p className={styles.emptyLead}>Runtime unavailable.</p>

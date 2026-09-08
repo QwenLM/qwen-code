@@ -17,7 +17,31 @@
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOSTS_SCHEMA_VERSION = 1;
 export const LOCAL_AGENT_RUNTIME_ID = 'local';
+
+export interface AgentHost {
+  id: string;
+  name: string;
+  secretHash: string;
+  workspaceCwd: string;
+  providers: string[];
+  createdAt: number;
+  lastSeenAt?: number;
+}
+
+export type AgentHostView = Omit<AgentHost, 'secretHash'>;
+
+export interface AgentHostEnrollment {
+  tokenHash: string;
+  expiresAt: number;
+}
+
+export interface AgentHostsFile {
+  schemaVersion: typeof AGENT_HOSTS_SCHEMA_VERSION;
+  hosts: AgentHost[];
+  enrollment?: AgentHostEnrollment;
+}
 
 /**
  * Where this workspace's notifications go.

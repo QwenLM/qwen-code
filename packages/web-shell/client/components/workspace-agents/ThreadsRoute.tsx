@@ -14,6 +14,7 @@ import {
   ThreadsPage,
   type WorkspaceAgentSummaryView,
   type WorkspaceAgentRuntimeView,
+  type AgentHostEnrollmentView,
   type AgentWorkspaceView,
   type NewWorkspaceAgent,
   type NewThread,
@@ -35,8 +36,10 @@ export interface ThreadsApi {
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
     runtime?: WorkspaceAgentRuntimeView;
+    runtimes?: WorkspaceAgentRuntimeView[];
     capabilities?: AgentCapabilitiesView;
   }>;
+  createHostEnrollment?(): Promise<AgentHostEnrollmentView>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -62,7 +65,8 @@ function createThreadsHttpApi(
   token: string | undefined,
   workspaceCwd: string,
 ): ThreadsApi {
-  const root = `${baseUrl.replace(/\/+$/, '')}/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const serverUrl = baseUrl.replace(/\/+$/, '');
+  const root = `${serverUrl}/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
   const request = async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(`${root}${path}`, {
       ...init,
@@ -84,6 +88,21 @@ function createThreadsHttpApi(
 
   return {
     listAgents: () => request('/agents'),
+    createHostEnrollment: async () => {
+      const result = await post<{
+        token: string;
+        workspaceId: string;
+        expiresAt: number;
+      }>('/hosts/enrollment', {});
+      return {
+        expiresAt: result.expiresAt,
+        command:
+          `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${JSON.stringify(result.token)} ` +
+          `qwen serve --no-web --port 0 ` +
+          `--agent-host-server ${JSON.stringify(serverUrl)} ` +
+          `--agent-host-workspace-id ${JSON.stringify(result.workspaceId)}`,
+      };
+    },
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
@@ -150,6 +169,9 @@ export function ThreadsRoute({
   );
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
   const [runtime, setRuntime] = useState<WorkspaceAgentRuntimeView>();
+  const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
+  const [hostEnrollment, setHostEnrollment] =
+    useState<AgentHostEnrollmentView>();
   const [view, setView] = useState<AgentWorkspaceView>('agents');
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
@@ -197,6 +219,10 @@ export function ThreadsRoute({
       appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
       setRuntime(nextAgents.runtime);
+      setRuntimes(
+        nextAgents.runtimes ??
+          (nextAgents.runtime ? [nextAgents.runtime] : []),
+      );
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
@@ -377,6 +403,8 @@ export function ThreadsRoute({
         view={view}
         onViewChange={setView}
         {...(runtime ? { runtime } : {})}
+        runtimes={runtimes}
+        {...(hostEnrollment ? { hostEnrollment } : {})}
         createPreview={createPreview}
         pending={pending}
         onOpenThread={openThread}
@@ -388,6 +416,16 @@ export function ThreadsRoute({
           void mutate(() => client.updateAgent(id, patch))
         }
         onOpenAgentBuilder={() => setCreatingAgent(true)}
+        {...(client.createHostEnrollment
+          ? {
+              onCreateHostEnrollment: () =>
+                void mutate(async () => {
+                  const enrollment = await client.createHostEnrollment?.();
+                  if (enrollment) setHostEnrollment(enrollment);
+                  return enrollment;
+                }),
+            }
+          : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         onCreateThread={(input) =>

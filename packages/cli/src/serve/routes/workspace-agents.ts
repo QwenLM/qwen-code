@@ -41,6 +41,8 @@ import {
   listThreads,
   parseMentions,
   postMessage,
+  issueAgentHostEnrollment,
+  readAgentHosts,
   readWorkspaceAgents,
   readAgentWorkspace,
   readThread,
@@ -97,6 +99,7 @@ const LIVE_RUN_STATUSES = new Set([
   'cancelling',
 ]);
 const ACTIVE_RUN_STATUSES = new Set(['running', 'finishing', 'cancelling']);
+const AGENT_HOST_ONLINE_WINDOW_MS = 15_000;
 
 function liveRunCount(thread: Thread): number {
   return thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).length;
@@ -449,10 +452,11 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime) return;
     const root = runtime.workspaceCwd;
     try {
-      const [agents, { threads }, workspace] = await Promise.all([
+      const [agents, { threads }, workspace, hosts] = await Promise.all([
         readWorkspaceAgents(root),
         listThreads(root),
         readAgentWorkspace(root),
+        readAgentHosts(root),
       ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
       const agentSessions = sessions.filter(
@@ -469,6 +473,7 @@ export function registerWorkspaceAgentRoutes(
         provider: 'Qwen Code ACP',
         status: 'online' as const,
         workspaceId: runtime.workspaceId,
+        workspaceCwd: root,
         ...(workspace.hostSessionId
           ? { hostSessionId: workspace.hostSessionId }
           : {}),
@@ -485,6 +490,27 @@ export function registerWorkspaceAgentRoutes(
           0,
         ),
       };
+      const now = Date.now();
+      const hostRuntimes = hosts.map((host) => ({
+        id: host.id,
+        kind: 'external' as const,
+        label: host.name,
+        provider: host.providers.join(', '),
+        status:
+          host.lastSeenAt !== undefined &&
+          now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
+            ? ('online' as const)
+            : ('offline' as const),
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: host.workspaceCwd,
+        ...(host.lastSeenAt !== undefined
+          ? { lastSeenAt: host.lastSeenAt }
+          : {}),
+        agentCount: 0,
+        sessionCount: 0,
+        runningTaskCount: 0,
+        queuedTaskCount: 0,
+      }));
       res.json({
         agents: agents.map((agent) => {
           const active = threads.find((thread) =>
@@ -588,6 +614,7 @@ export function registerWorkspaceAgentRoutes(
           };
         }),
         runtime: localRuntime,
+        runtimes: [localRuntime, ...hostRuntimes],
         // What every agent may do, sent once rather than per agent because it
         // is a property of the subsystem and not of an identity. Shown so the
         // boundary is something a person can read before trusting an agent
@@ -602,6 +629,23 @@ export function registerWorkspaceAgentRoutes(
       fail(res, error);
     }
   });
+
+  app.post(
+    `${prefix}/hosts/enrollment`,
+    deps.mutate(),
+    async (req: Request, res: Response) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        res.status(201).json({
+          ...(await issueAgentHostEnrollment(runtime.workspaceCwd)),
+          workspaceId: runtime.workspaceId,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
 
   app.get(`${prefix}/threads`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);

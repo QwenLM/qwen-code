@@ -308,6 +308,7 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -2094,6 +2095,8 @@ export function createServeApp(
       daemonLog,
     });
   }
+
+  registerAgentHostTransportRoutes(app, workspaceRegistry);
 
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the

@@ -378,12 +378,12 @@ top-level ACP session with its own persona, model setting and transcript. It is
 no longer a background subagent, and work on another task gets another session.
 The ACP bridge still multiplexes those sessions in one process. The produced
 `local` binding resolves through Qwen Code's existing workspace Runtime. Its
-durable host-session claim, provider, bridge heartbeat and live workload now
-appear in the Runtime view, but there is no remote registry or placement
-protocol.
+durable host-session claim, provider, bridge heartbeat and live workload appear
+in the Runtime view. H1 now also registers remote Qwen Host daemons and tracks
+liveness, but placement and remote execution remain absent.
 
-**Missing entirely.** Remote Runtime registry and placement; labels and due date
-on the work item; squads; inbox; projects. Priority, acceptance criteria,
+**Missing entirely.** Remote placement and execution; labels and due date on the
+work item; squads; inbox; projects. Priority, acceptance criteria,
 per-Agent instructions/model/concurrency and direct persistent-Agent creation
 have landed. Reusable definitions are now an optional compatibility path.
 
@@ -566,11 +566,11 @@ Stage A's initial sessionization is complete: `launcher.ts`, `dispatch-port.ts` 
 `dispatchAgentRuns` and the two ACP control methods behind them. Dispatch runs
 in the daemon, where the sessions are. The follow-up correction scopes those
 sessions to `(agent, thread)` instead of one transcript per identity.
-Multica-style runtime registration and its task-execution subprocess boundary
-remain absent.
+H1 now supplies Multica-style Host registration and liveness; its remote
+task-execution boundary remains absent.
 
-The local Runtime follow-up deliberately reused existing infrastructure rather
-than adding a parallel host store. A non-empty roster restores the persisted
+Before H1, the local Runtime follow-up deliberately reused existing
+infrastructure rather than adding a parallel host store. A non-empty roster restores the persisted
 host-session owner after daemon restart, and the page reads the bridge heartbeat
 plus live Agent/session/run counts. Unknown runtime bindings stay offline and
 their work remains queued instead of failing terminally. The observed restart
@@ -591,10 +591,10 @@ percentage estimate.
 | Agents collaborate through a shared thread | Live runs covered peer mentions, child delegation, parent reports, waiting, blocking and review | Passed locally |
 | A person can intervene while an Agent is working | A live mid-turn message was persisted in the same run's transcript and consumed window, and changed the submitted review | Passed for the normal path; late-drain crash windows remain open |
 | Reuse Qwen Code conversations | Agent task sessions appear under the existing sidebar's Agents source and open in the ordinary session view; the shared task keeps only cross-Agent coordination state | Passed locally |
-| Multica/Harness-style Host layer | The current daemon exposes one truthful local Runtime with provider, stable host-session id, heartbeat and workload counts; an unknown runtime binding stays offline and queued | Partial: no Host registration, remote heartbeat transport, placement or Agent-to-Host picker |
+| Multica/Harness-style Host layer | The primary daemon persists registered Hosts; a second daemon keeps a stable Host id across both daemon restarts, advertises provider/workspace, and drives online/offline through heartbeat | H1 passed locally; no Agent binding, remote execution, placement or transcript proxy (H2/H3) |
 | Full Multica tracker breadth | Agent instructions/model/concurrency and task priority/acceptance criteria exist | Partial: labels, projects, inbox, squads, due dates and invocation policy are absent |
 
-The next implementation step is intentionally not started by this audit.
+The audit's next step, registered-Host H1, is now implemented and accepted below.
 
 ### Registered-Host feasibility gate
 
@@ -661,6 +661,13 @@ Implementation has three separately accepted slices:
    remote session owner and proxies its events/transcript/cancel surface, so the
    existing Agents conversation list opens the same `(agent, thread)` history
    before and after either daemon restarts.
+
+H1 observation: enrollment replay returned 401; stopping the Host past the
+15-second window changed it to offline; restarting it without the token restored
+Host `host_d43cad67-c491-4915-9186-481732a0458e`; restarting the primary caused
+one failed heartbeat followed by reconnection with that same id. The Runtime
+page showed both the local daemon and `Demo-Host`, with the advertised provider,
+workspace and moving heartbeat. No API or UI path can bind an Agent to it.
 
 The registered-Host capability is accepted only after H1-H3 pass together.
 Cloud scheduling, autoscaling and one permanent process per Agent remain out of
@@ -780,7 +787,7 @@ question for whoever owns that surface.
 
 **Multica 实际是什么**：Linear 形态的 issue tracker，assignee 可以是 agent，外加一层 runtime 注册。`agent_runtime` 是独立实体（workspace + daemon_id + provider，带在线状态和心跳），agent 绑定到它上面；`agent_task_queue` 是 agent × issue 的派发队列；`issue` 有优先级、7 种状态、验收标准、截止日期、标签、项目；对话就是 issue 上的 comment。页面里有独立的 runtimes 和 runtimes/[id]。
 
-**我们的状态**：底层协作规则已经具备；每个 `(agent, task)` 都是独立的顶层 ACP session，不再是 background subagent，同一 Agent 处理不同任务也不会共用 transcript。本地 `runtimeId` 已产生、校验并在面板展示，但这些 session 仍共享一个 ACP daemon；远程 host 注册、心跳、放置和进程级故障隔离尚未实现。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
+**我们的状态**：底层协作规则已经具备；每个 `(agent, task)` 都是独立的顶层 ACP session，不再是 background subagent，同一 Agent 处理不同任务也不会共用 transcript。本地 `runtimeId` 已产生、校验并在面板展示，但这些 session 仍共享一个 ACP daemon；H1 已实现远程 Host 注册和心跳，放置、远程执行和进程级故障隔离尚未实现。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
 
 **之前那个七八成错在哪**：我拿自己那份设计文档当卷子打分，而文档 §1 当时就把执行模型定错了。现在修正的是本地 demo 主链路；若按 Multica 完整产品计算，远程 Runtime、权限、项目和收件箱仍然不存在，不能再用百分比掩盖不同分母。
 

@@ -164,9 +164,9 @@ ordinary conversation appeared in the existing Agents session list as
 sessions remain untouched. This is local-daemon product-path evidence, not a
 claim of a Multica-compatible remote Runtime.
 
-**Verified through the existing local Runtime owner (2026-09-08).** Runtime is
-not represented by a second invented registry for the demo. The Agent surface
-now projects Qwen Code's selected `WorkspaceRuntime`, the workspace's durable
+**Verified through the existing local Runtime owner (2026-09-08).** Before the
+registered-Host slice, the Agent surface projected Qwen Code's selected
+`WorkspaceRuntime`, the workspace's durable
 `hostSessionId`, and the bridge's real heartbeat. Restarting the daemon kept
 host session `f210855f-45ab-4624-a858-bf11785e22d0`; the non-empty roster
 restored its owner without a task mutation, and the displayed heartbeat moved
@@ -176,6 +176,18 @@ reported offline and the dispatcher leaves its work queued as
 `runtime_unavailable`; it is not converted into a terminal launch failure.
 This proves the one local host and its restart continuity, not remote
 registration or placement.
+
+**Verified through registered-Host H1 (2026-09-08).** The primary daemon now
+owns a workspace-scoped Host registry. A ten-minute one-time credential was
+exchanged by a second `qwen serve` process for Host
+`host_d43cad67-c491-4915-9186-481732a0458e`; replaying the enrollment returned
+401. Its provider and workspace advertisement appeared beside the local daemon
+in the Runtime view. Stopping it for more than the 15-second liveness window
+changed the stored Host to offline. Restarting it without the enrollment token
+restored the same Host id, and restarting the primary daemon while it was alive
+produced a heartbeat failure followed by automatic reconnection with that same
+id. This proves registration and liveness only: H1 does not permit binding an
+Agent to that Host or executing a run there.
 
 An earlier browser run exposed a prompt-level ping-pong: Bob and Alice used
 peer mentions in result prose, and each mention correctly booked another run.
@@ -321,9 +333,11 @@ not crash isolation: the current ACP bridge multiplexes those sessions in one
 process, so a process failure affects every local agent session.
 
 The cost is N live session contexts and model clients inside that process. A
-roster is expected to stay small — two to five agents — and the machine's memory
-is the practical limit. Remote hosts, daemon heartbeats and per-agent process
-boundaries require a first-class runtime layer; this demo does not claim them.
+local roster is expected to stay small — two to five agents — and the machine's
+memory is the practical limit. The registered-Host H1 slice adds durable
+identity, advertisement and daemon heartbeat, but remote Agent execution and
+per-agent process boundaries still require the H2 run protocol; this demo does
+not claim those capabilities.
 
 Everything the execution layer needs still exists:
 
@@ -389,6 +403,10 @@ read-only; a private server or trusted-looking name is not evidence.
 AgentWorkspaceState  schemaVersion, workspaceId, hostSessionId,
                     nextRunSequence
 AgentAgentsFile      schemaVersion, agents[]
+AgentHostsFile       schemaVersion, hosts[], enrollment?
+
+AgentHost            id, name, secretHash, workspaceCwd, providers[],
+                    createdAt, lastSeenAt
 
 WorkspaceAgent           id, name, description, color, agentType, model,
                     instructions, queueLimit, maxConcurrentRuns,
@@ -539,7 +557,7 @@ migrated under the workspace lock with atomic replacement; an unknown newer
 version or failed migration is a fail-closed error, never treated as empty
 state. The pre-migration file is retained until the replacement validates.
 
-Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/workspace agents/`),
+Stored under the per-project runtime dir (`~/.qwen/tmp/<project-hash>/agent-host/`),
 not the working tree — the reasoning the durable scheduled-tasks file records,
 plus one more: thread text is written by one agent and fed to another, so it is
 a prompt-injection surface and must never be committed, pulled, or reviewed as
@@ -728,7 +746,7 @@ Implemented on the single #11206 delivery branch:
 | File                                                      | Responsibility                                         |
 | --------------------------------------------------------- | ------------------------------------------------------ |
 | `core/src/agents/workspace-agents/types.ts`               | Entities and limits                                    |
-| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD, singleton host claim |
+| `core/src/agents/workspace-agents/store.ts`               | Paths, validation, locking, CRUD and Host registry     |
 | `core/src/agents/workspace-agents/mentions.ts`            | `@name` → agent ids                                    |
 | `core/src/agents/workspace-agents/dispatch-policy.ts`     | `decideDispatch` — pure                                |
 | `core/src/agents/workspace-agents/thread-actions.ts`      | `postMessage` — append and book under one lock         |
@@ -742,6 +760,8 @@ Implemented on the single #11206 delivery branch:
 | `core/src/agents/workspace-agents/dispatcher.ts`          | FIFO selection, runtime entry point, parent reports    |
 | `cli/src/serve/workspace-agents/session-dispatch-port.ts` | The one binding to the local agent session runtime     |
 | `cli/src/serve/workspace-agents/agent-host-session.ts`    | Hidden ACP host ownership, keepalive, reload           |
+| `cli/src/serve/routes/agent-hosts.ts`                     | Scoped Host enrollment and heartbeat transport         |
+| `cli/src/serve/agent-host-client.ts`                      | Remote daemon credential and heartbeat client          |
 | `cli/src/acp-integration/acpAgent.ts`                     | Applies the persona when an agent session spawns       |
 
 ### 5.1 Local review correction — committed and verified
@@ -1083,17 +1103,18 @@ source-task attribution at every hop (`ReasonInvocationNotAllowed`,
 `ReasonAttributionBlocked`). V1 here permits any agent to mention any enabled
 workspace peer, but still records non-spoofable source-run provenance.
 
-**Missing and worth having.** Runtime binding — agents that run on another
-machine or in the cloud, and agents that are not Qwen Code — is the one hard
-gap. Scheduled and external-event triggers are absent but the cron scheduler and
+**Missing and worth having.** Runtime placement and execution — agents that run
+on a registered Host or in the cloud, and agents that are not Qwen Code — is the
+one hard gap. Host registration and liveness are implemented but intentionally
+cannot claim work. Scheduled and external-event triggers are absent but the cron scheduler and
 channel workers already exist to carry them. Board views, labels, search and
 cross-issue references have no equivalent.
 
 Percentages were removed because they hid incompatible denominators. Current
 evidence supports a narrower statement: local persistent identities can be
 assigned work, collaborate through mentions and child threads, accept human
-input, and return work for review in the Web Shell. Runtime registration,
-remote hosts, process isolation, the full Multica agent builder, labels,
+input, and return work for review in the Web Shell. Remote execution,
+placement, process isolation, the full Multica agent builder, labels,
 projects, inbox and the complete failure-injection matrix are not complete.
 The product must not describe the former as percentage completion of the latter.
 
@@ -1251,20 +1272,20 @@ remain genuinely open:
 ### Resolved during step 3
 
 Runtime shape is settled: an Agent carries a runtime binding rather than being
-the runtime. V1 produces and enforces the single local binding and exposes it in
-the roster; Qwen Code's existing `WorkspaceRuntime`, durable host-session claim
-and ACP bridge heartbeat are its implementation. The Runtime view now reads
-those facts rather than presenting a constant local card. A second registry for
-remote/cloud/foreign adapters and placement remains outside the demo. This
-settles the former schema dependency without pretending remote registration
-already exists or deciding whether #9402 seeds a later adapter.
+the runtime. V1 still permits only the local binding. Qwen Code's existing
+`WorkspaceRuntime`, durable host-session claim and ACP bridge heartbeat are its
+local implementation. H1 adds a separate durable registry for remote Qwen Host
+daemons, but deliberately does not expose them as an Agent binding until H2 can
+authenticate claims and route thread mutations back through the primary. This
+settles the former schema dependency without pretending registration already
+means placement or deciding whether #9402 seeds a later adapter.
 
 ## 10. Out of scope
 
-Cross-machine and non-Qwen agents (#10078's session-boundary decision and
+Cross-machine Agent execution and non-Qwen agents (#10078's session-boundary decision and
 #10247 §5's stalled wiring choice); local per-agent OS-process isolation (task
 session isolation is §1); durable history after a thread
-is deleted; remote and cloud runtimes; multi-user permissions; and agents that
+is deleted; remote placement and cloud runtimes; multi-user permissions; and agents that
 write code, which decision 1 defers until isolation is settled.
 
 <details>

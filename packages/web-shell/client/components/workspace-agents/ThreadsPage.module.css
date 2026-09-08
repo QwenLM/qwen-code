@@ -79,6 +79,25 @@
   border-radius: var(--radius);
 }
 
+.enrollmentCard {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.enrollmentCard code {
+  overflow-x: auto;
+  padding: 10px;
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--muted);
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
 .runtimeHeader {
   min-width: 0;
 }
@@ -93,6 +112,10 @@
   color: var(--status-running-fg);
   font-size: 12px;
   text-transform: capitalize;
+}
+
+.runtimeStatus[data-runtime-status='offline'] {
+  color: var(--muted-foreground);
 }
 
 .runtimeFacts {
