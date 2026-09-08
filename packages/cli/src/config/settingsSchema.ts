@@ -2632,7 +2632,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default when the active provider can back it (Alibaba ModelStudio Standard API Key / Token Plan, or any DashScope-compatible entry); set enabled=false to turn it off. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2640,9 +2640,9 @@ const SETTINGS_SCHEMA = {
             label: 'Enable WebSearch',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: undefined as boolean | undefined,
             description:
-              'Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.',
+              'Set false to disable the built-in web_search tool. Leave unset to enable it automatically whenever the active provider can back the search request. Setting true also requires tools.webSearch.model unless an env-declared backend is configured. Env override: ENABLE_WEB_SEARCH.',
             showInDialog: true,
           },
           model: {
@@ -2652,7 +2652,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as string | undefined,
             description:
-              'Model selector for the search side request, resolved against modelProviders like fastModel ("modelId" or "authType:modelId"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
+              'Model selector for the search side request, resolved against modelProviders like fastModel ("modelId" or "authType:modelId"). Must resolve to a DashScope-compatible entry with an envKey. Optional: when unset, the search runs as qwen3.6-plus on the active provider\'s endpoint. Env override: WEB_SEARCH_MODEL.',
             showInDialog: true,
           },
           webExtractor: {

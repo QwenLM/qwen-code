@@ -13,6 +13,7 @@ import {
   resolveRequestTimeout,
 } from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import { findProviderByCredentials } from '../providers/all-providers.js';
 import {
   buildRuntimeFetchOptions,
   preloadRuntimeFetchModule,
@@ -57,6 +58,15 @@ const MAX_CANDIDATE_URLS = 25;
 const MAX_OPENED_URLS = 25;
 const NO_SEARCH_RETRY_BASE_DELAY_MS = 750;
 const NO_SEARCH_RETRY_JITTER_MS = 500;
+
+/**
+ * Search model used when the backend is derived from the main model's
+ * provider instead of being configured explicitly. Deliberately not the main
+ * model id: the coder-tuned models a user is likely to be running are not
+ * guaranteed to serve the Responses API search tools, while this one is the
+ * documented recommendation.
+ */
+export const DEFAULT_WEB_SEARCH_MODEL = 'qwen3.6-plus';
 
 /**
  * Parameters for the WebSearch tool. Deliberately just the query: the
@@ -107,7 +117,19 @@ export interface WebSearchBackendConfig {
 
 export type WebSearchGateResult =
   | { ok: true; backend: WebSearchBackendConfig }
-  | { ok: false; notice: string };
+  | {
+      ok: false;
+      notice: string;
+      /**
+       * True when the tool was never asked for: nothing under
+       * `tools.webSearch` requested it and the main model's provider has no
+       * search backend to derive. The registry keeps the tool off without a
+       * startup notice — a user on a provider we cannot serve should not be
+       * warned about a feature they never configured. Explicit
+       * misconfiguration leaves this unset so the notice still surfaces.
+       */
+      silent?: boolean;
+    };
 
 /**
  * DashScope-compatible endpoint check for the search side channel. Accepts
@@ -156,6 +178,189 @@ function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
   return classifyDashScopeBaseUrl(baseUrl) === null;
 }
 
+const gateDebugLogger: DebugLogger = createDebugLogger('WEB_SEARCH');
+
+/**
+ * Whether a provider entry can back the search side channel: a direct API
+ * key on a DashScope-compatible HTTPS endpoint. OAuth entries are excluded —
+ * their tokens cannot authenticate this request.
+ */
+function isUsableSearchEntry(entry: {
+  authType: AuthType;
+  baseUrl?: string;
+  envKey?: string;
+}): boolean {
+  return (
+    entry.authType !== AuthType.QWEN_OAUTH &&
+    !!entry.baseUrl &&
+    isDashScopeCompatibleBaseUrl(entry.baseUrl) &&
+    !!entry.envKey &&
+    !!process.env[entry.envKey]?.trim()
+  );
+}
+
+/**
+ * Whether the auto path may adopt an endpoint that matches no provider
+ * preset. Preset matching compares base URLs exactly, so it misses a
+ * hand-written `modelProviders` entry pointing at DashScope and the
+ * workspace-specific Token Plan hosts (`llm-*.<region>.maas.aliyuncs.com`);
+ * the host check covers both.
+ *
+ * Coding Plan endpoints are deliberately excluded: whether they serve the
+ * Responses API search tools has not been verified, so they are opted in
+ * explicitly (via `tools.webSearch.model`) rather than adopted implicitly.
+ */
+function isAutoEligibleDashScopeHost(baseUrl: string): boolean {
+  if (classifyDashScopeBaseUrl(baseUrl) !== null) {
+    return false;
+  }
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    !hostname.startsWith('coding.') && !hostname.startsWith('coding-intl.')
+  );
+}
+
+/** A provider entry the auto path can build a backend from. */
+interface AutoSearchCandidate {
+  authType: AuthType;
+  modelId: string;
+  baseUrl: string;
+  envKey: string;
+  /** Exact registry key component, for the customHeaders lookup. */
+  registryBaseUrl?: string;
+}
+
+/**
+ * The provider entry backing the currently selected model.
+ *
+ * Reads `ModelsConfig` (via the `getCurrentAuthType` /
+ * `getCurrentModelRegistryBaseUrl` accessors) rather than the content
+ * generator config: the tool registry is built inside `Config.initialize()`,
+ * before `refreshAuth` has populated the latter.
+ */
+function findPrimaryModelEntry(
+  config: Config,
+): AutoSearchCandidate | undefined {
+  const modelId = config.getModel();
+  const authType = config.getCurrentAuthType();
+  const registryBaseUrl = config.getCurrentModelRegistryBaseUrl();
+  const matches = config
+    .getAllConfiguredModels(authType ? [authType] : undefined)
+    .filter((m) => m.id === modelId);
+  // One model id can appear on several entries (different regions, or the
+  // synthesized runtime option sorted first); prefer the one the registry
+  // actually selected, then any entry that carries usable credentials.
+  const selected = registryBaseUrl
+    ? matches.find(
+        (m) =>
+          m.registryBaseUrl === registryBaseUrl ||
+          m.baseUrl === registryBaseUrl,
+      )
+    : undefined;
+  const entry = [selected, ...matches].find((m) => m?.baseUrl && m.envKey);
+  if (entry?.baseUrl && entry.envKey) {
+    return {
+      authType: entry.authType,
+      modelId: entry.id,
+      baseUrl: entry.baseUrl,
+      envKey: entry.envKey,
+      registryBaseUrl: entry.registryBaseUrl,
+    };
+  }
+  // Env-only configuration (OPENAI_BASE_URL + OPENAI_API_KEY) declares no
+  // `modelProviders` entry, and the AvailableModel synthesized for it carries
+  // neither baseUrl nor envKey — the runtime snapshot is the only source.
+  const snapshot = config.getActiveRuntimeModelSnapshot();
+  if (snapshot?.baseUrl && snapshot.apiKeyEnvKey) {
+    return {
+      authType: snapshot.authType,
+      modelId: snapshot.modelId,
+      baseUrl: snapshot.baseUrl,
+      envKey: snapshot.apiKeyEnvKey,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Derive the search backend from the provider the main model runs on, so a
+ * user who configured nothing beyond `/auth` still gets the tool.
+ *
+ * Every failure here is silent: nothing in the user's settings asked for web
+ * search, so a provider we cannot serve is not a misconfiguration to warn
+ * about. The search request reuses the main model's endpoint and key, so it
+ * bills the account the user is already using.
+ */
+function resolveAutoBackend(
+  config: Config,
+  settings: WebSearchSettings | undefined,
+): WebSearchGateResult {
+  const unavailable = (reason: string): WebSearchGateResult => {
+    gateDebugLogger.debug(`[WebSearch] auto backend unavailable: ${reason}`);
+    return {
+      ok: false,
+      silent: true,
+      notice: `WebSearch is not configured and no backend could be derived automatically: ${reason}.`,
+    };
+  };
+
+  const entry = findPrimaryModelEntry(config);
+  if (!entry) {
+    return unavailable(
+      'the selected model has no provider entry carrying both a baseUrl and an envKey',
+    );
+  }
+
+  // A preset that pins its endpoints is authoritative: it knows whether they
+  // serve the search tools. The custom provider is not — it matches whatever
+  // endpoint the user typed in (`baseUrl: undefined`) and carries no
+  // knowledge of it, so a custom entry pointing at DashScope must still reach
+  // the host check below, as must an entry matching no preset at all.
+  const preset = findProviderByCredentials(entry.baseUrl, entry.envKey);
+  const presetKnowsEndpoint = preset?.baseUrl !== undefined;
+  if (presetKnowsEndpoint) {
+    if (preset?.webSearch?.backend !== 'dashscope') {
+      return unavailable(
+        `provider "${preset?.id}" declares no built-in web search backend`,
+      );
+    }
+  } else if (!isAutoEligibleDashScopeHost(entry.baseUrl)) {
+    return unavailable(
+      `endpoint ${entry.baseUrl} is not known to serve the DashScope search tools`,
+    );
+  }
+
+  if (!isUsableSearchEntry(entry)) {
+    return unavailable(
+      `the ${entry.envKey} environment variable is not set, or the entry cannot back a side request`,
+    );
+  }
+
+  // AvailableModel carries no generationConfig — fetch the resolved entry to
+  // pick up customHeaders, as the explicit path does.
+  const resolvedEntry = config.getResolvedModelConfig(
+    entry.authType,
+    entry.modelId,
+    entry.registryBaseUrl,
+  );
+
+  return {
+    ok: true,
+    backend: {
+      modelId: preset?.webSearch?.searchModel ?? DEFAULT_WEB_SEARCH_MODEL,
+      apiKeyEnvKey: entry.envKey,
+      baseUrl: entry.baseUrl,
+      webExtractor: settings?.webExtractor !== false,
+      customHeaders: resolvedEntry?.generationConfig?.customHeaders,
+    },
+  };
+}
+
 /**
  * Evaluate whether WebSearch can run with the current configuration.
  *
@@ -165,11 +370,32 @@ function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
  * enforced server-side and already lags reality, while a model the Responses
  * endpoint does not serve fails the first invocation loudly
  * (`InvalidParameter: Unsupported model`).
+ *
+ * Three paths, in order: an env-declared backend (`WEB_SEARCH_BASE_URL`), a
+ * configured search model resolved against `modelProviders`, and — when
+ * neither is configured — derivation from the provider the main model runs
+ * on ({@link resolveAutoBackend}). Only the first two report failures as
+ * startup notices; see {@link WebSearchGateResult}.
  */
 export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   const settings = config.getWebSearchSettings();
+  // Defensive: the registry does not call the gate when the tool is turned
+  // off, but the per-invocation re-check reads settings that can have changed.
+  if (settings?.enabled === false) {
+    return {
+      ok: false,
+      silent: true,
+      notice: 'WebSearch is disabled by configuration.',
+    };
+  }
   const selector = settings?.model?.trim();
   if (!selector) {
+    // Nothing explicit was asked for: derive the backend from the main
+    // model's provider. An explicit `enabled: true`, or an env-declared
+    // backend missing its model, still names the missing piece instead.
+    if (settings?.enabled !== true && !settings?.baseUrl) {
+      return resolveAutoBackend(config, settings);
+    }
     return {
       ok: false,
       notice:
@@ -268,13 +494,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   // (different baseUrls, or an OAuth entry sorted first). Prefer an entry
   // this tool can actually use; fall back to the first match so the notice
   // below names the concrete disqualifier.
-  const isUsableEntry = (m: (typeof matches)[number]): boolean =>
-    m.authType !== AuthType.QWEN_OAUTH &&
-    !!m.baseUrl &&
-    isDashScopeCompatibleBaseUrl(m.baseUrl) &&
-    !!m.envKey &&
-    !!process.env[m.envKey]?.trim();
-  const entry = matches.find(isUsableEntry) ?? matches[0];
+  const entry = matches.find(isUsableSearchEntry) ?? matches[0];
   if (entry.authType === AuthType.QWEN_OAUTH) {
     return {
       ok: false,

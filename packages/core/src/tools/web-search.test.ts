@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
 import { WebSearchTool, evaluateWebSearchGate } from './web-search.js';
+import { generateCustomEnvKey } from '../providers/presets/custom-provider.js';
 
 const mockCreate = vi.hoisted(() => vi.fn());
 const mockCtorOpts = vi.hoisted(() => ({ current: undefined as unknown }));
@@ -39,6 +40,15 @@ interface ConfigOverrides {
     baseUrl?: string;
     generationConfig?: { customHeaders?: Record<string, string> };
   }>;
+  /** Model id the registry currently has selected (drives the auto path). */
+  primaryModel?: string;
+  /** Runtime snapshot for env-only configurations (no modelProviders entry). */
+  runtimeSnapshot?: {
+    modelId: string;
+    authType: string;
+    baseUrl?: string;
+    apiKeyEnvKey?: string;
+  };
 }
 
 function makeConfig(overrides: ConfigOverrides = {}): Config {
@@ -51,8 +61,12 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
     },
   ];
   return {
+    // `settings: undefined` must mean "nothing configured" (the auto path),
+    // which `??` cannot express — check for the key instead.
     getWebSearchSettings: () =>
-      overrides.settings ?? { enabled: true, model: 'qwen3.6-plus' },
+      'settings' in overrides
+        ? overrides.settings
+        : { enabled: true, model: 'qwen3.6-plus' },
     // The real Config disambiguates same-id entries by registry baseUrl;
     // mirror that so multi-entry tests resolve the gate-selected entry, not
     // the first (authType, id) match.
@@ -76,8 +90,13 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
     getSessionId: () => 'session-1',
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
-    getModel: () => 'main-model',
+    getModel: () => overrides.primaryModel ?? 'main-model',
     getContentGeneratorConfig: () => ({ authType: 'openai' }),
+    // The auto path reads the ModelsConfig view, which is populated before
+    // `refreshAuth` fills in the content generator config.
+    getCurrentAuthType: () => 'openai',
+    getCurrentModelRegistryBaseUrl: () => undefined,
+    getActiveRuntimeModelSnapshot: () => overrides.runtimeSnapshot,
     getFastModel: () => undefined,
   } as unknown as Config;
 }
@@ -161,6 +180,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env[TEST_ENV_KEY];
+  vi.unstubAllEnvs();
   vi.useRealTimers();
 });
 
@@ -545,6 +565,250 @@ describe('evaluateWebSearchGate', () => {
       }),
     );
     expect(gate.ok).toBe(true);
+  });
+});
+
+describe('evaluateWebSearchGate auto derivation', () => {
+  // Real preset credentials: the auto path resolves them through
+  // findProviderByCredentials, so these must stay in sync with the presets.
+  const STANDARD = {
+    id: 'qwen3.6-plus',
+    authType: 'openai',
+    envKey: 'DASHSCOPE_API_KEY',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  };
+  const TOKEN_PLAN = {
+    id: 'qwen3.7-plus',
+    authType: 'openai',
+    envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+    baseUrl:
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  };
+  const CODING_PLAN = {
+    id: 'qwen3-coder-plus',
+    authType: 'openai',
+    envKey: 'BAILIAN_CODING_PLAN_API_KEY',
+    baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+  };
+  const OPENROUTER = {
+    id: 'z-ai/glm-4.5-air:free',
+    authType: 'openai',
+    envKey: 'OPENROUTER_API_KEY',
+    baseUrl: 'https://openrouter.ai/api/v1',
+  };
+
+  /** Config with nothing under tools.webSearch: the auto path. */
+  const autoConfig = (
+    models: ConfigOverrides['models'],
+    primaryModel: string,
+    extra: Partial<ConfigOverrides> = {},
+  ) => makeConfig({ settings: undefined, models, primaryModel, ...extra });
+
+  it('derives the backend from a Standard API Key entry', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend).toEqual({
+        // Not the primary model id: the search runs on the documented
+        // search model at the same endpoint.
+        modelId: 'qwen3.6-plus',
+        apiKeyEnvKey: STANDARD.envKey,
+        baseUrl: STANDARD.baseUrl,
+        webExtractor: true,
+      });
+    }
+  });
+
+  it('derives the backend from a Token Plan entry', () => {
+    vi.stubEnv(TOKEN_PLAN.envKey, 'sk-token-plan');
+    const gate = evaluateWebSearchGate(autoConfig([TOKEN_PLAN], TOKEN_PLAN.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(TOKEN_PLAN.baseUrl);
+      expect(gate.backend.modelId).toBe('qwen3.6-plus');
+    }
+  });
+
+  it('derives the backend for a workspace-specific Token Plan host', () => {
+    // Preset matching compares base URLs exactly, so a workspace endpoint
+    // matches no preset and must be adopted by the host check instead.
+    const workspace = {
+      id: 'qwen3.7-plus',
+      authType: 'openai',
+      envKey: 'WS_WORKSPACE_KEY',
+      baseUrl:
+        'https://llm-1yxl3y53fm8pcr4z.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(workspace.envKey, 'sk-workspace');
+    const gate = evaluateWebSearchGate(autoConfig([workspace], workspace.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(workspace.baseUrl);
+      expect(gate.backend.apiKeyEnvKey).toBe(workspace.envKey);
+    }
+  });
+
+  it('derives the backend for a hand-written DashScope entry', () => {
+    const handWritten = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_DASHSCOPE_KEY',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(handWritten.envKey, 'sk-hand-written');
+    const gate = evaluateWebSearchGate(
+      autoConfig([handWritten], handWritten.id),
+    );
+    expect(gate.ok).toBe(true);
+  });
+
+  it('derives the backend for a custom-provider entry on a DashScope host', () => {
+    // The custom provider matches any endpoint the user typed in, so it must
+    // not veto an endpoint the host check would otherwise accept.
+    const custom = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: generateCustomEnvKey('openai' as never, DASHSCOPE_BASE_URL),
+      baseUrl: DASHSCOPE_BASE_URL,
+    };
+    vi.stubEnv(custom.envKey, 'sk-custom');
+    const gate = evaluateWebSearchGate(autoConfig([custom], custom.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.apiKeyEnvKey).toBe(custom.envKey);
+    }
+  });
+
+  it('derives the backend from a runtime model snapshot', () => {
+    // Env-only configuration declares no modelProviders entry.
+    vi.stubEnv('DASHSCOPE_API_KEY', 'sk-env-only');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        runtimeSnapshot: {
+          modelId: 'env-model',
+          authType: 'openai',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnvKey: 'DASHSCOPE_API_KEY',
+        },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
+    }
+  });
+
+  it('stays silently off on a Coding Plan entry', () => {
+    // The preset matches but declares no backend: the endpoint has not been
+    // verified to serve the Responses API search tools.
+    vi.stubEnv(CODING_PLAN.envKey, 'sk-sp-coding');
+    const gate = evaluateWebSearchGate(
+      autoConfig([CODING_PLAN], CODING_PLAN.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a hand-written Coding Plan host', () => {
+    const handWritten = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_CODING_KEY',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+    };
+    vi.stubEnv(handWritten.envKey, 'sk-sp-hand-written');
+    const gate = evaluateWebSearchGate(
+      autoConfig([handWritten], handWritten.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a third-party provider, without falling back to another DashScope entry', () => {
+    vi.stubEnv(OPENROUTER.envKey, 'sk-or');
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([OPENROUTER, STANDARD], OPENROUTER.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off when the entry key variable is unset', () => {
+    vi.stubEnv(STANDARD.envKey, '');
+    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a plaintext-HTTP DashScope host', () => {
+    const insecure = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_INSECURE_KEY',
+      baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(insecure.envKey, 'sk-insecure');
+    const gate = evaluateWebSearchGate(autoConfig([insecure], insecure.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off when disabled explicitly', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: false },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('still reports the no-model notice when explicitly enabled', () => {
+    vi.stubEnv(OPENROUTER.envKey, 'sk-or');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true },
+        models: [OPENROUTER],
+        primaryModel: OPENROUTER.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
+    }
+  });
+
+  it('prefers an explicitly configured search model over derivation', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { model: 'qwen3.7-plus' },
+        models: [{ ...STANDARD, id: 'qwen3.7-plus' }],
+        primaryModel: 'qwen3.7-plus',
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.modelId).toBe('qwen3.7-plus');
+    }
   });
 });
 

@@ -120,6 +120,18 @@ export interface ProviderConfig {
   mergeModelsByIdentity?: boolean;
 
   /**
+   * Built-in `web_search` backend this provider can serve with the same
+   * credentials as the main model, letting the tool register without any
+   * `tools.webSearch` configuration.
+   *
+   * Absent means the provider has no documented server-side search reachable
+   * through its endpoint, so the tool stays off unless the user configures a
+   * search model (or an env-declared backend) explicitly. `searchModel`
+   * overrides the default search model for providers that need one.
+   */
+  webSearch?: { backend: 'dashscope'; searchModel?: string };
+
+  /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.
    * Providers with the same `uiGroup` appear together under a shared heading.
    */

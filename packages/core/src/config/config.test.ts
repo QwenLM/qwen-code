@@ -9852,7 +9852,7 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('does not register web_search or push a notice when the feature is disabled', async () => {
+    it('does not register web_search or push a notice when nothing is configured and no provider can back it', async () => {
       const config = new Config(baseParams);
       await config.initialize();
 
@@ -9868,6 +9868,115 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.getWarnings().filter((w) => w.includes('WebSearch')),
       ).toEqual([]);
+    });
+
+    it('registers web_search with no configuration when the primary model runs on a ModelStudio provider', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
+    });
+
+    it('leaves web_search off without a notice when the primary model runs on a provider that cannot back it', async () => {
+      process.env['OPENROUTER_API_KEY'] = 'sk-or-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'z-ai/glm-4.5-air:free',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'z-ai/glm-4.5-air:free',
+                baseUrl: 'https://openrouter.ai/api/v1',
+                envKey: 'OPENROUTER_API_KEY',
+              },
+            ],
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['OPENROUTER_API_KEY'];
+      }
+    });
+
+    it('does not register web_search when it is turned off explicitly', async () => {
+      process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.6-plus',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: 'qwen3.6-plus',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+          webSearch: { enabled: false },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['DASHSCOPE_API_KEY'];
+      }
     });
 
     it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {

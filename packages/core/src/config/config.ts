@@ -4860,6 +4860,20 @@ export class Config {
   }
 
   /**
+   * The auth type of the currently selected model, read from `ModelsConfig`
+   * rather than the content generator config.
+   *
+   * Unlike {@link getAuthType}, this is usable before `refreshAuth` has run —
+   * the tool registry is built during `initialize()`, which happens first (the
+   * ACP bridge calls `initialize()` and only later `refreshAuth`). Callers that
+   * need the selected model's provider entry at registry-build time must use
+   * this.
+   */
+  getCurrentAuthType(): AuthType | undefined {
+    return this.modelsConfig.getCurrentAuthType();
+  }
+
+  /**
    * Resolve the effective input modalities of the current primary model. The
    * content generator config always carries resolved modalities (name-based
    * detection fills them in, defaulting unknown models to text-only), which is
@@ -9639,11 +9653,14 @@ export class Config {
         return new DisplayImageTool(this);
       });
     }
-    // WebSearch is opt-in: it registers only when explicitly enabled AND the
-    // configured search model resolves to a usable DashScope entry. A failed
-    // gate surfaces a one-time startup notice instead of a silently missing
-    // tool. Nothing is imported unless the feature is enabled.
-    if (this.webSearchSettings?.enabled) {
+    // WebSearch is opt-out: it registers whenever the gate can resolve a
+    // usable backend — either configured explicitly, or derived from the
+    // provider the main model runs on. `enabled: false` turns it off without
+    // importing anything. A gate failure surfaces a one-time startup notice
+    // only when the tool was actually asked for; a provider with no search
+    // backend fails silently (`gate.silent`), since warning about a feature
+    // the user never configured is noise.
+    if (this.webSearchSettings?.enabled !== false) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);
       if (gate.ok) {
@@ -9651,7 +9668,11 @@ export class Config {
           const { WebSearchTool } = await import('../tools/web-search.js');
           return new WebSearchTool(this);
         });
-      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+      } else if (
+        !gate.silent &&
+        !this.webSearchNoticeEmitted &&
+        !options?.forSubAgent
+      ) {
         this.webSearchNoticeEmitted = true;
         this.warnings.push(gate.notice);
       }
