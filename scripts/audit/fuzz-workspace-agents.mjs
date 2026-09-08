@@ -128,7 +128,7 @@ async function check(step, op) {
     new Set(allQueue).size === allQueue.length,
     `duplicate queueSequence across the workspace`,
   );
-  for (const [agentId, live] of liveByAgent) {
+  for (const agentId of liveByAgent.keys()) {
     const agent = agents.find((a) => a.id === agentId);
     if (!agent) continue;
     // Running is capped by maxConcurrentRuns; queued is capped by queueLimit,
