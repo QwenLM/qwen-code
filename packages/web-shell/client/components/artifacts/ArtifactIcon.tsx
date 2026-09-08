@@ -35,7 +35,7 @@ export type ArtifactIconKind =
   | 'video'
   | 'word';
 
-const ICONS: Readonly<Record<ArtifactIconKind, string>> = {
+export const ARTIFACT_ICON_URLS: Readonly<Record<ArtifactIconKind, string>> = {
   csv: csvIcon,
   file: fileIcon,
   html: htmlIcon,
@@ -100,7 +100,10 @@ const EXTENSION_ICONS: Readonly<Record<string, ArtifactIconKind>> = {
 };
 
 export function getArtifactIconKind(
-  artifact?: DaemonSessionArtifact,
+  artifact?: Pick<
+    DaemonSessionArtifact,
+    'kind' | 'title' | 'workspacePath' | 'url' | 'mimeType'
+  >,
 ): ArtifactIconKind {
   if (!artifact) return 'file';
 
@@ -167,7 +170,7 @@ export function ArtifactIcon({
   return (
     <img
       className={className}
-      src={ICONS[kind]}
+      src={ARTIFACT_ICON_URLS[kind]}
       data-artifact-icon={kind}
       alt=""
     />

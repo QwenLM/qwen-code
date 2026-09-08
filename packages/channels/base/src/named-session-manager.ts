@@ -342,7 +342,10 @@ export class NamedSessionManager {
           .catch(() => undefined);
         throw error;
       }
-      this.router.activateManagedSession(sessionId, target, task.cwd);
+      this.router.activateManagedSession(sessionId, target, task.cwd, {
+        isolation: task.isolation,
+        workspaceCwd: this.cwd,
+      });
       return this.selection(nextOwner, task);
     });
   }
@@ -392,6 +395,7 @@ export class NamedSessionManager {
         loadResult.sessionId,
         updatedTask.target,
         updatedTask.cwd,
+        { isolation: updatedTask.isolation, workspaceCwd: this.cwd },
       );
       return this.selection(nextOwner, updatedTask);
     });
@@ -478,6 +482,7 @@ export class NamedSessionManager {
           replacementSessionId ?? replacement.sessionId,
           replacement.target,
           replacement.cwd,
+          { isolation: replacement.isolation, workspaceCwd: this.cwd },
         );
       }
       try {
@@ -506,6 +511,7 @@ export class NamedSessionManager {
             restored.sessionId,
             task.target,
             task.cwd,
+            { isolation: task.isolation, workspaceCwd: this.cwd },
           );
         }
         throw new Error(`Failed to close task "${task.name}".`, {
@@ -568,6 +574,7 @@ export class NamedSessionManager {
           sessionId,
           updatedTask.target,
           updatedTask.cwd,
+          { isolation: updatedTask.isolation, workspaceCwd: this.cwd },
         );
         this.router.forgetManagedSession(task.sessionId);
         this.repointSupersededSessionIds(task.sessionId, sessionId);
@@ -604,6 +611,7 @@ export class NamedSessionManager {
         sessionId,
         updatedTask.target,
         updatedTask.cwd,
+        { isolation: updatedTask.isolation, workspaceCwd: this.cwd },
       );
       this.router.forgetManagedSession(task.sessionId);
       this.repointSupersededSessionIds(task.sessionId, sessionId);
@@ -730,6 +738,7 @@ export class NamedSessionManager {
         result.sessionId,
         task.target,
         task.cwd,
+        { isolation: task.isolation, workspaceCwd: this.cwd },
       );
       return result.sessionId;
     } catch (error) {
