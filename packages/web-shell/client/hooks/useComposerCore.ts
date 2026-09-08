@@ -113,28 +113,26 @@ import {
   type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
-// On Android Chrome the composer mounts the CodeMirror backend whenever the
-// `(hover: none) and (pointer: coarse)` media query does not match (tablets,
-// DeX with a mouse) or via the `?composer=codemirror` escape hatch. There,
-// CodeMirror swallows the real Backspace/Enter keydown and re-dispatches a
-// synthetic event carrying only `{key, keyCode}`: no repeat flag and no
-// modifier state survive (@codemirror/view InputState.keydown +
-// delayAndroidKey). Every guard in the attachment fallback below would see a
-// plain Backspace there, so a held key would drain every chip (~30/s, no
-// undo) and a single Ctrl+Backspace would destroy one. The flags are
-// undeliverable on that platform, so the keyboard fallback stays off and the
-// chips remain removable through their close buttons.
-// On Android Chrome the composer mounts the CodeMirror backend whenever the
-// `(hover: none) and (pointer: coarse)` media query does not match (tablets,
-// DeX with a mouse) or via the `?composer=codemirror` escape hatch. There,
-// CodeMirror swallows the real Backspace/Enter keydown and re-dispatches a
-// synthetic event carrying only `{key, keyCode}`: no repeat flag and no
-// modifier state survive (@codemirror/view InputState.keydown +
-// delayAndroidKey). Every guard in the attachment fallback below would see a
-// plain Backspace there, so a held key would drain every chip (~30/s, no
-// undo) and a single Ctrl+Backspace would destroy one. The flags are
-// undeliverable on that platform, so the keyboard fallback stays off and the
-// chips remain removable through their close buttons.
+// On Android Chrome and iOS, the composer can mount the CodeMirror backend
+// (Android: whenever `(hover: none) and (pointer: coarse)` does not match —
+// tablets, DeX with a mouse — or via the `?composer=codemirror` escape
+// hatch; iOS: the same escape hatch, and iPadOS 13+ with a pointer, which
+// reports a desktop user agent). There, CodeMirror swallows the real
+// Backspace keydown and re-dispatches a synthetic event that does not
+// carry the information the guards below rely on (@codemirror/view
+// delayAndroidKey on Android strips the repeat flag and every modifier;
+// flushIOSKey on iOS defers bare Backspace/Delete and replays them without
+// the repeat flag). A held key would drain every chip (~30/s, no undo), and
+// on Android a single Ctrl+Backspace would destroy one. The flags are
+// undeliverable on those platforms, so the keyboard fallback stays off and
+// the chips remain removable through their close buttons.
+// Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
+// or iPadOS 13+ maxTouchPoints).
+// Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
+// or iPadOS 13+ maxTouchPoints).
+export const isIosCodeMirrorComposer =
+  /Apple Computer/.test(navigator.vendor) &&
+  (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
 export const isAndroidCodeMirrorComposer = /\bAndroid\b/.test(
   navigator.userAgent,
 );
@@ -2995,7 +2993,8 @@ export function useComposerCore(
         // only on an otherwise-empty composer: with text present, Backspace
         // at position 0 stays a no-op and Delete keeps deleting characters.
         any: (view, event) => {
-          if (isAndroidCodeMirrorComposer) return false;
+          if (isAndroidCodeMirrorComposer || isIosCodeMirrorComposer)
+            return false;
           if (!event || (event.key !== 'Backspace' && event.key !== 'Delete')) {
             return false;
           }
