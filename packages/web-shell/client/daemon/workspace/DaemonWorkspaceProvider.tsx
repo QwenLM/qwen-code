@@ -31,6 +31,9 @@ const DaemonWorkspaceContext = createContext<
 // See the useEffect cleanup in DaemonWorkspaceProvider for details.
 let pendingDisposeClient: DaemonClient | undefined;
 
+/** Delay before the one bounded retry after a retryable brand-fetch failure. */
+const BRAND_RETRY_DELAY_MS = 2_000;
+
 export type {
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
@@ -68,6 +71,20 @@ export function DaemonWorkspaceProvider({
     autoConnect ? 'connecting' : 'idle',
   );
   const [error, setError] = useState<Error | undefined>(undefined);
+
+  // Reset the brand in the RENDER that observes a new client, not in the
+  // passive effect: children's effects run before this provider's, so an
+  // effect-first reset publishes one committed frame carrying the previous
+  // client's white-label on the new connection. `fetchBrand`'s own reset
+  // still covers the refresh path, where the client does not change.
+  const [brandClient, setBrandClient] = useState<DaemonClient | undefined>(
+    client,
+  );
+  if (brandClient !== client) {
+    setBrandClient(client);
+    setBrand(undefined);
+    setBrandSettled(false);
+  }
   const getCapabilities = useCallback(() => {
     if (!client) {
       return Promise.reject(new Error('Daemon workspace client unavailable'));
@@ -229,46 +246,76 @@ export function DaemonWorkspaceProvider({
   // superseded fetch's, can neither write a brand nor settle the current one.
   const brandGenerationRef = useRef(0);
   const brandInFlightRef = useRef(false);
-  const fetchBrand = useCallback((brandClient: DaemonClient) => {
-    const generation = ++brandGenerationRef.current;
-    brandInFlightRef.current = true;
-    setBrand(undefined);
-    setBrandSettled(false);
-    void Promise.resolve()
-      .then(() => brandClient.brand())
-      .then((resolved) => {
-        if (brandGenerationRef.current === generation) {
-          setBrand(resolved);
-          setBrandSettled(true);
-        }
-      })
-      .catch((error: unknown) => {
-        // Silent by design; see the comment above. Settle only on the one
-        // definitive "no brand here" answer: a 404 means this daemon has no
-        // route and never will. Everything else — a 503 while the deferred
-        // runtime is still starting, a 429 from the rate limiter, a transport
-        // failure, an old SDK with no `brand()` — is unknown, not absent:
-        // settling would report an authoritative empty brand and clear cached
-        // chrome over a retryable blip.
-        if (
-          brandGenerationRef.current === generation &&
-          error instanceof DaemonHttpError &&
-          error.status === 404
-        ) {
-          setBrandSettled(true);
-        }
-      })
-      .finally(() => {
-        if (brandGenerationRef.current === generation) {
-          brandInFlightRef.current = false;
-        }
-      });
-  }, []);
-  // Invalidates any in-flight fetch without touching state — stable so the
-  // effect cleanup can call it without capturing a ref's `.current`.
+  const brandRetryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const fetchBrand = useCallback(
+    (brandClient: DaemonClient, isRetry = false) => {
+      const generation = ++brandGenerationRef.current;
+      brandInFlightRef.current = true;
+      setBrand(undefined);
+      setBrandSettled(false);
+      void Promise.resolve()
+        .then(() => brandClient.brand())
+        .then((resolved) => {
+          if (brandGenerationRef.current === generation) {
+            setBrand(resolved);
+            setBrandSettled(true);
+          }
+        })
+        .catch((error: unknown) => {
+          // Silent by design; see the comment above. Settle only on the one
+          // definitive "no brand here" answer: a 404 means this daemon has no
+          // route and never will. Everything else — a 503 while the deferred
+          // runtime is still starting, a 429 from the rate limiter, a
+          // transport failure, an old SDK with no `brand()` — is unknown, not
+          // absent: settling would report an authoritative empty brand and
+          // clear cached chrome over a retryable blip.
+          if (brandGenerationRef.current !== generation) return;
+          if (error instanceof DaemonHttpError && error.status === 404) {
+            setBrandSettled(true);
+            return;
+          }
+          // One bounded retry, so a retryable blip cannot leave in-app chrome
+          // and cached tab chrome disagreeing for the page's lifetime. A
+          // repeat failure stays unsettled (unknown, still not absent) and is
+          // attributed on the console — the daemon's stderr cannot cover a
+          // request that never arrived.
+          if (isRetry) {
+            console.warn(
+              '[web-shell] brand could not be fetched after a retry; using the built-in brand until the connection recovers',
+            );
+            return;
+          }
+          brandRetryTimerRef.current = setTimeout(() => {
+            brandRetryTimerRef.current = undefined;
+            const current = clientRef.current;
+            if (
+              current !== undefined &&
+              brandGenerationRef.current === generation
+            ) {
+              fetchBrand(current, true);
+            }
+          }, BRAND_RETRY_DELAY_MS);
+        })
+        .finally(() => {
+          if (brandGenerationRef.current === generation) {
+            brandInFlightRef.current = false;
+          }
+        });
+    },
+    [],
+  );
+  // Invalidates any in-flight fetch or pending retry without touching state —
+  // stable so the effect cleanup can call it without capturing a ref's
+  // `.current`.
   const invalidateBrandFetch = useCallback(() => {
     brandGenerationRef.current++;
     brandInFlightRef.current = false;
+    if (brandRetryTimerRef.current !== undefined) {
+      clearTimeout(brandRetryTimerRef.current);
+      brandRetryTimerRef.current = undefined;
+    }
   }, []);
   useEffect(() => {
     if (!client) return undefined;

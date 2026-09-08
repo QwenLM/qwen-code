@@ -4610,6 +4610,34 @@ describe('createServeApp', () => {
         expect(response.status).toBe(200);
       }
     });
+
+    it('refuses a resolvable brand placeholder through the real loader', async () => {
+      // The placeholder guard reads the pre-substitution snapshot
+      // (`originalSettings`), which the real loadSettings clones before
+      // substituting. Only this boundary can witness that — the resolver's
+      // own tests hand-build the field. A placeholder that WOULD resolve
+      // (BRAND_PROBE is set, as a workspace's .env would arrange) must still
+      // not reach the response.
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{"ui":{"brand":{"name":"${BRAND_PROBE}"}}}',
+      );
+      const previous = process.env['BRAND_PROBE'];
+      process.env['BRAND_PROBE'] = 'Repo Supplied Name';
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          webShellDir: brandWebShellDir,
+        });
+        const response = await request(app)
+          .get('/brand')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({});
+      } finally {
+        if (previous === undefined) delete process.env['BRAND_PROBE'];
+        else process.env['BRAND_PROBE'] = previous;
+      }
+    });
   });
 
   describe('GET /capabilities', () => {

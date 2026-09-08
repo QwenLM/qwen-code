@@ -10,6 +10,7 @@ import {
   createDebugLogger,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
+import { resolveEnvVarsInString } from '@qwen-code/qwen-code-core/envVarResolver';
 import type { LoadedSettings } from '../config/settings.js';
 import { resolvePath } from '../utils/resolvePath.js';
 
@@ -29,11 +30,13 @@ export interface WebShellBrand {
 export interface ResolvedWebShellBrand {
   brand: WebShellBrand;
   /**
-   * Operator-facing explanation of a rejected logo. Never sent to the client;
-   * the route writes it to stderr so a deployment that configured a logo and
-   * silently got the built-in one can find out why.
+   * Operator-facing explanations of rejected or advisory brand inputs, one
+   * per cause. Never sent to the client; the route writes each entry to
+   * stderr as its own line so a deployment that configured a brand and
+   * silently got the built-in one can find out why, and so a log rule keyed
+   * on one key's prefix is not displaced by another key's reason.
    */
-  warning?: string;
+  warnings?: string[];
 }
 
 /**
@@ -66,29 +69,22 @@ export function resolveWebShellBrand(
   const warnings: string[] = [];
 
   const name = readBrandLeaf(settings, 'name');
-  if (name.warning) warnings.push(name.warning);
+  warnings.push(...name.warnings);
   if (name.resolved) {
     const sanitized = sanitizeBrandName(name.resolved.value);
     if (sanitized) brand.name = sanitized;
   }
 
   const logo = readBrandLeaf(settings, 'logoPath');
-  if (logo.warning) warnings.push(logo.warning);
-  if (!logo.resolved) {
-    return warnings.length > 0
-      ? { brand, warning: warnings.join('; ') }
-      : { brand };
+  warnings.push(...logo.warnings);
+  if (logo.resolved) {
+    const resolved = readBrandLogo(logo.resolved.value, logo.resolved.dir);
+    warnings.push(...resolved.warnings);
+    if (resolved.dataUri !== undefined) {
+      brand.logoDataUri = resolved.dataUri;
+    }
   }
-
-  const resolved = readBrandLogo(logo.resolved.value, logo.resolved.dir);
-  if (resolved.warning) warnings.push(resolved.warning);
-  if (resolved.dataUri === undefined) {
-    return { brand, warning: warnings.join('; ') };
-  }
-  brand.logoDataUri = resolved.dataUri;
-  return warnings.length > 0
-    ? { brand, warning: warnings.join('; ') }
-    : { brand };
+  return warnings.length > 0 ? { brand, warnings } : { brand };
 }
 
 interface ScopedBrandValue {
@@ -101,20 +97,13 @@ interface ScopedBrandValue {
   dir: string;
 }
 
-/**
- * Matches the placeholder syntax of `resolveEnvVarsInString` exactly
- * (`$VAR_NAME` or `${VAR_NAME}`), so anything the substitution engine would
- * have replaced — and only that — is treated as a placeholder here.
- */
-const PLACEHOLDER_PATTERN = /\$(?:(\w+)|{([^}]+)})/;
-
 /** Last defined value wins, matching `mergeSettings` scalar precedence. */
 function readBrandLeaf(
   settings: LoadedSettings,
   key: 'name' | 'logoPath',
-): { resolved?: ScopedBrandValue; warning?: string } {
+): { resolved?: ScopedBrandValue; warnings: string[] } {
   let resolved: ScopedBrandValue | undefined;
-  let warning: string | undefined;
+  let warnings: string[] = [];
   for (const file of [
     settings.systemDefaults,
     settings.user,
@@ -135,25 +124,30 @@ function readBrandLeaf(
     // is what the schema description promises empty means.
     if (trimmed.length === 0) {
       resolved = undefined;
-      warning = undefined;
+      warnings = [];
       continue;
     }
-    if (PLACEHOLDER_PATTERN.test(trimmed)) {
-      // Ignored, not resolved: the substitution source is process-wide and a
-      // workspace can populate it, so resolving here would smuggle the
-      // workspace layer back in. The layer still wins over lower layers —
-      // the key is unset with a warning, not skipped.
+    // Refuse on substitution, not on syntax: run the authoritative engine and
+    // refuse only when it would actually change the value. A literal `$5` or
+    // `Cost$Less` resolves to itself (the variable is undefined) and is kept;
+    // a placeholder that resolves — which only the process-wide environment
+    // can arrange, and a workspace populates that first at boot — is refused,
+    // because that would smuggle the workspace layer back in. The layer still
+    // wins over lower layers: the key is unset with a warning, not skipped.
+    if (resolveEnvVarsInString(trimmed) !== trimmed) {
       resolved = undefined;
-      warning = `ui.brand.${key} uses an environment placeholder, which brand keys do not resolve — the substitution source is process-wide and a workspace can supply it. Set a literal value instead.`;
+      warnings = [
+        `ui.brand.${key} uses an environment placeholder, which brand keys do not resolve — the substitution source is process-wide and a workspace can supply it. Set a literal value instead.`,
+      ];
       continue;
     }
     resolved = {
       value: trimmed,
       dir: file.path ? path.dirname(file.path) : '',
     };
-    warning = undefined;
+    warnings = [];
   }
-  return warning === undefined ? { resolved } : { resolved, warning };
+  return { resolved, warnings };
 }
 
 /**
@@ -179,13 +173,15 @@ function sanitizeBrandName(raw: string): string | undefined {
 function readBrandLogo(
   configuredPath: string,
   declaringDir: string,
-): { dataUri?: string; warning?: string } {
+): { dataUri?: string; warnings: string[] } {
   const expanded = resolvePath(configuredPath);
   let filePath = expanded;
   if (!path.isAbsolute(expanded)) {
     if (!declaringDir) {
       return {
-        warning: `ui.brand.logoPath '${configuredPath}' is relative but its settings layer has no owning file directory to resolve against`,
+        warnings: [
+          `ui.brand.logoPath '${configuredPath}' is relative but its settings layer has no owning file directory to resolve against`,
+        ],
       };
     }
     filePath = path.resolve(declaringDir, expanded);
@@ -198,25 +194,33 @@ function readBrandLogo(
   try {
     stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
   } catch {
-    return { warning: `ui.brand.logoPath is not readable: ${filePath}` };
+    return { warnings: [`ui.brand.logoPath is not readable: ${filePath}`] };
   }
   if (!stat) {
-    return { warning: `ui.brand.logoPath does not exist: ${filePath}` };
+    return { warnings: [`ui.brand.logoPath does not exist: ${filePath}`] };
   }
   if (stat.isSymbolicLink()) {
-    return { warning: `ui.brand.logoPath must not be a symlink: ${filePath}` };
+    return {
+      warnings: [`ui.brand.logoPath must not be a symlink: ${filePath}`],
+    };
   }
   if (!stat.isFile()) {
-    return { warning: `ui.brand.logoPath must be a regular file: ${filePath}` };
+    return {
+      warnings: [`ui.brand.logoPath must be a regular file: ${filePath}`],
+    };
   }
   if (stat.nlink > 1) {
     return {
-      warning: `ui.brand.logoPath must not have multiple hard links (nlink=${stat.nlink}): ${filePath}`,
+      warnings: [
+        `ui.brand.logoPath must not have multiple hard links (nlink=${stat.nlink}): ${filePath}`,
+      ],
     };
   }
   if (stat.size > MAX_BRAND_LOGO_BYTES) {
     return {
-      warning: `ui.brand.logoPath exceeds ${MAX_BRAND_LOGO_BYTES} bytes: ${filePath}`,
+      warnings: [
+        `ui.brand.logoPath exceeds ${MAX_BRAND_LOGO_BYTES} bytes: ${filePath}`,
+      ],
     };
   }
 
@@ -224,34 +228,51 @@ function readBrandLogo(
   try {
     realPath = fs.realpathSync(filePath);
   } catch {
-    return { warning: `ui.brand.logoPath is not resolvable: ${filePath}` };
+    return { warnings: [`ui.brand.logoPath is not resolvable: ${filePath}`] };
   }
 
   const read = readRegularFileNoFollow(realPath, stat);
   if (read.content === undefined) {
     return {
-      warning: `ui.brand.logoPath could not be read: ${filePath} (${read.reason})`,
+      warnings: [
+        `ui.brand.logoPath could not be read: ${filePath} (${read.reason})`,
+      ],
     };
   }
-  const rootTag = parseSvgRootTag(read.content);
-  if (rootTag === undefined) {
+  const root = parseSvgRootTag(read.content);
+  if (root === undefined) {
     return {
-      warning: `ui.brand.logoPath is not an SVG document (root element is not a namespaced <svg>): ${filePath}`,
+      warnings: [
+        `ui.brand.logoPath is not an SVG document (root element is not a namespaced <svg>): ${filePath}`,
+      ],
     };
+  }
+
+  const warnings: string[] = [];
+  // Warn rather than reject: the file is usable, but without a viewBox (or
+  // an explicit width and height) the browser cannot scale the artwork into
+  // the fixed sidebar box and may paint a blank mark — and since the image
+  // loads successfully, no client-side error event fires to reveal it. The
+  // daemon's stderr is the only channel that can tell the operator.
+  if (!hasScalingGeometry(root.tag)) {
+    warnings.push(
+      `ui.brand.logoPath has no viewBox or width/height, so it cannot be scaled into the sidebar logo box and may render blank: ${filePath}`,
+    );
+  }
+  // A prefix-bound root with unprefixed children loads successfully but
+  // paints nothing: the children are in no namespace. Same advisory channel.
+  if (
+    root.prefix !== undefined &&
+    hasUnprefixedSvgElements(root.content, root.prefix)
+  ) {
+    warnings.push(
+      `ui.brand.logoPath has a prefix-bound <${root.prefix}:svg> root but unprefixed elements inside it, which are in no namespace and render blank: ${filePath}`,
+    );
   }
 
   return {
     dataUri: `data:image/svg+xml,${encodeURIComponent(read.content)}`,
-    // Warn rather than reject: the file is usable, but without a viewBox (or
-    // an explicit width and height) the browser cannot scale the artwork into
-    // the fixed sidebar box and may paint a blank mark — and since the image
-    // loads successfully, no client-side error event fires to reveal it. The
-    // daemon's stderr is the only channel that can tell the operator.
-    ...(hasScalingGeometry(rootTag)
-      ? {}
-      : {
-          warning: `ui.brand.logoPath has no viewBox or width/height, so it cannot be scaled into the sidebar logo box and may render blank: ${filePath}`,
-        }),
+    warnings,
   };
 }
 
@@ -318,19 +339,22 @@ function readRegularFileNoFollow(
 
 /**
  * Skip the XML prolog — declaration, comments, DOCTYPE — then require the
- * first element to be an `<svg>` that declares the SVG namespace, returning
- * the root start tag (or `undefined` when the shape is anything else).
+ * first element to be an `svg` element (any prefix) whose binding declares
+ * the SVG namespace, returning its start tag, prefix and the full content
+ * (or `undefined` when the shape is anything else).
  *
- * The namespace requirement is renderability, not paranoia: a bare `<svg>`
- * root is parsed as an image only when it carries
- * `xmlns="http://www.w3.org/2000/svg"`, so without it the daemon would ship a
- * data URI that paints a blank mark and writes nothing to stderr. This is a
- * correctness check, not a security boundary. The client renders a custom logo
- * as an `img` whose `src` is the data URI, never as injected markup, and SVG
- * loaded as an image cannot run script. Do not switch the client to inline
- * rendering without adding a sanitizer here first.
+ * The namespace requirement is renderability, not paranoia: a root element
+ * not in the SVG namespace is parsed as an image only when the binding is
+ * present, so without it the daemon would ship a data URI that paints a
+ * blank mark and writes nothing to stderr. This is a correctness check, not
+ * a security boundary. The client renders a custom logo as an `img` whose
+ * `src` is the data URI, never as injected markup, and SVG loaded as an
+ * image cannot run script. Do not switch the client to inline rendering
+ * without adding a sanitizer here first.
  */
-function parseSvgRootTag(content: string): string | undefined {
+function parseSvgRootTag(
+  content: string,
+): { tag: string; prefix?: string; content: string } | undefined {
   let rest = content.replace(/^\uFEFF/, '');
   for (;;) {
     rest = rest.replace(/^\s+/, '');
@@ -352,25 +376,25 @@ function parseSvgRootTag(content: string): string | undefined {
       rest = rest.slice(end);
       continue;
     }
-    if (!rest.startsWith('<svg')) return undefined;
-    // A prefix-bound root (`<svg:svg>`, the Batik/XSL shape) is namespace-
-    // well-formed and renders as an image; it is accepted when it binds
-    // `xmlns:svg` to the SVG namespace. `<svg:svgfoo>` still falls out here,
-    // and an `<svgfoo>` root never reaches the namespace check either.
-    const prefixed = rest.startsWith(':svg', 4);
-    const boundary = rest[prefixed ? 8 : 4];
-    if (
-      boundary !== undefined &&
-      boundary !== '>' &&
-      boundary !== '/' &&
-      !/\s/.test(boundary)
-    ) {
-      return undefined;
-    }
+    // The prefix is namespace-irrelevant — any prefix bound to the SVG
+    // namespace renders identically — so match the optional prefix rather
+    // than hard-coding `svg:`. The lookahead replaces a manual boundary
+    // check: `<svgfoo` fails it, as does `<svg:svgfoo`.
+    const rootMatch = /^<(?:([A-Za-z_][\w.-]*):)?svg(?=[\s/>])/.exec(rest);
+    if (!rootMatch) return undefined;
     const end = skipMarkupConstruct(rest);
     if (end === -1) return undefined;
     const tag = rest.slice(0, end);
-    return declaresSvgNamespace(tag, prefixed) ? tag : undefined;
+    const prefix = rootMatch[1];
+    // A prefix-bound root (`<svg:svg>`, the Batik/XSL shape) is namespace-
+    // well-formed and renders as an image; it is accepted when its prefix
+    // binds to the SVG namespace. A prefix binding on an unprefixed root
+    // does not count — `xmlns:svg` alone leaves `<svg>` in no namespace.
+    const binding = prefix === undefined ? 'xmlns' : `xmlns:${prefix}`;
+    if (readAttributeValue(tag, binding) !== SVG_NAMESPACE) {
+      return undefined;
+    }
+    return { tag, prefix, content };
   }
 }
 
@@ -443,49 +467,69 @@ function blankQuotedSpans(text: string): string {
 }
 
 /**
- * Read one attribute's raw value from a start tag, or `undefined` when the
+ * Read one attribute's value from a start tag, or `undefined` when the
  * attribute is absent. The match runs over quote-blanked text, so an
  * attribute-shaped substring inside another attribute's value does not count;
  * the value itself is sliced from the original text by index (the blanked
- * copy is length-preserving).
+ * copy is length-preserving) and XML entity and character references are
+ * decoded, as a real parser would do before comparing.
  */
 function readAttributeValue(tag: string, name: string): string | undefined {
   const blanked = blankQuotedSpans(tag);
-  const re = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])`, 'g');
+  const re = new RegExp(
+    `(?:^|\\s)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(["'])`,
+    'g',
+  );
   const match = re.exec(blanked);
   if (match === null) return undefined;
   const quoteChar = match[1]!;
   const valueStart = match.index + match[0].length;
   const valueEnd = tag.indexOf(quoteChar, valueStart);
   if (valueEnd === -1) return undefined;
-  return tag.slice(valueStart, valueEnd);
+  return decodeXmlEntities(tag.slice(valueStart, valueEnd));
 }
 
-/**
- * True when the root start tag declares the SVG namespace for its own
- * element name: the default `xmlns` for an unprefixed `<svg>`, or an
- * `xmlns:svg` binding for a prefix-bound `<svg:svg>` (the shape XML
- * toolchains like Batik emit, and browsers render). A prefix binding on an
- * unprefixed root does not count — `xmlns:svg` alone leaves `<svg>` in no
- * namespace, which is exactly the blank-render case the check exists for.
- * Whitespace around `=` is allowed, as XML's grammar permits.
- */
-function declaresSvgNamespace(tag: string, prefixed: boolean): boolean {
-  return (
-    readAttributeValue(tag, prefixed ? 'xmlns:svg' : 'xmlns') === SVG_NAMESPACE
+/** Decode the five predefined entities and numeric character references. */
+function decodeXmlEntities(value: string): string {
+  return value.replace(
+    /&(#x[0-9a-fA-F]+|#\d+|lt|gt|amp|quot|apos);/g,
+    (entity, body: string) => {
+      if (body === 'lt') return '<';
+      if (body === 'gt') return '>';
+      if (body === 'amp') return '&';
+      if (body === 'quot') return '"';
+      if (body === 'apos') return "'";
+      const codePoint = body.startsWith('#x')
+        ? parseInt(body.slice(2), 16)
+        : parseInt(body.slice(1), 10);
+      return Number.isFinite(codePoint)
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    },
   );
 }
 
 /**
  * True when the root tag carries geometry the browser can scale into the
- * fixed sidebar logo box: a non-empty `viewBox`, or explicit `width` and
- * `height` that are positive and not percentages. Name-presence alone is not
- * enough — `viewBox=""` or `width="0"` paints nothing, and `width="100%"`
- * ties the artwork to the viewport it never fills at 26px.
+ * fixed sidebar logo box: a valid `viewBox` with a non-zero viewport, or
+ * explicit `width` and `height` that are positive and not percentages.
+ * Name-presence alone is not enough — `viewBox=""` or `width="0"` paints
+ * nothing, and `width="100%"` ties the artwork to the viewport it never
+ * fills at 26px. A malformed viewBox is ignored by browsers, so it falls
+ * through to the width/height check rather than deciding on its own.
  */
 function hasScalingGeometry(rootTag: string): boolean {
   const viewBox = readAttributeValue(rootTag, 'viewBox');
-  if (viewBox !== undefined && viewBox.trim() !== '') return true;
+  if (viewBox !== undefined && viewBox.trim() !== '') {
+    const parts = viewBox
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number);
+    if (parts.length === 4 && parts.every((p) => Number.isFinite(p))) {
+      return parts[2]! > 0 && parts[3]! > 0;
+    }
+    // Malformed: browsers ignore the attribute — decide on width/height.
+  }
   const width = readAttributeValue(rootTag, 'width');
   const height = readAttributeValue(rootTag, 'height');
   if (width === undefined || height === undefined) return false;
@@ -496,4 +540,16 @@ function hasScalingGeometry(rootTag: string): boolean {
     return Number.isFinite(numeric) && numeric > 0;
   };
   return usable(width) && usable(height);
+}
+
+/**
+ * True when a prefix-bound document draws with unprefixed elements: the
+ * children land in NO namespace, so the browser loads the image successfully
+ * and paints nothing — a blank mark with no error event to catch it.
+ */
+function hasUnprefixedSvgElements(content: string, prefix: string): boolean {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(
+    `<(?!(?:${escaped}):)(?:circle|ellipse|g|image|line|path|polygon|polyline|rect|text|use)[\\s/>]`,
+  ).test(content);
 }

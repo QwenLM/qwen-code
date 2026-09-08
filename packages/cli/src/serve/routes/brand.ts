@@ -47,8 +47,10 @@ export function registerBrandRoutes(
         skipLoadEnvironment: true,
         skipWorkspaceSettings: true,
       });
-      const { brand, warning } = resolveWebShellBrand(loaded);
-      if (warning) {
+      const { brand, warnings } = resolveWebShellBrand(loaded);
+      // One line per cause, so a log rule keyed on one key's prefix keeps
+      // firing when a second misconfiguration exists alongside it.
+      for (const warning of warnings ?? []) {
         writeStderrLine(`qwen serve: GET /brand: ${warning}`);
       }
       res.status(200).json(brand);

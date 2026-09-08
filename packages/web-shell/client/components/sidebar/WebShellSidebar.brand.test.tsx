@@ -216,18 +216,27 @@ describe('sidebar brand', () => {
     // The daemon does not sanitize the SVG it read, so this is the invariant
     // that keeps a hostile logo file inert: the payload may only ever reach the
     // DOM as an img src. If a future change inlines it, this test must fail.
-    const hostile =
-      'data:image/svg+xml,' +
-      encodeURIComponent(
-        '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
-      );
+    // The spy installs BEFORE the render on purpose: the fallback warning
+    // must fire only on a real decode failure, so a logo that renders must
+    // never produce it — not even during mount.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const hostile =
+        'data:image/svg+xml,' +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+        );
 
-    renderSidebar({ name: 'QiuQiu Code', logoDataUri: hostile });
+      renderSidebar({ name: 'QiuQiu Code', logoDataUri: hostile });
 
-    expect(brandLogoImage()?.getAttribute('src')).toBe(hostile);
-    expect(builtInMark()).toBeNull();
-    expect(container.querySelectorAll('script')).toHaveLength(0);
-    expect(container.innerHTML).not.toContain('alert(1)</script>');
+      expect(brandLogoImage()?.getAttribute('src')).toBe(hostile);
+      expect(builtInMark()).toBeNull();
+      expect(container.querySelectorAll('script')).toHaveLength(0);
+      expect(container.innerHTML).not.toContain('alert(1)</script>');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('falls back to the built-in mark when the logo image fails to decode', () => {
@@ -249,6 +258,7 @@ describe('sidebar brand', () => {
 
       expect(brandLogoImage()).toBeNull();
       expect(builtInMark()).not.toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('brand logo could not be rendered'),
       );

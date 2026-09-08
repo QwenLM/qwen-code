@@ -467,6 +467,7 @@ const {
       status: 'connected' as 'connected' | 'error',
       client: workspaceClient,
       refreshCapabilities: vi.fn(),
+      refreshBrand: vi.fn(),
     },
     mockWorkspaceActions: {
       readWorkspaceFile: vi.fn().mockResolvedValue({
@@ -9405,6 +9406,7 @@ beforeEach(() => {
   mockWorkspace.refreshCapabilities.mockResolvedValue(
     mockWorkspace.capabilities,
   );
+  mockWorkspace.refreshBrand.mockReset();
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
     workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
@@ -15394,6 +15396,30 @@ describe('App session callbacks', () => {
     ).toBeFalsy();
   });
 
+  it('does not re-ask the brand when the connection is healthy', async () => {
+    // The recovery branch is the only refreshBrand caller: on a healthy
+    // connection nothing must re-ask, or a resolved brand would churn on
+    // every session creation.
+    mockWorkspace.status = 'connected';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const shellRef = createRef<WebShellApi>();
+    renderApp({ shellRef });
+    await flush();
+
+    let created: boolean | undefined;
+    await act(async () => {
+      created = await shellRef.current?.createNewSession();
+    });
+
+    expect(created).toBe(true);
+    expect(mockWorkspace.refreshBrand).not.toHaveBeenCalled();
+  });
+
   it('retries failed capabilities before routing a global new session', async () => {
     mockWorkspace.status = 'error';
     mockWorkspace.capabilities =
@@ -15421,6 +15447,9 @@ describe('App session callbacks', () => {
 
     expect(created).toBe(true);
     expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+    // The recovery path also re-asks the brand — a retryable brand failure
+    // never retries on its own, and this is the one caller that can heal it.
+    expect(mockWorkspace.refreshBrand).toHaveBeenCalledOnce();
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
 
     act(() => {

@@ -196,7 +196,11 @@ at all — the settings watcher is instantiated only by the interactive terminal
 — so no setting propagates from an external file edit today, and brand matching
 that behavior is consistency rather than a gap. A page reload picks up a change.
 A write through any settings route still bumps the client's settings signal,
-which does not re-fetch brand; brand is re-read on the next connection.
+which does not re-fetch brand; brand is re-read on the next connection. One
+bounded retry exists purely for transient transport failures — a retryable
+rejection is re-asked once after a short delay, and the connection recovery
+path re-asks through `refreshBrand` when the brand is still missing — neither
+touches the live-reload boundary.
 
 ## Title and favicon before first paint
 
@@ -254,7 +258,9 @@ object), or a 404 from a daemon that has no route and never will — because a
 retryable failure (a 503 while the deferred runtime starts, a 429, a transport
 blip, an old SDK with no `brand()`) is unknown, not absent: settling there
 would report an authoritative empty brand, reset the tab title mid-session and
-delete the cache over a blip nothing ever retries. A settled-with-no-brand
+delete the cache over a blip. A blip is retried once after a short delay and
+re-asked through the workspace-error recovery path when the brand is still
+missing, but a settings-signal bump never re-fetches it. A settled-with-no-brand
 outcome reports an empty brand, which clears stale cached chrome; an unsettled
 one reports nothing, which is what keeps the flash away. An older daemon's 404
 and a host withdrawing its `brand` prop both settle, so both invalidate the
@@ -336,7 +342,7 @@ override without this feature.
 | `packages/sdk-typescript/src/index.ts`, `src/daemon/index.ts`             | type re-exports                                                                                                                   |
 | `packages/web-shell/client/brandContext.ts`                               | new: context, provider, hooks, built-in name, stable empty value                                                                  |
 | `packages/web-shell/client/daemon/workspace/types.ts`                     | optional brand and settled-flag fields on the workspace context                                                                   |
-| `packages/web-shell/client/daemon/workspace/DaemonWorkspaceProvider.tsx`  | fetch once per connection with a settled flag, outside the status machine                                                         |
+| `packages/web-shell/client/daemon/workspace/DaemonWorkspaceProvider.tsx`  | fetch once per connection with a settled flag, one bounded retry for transient failures, outside the status machine               |
 | `packages/web-shell/client/App.tsx`                                       | brand and callback props, precedence resolution, provider mount                                                                   |
 | `packages/web-shell/client/index.tsx`                                     | export the brand prop type                                                                                                        |
 | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`        | name, version tooltip, logo with a falsy-node fallback and an image-decode fallback                                               |
@@ -384,18 +390,23 @@ nor writable through it.
 
 On the client, the provider test asserts the brand and the settled flag reach
 the context on success, that a definitive 404 settles with no brand while a
-retryable 503 stays unsettled (unknown, not absent), that `refreshBrand`
-re-issues the fetch with the same settle rule and is a no-op on an
-already-resolved or settled brand, that a superseded client can neither
-write its brand into nor settle the new connection, and that a re-point
-resets the previous brand before the new fetch. The app test asserts
-prop-wins-over-fetched precedence (including against a daemon brand that
-carries a logo — the takeover is whole-object, not field-merge), in-flight
-silence for both an absent and a nullish host prop, the unsettled-to-settled
-transition that production actually takes, settled-with-no-brand reporting
-(which is what clears stale chrome), host-prop withdrawal reporting the empty
-brand again, empty-name normalization in the payload, logo-URI pass-through,
-and no re-firing for a fresh-but-equal inline prop and handler. The sidebar
+retryable 503 stays unsettled (unknown, not absent), that a retryable failure
+retries once on its own and is attributed on the console only once the retry
+is exhausted, that `refreshBrand` re-issues the fetch with the same settle
+rule and is a no-op on an already-resolved, settled, or in-flight brand, that
+a superseded client can neither write its brand into nor settle the new
+connection nor be re-asked by a refresh (per-instance call attribution), that
+a token rotation re-fetches against the new identity, and that no committed
+frame carries the previous client's brand beside the new connection's
+baseUrl. The app test asserts prop-wins-over-fetched precedence (including
+against a daemon brand that carries a logo — the takeover is whole-object,
+not field-merge), in-flight silence for both an absent and a nullish host
+prop, the unsettled-to-settled transition that production actually takes,
+settled-with-no-brand reporting (which is what clears stale chrome), the
+recovery path re-asking the brand alongside capabilities, host-prop
+withdrawal reporting the empty brand again, empty-name normalization in the
+payload, logo-URI pass-through, and no re-firing for a fresh-but-equal inline
+prop and handler. The sidebar
 test asserts the built-in rendering is untouched — the inline mark is asserted
 present, not merely no image asserted absent — the name and tooltip follow the
 brand, the logo renders as an image with no script node in the document, an
@@ -435,10 +446,10 @@ characters to match the TUI banner title, and the sidebar brand row already
 carried `overflow: hidden` with `text-overflow: ellipsis`, so a name at the cap
 still degrades gracefully in a narrow sidebar. No new layout rule was needed.
 
-The resolved brand is not cached on the daemon. It is fetched once per
-connection and the file read is bounded at 32 KiB, so caching would buy nothing
-and add an invalidation question — the daemon has no settings watcher to
-invalidate it with.
+The resolved brand is not cached on the daemon. It is read from settings on
+each request and the file read is bounded at 32 KiB, so caching would buy
+nothing and add an invalidation question — the daemon has no settings watcher
+to invalidate it with.
 
 The brand prop replaces the fetched brand wholesale rather than merging field
 by field. That matches how the theme and language props already behave, and a

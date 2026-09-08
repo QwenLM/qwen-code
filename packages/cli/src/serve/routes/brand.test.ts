@@ -12,6 +12,11 @@ import express from 'express';
 import request from 'supertest';
 import { registerBrandRoutes } from './brand.js';
 import { loadSettings } from '../../config/settings.js';
+import type {
+  LoadedSettings,
+  Settings,
+  SettingsFile,
+} from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -34,10 +39,11 @@ function stubSettings(scopes: {
   // The resolver reads the pre-substitution snapshot, so the stub must carry
   // every field a real SettingsFile has — omitting `originalSettings` hid
   // that dependency behind the `as never` until the placeholder guard moved
-  // the read.
-  const file = (settings: Record<string, unknown>) => ({
-    settings,
-    originalSettings: structuredClone(settings),
+  // the read. The return type is annotated so a future field the resolver
+  // needs fails typecheck here instead of silently reverting to `{}` bodies.
+  const file = (settings: Record<string, unknown>): SettingsFile => ({
+    settings: settings as Settings,
+    originalSettings: structuredClone(settings) as Settings,
     path: '/stub/settings.json',
   });
   vi.mocked(loadSettings).mockReturnValue({
@@ -45,7 +51,7 @@ function stubSettings(scopes: {
     systemDefaults: file(scopes.systemDefaults ?? {}),
     user: file(scopes.user ?? {}),
     workspace: file({}),
-  } as never);
+  } as unknown as LoadedSettings);
 }
 
 function makeApp() {

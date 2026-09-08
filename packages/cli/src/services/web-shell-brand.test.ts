@@ -19,13 +19,14 @@ const fsActual = vi.hoisted(
     ({}) as {
       fstatSync: typeof import('node:fs').fstatSync;
       lstatSync: typeof import('node:fs').lstatSync;
+      openSync: typeof import('node:fs').openSync;
       realpathSync: typeof import('node:fs').realpathSync;
     },
 );
 
 // Pass-through by default: roughly every case in this file reads through the
 // real filesystem via the same namespace import, so a plain mock would strip
-// `fs` from all of them. Only the functions the TOCTOU, FIFO and
+// `fs` from all of them. Only the functions the TOCTOU, FIFO, O_NONBLOCK and
 // resolvability cases need to perturb are wrapped, and beforeEach re-attaches
 // the real implementations so a leaked once-implementation cannot reach the
 // next test.
@@ -33,11 +34,13 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsActual.fstatSync = actual.fstatSync;
   fsActual.lstatSync = actual.lstatSync;
+  fsActual.openSync = actual.openSync;
   fsActual.realpathSync = actual.realpathSync;
   return {
     ...actual,
     fstatSync: vi.fn(),
     lstatSync: vi.fn(),
+    openSync: vi.fn(),
     realpathSync: vi.fn(),
   };
 });
@@ -83,6 +86,7 @@ describe('resolveWebShellBrand', () => {
   beforeEach(() => {
     vi.mocked(fs.fstatSync).mockReset().mockImplementation(fsActual.fstatSync);
     vi.mocked(fs.lstatSync).mockReset().mockImplementation(fsActual.lstatSync);
+    vi.mocked(fs.openSync).mockReset().mockImplementation(fsActual.openSync);
     vi.mocked(fs.realpathSync)
       .mockReset()
       .mockImplementation(fsActual.realpathSync);
@@ -201,7 +205,7 @@ describe('resolveWebShellBrand', () => {
       });
       const result = resolveWebShellBrand(settings);
       expect(result.brand).toEqual({});
-      expect(result.warning).toBeUndefined();
+      expect(result.warnings).toBeUndefined();
     });
 
     it('keeps the user name when the workspace layer sets a different one', () => {
@@ -218,10 +222,10 @@ describe('resolveWebShellBrand', () => {
   describe('logo', () => {
     it('encodes a valid SVG as a data URI that decodes to the source', () => {
       const logoPath = writeLogo(LOGO_SVG);
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri?.startsWith('data:image/svg+xml,')).toBe(true);
       expect(
         decodeURIComponent(
@@ -237,10 +241,10 @@ describe('resolveWebShellBrand', () => {
           '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n' +
           LOGO_SVG,
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -248,14 +252,14 @@ describe('resolveWebShellBrand', () => {
       const logoPath = writeLogo(
         '<!DOCTYPE svg [ <!ENTITY x "y"> ]>\n' + LOGO_SVG,
       );
-      const { warning } = resolveWebShellBrand(
+      const { warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
     });
 
     it('keeps the configured name when the logo is rejected', () => {
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({
           user: brandSettings({
             name: 'QiuQiu Code',
@@ -264,7 +268,7 @@ describe('resolveWebShellBrand', () => {
         }),
       );
       expect(brand).toEqual({ name: 'QiuQiu Code' });
-      expect(warning).toContain('does not exist');
+      expect(warnings).toEqual([expect.stringContaining('does not exist')]);
     });
 
     it.each([
@@ -290,11 +294,11 @@ describe('resolveWebShellBrand', () => {
         'exceeds 32768 bytes:',
       ],
     ])('rejects %s', (_label, makePath, expectedWarning) => {
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: makePath() }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain(expectedWarning);
+      expect(warnings).toEqual([expect.stringContaining(expectedWarning)]);
     });
 
     it('rejects a file whose decoded size exceeds the cap though its on-disk size does not', () => {
@@ -304,11 +308,11 @@ describe('resolveWebShellBrand', () => {
       // Without this fixture the inner cap is unreachable from any shipped test.
       const file = path.join(dir, 'undecodable.svg');
       fs.writeFileSync(file, Buffer.alloc(32768, 0x80));
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('once decoded');
+      expect(warnings).toEqual([expect.stringContaining('once decoded')]);
     });
 
     it('rejects an <svg> root that declares no SVG namespace', () => {
@@ -319,11 +323,11 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('namespaced <svg>');
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
     });
 
     it("accepts whitespace around the xmlns attribute's equals sign", () => {
@@ -333,10 +337,10 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg xmlns = "http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -347,10 +351,10 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg viewBox="0 0 8 8" aria-label="Next >" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -373,11 +377,11 @@ describe('resolveWebShellBrand', () => {
         // Accepting either ships a data URI that paints a blank mark with
         // nothing on stderr, the failure the namespace rule exists to prevent.
         const file = writeLogo(contents);
-        const { brand, warning } = resolveWebShellBrand(
+        const { brand, warnings } = resolveWebShellBrand(
           makeSettings({ user: brandSettings({ logoPath: file }) }),
         );
         expect(brand.logoDataUri).toBeUndefined();
-        expect(warning).toContain('namespaced <svg>');
+        expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
       },
     );
 
@@ -388,11 +392,11 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svgfoo xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('namespaced <svg>');
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
     });
 
     it('accepts a prefix-bound root that binds svg to the SVG namespace', () => {
@@ -403,10 +407,10 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg:svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><svg:circle cx="4" cy="4" r="4"/></svg:svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -414,11 +418,107 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg:svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('namespaced <svg>');
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
+    });
+
+    it('accepts any prefix bound to the SVG namespace, not just svg', () => {
+      // Namespace resolution is prefix-agnostic: `<inkscape:svg
+      // xmlns:inkscape="…">` is the same document to a browser. Hard-coding
+      // the `svg` prefix would refuse renderable files with a false
+      // diagnostic.
+      const file = writeLogo(
+        '<inkscape:svg xmlns:inkscape="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><inkscape:circle cx="4" cy="4" r="4"/></inkscape:svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it('accepts a namespace binding written with character references', () => {
+      // `&#104;` is `h`: a real parser decodes character references before
+      // namespace comparison, so this document IS in the SVG namespace.
+      const file = writeLogo(
+        '<svg xmlns="&#104;ttp://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it('rejects a suffix-colliding attribute name carrying the namespace', () => {
+      // `data-xmlns` is not `xmlns`: only the attribute-NAME boundary keeps
+      // the match from firing inside it, and this document declares no
+      // default namespace — accepting it ships a broken-image data URI.
+      const file = writeLogo(
+        '<svg data-xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
+    });
+
+    it('warns for a prefix-bound root whose children are unprefixed', () => {
+      // The root is in the SVG namespace but `<circle>` without the prefix
+      // is in NO namespace — the document loads successfully and paints
+      // nothing, so the advisory is the only signal.
+      const file = writeLogo(
+        '<svg:svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg:svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('unprefixed elements'),
+      ]);
+    });
+
+    it('warns for a degenerate viewBox with no viewport area', () => {
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 0 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('no viewBox or width/height'),
+      ]);
+    });
+
+    it('does not count a suffix-colliding data-viewBox as scaling geometry', () => {
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" data-viewBox="0 0 8 8"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warnings).toEqual([
+        expect.stringContaining('no viewBox or width/height'),
+      ]);
+    });
+
+    it('accepts character-referenced dimensions as usable geometry', () => {
+      // `&#50;&#52;` decodes to "24": parseable, positive, advisory-free.
+      const file = writeLogo(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="&#50;&#52;" height="&#50;&#52;"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warnings } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warnings).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
     });
 
     it('accepts an astral character in an attribute before the xmlns', () => {
@@ -429,10 +529,10 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg viewBox="0 0 8 8" aria-label="logo \u{1F680}\u{20000}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -448,11 +548,13 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         `<svg xmlns="http://www.w3.org/2000/svg" ${geometry}><circle cx="4" cy="4" r="4"/></svg>`,
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeDefined();
-      expect(warning).toContain('no viewBox or width/height');
+      expect(warnings).toEqual([
+        expect.stringContaining('no viewBox or width/height'),
+      ]);
     });
 
     it('ignores a placeholder logoPath rather than resolving it from a workspace-tainted environment', () => {
@@ -460,7 +562,9 @@ describe('resolveWebShellBrand', () => {
       // which loadEnvironment populates workspace-first at boot — so the
       // substituted value can come from a repository even though the
       // operator's own layer wrote the placeholder. Brand keys therefore read
-      // the pre-substitution snapshot and refuse placeholders.
+      // the pre-substitution snapshot and refuse placeholders. The variable
+      // must be SET for the guard to fire: an unresolvable placeholder is
+      // preserved verbatim by the engine and kept as literal text.
       const logoPath = writeLogo(LOGO_SVG);
       const user = settingsFile(
         brandSettings({ logoPath }),
@@ -477,17 +581,26 @@ describe('resolveWebShellBrand', () => {
         true,
         new Set(),
       );
-      const { brand, warning } = resolveWebShellBrand(settings);
-      expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('environment placeholder');
+      const previous = process.env['BRAND_DIR'];
+      process.env['BRAND_DIR'] = dir;
+      try {
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand.logoDataUri).toBeUndefined();
+        expect(warnings).toEqual([
+          expect.stringContaining('environment placeholder'),
+        ]);
+      } finally {
+        if (previous === undefined) delete process.env['BRAND_DIR'];
+        else process.env['BRAND_DIR'] = previous;
+      }
     });
 
-    it('ignores a placeholder name for the same reason', () => {
+    it('ignores a placeholder name for the same reason, bare $VAR form included', () => {
       const user = settingsFile(
         brandSettings({ name: 'Repo Brand' }),
         path.join(dir, 'settings.json'),
       );
-      user.originalSettings = brandSettings({ name: '${PRODUCT_NAME}' });
+      user.originalSettings = brandSettings({ name: '$PRODUCT_NAME' });
       const settings = new LoadedSettings(
         settingsFile({}, '/system/settings.json'),
         settingsFile({}, '/system-defaults.json'),
@@ -496,9 +609,93 @@ describe('resolveWebShellBrand', () => {
         true,
         new Set(),
       );
-      const { brand, warning } = resolveWebShellBrand(settings);
-      expect(brand.name).toBeUndefined();
-      expect(warning).toContain('environment placeholder');
+      const previous = process.env['PRODUCT_NAME'];
+      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
+      try {
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand.name).toBeUndefined();
+        expect(warnings).toEqual([
+          expect.stringContaining('environment placeholder'),
+        ]);
+      } finally {
+        if (previous === undefined) delete process.env['PRODUCT_NAME'];
+        else process.env['PRODUCT_NAME'] = previous;
+      }
+    });
+
+    it('keeps a literal name that merely contains a dollar sign', () => {
+      // The guard refuses on substitution, not syntax: these values contain
+      // `$` but resolve to themselves, so nothing workspace-supplied could
+      // have entered them.
+      for (const name of ['$5 Off Mart', 'US$ Deals', 'Cost$Less']) {
+        const settings = makeSettings({ user: brandSettings({ name }) });
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand).toEqual({ name });
+        expect(warnings).toBeUndefined();
+      }
+    });
+
+    it('lets a placeholder layer mask a lower literal, with a warning', () => {
+      // Precedence is symmetrical with value-winning: the placeholder layer
+      // wins over lower layers and the key is unset — not skipped — so a
+      // managed brand does not reappear beneath it.
+      const previous = process.env['PRODUCT_NAME'];
+      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
+      try {
+        const settings = makeSettings({
+          systemDefaults: brandSettings({ name: 'Managed Brand' }),
+          user: brandSettings({ name: '${PRODUCT_NAME}' }),
+        });
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand).toEqual({});
+        expect(warnings).toEqual([
+          expect.stringContaining('environment placeholder'),
+        ]);
+      } finally {
+        if (previous === undefined) delete process.env['PRODUCT_NAME'];
+        else process.env['PRODUCT_NAME'] = previous;
+      }
+    });
+
+    it('lets an explicit empty value at a higher layer reset a placeholder below it, with no warning', () => {
+      const previous = process.env['PRODUCT_NAME'];
+      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
+      try {
+        const settings = makeSettings({
+          systemDefaults: brandSettings({ name: '${PRODUCT_NAME}' }),
+          user: brandSettings({ name: '' }),
+        });
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand).toEqual({});
+        expect(warnings).toBeUndefined();
+      } finally {
+        if (previous === undefined) delete process.env['PRODUCT_NAME'];
+        else process.env['PRODUCT_NAME'] = previous;
+      }
+    });
+
+    it('reports every misconfigured key, one warning per cause', () => {
+      // A name placeholder and a missing logo in the same layer must each
+      // surface their own line — joined output would displace one reason and
+      // break the stderr prefix the protocol doc anchors.
+      const previous = process.env['PRODUCT_NAME'];
+      process.env['PRODUCT_NAME'] = 'Repo Supplied Name';
+      try {
+        const settings = makeSettings({
+          user: brandSettings({
+            name: '${PRODUCT_NAME}',
+            logoPath: path.join(dir, 'missing.svg'),
+          }),
+        });
+        const { brand, warnings } = resolveWebShellBrand(settings);
+        expect(brand).toEqual({});
+        expect(warnings).toHaveLength(2);
+        expect(warnings?.join('\n')).toContain('environment placeholder');
+        expect(warnings?.join('\n')).toContain('does not exist');
+      } finally {
+        if (previous === undefined) delete process.env['PRODUCT_NAME'];
+        else process.env['PRODUCT_NAME'] = previous;
+      }
     });
 
     it('lets a literal at a higher layer override a placeholder below it', () => {
@@ -508,9 +705,9 @@ describe('resolveWebShellBrand', () => {
         systemDefaults: brandSettings({ name: '${PRODUCT_NAME}' }),
         user: brandSettings({ name: 'User Brand' }),
       });
-      const { brand, warning } = resolveWebShellBrand(settings);
+      const { brand, warnings } = resolveWebShellBrand(settings);
       expect(brand).toEqual({ name: 'User Brand' });
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
     });
 
     it('rejects a prefix-only xmlns binding with no default namespace', () => {
@@ -519,11 +716,11 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('namespaced <svg>');
+      expect(warnings).toEqual([expect.stringContaining('namespaced <svg>')]);
     });
 
     it.each([
@@ -537,10 +734,10 @@ describe('resolveWebShellBrand', () => {
       // Quoted literals and the internal-subset bracket may hold `>`, `[` and
       // `]`; the scanner must not treat any of them as the end of the DOCTYPE.
       const file = writeLogo(prolog + LOGO_SVG);
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -553,21 +750,23 @@ describe('resolveWebShellBrand', () => {
       const file = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeDefined();
-      expect(warning).toContain('no viewBox or width/height');
+      expect(warnings).toEqual([
+        expect.stringContaining('no viewBox or width/height'),
+      ]);
     });
 
     it('does not warn when width and height stand in for a viewBox', () => {
       const file = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4"/></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
@@ -583,11 +782,13 @@ describe('resolveWebShellBrand', () => {
         ctx.skip();
         return;
       }
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: link }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('must not be a symlink');
+      expect(warnings).toEqual([
+        expect.stringContaining('must not be a symlink'),
+      ]);
     });
 
     it('reports a hard-linked logo distinctly from a non-regular file', (ctx) => {
@@ -599,13 +800,13 @@ describe('resolveWebShellBrand', () => {
         ctx.skip(); // Same reason as the symlink case above.
         return;
       }
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: link }) }),
       );
       // The file *is* a regular file, so the message must say what actually
       // refused it — otherwise the operator debugs permissions and spelling.
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('hard links');
+      expect(warnings).toEqual([expect.stringContaining('hard links')]);
     });
 
     it('refuses a file swapped between the lstat and the open', () => {
@@ -621,54 +822,85 @@ describe('resolveWebShellBrand', () => {
         Object.assign(fake, stat, { ino: stat.ino + 1 });
         return fake;
       }) as never);
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('changed while it was being read');
+      expect(warnings).toEqual([
+        expect.stringContaining('changed while it was being read'),
+      ]);
     });
 
     it('refuses a FIFO swapped in after the pre-open stat guards', (ctx) => {
       // The route handler is fully synchronous on the daemon's single event
       // loop, so an `open(2)` on a FIFO with no writer would block the whole
       // daemon — O_NONBLOCK is what makes the open succeed and hands the
-      // refusal to the fd identity re-check. Without the flag this test
-      // exceeds the test timeout instead of passing.
+      // refusal to the fd identity re-check.
+      if (process.platform === 'win32') {
+        // FIFOs are a POSIX concept; the O_NONBLOCK defence this test pins
+        // only exists there. A skip, not a silent pass — same discipline as
+        // the link tests.
+        ctx.skip();
+        return;
+      }
       const fifoPath = path.join(dir, 'fifo.svg');
       try {
         execFileSync('mkfifo', [fifoPath]);
       } catch {
-        // No mkfifo (Windows, or a filesystem without FIFOs) — a skip, not a
-        // silent pass, same discipline as the link tests.
-        ctx.skip();
+        ctx.skip(); // No mkfifo on this host.
         return;
       }
       // Drive the post-swap state: the pre-open lstat reports a regular file,
       // so the guards pass and the open hits the FIFO.
       const regular = fsActual.lstatSync(writeLogo(LOGO_SVG));
       vi.mocked(fs.lstatSync).mockImplementationOnce((() => regular) as never);
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: fifoPath }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('changed while it was being read');
+      expect(warnings).toEqual([
+        expect.stringContaining('changed while it was being read'),
+      ]);
+    });
+
+    it('opens the logo with O_NONBLOCK when the platform defines it', () => {
+      // The FIFO case above cannot fail fast on its own: a blocked open(2)
+      // wedges the vitest worker's event loop, so its timeout never fires and
+      // CI burns the job limit with no test name in the log. Capturing the
+      // flags the resolver passes gives the O_NONBLOCK bit a witness that
+      // reds in milliseconds instead, and also runs where mkfifo cannot.
+      if (typeof fs.constants.O_NONBLOCK !== 'number') {
+        // Windows defines neither O_NOFOLLOW nor O_NONBLOCK — the guard is
+        // conditional by design, so there is nothing to assert here.
+        return;
+      }
+      const openSyncMock = vi.mocked(fs.openSync);
+      const logoPath = writeLogo(LOGO_SVG);
+      resolveWebShellBrand(makeSettings({ user: brandSettings({ logoPath }) }));
+      expect(openSyncMock).toHaveBeenCalled();
+      const flags = openSyncMock.mock.calls.map((call) => call[1] as number);
+      expect(flags.some((f) => (f & fs.constants.O_NONBLOCK) !== 0)).toBe(true);
     });
 
     it('soft-fails a path that cannot be statted', () => {
-      // logo.svg is a regular file, so logo.svg/nested.svg raises ENOTDIR on
-      // lstat — the soft-fail must keep the configured name and report the
-      // published `ui.brand.logoPath is not readable` line, not blow up.
+      // The lstatSync throw branch: a permission error (or, on Windows, the
+      // platform's mapping of a path-under-a-file) must keep the configured
+      // name and report the published `is not readable` line, not blow up.
+      // Mocked rather than a real ENOTDIR fixture because Windows lstat
+      // reports that shape as no-entry instead of throwing.
       const logoPath = writeLogo(LOGO_SVG);
-      const { brand, warning } = resolveWebShellBrand(
+      vi.mocked(fs.lstatSync).mockImplementationOnce((() => {
+        const error = new Error('permission denied') as NodeJS.ErrnoException;
+        error.code = 'EACCES';
+        throw error;
+      }) as never);
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({
-          user: brandSettings({
-            name: 'QiuQiu Code',
-            logoPath: path.join(logoPath, 'nested.svg'),
-          }),
+          user: brandSettings({ name: 'QiuQiu Code', logoPath }),
         }),
       );
       expect(brand).toEqual({ name: 'QiuQiu Code' });
-      expect(warning).toContain('is not readable');
+      expect(warnings).toEqual([expect.stringContaining('is not readable')]);
     });
 
     it('soft-fails when the path cannot be resolved', () => {
@@ -680,11 +912,11 @@ describe('resolveWebShellBrand', () => {
         error.code = 'ELOOP';
         throw error;
       }) as never);
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('is not resolvable');
+      expect(warnings).toEqual([expect.stringContaining('is not resolvable')]);
     });
 
     it('expands a leading tilde against the home directory', (ctx) => {
@@ -701,12 +933,12 @@ describe('resolveWebShellBrand', () => {
           return;
         }
         writeLogo(LOGO_SVG, 'tilde-logo.svg');
-        const { brand, warning } = resolveWebShellBrand(
+        const { brand, warnings } = resolveWebShellBrand(
           makeSettings({
             user: brandSettings({ logoPath: '~/tilde-logo.svg' }),
           }),
         );
-        expect(warning).toBeUndefined();
+        expect(warnings).toBeUndefined();
         expect(brand.logoDataUri).toBeDefined();
       } finally {
         if (previousHome === undefined) delete process.env['HOME'];
@@ -720,19 +952,19 @@ describe('resolveWebShellBrand', () => {
       fs.mkdirSync(path.join(dir, 'brand'));
       fs.writeFileSync(path.join(dir, 'brand', 'logo.svg'), LOGO_SVG, 'utf-8');
 
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({
           user: brandSettings({ logoPath: 'brand/logo.svg' }),
           userPath: path.join(dir, 'settings.json'),
         }),
       );
 
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toBeDefined();
     });
 
     it('rejects a relative path whose settings layer has no owning file', () => {
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({
           user: brandSettings({ logoPath: 'brand/logo.svg' }),
           userPath: '',
@@ -740,7 +972,9 @@ describe('resolveWebShellBrand', () => {
       );
 
       expect(brand.logoDataUri).toBeUndefined();
-      expect(warning).toContain('no owning file directory');
+      expect(warnings).toEqual([
+        expect.stringContaining('no owning file directory'),
+      ]);
     });
 
     it('accepts an SVG that contains script, because the client renders it as an image', () => {
@@ -753,10 +987,10 @@ describe('resolveWebShellBrand', () => {
       const logoPath = writeLogo(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><script>alert(1)</script></svg>',
       );
-      const { brand, warning } = resolveWebShellBrand(
+      const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
       );
-      expect(warning).toBeUndefined();
+      expect(warnings).toBeUndefined();
       expect(brand.logoDataUri).toContain('data:image/svg+xml,');
     });
   });

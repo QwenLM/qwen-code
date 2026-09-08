@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from 'react';
+import { act, useEffect, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
@@ -46,9 +46,21 @@ const sdkMocks = vi.hoisted(() => {
   const deleteSessionsData = vi.fn();
   const exportSession = vi.fn();
   const daemonStatus = vi.fn();
+  const instances: MockDaemonClient[] = [];
 
   class MockDaemonClient {
-    constructor(_opts: unknown) {}
+    constructor(opts: unknown) {
+      this.baseUrl = (opts as { baseUrl?: string }).baseUrl;
+      instances.push(this);
+    }
+
+    /** The baseUrl this client was constructed with, for attribution. */
+    readonly baseUrl: string | undefined;
+
+    // Per-instance wrapper so a test can attribute each call to the client
+    // it was issued against; delegates to the shared mock so the existing
+    // queue/count assertions are unaffected.
+    brand = vi.fn(() => brand());
 
     workspaceByCwd = vi.fn(() => ({
       runtimeMcpTools: workspaceMcpTools,
@@ -56,7 +68,6 @@ const sdkMocks = vi.hoisted(() => {
     }));
 
     capabilities = capabilities;
-    brand = brand;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
     workspaceMcpResources = workspaceMcpResources;
@@ -112,7 +123,9 @@ const sdkMocks = vi.hoisted(() => {
     deleteSessionsData,
     exportSession,
     daemonStatus,
+    instances,
     reset() {
+      instances.length = 0;
       capabilities.mockReset();
       capabilities.mockResolvedValue({
         workspaceCwd: '/mock-workspace',
@@ -476,6 +489,147 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.brandSettled).toBe(true);
   });
 
+  it('retries a retryable failure once on its own, without a refreshBrand call', async () => {
+    // A 429 with a one-token bucket (capabilities took the other), a 503
+    // while the runtime starts, or a transport blip must not leave the shell
+    // split-brained — built-in name in-app, cached white-label in the tab —
+    // until a manual reload. One bounded retry fires without any caller.
+    sdkMocks.brand
+      .mockRejectedValueOnce(new DaemonHttpError(429, undefined, 'limited'))
+      .mockResolvedValueOnce({ name: 'QiuQiu Code' });
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // The immediate aftermath is still the unsettled "unknown" state.
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+    expect(context?.brandSettled).toBe(false);
+
+    await act(async () => {
+      await vi.waitFor(() => expect(sdkMocks.brand).toHaveBeenCalledTimes(2), {
+        timeout: 4000,
+      });
+    });
+
+    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+    expect(context?.brandSettled).toBe(true);
+  });
+
+  it('warns once a retryable failure persists past the retry, but not on a definitive 404', async () => {
+    // The daemon's stderr cannot cover a request that never arrived, so the
+    // exhausted-retry state gets the console. A 404 is an expected old-daemon
+    // state and stays silent.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      sdkMocks.brand.mockRejectedValue(
+        new DaemonHttpError(503, undefined, 'runtime starting'),
+      );
+      let context: DaemonWorkspaceContextValue | undefined;
+
+      function Harness() {
+        context = useOptionalDaemonWorkspace();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      // Silent while the retry is still pending.
+      expect(warn).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.waitFor(
+          () => expect(sdkMocks.brand).toHaveBeenCalledTimes(2),
+          { timeout: 4000 },
+        );
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('brand could not be fetched'),
+      );
+      expect(context?.brandSettled).toBe(false);
+
+      warn.mockClear();
+      sdkMocks.brand.mockRejectedValue(
+        new DaemonHttpError(404, undefined, '404 not found'),
+      );
+      await act(async () => {
+        context?.refreshBrand?.();
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(sdkMocks.brand).toHaveBeenCalledTimes(3);
+      expect(context?.brandSettled).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not re-issue the fetch while one is in flight', async () => {
+    // The in-flight gate leg: a recovery-path refresh during the mount fetch
+    // must not supersede it into a duplicate request (on a rate-limited
+    // daemon the duplicate 429s where the original would have succeeded).
+    let resolveFetch!: (brand: unknown) => void;
+    const pending = new Promise((r) => (resolveFetch = r));
+    sdkMocks.brand.mockImplementation(() => pending);
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFetch({ name: 'Daemon Brand' });
+      await pending;
+    });
+    expect(context?.brand).toEqual({ name: 'Daemon Brand' });
+    expect(context?.brandSettled).toBe(true);
+  });
+
+  it('does not re-issue the fetch after a definitive 404 settled it', async () => {
+    // The settled gate leg: re-asking after a 404 would turn the definitive
+    // answer back into "loading" and re-fire the cache-clearing report.
+    sdkMocks.brand.mockRejectedValue(
+      new DaemonHttpError(404, undefined, '404 not found'),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(context?.brandSettled).toBe(true);
+
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(true);
+  });
+
   it('survives an SDK client that has no brand method at all', async () => {
     // `@qwen-code/sdk` is a peer dependency, so a host on an older SDK hands the
     // provider a client without `brand()`. Calling it throws a synchronous
@@ -667,12 +821,196 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.brand).toBeUndefined();
     expect(context?.brandSettled).toBe(false);
 
+    // A recovery-path refresh while the successor is still in flight must not
+    // supersede it into a duplicate request — only the in-flight leg of the
+    // gate blocks here, so this is the witness for the finally-leg guard:
+    // without it, the superseded rejection would have cleared the flag and
+    // this call would fire a third request.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
+
     await act(async () => {
       resolveSecond({ name: 'Daemon B' });
       await second;
     });
     expect(context?.brand).toEqual({ name: 'Daemon B' });
     expect(context?.brandSettled).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('re-fetches the brand when only the token changes', async () => {
+    // The client is memoized on [autoConnect, baseUrl, token, transport], so
+    // a token rotation produces a NEW client: the brand effect must re-run
+    // (resetting, then fetching against the new identity) — otherwise the
+    // context keeps describing the previous token's connection.
+    sdkMocks.brand
+      .mockResolvedValueOnce({ name: 'Token A Brand' })
+      .mockResolvedValueOnce({ name: 'Token B Brand' });
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="token-a">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(context?.brand).toEqual({ name: 'Token A Brand' });
+
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="token-b">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
+    expect(context?.brand).toEqual({ name: 'Token B Brand' });
+    expect(context?.brandSettled).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('re-asks the CURRENT client when refreshBrand fires after a re-point', async () => {
+    // The retry must go to the client the shell is connected to NOW: the
+    // shared brand spy queues by call order, so without per-instance
+    // attribution a retry that asks the superseded client would satisfy
+    // every assertion while painting daemon A's white-label on daemon B's
+    // shell.
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Re-point; the retryable failure on B's mount fetch leaves the brand
+    // unsettled, so the gate permits a re-ask.
+    sdkMocks.brand.mockRejectedValue(
+      new DaemonHttpError(503, undefined, 'runtime starting'),
+    );
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:5173">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(context?.brandSettled).toBe(false);
+
+    sdkMocks.brand.mockResolvedValue({ name: 'Daemon B' });
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const [clientA, clientB] = sdkMocks.instances;
+    expect(clientA?.brand).toHaveBeenCalledTimes(1);
+    expect(clientB?.baseUrl).toBe('http://127.0.0.1:5173');
+    expect(clientB?.brand).toHaveBeenCalledTimes(2);
+    expect(context?.brand).toEqual({ name: 'Daemon B' });
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('never publishes the previous client\'s brand on the re-point commit', async () => {
+    // The reset lives in the render that observes the client change, so no
+    // committed frame may carry daemon A's brand beside daemon B's baseUrl —
+    // a consumer effect keyed on baseUrl must see the reset state.
+    sdkMocks.brand
+      .mockResolvedValueOnce({ name: 'Daemon A' })
+      .mockResolvedValueOnce({ name: 'Daemon B' });
+    const frames: Array<{
+      baseUrl: string | undefined;
+      brand: unknown;
+      settled: boolean | undefined;
+    }> = [];
+    function Harness() {
+      const context = useOptionalDaemonWorkspace();
+      // Log COMMITTED frames (an effect fires after commit), not render
+      // passes — a render-phase setState discards the stale render before
+      // commit, and only committed frames can reach a consumer.
+      useEffect(() => {
+        frames.push({
+          baseUrl: context?.baseUrl,
+          brand: context?.brand,
+          settled: context?.brandSettled,
+        });
+      });
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(frames.at(-1)?.brand).toEqual({ name: 'Daemon A' });
+
+    await act(async () => {
+      root.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:5173">
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(
+      frames.some(
+        (frame) =>
+          frame.baseUrl === 'http://127.0.0.1:5173' &&
+          (frame.brand as { name?: string } | undefined)?.name === 'Daemon A',
+      ),
+    ).toBe(false);
 
     act(() => root.unmount());
     container.remove();
