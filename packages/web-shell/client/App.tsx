@@ -1292,7 +1292,8 @@ export interface WebShellProps {
   onSessionChange?: (event: SessionChangeEvent) => void;
   /**
    * Called for authoritative terminals observed live, or replayed for a prompt
-   * this provider admitted.
+   * this provider admitted. Multiple mounted providers can report the same
+   * `(sessionId, promptId)`, so hosts should deduplicate by that key.
    */
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**

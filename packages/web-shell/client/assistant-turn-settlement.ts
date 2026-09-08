@@ -35,6 +35,17 @@ function getSettledAssistantMessage(
       )
       .map((block) => block.id),
   );
+  if (
+    promptBlockIds.size === 0 ||
+    blocks.some(
+      (block) =>
+        block.kind === 'assistant' &&
+        promptBlockIds.has(block.id) &&
+        block.streaming,
+    )
+  ) {
+    return undefined;
+  }
   const messages = transcriptBlocksToDaemonMessages(blocks, {
     includeSourceIdentity: true,
   });

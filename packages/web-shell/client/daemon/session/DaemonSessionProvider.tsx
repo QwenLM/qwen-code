@@ -1092,14 +1092,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
   const locallyBoundPromptKeysRef = useRef(new Set<string>());
-  // A locally bound prompt whose terminal an epoch reset may have destroyed.
-  // Recorded when `requestEpochResetReload` discards the binding, consumed
-  // after the reload's replay injection to publish a `failed` retirement when
-  // the fresh snapshot carried no terminal for it (a cold restore emits only
-  // `session_update` chunks). Cleared on use so unrelated reloads stay silent.
-  const epochResetBoundPromptRef = useRef<
-    { sessionId: string; promptId: string } | undefined
-  >(undefined);
   const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
     new Set(),
   );
@@ -1131,26 +1123,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       });
     },
     [],
-  );
-  // Publish a `failed` settlement for a still-bound prompt whose terminal was
-  // destroyed without ever being observed (session died, auth/terminal error,
-  // missing session). Stays inside the public outcome union and carries the
-  // same (sessionId, promptId) key so a late real terminal is deduped.
-  const retireAbandonedPrompt = useCallback(
-    (sessionId: string, code: string) => {
-      const active = activePromptsRef.current.get(sessionId);
-      if (!active?.promptId) return;
-      publishPromptSettlement({
-        sessionId,
-        promptId: active.promptId,
-        outcome: 'failed',
-        error: {
-          message: 'Prompt terminal lost before delivery',
-          code,
-        },
-      });
-    },
-    [publishPromptSettlement],
   );
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
@@ -2890,33 +2862,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 publishPromptSettlement(replaySettlement);
               }
             }
-            // An epoch reset may have destroyed the terminal of a prompt this
-            // provider had bound: if the replay above did not settle it (the
-            // admission key is still present, so no terminal arrived), retire
-            // it as `failed` rather than leaving a host keyed on
-            // `onAssistantTurnSettled` waiting forever.
-            const epochResetBoundPrompt = epochResetBoundPromptRef.current;
-            epochResetBoundPromptRef.current = undefined;
-            if (
-              epochResetBoundPrompt &&
-              epochResetBoundPrompt.sessionId === activeSession.sessionId &&
-              locallyBoundPromptKeysRef.current.has(
-                getPromptSettledKey(
-                  epochResetBoundPrompt.sessionId,
-                  epochResetBoundPrompt.promptId,
-                ),
-              )
-            ) {
-              publishPromptSettlement({
-                sessionId: epochResetBoundPrompt.sessionId,
-                promptId: epochResetBoundPrompt.promptId,
-                outcome: 'failed',
-                error: {
-                  message: 'Prompt terminal lost across daemon epoch reset',
-                  code: 'epoch_reset',
-                },
-              });
-            }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
             // completed: if normalization/dispatch threw, the recovery path
@@ -3268,16 +3213,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const active = activePromptsRef.current.get(
               activeSession.sessionId,
             );
-            if (active?.promptId) {
-              // The reset may have destroyed the turn's terminal (a cold
-              // restore emits only `session_update` chunks, never terminals).
-              // Remember the bound prompt so the reload can retire it as
-              // `failed` if the fresh snapshot carries no terminal for it.
-              epochResetBoundPromptRef.current = {
-                sessionId: activeSession.sessionId,
-                promptId: active.promptId,
-              };
-            }
             active?.controller.abort();
             activePromptsRef.current.delete(activeSession.sessionId);
             if (restoredActivePrompt) {
@@ -3925,7 +3860,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
-            retireAbandonedPrompt(failedSessionId, 'session_error');
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
@@ -4357,7 +4291,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
               );
             }
-            retireAbandonedPrompt(deadSessionId, 'session_missing');
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
