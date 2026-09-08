@@ -541,9 +541,25 @@ describe('seamLines', () => {
       "const o = { m: require('./changed.js') };\nlet x = 1;",
       "for (const m of require('./changed.js')) {}\nlet x = 1;",
       "obj['m'] = require('./changed.js');\nlet x = 1;",
+      // A still-wrapped promise STORED by a binding (#10136 R9-1 round
+      // 16): the callback body that eventually uses the module is
+      // written anywhere — a use the name read cannot account for, at
+      // each binding terminal shape.
+      "const p = import('./changed.js');\np.then(handler);",
+      "let p;\np = import('./changed.js');\np.then(handler);",
+      "class A {\n  p = import('./changed.js');\n  run() {\n    this.p.then((m) => {\n      m.call();\n    });\n  }\n}",
+      // …and the assignment inside an awaited expression binds the
+      // promise for `n`, not the module: awaiting AROUND the assignment
+      // does not unwrap what the assignment stored.
+      "const m = await (n = import('./changed.js'));\nlet x = 1;",
     ]) {
       expect(seamLines('src/imp.ts', source, changed)).toBeNull();
     }
+    // The non-binding terminals stay as they are: a promise that binds
+    // nothing still just marks its own statement.
+    expect(
+      seamLines('src/imp.ts', "void import('./changed.js');", changed),
+    ).toEqual([1]);
   });
 
   it('a statement that receives nothing marks its own lines and binds nothing', () => {
@@ -580,18 +596,6 @@ describe('seamLines', () => {
           'a.run();', // 3
           'b.run();', // 4
           'let x = 1;', // 5
-        ],
-        [1, 2, 3, 4],
-      ],
-      [
-        [
-          'let n;', // 1
-          "const m = await (n = import('./changed.js'));", // 2
-          'm.run();', // 3
-          'n.then(f);', // 4
-          // A module: in a script `await (…)` is a call to a function
-          // named `await`, and the grammar reads it as one.
-          'export {};', // 5
         ],
         [1, 2, 3, 4],
       ],

@@ -656,7 +656,14 @@ function seamLinesWith(
   // `cache ?? (cache = require('x'))`); an expression statement ends the
   // walk with whatever was collected (nothing, for a bare side-effect
   // call). Anything else the value flows into is an escape the name read
-  // cannot follow, and the read fails closed.
+  // cannot follow, and the read fails closed. A still-WRAPPED promise
+  // reaches no terminal either (#10136 R9-1 round 16): `const p =
+  // import('x')` stores the promise, and the callback body that eventually
+  // uses the module (`p.then((m) => …)`) is written anywhere — a use the
+  // name read cannot account for. So every BINDING terminal refuses while
+  // `unwrapped` is still false: receiving the value is gated on the
+  // promise's state, not only chaining onto it (`const api = await
+  // import('x')` still binds — the await is inside the walk's own path).
   const receiverBindings = (
     call: TSNode,
     promise: boolean,
@@ -678,6 +685,29 @@ function seamLinesWith(
         parent.expression === node
       ) {
         return null;
+      }
+      if (!unwrapped) {
+        // The binding terminals, gated on the promise's state: a
+        // declaration, a destructuring default, a class field, or an
+        // assignment that would STORE the wrapped promise.
+        if (
+          (ts.isVariableDeclaration(parent) && parent.initializer === node) ||
+          (ts.isBindingElement(parent) && parent.initializer === node) ||
+          (ts.isPropertyDeclaration(parent) &&
+            parent.initializer === node &&
+            (ts.isIdentifier(parent.name) ||
+              ts.isPrivateIdentifier(parent.name))) ||
+          (ts.isBinaryExpression(parent) &&
+            parent.right === node &&
+            (parent.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+              parent.operatorToken.kind ===
+                ts.SyntaxKind.QuestionQuestionEqualsToken ||
+              parent.operatorToken.kind === ts.SyntaxKind.BarBarEqualsToken ||
+              parent.operatorToken.kind ===
+                ts.SyntaxKind.AmpersandAmpersandEqualsToken))
+        ) {
+          return null;
+        }
       }
       if (ts.isVariableDeclaration(parent) && parent.initializer === node) {
         out.push(...declaredNames(parent.name));
