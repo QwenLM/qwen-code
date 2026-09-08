@@ -373,8 +373,6 @@ describe('discoverWorkspacePackages', () => {
 
 describe('seamLines', () => {
   const changed = new Set(['src/changed.ts']);
-  const all = (source: string): number[] =>
-    Array.from({ length: source.split('\n').length }, (_, i) => i + 1);
 
   it('marks the import statement and every use of its bindings', () => {
     const source = [
@@ -407,6 +405,35 @@ describe('seamLines', () => {
       'const x = 1;', // 5
     ].join('\n');
     expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a binding USE marks every line its statement spans — the multi-line call (#10136 R18-1)', () => {
+    // The fixture from the finding: the import sits on line 1, the call
+    // on line 3, and the call's arguments span lines 4-9. A single-line
+    // mark over `moved` leaves [6,12]-shaped hunks inside the call
+    // shed while the census certifies `kept: 0` — the use must mark the
+    // whole statement, argument lines included.
+    const source = [
+      "import { moved } from './changed.js';", // 1
+      'const head = 1;', // 2
+      'moved(', // 3
+      '  alpha,', // 4
+      '  beta,', // 5
+      '  {', // 6
+      '    gamma: 1,', // 7
+      '    delta: 2,', // 8
+      '    zeta: 6,', // 9
+      '  },', // 10
+      ');', // 11
+      'const tail = 2;', // 12
+    ].join('\n');
+    const got = seamLines('src/imp.ts', source, changed);
+    expect(got).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    // …and reverting to the identifier's own line reds exactly here: the
+    // inner argument lines 6-10 must be in the set, not just the callee's.
+    for (const line of [6, 7, 8, 9, 10]) {
+      expect(got).toContain(line);
+    }
   });
 
   it('binds a require destructuring, on one line or across lines', () => {
@@ -448,12 +475,26 @@ describe('seamLines', () => {
     expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3, 5]);
   });
 
-  it('a specifier inside a string is a string — no seam, no doubt', () => {
+  it('a specifier inside a string is one reader short of a census — doubt (#10136 R18-1)', () => {
+    // The parser correctly reads the string as a string — but the
+    // entrance regex (`scanImportSpecifiers`) does not, and a file
+    // ENTERS interaction on that regex: a confident `[]` here sheds the
+    // file on an edge the census never saw. The cross-check exists for
+    // exactly this disagreement: any specifier the regex can see
+    // resolving into `changed` that the parser walk never resolved is
+    // the doubt state, not "no seam".
     const source = [
       'export const note = "} from \'./changed.js\'";', // 1
       'let unrelated = 1;', // 2
     ].join('\n');
-    expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
+    expect(seamLines('src/imp.ts', source, changed)).toBeNull();
+    // …and the control: a string naming a file OUTSIDE the change set
+    // carries no edge either reader can see — no seam, no doubt.
+    const elsewhere = [
+      'export const note = "} from \'./elsewhere.js\'";', // 1
+      'let unrelated = 1;', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', elsewhere, changed)).toEqual([]);
   });
 
   it('a dynamic import received by a declaration binds its names', () => {
@@ -501,7 +542,7 @@ describe('seamLines', () => {
       "for (const m of require('./changed.js')) {}\nlet x = 1;",
       "obj['m'] = require('./changed.js');\nlet x = 1;",
     ]) {
-      expect(seamLines('src/imp.ts', source, changed)).toEqual(all(source));
+      expect(seamLines('src/imp.ts', source, changed)).toBeNull();
     }
   });
 
@@ -612,11 +653,14 @@ describe('seamLines', () => {
       "/** @type {import('./changed.js').Foo} */", // 1 — the tag, not `let v`
       'let v;', // 2
       "/** @typedef {import('./changed.js').Bar} Local */", // 3
-      '/** @param {Local} p */', // 4
+      '/** @param {Local} p */', // 4 — the alias USE (#10136 R17-3)
       'function f(p) {}', // 5
       'let x = 1;', // 6
     ].join('\n');
-    expect(seamLines('src/imp.js', typed, changed)).toEqual([1, 3]);
+    // Line 4 too: the typedef binds a local ALIAS of the imported type,
+    // so a file that types everything through the alias no longer marks
+    // nothing past the typedef line.
+    expect(seamLines('src/imp.js', typed, changed)).toEqual([1, 3, 4]);
     const imported = [
       "/** @import { Foo } from './changed.js' */", // 1
       '', // 2
@@ -673,9 +717,9 @@ describe('seamLines', () => {
           ? undefined
           : (target as unknown as Record<string | symbol, unknown>)[prop],
     }) as unknown as typeof ts;
-    expect(seamLines('src/imp.js', aboveImport, jsChanged, [], older)).toEqual([
-      1, 2, 3, 4, 5,
-    ]);
+    expect(
+      seamLines('src/imp.js', aboveImport, jsChanged, [], older),
+    ).toBeNull();
   });
 
   it('a private field receives a require, and its uses are read by name (round 3)', () => {
@@ -731,7 +775,7 @@ describe('seamLines', () => {
         "({ moved: obj['k'] } = require('./changed.js'));\nlet x = 1;",
         changed,
       ),
-    ).toEqual([1, 2]);
+    ).toBeNull();
   });
 
   it('a template or parenthesised specifier is a literal, a computed one is doubt', () => {
@@ -792,10 +836,8 @@ describe('seamLines', () => {
           ? undefined
           : (target as unknown as Record<string | symbol, unknown>)[prop],
     }) as unknown as typeof ts;
-    expect(seamLines('src/imp.ts', source, changed, [], older)).toEqual([
-      1, 2, 3,
-    ]);
-    // A build whose walk throws mid-way: the doubt shape, not a crash.
+    expect(seamLines('src/imp.ts', source, changed, [], older)).toBeNull();
+    // A build whose walk throws mid-way: the doubt state, not a crash.
     const throwing = new Proxy(ts, {
       get: (target, prop) =>
         prop === 'isCallExpression'
@@ -806,7 +848,7 @@ describe('seamLines', () => {
     }) as unknown as typeof ts;
     expect(
       seamLines('src/imp.ts', 'let x = 1;\nlet y = 2;', changed, [], throwing),
-    ).toEqual([1, 2]);
+    ).toBeNull();
   });
 
   it('an assignment to an identifier receives a require', () => {
@@ -824,30 +866,143 @@ describe('seamLines', () => {
       'const m = require(name);\nlet x = 1;',
       'const m = await import(`./${name}.js`);\nlet x = 1;',
     ]) {
-      expect(seamLines('src/imp.ts', source, changed)).toEqual(all(source));
+      expect(seamLines('src/imp.ts', source, changed)).toBeNull();
     }
+  });
+
+  it('require by an alias, a comma sequence, or the property form is still require (#10136 R18-1)', () => {
+    // Each of these returned a confident `[]` where the plain-`require`
+    // control correctly marked — the class the round-18 probe filed.
+    const control = seamLines(
+      'src/imp.ts',
+      "const m = require('./changed.js');\nm.run();",
+      changed,
+    );
+    expect(control).toEqual([1, 2]);
+    // A `createRequire` factory's product.
+    expect(
+      seamLines(
+        'src/imp.js',
+        [
+          'const req = createRequire(import.meta.url);', // 1
+          "const m = req('./changed.js');", // 2
+          'm.run();', // 3
+        ].join('\n'),
+        changed,
+      ),
+    ).toEqual([2, 3]);
+    // The `(0, require)(…)` comma sequence.
+    expect(
+      seamLines(
+        'src/imp.js',
+        "const m = (0, require)('./changed.js');\nm.run();",
+        changed,
+      ),
+    ).toEqual([1, 2]);
+    // The property form — `module.require(…)` is the same function.
+    expect(
+      seamLines(
+        'src/imp.js',
+        "const m = module.require('./changed.js');\nm.run();",
+        changed,
+      ),
+    ).toEqual([1, 2]);
+    // An alias call with a COMPUTED specifier is the same doubt the
+    // plain form's computed specifier is.
+    expect(
+      seamLines(
+        'src/imp.js',
+        'const req = createRequire(import.meta.url);\nconst m = req(name);',
+        changed,
+      ),
+    ).toBeNull();
+    // …and a factory whose own introduction escapes the receiver walk.
+    expect(
+      seamLines(
+        'src/imp.js',
+        "register(createRequire(import.meta.url));\nconst m = req('./changed.js');",
+        changed,
+      ),
+    ).toBeNull();
+  });
+
+  it('a property-named binding reads back through its bracket spelling (#10136 R18-1)', () => {
+    // `exports.moved = require(…)` establishes the binding by property
+    // name; `exports['moved']` is the same property read back through
+    // the legal bracket spelling — the establishing side of that exact
+    // spelling is already a doubt state (`obj['m'] = require(…)`), so
+    // the read-back side must not mark nothing.
+    const source = [
+      "exports.moved = require('./changed.js');", // 1
+      "exports['moved'].run();", // 2
+      'let x = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.js', source, changed)).toEqual([1, 2]);
+    // …and a bracket read of a name the seam did NOT bind stays silent.
+    const unbound = [
+      "exports.moved = require('./changed.js');", // 1
+      "exports['other'].run();", // 2
+    ].join('\n');
+    expect(seamLines('src/imp.js', unbound, changed)).toEqual([1]);
+  });
+
+  it('a JSDoc type spelling the parser erases is a doubt, not a confident miss (#10136 R18-1, R17-2)', () => {
+    // Each of these TypeScript's JSDoc parser erases into a childless
+    // node — the specifier never becomes an `ImportType`, no diagnostic
+    // fires, and the read used to return `[]` while every sibling
+    // spelling correctly marked. Doubt over the tag's own raw text.
+    for (const tag of [
+      "@callback {import('./changed.js').Foo} MyFn",
+      "@overload {import('./changed.js').Foo}",
+      "@func {import('./changed.js').Foo}",
+      "@function {import('./changed.js').Foo}",
+      "@see {@link import('./changed.js')}",
+      // The legal JSDoc `require('…')` type spelling (R17-2) — erased
+      // where `@type {import('…')}` is read.
+      "@type {require('./changed.js')}",
+    ]) {
+      const source = [`/** ${tag} */`, 'let v = 1;'].join('\n');
+      expect(seamLines('src/imp.js', source, changed)).toBeNull();
+    }
+    // …and the control rows the table already reads correctly: readable
+    // spellings mark, an erased spelling naming a file OUTSIDE the
+    // change set is no seam and no doubt.
+    expect(
+      seamLines(
+        'src/imp.js',
+        ["/** @type {import('./changed.js').Foo} */", 'let v = 1;'].join('\n'),
+        changed,
+      ),
+    ).toEqual([1]);
+    expect(
+      seamLines(
+        'src/imp.js',
+        ["/** @see {@link import('./elsewhere.js')} */", 'let v = 1;'].join(
+          '\n',
+        ),
+        changed,
+      ),
+    ).toEqual([]);
   });
 
   it('a syntax error is a tree the oracle cannot certify', () => {
     // The error sits BEFORE a real seam the recovered tree would still
     // read correctly: trusting the tree would certify `[2, 3]`, and the
-    // doubt is what marks line 1 too.
+    // doubt is what covers line 1 too.
     const source = [
       'let a = ;', // 1
       "const { moved } = require('./changed.js');", // 2
       'moved();', // 3
     ].join('\n');
-    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+    expect(seamLines('src/imp.ts', source, changed)).toBeNull();
   });
 
-  it('with no parser resolvable every read is the doubt shape', () => {
+  it('with no parser resolvable every read is the doubt state', () => {
     const source = ["import { moved } from './changed.js';", 'moved();'].join(
       '\n',
     );
-    expect(seamLines('src/imp.ts', source, changed, [], null)).toEqual([1, 2]);
-    expect(seamLines('src/imp.ts', 'let x = 1;', changed, [], null)).toEqual([
-      1,
-    ]);
+    expect(seamLines('src/imp.ts', source, changed, [], null)).toBeNull();
+    expect(seamLines('src/imp.ts', 'let x = 1;', changed, [], null)).toBeNull();
   });
 
   it('comment-like markers inside strings, templates and regexes do not blank the seam (#10136)', () => {
@@ -1038,7 +1193,13 @@ describe('seamLines', () => {
       ');', // 6
       'let x = 1;', // 7
     ].join('\n');
-    expect(seamLines('src/imp.tsx', source, changed)).toEqual([1, 4]);
+    // The use marks its whole statement (#10136 R18-1): the declaration
+    // spans lines 2-6, and a hunk carrying any of those lines is one the
+    // seam must keep — a single-line mark at 4 sheds the closing tags a
+    // fix commit edits beside the element.
+    expect(seamLines('src/imp.tsx', source, changed)).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
   });
 
   it('a shebang line is a comment', () => {
@@ -1202,11 +1363,14 @@ describe('the seam oracle and its parser (#10136)', () => {
     const missing: string[] = [];
     let importLines = 0;
     let markedLines = 0;
-    // The doubt causes the contract names all live at a `require(…)` or
-    // `import(…)` call — a computed specifier, or a value that escapes into
-    // an argument, a literal, a return — so a doubt in a file with no such
-    // call is one the contract does not name.
-    const dynamicLoad = /\b(?:require|import)\s*\(/;
+    // The doubt causes the contract names (#10136 R18-1): a computed
+    // specifier or an escaping value at a `require(…)`/`import(…)` call,
+    // an erased JSDoc subtree carrying one, and the one-reader
+    // cross-check — a specifier the entrance regex sees resolving into
+    // the corpus that the parser walk never resolved (a comment or
+    // string mention). A doubt in a file carrying NONE of these is one
+    // the contract does not name.
+    const dynamicLoad = /\b(?:require|import)\s*\(|createRequire\s*\(/;
     for (const [i, file] of files.entries()) {
       const text = readFileSync(file, 'utf8');
       const rel = rels[i];
@@ -1250,10 +1414,14 @@ describe('the seam oracle and its parser (#10136)', () => {
         ts.forEachChild(node, typeImports);
       };
       typeImports(sf);
-      const total = text.split('\n').length;
-      if (got.length === total && expected.length < total) {
+      if (got === null) {
         doubted.push(rel);
-        if (!dynamicLoad.test(text)) unexplained.push(rel);
+        const regexSeesCorpus = scanImportSpecifiers(text).some(
+          (s) => resolveSpecifier(rel, s, corpus) !== null,
+        );
+        if (!dynamicLoad.test(text) && !regexSeesCorpus) {
+          unexplained.push(rel);
+        }
         continue;
       }
       importLines += expected.length;

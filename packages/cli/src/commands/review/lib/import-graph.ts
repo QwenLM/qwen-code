@@ -415,8 +415,8 @@ function isTypeScriptModule(value: unknown): value is TypeScriptModule {
  * method chained onto the un-awaited promise (`import('x').then(handler)`)
  * hands the module to a callback the name read cannot follow: an escape.
  *
- * Every read the oracle cannot prove fails CLOSED — the doubt shape marks
- * every line, which `widenScope` republishes in full: no parser resolvable
+ * Every read the oracle cannot prove fails CLOSED — `null`, the doubt
+ * state, which `widenScope` republishes in full: no parser resolvable
  * (`loadTypeScript`), a source the parser reports a syntax error on (the
  * tree past the error is a guess), a `require`/`import(…)` whose specifier
  * is not a string literal (a computed one may name a changed file the read
@@ -424,11 +424,20 @@ function isTypeScriptModule(value: unknown): value is TypeScriptModule {
  * value escapes into an expression the receiver walk does not follow (an
  * argument — `foo(require('x'))` — a method chained onto an un-awaited
  * `import('x')` promise, an array or object literal, a `return`, an
- * `export =`, an element-access target), and
- * a walk that throws on a parser build missing an entry point. Under-
+ * `export =`, an element-access target), a `createRequire` alias whose
+ * introduction escapes the same way, a JSDoc tag whose own text carries a
+ * specifier its parsed subtree never surfaced as an `ImportType` node
+ * (TypeScript erases the `@callback`/`@overload`/`@func` family, `@see
+ * {@link …}` and the JSDoc `require('…')` type spelling into childless
+ * nodes), a specifier the entrance regex can see resolving into `changed`
+ * that this walk never resolved (one reader for both halves — a comment
+ * that merely mentions the path is a doubt, not a confident `kept: 0`),
+ * and a walk that throws on a parser build missing an entry point. Under-
  * collection of the oracle is the one error the seam bound must not make.
  * Line numbers count LF alone — the diff's own accounting — never the
  * CR/LS/PS breaks the parser also counts.
+ *
+ * Returns the sorted 1-based lines, or `null` for the doubt state.
  */
 export function seamLines(
   fromFile: string,
@@ -436,16 +445,14 @@ export function seamLines(
   changed: ReadonlySet<string>,
   packages: readonly WorkspacePackage[] = [],
   ts: TypeScriptModule | null = loadTypeScript(),
-): number[] {
-  const total = source.split('\n').length;
-  const doubt = (): number[] => Array.from({ length: total }, (_, i) => i + 1);
-  if (ts === null) return doubt();
+): number[] | null {
+  if (ts === null) return null;
   try {
-    return seamLinesWith(ts, fromFile, source, changed, packages) ?? doubt();
+    return seamLinesWith(ts, fromFile, source, changed, packages);
   } catch {
     // A parser build the oracle's walk does not fit (an entry point missing,
     // a node shape it did not expect): not a reading, so not a census.
-    return doubt();
+    return null;
   }
 }
 
@@ -534,8 +541,38 @@ function seamLinesWith(
     while (e !== undefined && ts.isParenthesizedExpression(e)) e = e.expression;
     return e !== undefined && ts.isStringLiteralLike(e) ? e.text : null;
   };
-  const resolves = (spec: string): boolean =>
-    resolveSpecifier(fromFile, spec, changed, packages) !== null;
+  // Every specifier this walk resolved into `changed`, recorded so the
+  // post-walk cross-check can prove the two readers agree (#10136 R18-1):
+  // a file enters `interaction` on `scanImportSpecifiers`' regex, and any
+  // specifier THAT read can see resolving into `changed` which this walk
+  // never resolved is an edge the census cannot account for — doubt, not
+  // a confident miss.
+  const resolvedSpecs = new Set<string>();
+  const resolves = (spec: string): boolean => {
+    const hit = resolveSpecifier(fromFile, spec, changed, packages) !== null;
+    if (hit) resolvedSpecs.add(spec);
+    return hit;
+  };
+  // The callee of a call, unwrapped past the shapes that hide it from a
+  // plain identifier read: parentheses, and the `(0, require)(…)` comma
+  // sequence (the right operand is what actually gets called).
+  const unwrapCallee = (expr: TSNode): TSNode => {
+    let e = expr;
+    for (;;) {
+      if (ts.isParenthesizedExpression(e)) {
+        e = e.expression;
+        continue;
+      }
+      if (
+        ts.isBinaryExpression(e) &&
+        e.operatorToken.kind === ts.SyntaxKind.CommaToken
+      ) {
+        e = e.right;
+        continue;
+      }
+      return e;
+    }
+  };
   // The names a binding pattern or identifier declares — the LOCAL names,
   // whatever property they were taken from.
   const declaredNames = (name: import('typescript').BindingName): string[] => {
@@ -711,12 +748,93 @@ function seamLinesWith(
   const isUnreadableJSDocImport = (node: TSNode): boolean =>
     typeof ts.isJSDocImportTag !== 'function' &&
     (node as { tagName?: { text?: unknown } }).tagName?.text === 'import';
+  // A JSDoc tag whose own text carries a `require('…')`/`import('…')`
+  // specifier its parsed subtree never surfaced as an `ImportType` node
+  // (#10136 R17-2/R18-1). TypeScript's JSDoc parser erases several legal
+  // type spellings — the `@callback`/`@overload`/`@func`/`@function`
+  // signatures, `@see {@link …}`, and the JSDoc `require('…')` type — into
+  // childless nodes (`JSDocSignature`, unknown tags, link text), so the
+  // specifier never becomes a node the walk can rule on: no
+  // `ImportTypeNode`, no parse diagnostic, no refusal — a confident miss.
+  // The doubt is read over the tag's own raw text (`node.pos`/`node.end`),
+  // and only when the erased specifier actually resolves into `changed`:
+  // an erased type naming something else is no seam either way.
+  const jsDocCarriesUnreadSpec = (node: TSNode): boolean => {
+    // A JSDoc tag by kind range, not by `ts.isJSDocTag`: that guard is
+    // absent from the public type surface of the parser builds the
+    // oracle resolves at run time.
+    if (
+      node.kind < ts.SyntaxKind.FirstJSDocTagNode ||
+      node.kind > ts.SyntaxKind.LastJSDocTagNode
+    ) {
+      return false;
+    }
+    const raw = source.slice(node.pos, node.end);
+    const specs = new Set<string>();
+    for (const re of [
+      /\brequire\s*\(\s*['"`]([^'"`\n]+)['"`]/g,
+      /\bimport\s*\(\s*['"`]([^'"`\n]+)['"`]/g,
+    ]) {
+      for (const m of raw.matchAll(re)) specs.add(m[1] ?? '');
+    }
+    if (specs.size === 0) return false;
+    const readable = new Set<string>();
+    const collect = (n: TSNode): void => {
+      if (ts.isImportTypeNode(n)) {
+        const arg = n.argument;
+        if (ts.isLiteralTypeNode(arg) && ts.isStringLiteralLike(arg.literal)) {
+          readable.add(arg.literal.text);
+        }
+      }
+      ts.forEachChild(n, collect);
+    };
+    collect(node);
+    for (const spec of specs) {
+      if (!readable.has(spec) && resolves(spec)) return true;
+    }
+    return false;
+  };
+  // `require` under an alias (#10136 R18-1): `const req =
+  // createRequire(import.meta.url)` makes `req` a require factory's
+  // product, and a call through it is a require call the plain identifier
+  // read cannot see — it returned a confident `[]` where the aliased
+  // control correctly marked. Collected file-wide BEFORE the walk (a
+  // hoisted use precedes its declaration in source order), by name — the
+  // same fuzz the binding read budgets.
+  const requireAliases = new Set<string>();
+  const collectAliases = (node: TSNode): void => {
+    if (refused) return;
+    if (ts.isCallExpression(node)) {
+      const callee = unwrapCallee(node.expression);
+      if (
+        (ts.isIdentifier(callee) && callee.text === 'createRequire') ||
+        (ts.isPropertyAccessExpression(callee) &&
+          callee.name.text === 'createRequire')
+      ) {
+        const received = receiverBindings(node, false);
+        if (received === null) {
+          // The alias itself escapes the receiver walk: calls through it
+          // are unreadable either way.
+          refused = true;
+          return;
+        }
+        for (const b of received) requireAliases.add(b);
+      }
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  collectAliases(sf);
+  if (refused) return null;
   // Every branch falls through to the children walk at the bottom: the
   // JSDoc a statement carries — an `@import` above an `import`, a
   // `@typedef` above an `export … from` — is a child the walk must enter
   // whatever the statement itself was.
   const visit = (node: TSNode): void => {
     if (refused) return;
+    if (jsDocCarriesUnreadSpec(node)) {
+      refused = true;
+      return;
+    }
     if (ts.isImportDeclaration(node)) {
       const spec = literalSpecifier(node.moduleSpecifier);
       if (spec === null) {
@@ -740,6 +858,33 @@ function seamLinesWith(
       if (resolves(spec)) {
         markSpan(node);
         bindImportClause(tag.importClause);
+      }
+    } else if (
+      typeof ts.isJSDocTypedefTag === 'function' &&
+      ts.isJSDocTypedefTag(node)
+    ) {
+      // `@typedef {import('./changed.js').Bar} Local` binds a local ALIAS
+      // of an imported type (#10136 R17-3): the ImportType child marks
+      // the typedef's own lines, but nothing bound the alias, so a file
+      // that types everything through it marked nothing past this line.
+      let aliased = false;
+      const scan = (n: TSNode): void => {
+        if (ts.isImportTypeNode(n)) {
+          const arg = n.argument;
+          const spec =
+            ts.isLiteralTypeNode(arg) && ts.isStringLiteralLike(arg.literal)
+              ? arg.literal.text
+              : null;
+          if (spec !== null && resolves(spec)) aliased = true;
+        }
+        ts.forEachChild(n, scan);
+      };
+      scan(node);
+      if (aliased) {
+        const name = (node as import('typescript').JSDocTypedefTag).fullName;
+        if (name !== undefined && ts.isIdentifier(name)) {
+          bindings.add(name.text);
+        }
       }
     } else if (ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier !== undefined) {
@@ -778,8 +923,17 @@ function seamLinesWith(
         }
       }
     } else if (ts.isCallExpression(node)) {
-      const callee = node.expression;
-      const isRequire = ts.isIdentifier(callee) && callee.text === 'require';
+      const callee = unwrapCallee(node.expression);
+      // `require` by every spelling the grammar can hide it behind
+      // (#10136 R18-1): the bare identifier, a `createRequire` alias
+      // collected above, a `(0, require)(…)` comma sequence, and the
+      // property form `module.require(…)` — an unwrapped callee the read
+      // cannot name is left to the doubt states, never guessed.
+      const isRequire =
+        (ts.isIdentifier(callee) &&
+          (callee.text === 'require' || requireAliases.has(callee.text))) ||
+        (ts.isPropertyAccessExpression(callee) &&
+          callee.name.text === 'require');
       const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword;
       if ((isRequire || isDynamicImport) && node.arguments.length >= 1) {
         const spec = literalSpecifier(node.arguments[0]);
@@ -802,13 +956,40 @@ function seamLinesWith(
   };
   visit(sf);
   if (refused) return null;
+  // One reader for both halves (#10136 R18-1): a file enters
+  // `interaction` on `scanImportSpecifiers`' regex, so any specifier the
+  // regex can see resolving into `changed` that this walk never resolved
+  // is an edge the census cannot account for — a comment or string that
+  // merely MENTIONS the changed path, an import the walk's own rules
+  // refused to see. A confident census over it sheds the file on evidence
+  // nobody read.
+  for (const spec of scanImportSpecifiers(source)) {
+    if (resolveSpecifier(fromFile, spec, changed, packages) !== null) {
+      if (!resolvedSpecs.has(spec)) return null;
+    }
+  }
   if (bindings.size > 0) {
     const mention = (node: TSNode): void => {
+      // A binding use marks the whole statement it sits in
+      // (`markSpan(statementOf(…))`), never the identifier's own line
+      // (#10136 R18-1): a single-line mark over a multi-line call sheds
+      // exactly the hunks inside the call — the argument lines a fix
+      // commit changes — while the plan's census certifies the shed.
       if (
         (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) &&
         bindings.has(node.text)
       ) {
-        marked.add(lineOf(node.getStart(sf)));
+        markSpan(statementOf(node));
+      } else if (
+        ts.isElementAccessExpression(node) &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        bindings.has(node.argumentExpression.text)
+      ) {
+        // The bracket spelling of a property-named binding —
+        // `exports['moved']` reads back what `exports.moved = require(…)`
+        // established; the establishing side of the same spelling is
+        // already a doubt state, so the read-back must see it too.
+        markSpan(statementOf(node));
       }
       eachChild(node, mention);
     };

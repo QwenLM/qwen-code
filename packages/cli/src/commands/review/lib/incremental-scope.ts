@@ -211,16 +211,18 @@ export function widenScope(input: WidenInput): WidenedScope {
         continue;
       }
       const lines = seamLines(path, source, touched, packages);
-      // The doubt shape — a read whose bindings cannot be proven collected
-      // marks EVERY line (#10136) — is detected before hunk matching:
+      // The doubt state — `null`, a read whose bindings cannot be proven
+      // collected (#10136) — is detected before hunk matching:
       // `parseDiff` clamps a pure-deletion hunk at the top of a file
       // (`@@ -1,N +0,0 @@`) to new-side [0,0], no marked line is ever 0,
       // so matching in the doubt state would shed exactly the hunks the
-      // doubt state promises to keep. A legitimate scan can never mark
-      // more lines than the file has, so the shape is unambiguous; leave
-      // the file unbounded with NO seam record, exactly like the
+      // doubt state promises to keep. An explicit signal, never a
+      // count-based guess (#10136 R18-1): span-widened marking can
+      // legitimately cover nearly every line of a file, so "all lines
+      // marked" stopped being a shape a detector could read. Leave the
+      // file unbounded with NO seam record, exactly like the
       // unreadable-source doubt state.
-      if (lines.length >= fileLines) continue;
+      if (lines === null) continue;
       const kept = new Set<number>();
       section.hunks.forEach((h, i) => {
         if (lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)) {

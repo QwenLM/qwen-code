@@ -518,6 +518,74 @@ describe('widenScope seam bound (#10104)', () => {
     expect(diff).toContain('+  return 1;');
   });
 
+  it('a hunk inside a multi-line USE of the seam is kept — the census is {kept: 1, total: 1}, not an empty keep set (#10136 R18-1)', () => {
+    // The finding's fixture, end to end through the real chain: the
+    // interaction file imports the changed module on line 1 and calls it
+    // on line 3, with the call's arguments spanning lines 4-11. The only
+    // hunk covers the inner argument lines [6,12]. A single-line mark
+    // over `moved` keeps NOTHING and the plan certifies `kept: 0` over a
+    // hunk that sits inside the call to the changed module; the
+    // statement-span mark keeps the hunk, so `hunkKeep` stays
+    // `undefined` (nothing shed) beside `seam: {kept: 1, total: 1}`.
+    const ARG_SECTION = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -4,7 +6,7 @@',
+      '  {',
+      '    gamma: 1,',
+      '    delta: 2,',
+      '-    zeta: 6,',
+      '+    zeta: 7,',
+      '  },',
+      ');',
+      ' const tail = 2;',
+      '',
+    ].join('\n');
+    const ARG_SOURCE = [
+      "import { moved } from './changed.js';", // 1
+      'const head = 1;', // 2
+      'moved(', // 3
+      '  alpha,', // 4
+      '  beta,', // 5
+      '  {', // 6
+      '    gamma: 1,', // 7
+      '    delta: 2,', // 8
+      '    zeta: 7,', // 9
+      '  },', // 10
+      ');', // 11
+      'const tail = 2;', // 12
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + ARG_SECTION, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? ARG_SOURCE : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction).toEqual([
+      {
+        path: 'src/imp.ts',
+        importsChanged: ['src/changed.ts'],
+        seam: { kept: 1, total: 1 },
+      },
+    ]);
+    expect(widened.hunkKeep).toBeUndefined();
+    // …and the published bytes carry the zeta hunk — the file did not go
+    // header-only over a hunk inside the call.
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('+    zeta: 7,');
+  });
+
   it('a seam line on a hunk boundary keeps the hunk — both ends inclusive (#10136)', () => {
     // IMP_SECTION's second hunk spans new-side lines 10-12. A seam use on
     // line 12 exactly (the last line) must keep it; one on line 10 exactly
