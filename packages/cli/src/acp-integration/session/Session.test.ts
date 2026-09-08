@@ -2662,10 +2662,8 @@ describe('Session', () => {
 
   describe('shell execution config plumbing (#11303)', () => {
     it('passes the config shell execution settings to invocation.execute', async () => {
-      // The TUI scheduler passes config.getShellExecutionConfig(); the ACP
-      // dispatch used to pass nothing, so ShellToolInvocation fell back to `{}`
-      // and the PTY was sized 80x30 by shellExecutionService's own defaults
-      // while pager/showColor/maxBufferedOutputBytes were dropped.
+      // ACP currently uses Config's defaults; passing them changes the PTY
+      // height from shellExecutionService's fallback of 30 rows to 24.
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'hi',
         returnDisplay: 'hi',

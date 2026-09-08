@@ -1321,6 +1321,39 @@ describe('HookRunner', () => {
       );
     });
 
+    it('does not taskkill an exited Windows hook supervisor', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: object,
+          callback: (error: Error | null) => void,
+        ) => {
+          callback(null);
+        },
+      );
+      const { mockProcess, controller, resultPromise } =
+        startWindowsSurvivingHook(HookEventName.StopFailure, 9913);
+      (
+        mockProcess as unknown as {
+          exitCode: number | null;
+        }
+      ).exitCode = 0;
+
+      controller.abort();
+      mockProcess.emit('close', 0);
+      await resultPromise;
+
+      expect(mockExecFile).not.toHaveBeenCalledWith(
+        expect.anything(),
+        ['/f', '/t', '/pid', String(mockProcess.pid)],
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('falls back to a direct SIGKILL when taskkill of a surviving Windows hook fails', async () => {
       // taskkillProcessTree resolves false when execFile reports an error
       // (ERROR_ACCESS_DENIED from an elevated or AV-intercepted System32) or

@@ -457,6 +457,9 @@ async function taskkillProcessTree(pid: number): Promise<boolean> {
 async function terminateWindowsHookProcessTree(
   child: ChildProcess,
 ): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
   const pid = child.pid;
   if (!pid) {
     killDirectChild(child, 'SIGKILL');

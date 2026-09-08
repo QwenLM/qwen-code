@@ -718,6 +718,9 @@ export class AcpConnection {
     if (!child) {
       return;
     }
+    if (child.pid === undefined) {
+      return;
+    }
 
     // Close the child's stdin instead of killing it. Ending the ndjson stream
     // is the CLI's own shutdown path: `await connection.closed` returns, it
@@ -766,7 +769,7 @@ export class AcpConnection {
         execFile(
           WINDOWS_TASKKILL,
           ['/f', '/t', '/pid', String(child.pid)],
-          { windowsHide: true },
+          { windowsHide: true, timeout: 2_000 },
           (error) => {
             if (error) {
               logger.error('[ACP] taskkill failed for the CLI tree:', error);

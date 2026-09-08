@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
+import { logger } from '../utils/logger.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
@@ -231,6 +232,16 @@ describe('AcpConnection.ensureConnection', () => {
 });
 
 describe('AcpConnection child exit cleanup', () => {
+  beforeEach(() => {
+    execFileMock.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it('disconnect clears child, sdkConnection, and sessionId', () => {
     const conn = createConnection({
       child: createMockChild(),
@@ -266,6 +277,57 @@ describe('AcpConnection child exit cleanup', () => {
 
     expect(mockEnd).toHaveBeenCalledOnce();
     expect(mockKill).not.toHaveBeenCalled();
+  });
+
+  it('does not force-kill a child that failed to spawn', () => {
+    const mockKill = vi.fn();
+    const conn = createConnection({
+      child: createMockChild({ kill: mockKill, pid: undefined }),
+    });
+
+    (conn as unknown as AcpConnection).disconnect();
+    vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
+
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(mockKill).not.toHaveBeenCalled();
+  });
+
+  it('does not end stdin that is already closed', () => {
+    const end = vi.fn();
+    const conn = createConnection({
+      child: createMockChild({
+        stdin: { ...createMockStdin(end), writableEnded: true },
+      }),
+    });
+
+    (conn as unknown as AcpConnection).disconnect();
+
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('handles a synchronous stdin close failure', () => {
+    const closeError = new Error('EPIPE');
+    const once = vi.fn();
+    const logError = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const conn = createConnection({
+      child: createMockChild({
+        stdin: {
+          ...createMockStdin(
+            vi.fn(() => {
+              throw closeError;
+            }),
+          ),
+          once,
+        },
+      }),
+    });
+
+    expect(() => (conn as unknown as AcpConnection).disconnect()).not.toThrow();
+    expect(once).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(logError).toHaveBeenCalledWith(
+      '[ACP] Failed to close CLI stdin during disconnect:',
+      closeError,
+    );
   });
 
   it('disconnect force-kills the CLI only after it fails to exit on its own', () => {
@@ -323,7 +385,7 @@ describe('AcpConnection child exit cleanup', () => {
       expect(execFileMock).toHaveBeenCalledWith(
         expect.stringMatching(/\\System32\\taskkill\.exe$/i),
         ['/f', '/t', '/pid', '4242'],
-        expect.objectContaining({ windowsHide: true }),
+        expect.objectContaining({ windowsHide: true, timeout: 2_000 }),
         expect.any(Function),
       );
       expect(mockKill).not.toHaveBeenCalled();
@@ -377,6 +439,7 @@ describe('AcpConnection child exit cleanup', () => {
   });
 
   it('disconnect does not force-kill a CLI that exited on its own', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.useFakeTimers();
     try {
       const mockKill = vi.fn();
@@ -403,6 +466,29 @@ describe('AcpConnection child exit cleanup', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('falls back when taskkill cannot terminate the CLI tree', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        _args: string[],
+        _options: object,
+        callback: (error: Error | null) => void,
+      ) => {
+        callback(new Error('ERROR_ACCESS_DENIED'));
+      },
+    );
+    const mockKill = vi.fn();
+    const conn = createConnection({
+      child: createMockChild({ kill: mockKill }),
+    });
+
+    (conn as unknown as AcpConnection).disconnect();
+    vi.advanceTimersByTime(SHUTDOWN_GRACE_MS);
+
+    expect(mockKill).toHaveBeenCalledOnce();
   });
 });
 
