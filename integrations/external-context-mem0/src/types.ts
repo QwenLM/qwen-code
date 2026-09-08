@@ -11,7 +11,7 @@ export type AuthenticationKind =
 
 export type ScopeLocation = 'json' | 'json.filters' | 'query' | 'omit';
 
-interface InstanceConfigBase {
+export interface InstanceConfigBase {
   dialectPath: string;
   endpoint: {
     origin: string;
@@ -37,6 +37,44 @@ export interface InstanceConfigV3 extends InstanceConfigBase {
     repositoryRoot: string;
   };
 }
+
+export interface WriteInstanceConfigV4 extends InstanceConfigBase {
+  schemaVersion: 4;
+  repositoryRoot: string;
+}
+
+export interface WriteDialectV1 {
+  writeDialectVersion: 1;
+  id: string;
+  auth: AuthenticationKind;
+  create: {
+    path: string;
+    userIdLocation: 'json' | 'omit';
+    agentIdLocation: 'json' | 'omit';
+    appIdLocation: 'json' | 'omit';
+  };
+  response: {
+    completion: 'records' | 'records-or-event';
+    collection: 'results' | 'root-array' | 'root-object';
+    idField: 'id' | 'memory_id';
+  };
+}
+
+export interface WriteRuntimeConfiguration {
+  instance: WriteInstanceConfigV4;
+  dialect: WriteDialectV1;
+  credential: string;
+}
+
+export type RememberResult =
+  | { status: 'stored'; memoryId: string }
+  | { status: 'accepted'; providerOperationId: string }
+  | { status: 'failed' | 'unknown' };
+
+export type RememberProvider = (input: {
+  content: string;
+  signal: AbortSignal;
+}) => Promise<RememberResult>;
 
 export interface DialectV1 {
   dialectVersion: 1;
