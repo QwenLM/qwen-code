@@ -15,12 +15,18 @@ import instanceConfigSchema from '../schemas/instance-config.schema.json' with {
 import writeInstanceConfigSchema from '../schemas/write-instance-config.schema.json' with { type: 'json' };
 // eslint-disable-next-line import/no-internal-modules -- bundle the canonical package schema
 import writeDialectSchema from '../schemas/write-dialect.schema.json' with { type: 'json' };
+// eslint-disable-next-line import/no-internal-modules -- bundle the canonical package schema
+import deleteInstanceConfigSchema from '../schemas/delete-instance-config.schema.json' with { type: 'json' };
+// eslint-disable-next-line import/no-internal-modules -- bundle the canonical package schema
+import deleteDialectSchema from '../schemas/delete-dialect.schema.json' with { type: 'json' };
 import type {
   DialectV1,
   InstanceConfigV2,
   InstanceConfigV3,
   WriteInstanceConfigV4,
   WriteDialectV1,
+  DeleteInstanceConfigV5,
+  DeleteDialectV1,
 } from './types.js';
 
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -29,6 +35,8 @@ const validateAutoRecallInstance = ajv.compile(autoRecallInstanceConfigSchema);
 const validateDialect = ajv.compile(dialectSchema);
 const validateWriteInstance = ajv.compile(writeInstanceConfigSchema);
 const validateWriteDialect = ajv.compile(writeDialectSchema);
+const validateDeleteInstance = ajv.compile(deleteInstanceConfigSchema);
+const validateDeleteDialect = ajv.compile(deleteDialectSchema);
 
 export class ConfigurationError extends Error {}
 
@@ -78,6 +86,25 @@ export function parseWriteDialect(value: unknown): WriteDialectV1 {
   return value as WriteDialectV1;
 }
 
+export function parseDeleteInstanceConfig(
+  value: unknown,
+): DeleteInstanceConfigV5 {
+  return parseInstance(
+    validateDeleteInstance,
+    value,
+    'Mem0 extension delete configuration is invalid.',
+  );
+}
+
+export function parseDeleteDialect(value: unknown): DeleteDialectV1 {
+  requireValid(
+    validateDeleteDialect,
+    value,
+    'Mem0 extension delete dialect is invalid.',
+  );
+  return value as DeleteDialectV1;
+}
+
 function requireValid(
   validate: ValidateFunction,
   value: unknown,
@@ -89,7 +116,11 @@ function requireValid(
 }
 
 function parseInstance<
-  T extends InstanceConfigV2 | InstanceConfigV3 | WriteInstanceConfigV4,
+  T extends
+    | InstanceConfigV2
+    | InstanceConfigV3
+    | WriteInstanceConfigV4
+    | DeleteInstanceConfigV5,
 >(validate: ValidateFunction, value: unknown, message: string): T {
   requireValid(validate, value, message);
   const parsed = value as T;

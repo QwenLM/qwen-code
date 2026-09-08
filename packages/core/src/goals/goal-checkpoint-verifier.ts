@@ -22,7 +22,20 @@ import {
   isGoalEvidenceProofKind,
 } from './goal-protocol.js';
 
-const GOAL_CHECKPOINT_VERIFIER_TIMEOUT_MS = 30_000;
+/**
+ * How long one checkpoint verifier call may run before it is abandoned.
+ *
+ * Sized from the output the call is asked to produce, not from a typical
+ * side query: up to GOAL_CHECKPOINT_CLAIM_LIMIT claims of up to
+ * GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS each plus their sourceRefs, streamed
+ * with thinking disabled, is tens of kilobytes of JSON -- minutes at the
+ * decode rate of a large model, not seconds. The previous 30 s figure fit a
+ * window with a few dozen short records; a window that had overflowed the
+ * catalog, the one case compaction exists for, timed out on every attempt
+ * and never wrote a checkpoint at all. Operators tune it through
+ * `model.goalCheckpointTimeoutSeconds`.
+ */
+export const GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS = 180_000;
 const GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
 
 const GOAL_CHECKPOINT_VERIFIER_SCHEMA = {
@@ -142,7 +155,8 @@ export function createGoalCheckpointVerifier(
   config: Config,
   options: CreateGoalCheckpointVerifierOptions = {},
 ): GoalCheckpointVerifier {
-  const timeoutMs = options.timeoutMs ?? GOAL_CHECKPOINT_VERIFIER_TIMEOUT_MS;
+  const timeoutMs =
+    options.timeoutMs ?? GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
   return async (input, attemptSignal) => {
     const contents = verifierContents(input);
     const timeoutController = new AbortController();
@@ -162,6 +176,13 @@ export function createGoalCheckpointVerifier(
         purpose: 'goal-checkpoint-verifier',
         maxAttempts: 1,
         skipOutputLanguagePreference: true,
+        // Stream so a slow claims generation outlives the provider request
+        // timeout: non-streaming returns no bytes until the whole JSON is
+        // generated, so the SDK timeout (default 120 s) would abort every
+        // attempt past it and retry from zero, leaving any ceiling above
+        // that unreachable. Streamed, the timeout bounds only connect +
+        // first response and the stream guards apply instead.
+        stream: true,
         systemInstruction: GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT,
         config: {
           temperature: 0,
@@ -170,9 +191,8 @@ export function createGoalCheckpointVerifier(
           thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
         },
         // Parsing stays out of a validate hook: runSideQuery re-wraps hook
-        // failures into plain Errors, dropping the InvalidGoalCheckpointError
-        // class the runtime's checkpoint stall breaker counts unusable
-        // results by.
+        // failures into plain Errors, erasing the InvalidGoalCheckpointError
+        // class and message the verifier's own tests assert on.
       });
       return parseGoalCheckpointVerifierText(result.text);
     } finally {
