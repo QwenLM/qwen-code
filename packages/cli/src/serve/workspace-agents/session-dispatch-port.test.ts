@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceAgent } from '@qwen-code/qwen-code-core';
+import { agentSessionId } from '../../runtime/agent-session-source.js';
 
 import {
   createSessionDispatchPort,
@@ -42,6 +43,14 @@ function contextOf(sendPrompt: ReturnType<typeof vi.fn>) {
 }
 
 describe('session dispatch port', () => {
+  it('uses stable RFC UUID session IDs accepted by ACP', () => {
+    const id = agentSessionId(AGENT.id);
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(agentSessionId(AGENT.id)).toBe(id);
+    expect(agentSessionId('ag_bob')).not.toBe(id);
+  });
   it('tells the agent which run its opening turn belongs to', async () => {
     // Without this the child boots with the right persona and then throws on
     // its first thread tool, because nothing else carries the run identity

@@ -13950,29 +13950,6 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
-    // An agent session *is* one workspace agent. The spawn request carries no
-    // persona, so the child resolves its own from the roster the dispatcher
-    // reads, at the moment the body starts — which is what makes definition
-    // drift observable rather than frozen at spawn time.
-    if (sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE) {
-      if (!sessionSource.sourceId) {
-        throw RequestError.invalidParams(
-          undefined,
-          'An agent session must name the agent it is',
-        );
-      }
-      const persona = await resolveAgentPersona(config, sessionSource.sourceId);
-      if (persona.status !== 'resolved') {
-        // Fail the spawn rather than booting a generic assistant that would
-        // still post under this agent's name. Every guard in the capability
-        // boundary is derived from the definition this would have skipped.
-        throw RequestError.invalidParams(undefined, persona.error);
-      }
-      config.applyWorkspaceAgentPersona(
-        persona.systemPrompt,
-        persona.agent.name,
-      );
-    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
@@ -14080,6 +14057,27 @@ class QwenAgent implements Agent {
         // (the daemon only adds SDK-type runtime servers for client MCP).
         sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
       });
+      // initialize() creates the definition manager. Resolve the identity
+      // afterwards, but before publishing or prompting this session.
+      if (sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE) {
+        if (!sessionSource.sourceId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'An agent session must name the agent it is',
+          );
+        }
+        const persona = await resolveAgentPersona(
+          config,
+          sessionSource.sourceId,
+        );
+        if (persona.status !== 'resolved') {
+          throw RequestError.invalidParams(undefined, persona.error);
+        }
+        config.applyWorkspaceAgentPersona(
+          persona.systemPrompt,
+          persona.agent.name,
+        );
+      }
       this.assertManagedSessionAdmission();
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>

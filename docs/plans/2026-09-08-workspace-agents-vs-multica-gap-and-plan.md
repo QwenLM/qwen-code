@@ -4,6 +4,40 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Live follow-up (supersedes the startup blocker below)
+
+The source dev loader now resolves ACP bridge exports from this worktree, not
+the checkout behind shared node_modules. Real browser task submission then
+exposed and drove fixes for three more execution-path defects: prefixed session
+IDs rejected by ACP's UUID contract, persona resolution before Config created
+its definition manager, and attempting session creation for live or persisted
+sessions. Agent IDs now map to stable UUID v5 session IDs; persona resolution
+runs after initialization but before publication; start reuses a live session,
+resumes an active on-disk transcript, or creates a genuinely new session.
+Protocol error objects use the existing error formatter instead of rendering
+`[object Object]`.
+
+Local task `th_b425fc9b-719a-4456-99a9-13fae4c960ea` used two test identities
+(`demo-leader`, `demo-worker`) backed by the existing general-purpose definition.
+The model created child `th_cc67e630-b3e8-42b8-b27e-3429adcde924` and submitted
+323 through `thread_review`; the leader posted 667 and closed with `thread_wait`.
+Persisted run intervals overlap for 8,006 ms: leader
+1788846040198–1788846063450, worker 1788846054442–1788846062448.
+After the startup/restore corrections and explicit human retry, the leader
+read the child and submitted both results through `thread_review`. Chrome
+confirmed parent completion is refused with `descendants_not_done` before child
+acceptance; marking the child done succeeded and automatically started another
+leader run from the parent-report event, without a new human message.
+That run (`rn_5d81f465-0dd0-41c5-b3cf-f9ce4289d812`) completed and submitted
+another summary. The browser then successfully marked the parent done; both
+parent and child are now done. The two local test identities and full failure/
+retry history remain available in this acceptance workspace.
+
+This is real execution evidence, not a clean first-attempt acceptance run:
+the same task preserves earlier failures and manual retries. Immediate mid-run
+steering, capability enforcement on this session path, and the full original
+acceptance matrix remain unverified/incomplete. No build or local CI was run.
+
 - Direct source execution of `Config.createToolRegistry` now reports all six
   `thread_*` tools for a top-level `agent` session and zero for an ordinary
   session. Previously registration required `forSubAgent`, so replacement

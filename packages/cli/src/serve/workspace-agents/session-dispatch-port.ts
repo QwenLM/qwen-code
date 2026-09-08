@@ -21,6 +21,7 @@
  * returns is one of the outcomes the dispatcher already knows.
  */
 
+import { getErrorMessage, SessionService } from '@qwen-code/qwen-code-core';
 import type {
   AgentBodyState,
   AgentDispatchPort,
@@ -38,6 +39,7 @@ import {
 export type AgentSessionBridge = Pick<
   AcpSessionBridge,
   | 'spawnOrAttach'
+  | 'resumeSession'
   | 'sendPrompt'
   | 'listWorkspaceSessions'
   | 'cancelSession'
@@ -76,6 +78,7 @@ export function createSessionDispatchPort(
 ): AgentDispatchPort {
   const { bridge, workspaceCwd } = input;
   const executions = new Map<string, AgentBodyState>();
+  const sessions = new SessionService(workspaceCwd);
 
   /**
    * Sends one turn to an agent's session, saying which run it is a turn of.
@@ -143,17 +146,22 @@ export function createSessionDispatchPort(
       contextThroughSequence,
     }): Promise<AgentStartResult> {
       try {
-        // Spawn-or-attach is idempotent on the deterministic id, so `launch`,
-        // `resume` and `continue_completed` collapse into one call: the three
-        // were only ever distinct because a background registry held three
-        // different kinds of remains. A process is there or it is not.
-        const session = await bridge.spawnOrAttach({
+        let session: { sessionId: string } | undefined = sessionFor(
+          bridge,
           workspaceCwd,
-          sessionId: agentSessionId(agent.id),
-          sourceType: AGENT_SESSION_SOURCE_TYPE,
-          sourceId: agent.id,
-          sessionScope: 'thread',
-        });
+          agent,
+        );
+        if (!session) {
+          const request = {
+            workspaceCwd,
+            sessionId: agentSessionId(agent.id),
+            sourceType: AGENT_SESSION_SOURCE_TYPE,
+            sourceId: agent.id,
+          };
+          session = (await sessions.sessionExists(request.sessionId))
+            ? await bridge.resumeSession(request)
+            : await bridge.spawnOrAttach({ ...request, sessionScope: 'thread' });
+        }
         const context: AgentRunContext = {
           workspaceId,
           agentId: agent.id,
@@ -163,9 +171,10 @@ export function createSessionDispatchPort(
           attempt,
           contextThroughSequence,
         };
+        const sessionId = session.sessionId;
         return {
           status: 'started',
-          sessionId: session.sessionId,
+          sessionId,
           consumedOnStart: true,
           activate() {
             const execution: AgentBodyState = {
@@ -177,7 +186,7 @@ export function createSessionDispatchPort(
             executions.set(agent.id, execution);
             // sendPrompt resolves at turn completion, not queue acceptance.
             // Keep dispatch free to start peers and service cancellation.
-            void send(session.sessionId, prompt, runId, context).then(
+            void send(sessionId, prompt, runId, context).then(
               () => {
                 if (executions.get(agent.id) === execution) {
                   executions.delete(agent.id);
@@ -189,14 +198,14 @@ export function createSessionDispatchPort(
                   kind: 'failed',
                   runId,
                   attempt,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: getErrorMessage(error),
                 });
               },
             );
           },
         };
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = getErrorMessage(error);
         // A persona that will not resolve fails the spawn by design — the
         // child refuses rather than booting a generic assistant under this
         // agent's name — and that is a configuration error, not a crash.
