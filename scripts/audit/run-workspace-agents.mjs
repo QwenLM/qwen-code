@@ -1257,6 +1257,44 @@ ok(
 );
 ok('and says the spend is tree-wide', bud.scope.includes('thread tree'));
 
+console.log('\n17b. a sub-thread cannot buy a fresh budget');
+// Decision 17. Without inheritance an agent could reset the loop breaker by
+// delegating: the child would start at zero unattended turns and the whole
+// tree could run forever a sub-thread at a time.
+const budgetParent = await startFor('Budget parent');
+await M.updateThread(ROOT, budgetParent.th.id, (t) => ({
+  ...t,
+  autoTurnsUsed: 7,
+}));
+const budgetChild = await asAgent(
+  budgetParent.agentId,
+  budgetParent.th.id,
+  budgetParent.runId,
+  budgetParent.th.rootThreadId,
+  () =>
+    new M.ThreadCreateTool(cfg).buildAndExecute(
+      { title: 'Inheriting bit' },
+      sig(),
+    ),
+);
+ok(
+  'the split succeeded',
+  !budgetChild.error,
+  JSON.stringify(budgetChild.error),
+);
+const inheritor = (await M.listThreads(ROOT)).threads.find(
+  (t) => t.parentThreadId === budgetParent.th.id,
+);
+ok(
+  'the child starts from the parent count, not from zero',
+  inheritor?.autoTurnsUsed === 7,
+  String(inheritor?.autoTurnsUsed),
+);
+ok(
+  'and charges tokens to the same root',
+  inheritor?.rootThreadId === budgetParent.th.rootThreadId,
+);
+
 console.log('\n18. concurrency');
 // Everything above ran one operation at a time, which is the one shape a
 // store with a mutation lock is guaranteed to survive. These run together.
