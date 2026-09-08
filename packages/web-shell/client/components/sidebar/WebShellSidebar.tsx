@@ -331,7 +331,7 @@ export interface WebShellSidebarSessionActionsOptions {
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
 
-const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
   ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
@@ -1569,6 +1569,7 @@ export function WebShellSidebar({
     workspace.client,
     {
       enabled: workspaceSessionLiveStateEnabled,
+      pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
       workspaceCwds: liveStateWorkspaceCwds,
       groupWorkspaceCwds: liveStateGroupWorkspaceCwds,
     },
@@ -2058,6 +2059,7 @@ export function WebShellSidebar({
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
       !session.hasActivePrompt &&
+      session.activeWorkState !== 'active' &&
       canMutateSessionArchive(session),
     [canMutateSessionArchive, isCurrentSession, sessionActionItems],
   );
@@ -2351,7 +2353,11 @@ export function WebShellSidebar({
   }, []);
 
   const hasRunningSession = useMemo(
-    () => sessions.some((session) => session.hasActivePrompt),
+    () =>
+      sessions.some(
+        (session) =>
+          session.hasActivePrompt || session.activeWorkState === 'active',
+      ),
     [sessions],
   );
   const statusSessions = useMemo(() => {
@@ -4392,9 +4398,13 @@ export function WebShellSidebar({
       }
 
       const isCurrent = standalone?.active ?? isCurrentSession(session);
+      const sessionWorkActive =
+        !session.hasActivePrompt && session.activeWorkState === 'active';
+      const activityUnknown =
+        !session.hasActivePrompt && session.activeWorkState === 'unknown';
       // Archiving closes the live session daemon-side, which would end the
-      // running turn; keep the action visible but inert while it runs.
-      const running = Boolean(session.hasActivePrompt);
+      // running work; keep the action visible but inert while it runs.
+      const running = Boolean(session.hasActivePrompt || sessionWorkActive);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4442,7 +4452,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            session.hasActivePrompt && styles.runningSession,
+            running && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4500,6 +4510,19 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
+            ) : sessionWorkActive && !scheduledTaskIcon && !completedUnread ? (
+              <span
+                className={styles.sessionStatusDot}
+                data-web-shell-session-active-work
+                aria-hidden="true"
+              />
+            ) : activityUnknown && !scheduledTaskIcon && !completedUnread ? (
+              <span
+                className={styles.sessionStatusUnknown}
+                aria-label={t('sidebar.activityUnknown')}
+              >
+                ?
+              </span>
             ) : null}
           </span>
           {isEditing && showRename ? (
@@ -4561,10 +4584,14 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt ? (
+                {session.hasActivePrompt || sessionWorkActive ? (
                   <span
                     className={styles.sessionLoading}
-                    aria-label={t('sidebar.running')}
+                    aria-label={
+                      sessionWorkActive
+                        ? t('sidebar.activeWork')
+                        : t('sidebar.running')
+                    }
                   />
                 ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>

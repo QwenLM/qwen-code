@@ -28,6 +28,7 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type {
   VoiceStatusRevision,
@@ -247,7 +248,7 @@ const {
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
-  mockUseDaemonActivePromptBridge,
+  mockUseDaemonSessionActivityBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -656,6 +657,8 @@ const {
         settings: DaemonSettingDescriptor[];
       } | null,
       latestSplitViewProps: null as {
+        onPendingPanesChange?: (ids: string[]) => void;
+        showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
         sessionWorkflowEnabled?: boolean;
@@ -720,7 +723,7 @@ const {
     mockReleaseWebTerminal: vi.fn(),
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
-    mockUseDaemonActivePromptBridge: vi.fn(),
+    mockUseDaemonSessionActivityBridge: vi.fn(),
   };
 });
 
@@ -1318,9 +1321,14 @@ vi.mock('./components/dialogs/DialogShell', async () => {
   };
 });
 
-vi.mock('./components/sidebar/WebShellSidebar', async () => {
+vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
   const React = await import('react');
+  const actual =
+    await importOriginal<
+      typeof import('./components/sidebar/WebShellSidebar')
+    >();
   return {
+    DEFAULT_SESSION_ACTION_ITEMS: actual.DEFAULT_SESSION_ACTION_ITEMS,
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
@@ -1617,7 +1625,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     hasActivePrompt: testState.sessionHasActivePrompt,
     authoritative: true,
   }),
-  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
+  useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -1750,6 +1758,7 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
+      onPendingPanesChange?: (ids: string[]) => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -9384,10 +9393,11 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockUseWorkspaceSessionLiveState.mockClear();
-  mockUseDaemonActivePromptBridge.mockReset();
-  mockUseDaemonActivePromptBridge.mockImplementation(
-    () => testState.sessionHasActivePrompt,
-  );
+  mockUseDaemonSessionActivityBridge.mockReset();
+  mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
+    hasActivePrompt: testState.sessionHasActivePrompt,
+    activeWorkState: undefined,
+  }));
   mockWorkspace.status = 'connected';
   mockWorkspace.brand = undefined;
   mockWorkspace.brandSettled = false;
@@ -9905,6 +9915,7 @@ describe('App plan todos', () => {
   });
 
   it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
@@ -10076,11 +10087,21 @@ describe('App plan todos', () => {
     const { container, rerender } = renderApp();
     await flush();
 
-    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
 
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
+
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'prepare',
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
 
     await act(async () => {
       testState.latestTodoPanelOnOpen?.();
@@ -10508,6 +10529,12 @@ describe('App session workflow', () => {
       await Promise.resolve();
     });
 
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+    });
+
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
@@ -10761,7 +10788,7 @@ describe('App session workflow', () => {
     ).not.toBeNull();
   });
 
-  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+  it('keeps Todo progress non-interactive when Session Workflow is off', async () => {
     testState.messages = [
       {
         id: 'plan',
@@ -10784,18 +10811,11 @@ describe('App session workflow', () => {
     const { container } = renderApp();
     await flush();
 
-    await act(async () => {
-      testState.latestTodoPanelOnOpen?.();
-      await Promise.resolve();
-    });
-
-    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
-    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
-    expect(
-      container
-        .querySelector('[data-testid="dialog-shell"]')
-        ?.getAttribute('data-dialog-title'),
-    ).toBe('Background tasks');
+    expect(testState.latestTodoPanelTodos.map((todo) => todo.id)).toEqual([
+      'work',
+    ]);
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
   });
 
   it('keeps workflow agent tools mounted behind the tasks dialog', async () => {
@@ -11027,7 +11047,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseDaemonActivePromptBridge).toHaveBeenCalledWith(
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenCalledWith(
       mockWorkspace.client,
       '/tmp/live',
       'session-1',
@@ -11037,6 +11057,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
   it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
+      sessionLiveStatePollIntervalMs: 10_000,
       workspaces: [
         {
           id: 'primary',
@@ -11061,6 +11082,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: true,
+        pollIntervalMs: 10_000,
         workspaceCwds: ['/tmp/project', '/tmp/live'],
         groupWorkspaceCwds: [],
       },
@@ -11083,6 +11105,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: false,
+        pollIntervalMs: undefined,
         workspaceCwds: [],
         groupWorkspaceCwds: [],
       },
@@ -28885,6 +28908,91 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it.each<undefined | Array<'details'>>([undefined, [], ['details']])(
+    'applies the session-details allowlist to split panes: %j',
+    async (items) => {
+      const { container } = renderApp({
+        sidebar: { sessionActions: { items } },
+      });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+      });
+      expect(testState.latestSplitViewProps?.showSessionDetails).toBe(
+        (items ?? DEFAULT_SESSION_ACTION_ITEMS).includes('details'),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'does not rerender App for other split sessions (outer pending: %s)',
+    async (outerPending) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+      });
+      await flush();
+      const report = testState.latestSplitViewProps!.onPendingPanesChange!;
+      const ownerIds = outerPending ? [mockConnection.sessionId!] : [];
+      await act(async () => report(ownerIds));
+      rerender();
+      expect(testState.latestSplitViewProps!.onPendingPanesChange).toBe(report);
+      expect(mockUseDaemonActivePromptBridge).toHaveBeenCalled();
+      mockUseDaemonActivePromptBridge.mockClear();
+      for (const ids of [['foreign-session'], ['another-session'], []]) {
+        await act(async () => report([...ownerIds, ...ids]));
+        expect(mockUseDaemonActivePromptBridge).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('keeps the outer approval notice until its current session is reported', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+    });
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+    });
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toContain(mockConnection.sessionId);
+    const notice = () =>
+      container.querySelector('[data-testid="split-approval-notice"]');
+    expect(notice()).not.toBeNull();
+    await act(async () => {
+      testState.latestSplitViewProps?.onPendingPanesChange?.([
+        mockConnection.sessionId!,
+      ]);
+    });
+    expect(notice()).toBeNull();
+    const previous = testState.latestSplitViewProps!.onPendingPanesChange!;
+    const previousSessionId = mockConnection.sessionId!;
+    await act(async () => {
+      mockConnection.sessionId = 'outer-session-2';
+      rerender();
+    });
+    const next = testState.latestSplitViewProps!.onPendingPanesChange!;
+    expect(next).not.toBe(previous);
+    await act(async () => next([previousSessionId]));
+    expect(notice()).not.toBeNull();
+    await act(async () => next(['outer-session-2']));
+    expect(notice()).toBeNull();
+    await act(async () => {
+      testState.latestSplitViewProps?.onPendingPanesChange?.([]);
+    });
+    expect(notice()).not.toBeNull();
+  });
+
   it('surfaces the outer approval as a split notice and returns to chat when clicked', async () => {
     // The overlay is suppressed under the split, so the outer approval would be
     // invisible; a notice banner (with a way back) is the only signal.
@@ -28897,6 +29005,12 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+    });
+
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
       rerender();
