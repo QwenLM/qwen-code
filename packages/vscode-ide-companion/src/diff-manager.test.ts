@@ -23,28 +23,46 @@ vi.mock('vscode', () => {
     }
   }
 
+  // `with()` has to derive a new uri. DiffManager keys `diffDocuments` on
+  // `toString()` and the two sides of one diff differ only by scheme and query,
+  // so a copy that keeps rendering the original's fields collapses the left and
+  // the right side onto a single key — and two diffs for one path onto a single
+  // entry — which makes every witness about *which* document a dismissal is
+  // keyed on vacuous.
+  interface FakeUri {
+    fsPath: string;
+    scheme: string;
+    query: string;
+    with: (change: Record<string, unknown>) => FakeUri;
+    toString: () => string;
+  }
+  const makeUri = (
+    fsPath: string,
+    scheme: string,
+    query: string,
+    rendered?: string,
+  ): FakeUri => ({
+    fsPath,
+    scheme,
+    query,
+    with: (change: Record<string, unknown>) =>
+      makeUri(
+        fsPath,
+        (change.scheme as string | undefined) ?? scheme,
+        (change.query as string | undefined) ?? query,
+      ),
+    toString: () => rendered ?? `${scheme}://${fsPath}?${query}`,
+  });
+
   return {
     EventEmitter,
     Uri: {
-      file: (filePath: string) => {
-        const uri: {
-          fsPath: string;
-          scheme: string;
-          query: string;
-          with: (change: Record<string, unknown>) => unknown;
-          toString: () => string;
-        } = {
-          fsPath: filePath,
-          scheme: 'file',
-          query: '',
-          with(change: Record<string, unknown>) {
-            return { ...uri, ...change };
-          },
-          toString() {
-            return `${uri.scheme}://${uri.fsPath}?${uri.query}`;
-          },
-        };
-        return uri;
+      file: (filePath: string) => makeUri(filePath, 'file', ''),
+      // closeAll() round-trips its map keys back through Uri.parse.
+      parse: (value: string) => {
+        const [scheme = '', rest = ''] = value.split('://');
+        const [fsPath = '', query = ''] = rest.split('?');
+        return makeUri(fsPath, scheme, query, value);
       },
     },
     ViewColumn: { Active: -1, Beside: -2 },
@@ -73,6 +91,25 @@ const { DiffContentProvider, DiffManager } = await import('./diff-manager.js');
 
 const WRITABLE_COMMAND =
   'workbench.action.files.setActiveEditorWriteableInSession';
+
+// `vscode.diff` is called as (command, left, right, title, options): the left
+// side is the read-only old document, the right side the writable one the vote
+// commands and the dismissal keying both resolve through.
+function openedDiffCall(): unknown[] {
+  const call = executeCommand.mock.calls.find(
+    ([command]) => command === 'vscode.diff',
+  );
+  if (!call) throw new Error('no diff was opened');
+  return call;
+}
+
+function lastOpenedLeftUri(): { toString(): string } {
+  return openedDiffCall()[1] as { toString(): string };
+}
+
+function lastOpenedRightUri(): { toString(): string } {
+  return openedDiffCall()[2] as { toString(): string };
+}
 
 describe('DiffManager.showDiff writability', () => {
   beforeEach(() => {
@@ -190,14 +227,6 @@ describe('DiffManager permission diff dismissal', () => {
     return new DiffManager(() => {}, new DiffContentProvider());
   }
 
-  function lastOpenedRightUri(): { toString(): string } {
-    const call = executeCommand.mock.calls.find(
-      ([command]) => command === 'vscode.diff',
-    );
-    if (!call) throw new Error('no diff was opened');
-    return call[2] as { toString(): string };
-  }
-
   it('reports a permission diff the user closed without voting', async () => {
     const manager = createManager();
     const closed = vi.fn();
@@ -265,6 +294,28 @@ describe('DiffManager permission diff dismissal', () => {
     expect(closed).toHaveBeenCalledTimes(1);
   });
 
+  // R5-2: the two cases above both pass `suppressNotification = true`, and the
+  // one case that passes `false` also passes a request id, so it never reaches
+  // the fire. The default arm is the one production actually sends —
+  // IdeClient.disconnect() calls closeDiff(filePath) with no options and the MCP
+  // closeDiff tool forwards `suppressNotification: undefined` — so gating the
+  // fire on the flag instead of on the missing id went unnoticed.
+  it('reports an id-less close that leaves the notification flag at its default', async () => {
+    const manager = createManager();
+    const closed = vi.fn();
+    manager.onDidClosePermissionDiff(closed);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+
+    await manager.closeDiff('/workspace/foo.ts');
+
+    expect(closed).toHaveBeenCalledWith({ permissionRequestId: 'req-1' });
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
   it('stays quiet when an id-less close matches a diff no approval owns', async () => {
     const manager = createManager();
     const closed = vi.fn();
@@ -309,14 +360,6 @@ describe('DiffManager permission request id binding', () => {
     return new DiffManager(() => {}, new DiffContentProvider());
   }
 
-  function lastOpenedRightUri(): { toString(): string } {
-    const call = executeCommand.mock.calls.find(
-      ([command]) => command === 'vscode.diff',
-    );
-    if (!call) throw new Error('no diff was opened');
-    return call[2] as { toString(): string };
-  }
-
   it('reads back the request id the diff was opened for', async () => {
     const manager = createManager();
 
@@ -328,6 +371,25 @@ describe('DiffManager permission request id binding', () => {
 
     expect(manager.hasDiff(rightUri as never)).toBe(true);
     expect(manager.getPermissionRequestId(rightUri as never)).toBe('req-1');
+  });
+
+  // R5-1: the entry is keyed on the writable right side only. `qwen.diff.accept`
+  // and `qwen.diff.cancel` resolve the vote through the active editor's uri,
+  // which is the modified side, so keying the map on the left document would
+  // silently break both — and while the uri mock rendered a `with()` copy with
+  // the original's scheme and query, both sides shared one key and nothing here
+  // could tell the two apart.
+  it('keys the diff on the writable side, not the read-only one', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+      permissionRequestId: 'req-1',
+    });
+    const leftUri = lastOpenedLeftUri();
+
+    expect(manager.hasDiff(leftUri as never)).toBe(false);
+    expect(manager.getPermissionRequestId(leftUri as never)).toBeUndefined();
   });
 
   it('leaves the request id undefined for a diff no approval owns', async () => {

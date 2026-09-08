@@ -1107,6 +1107,51 @@ describe('EmbeddedApp permission diff dismissal', () => {
     );
   });
 
+  // R5-3/R5-4: the teardown half of the recovery path the Risk & Scope section
+  // rests on. `closeOpenPermissionDiffs` hands the preview back and forgets the
+  // dismissed id, and the dismissal handler drops the request from the
+  // open-diff map — reverting any of the three lines left every test green.
+  it('returns preview ownership to the host when the pending diffs are torn down', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(1);
+
+    await dismiss('req-write');
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(false);
+
+    // Moving to an automatic approval mode tears every pending diff down.
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'modeChanged', data: { modeId: 'yolo' } },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(latestProps()['hostOwnsEditDiffPreview']).toBe(true);
+    // The tab the user already closed is not closed a second time: the
+    // dismissal dropped it from the open-diff map, so the teardown loop has
+    // nothing left to post for that request.
+    expect(postMessagesOfType('closeDiff')).toEqual([]);
+
+    // With the dismissed id forgotten, the same request can own a native diff
+    // again once the mode allows approvals.
+    await act(async () => {
+      onTranscriptChange([permissionBlock]);
+      await Promise.resolve();
+    });
+    expect(postMessagesOfType('openDiff')).toHaveLength(2);
+  });
+
   it('ignores a dismissal posted by a nested iframe window', async () => {
     const props = await renderApp();
     const onTranscriptChange = callback<(blocks: unknown[]) => void>(
