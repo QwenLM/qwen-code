@@ -140,6 +140,23 @@ recorded a valid repeated receipt once. No build, lint, typecheck or test suite
 ran. Crash/late-drain/close races on the new ACP path still require live checks;
 this supersedes earlier statements below that live input is unconnected.
 
+#### ACP initial input — transcript before receipt
+
+The initial launch path no longer reports its input consumed while the session
+is merely prepared. `Session` records and flushes the initial user message
+before advancing the durable consumed watermark; a failed receipt leaves the
+input eligible for replay.
+
+Real task `th_c7646c7b-7f4c-4996-9560-42721f125d0d` ran on the existing
+demo-worker session. Run `rn_bcd7f190-5958-4dcd-9c92-ea207d4aad16` posted
+`INITIAL-RECEIPT-8391`, called `thread_review`, and finished with trigger
+`ms_c7dcb7be-dda0-496f-90f7-e3663dec5130` consumed at watermark 1. Reloading
+the session from disk found both the assigned prompt and marker in its
+transcript. This observes the normal model path and checks the persisted result;
+the exact process-exit window between transcript flush and receipt remains an
+unrun failure injection. No build, lint, typecheck, test suite, CI, or new PR
+was used.
+
 #### Unread input at close
 
 Source inspection found that explicit close used to promote every accepted id

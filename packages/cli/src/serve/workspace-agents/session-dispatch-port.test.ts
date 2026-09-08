@@ -68,6 +68,7 @@ describe('session dispatch port', () => {
     expect(result.status).toBe('started');
     expect(sendPrompt).not.toHaveBeenCalled();
     if (result.status !== 'started') throw new Error('Expected prepared session');
+    expect(result.consumedOnStart).toBe(false);
     result.activate?.();
     expect(contextOf(sendPrompt)?.agentRun).toEqual({
       workspaceId: 'ws_1',

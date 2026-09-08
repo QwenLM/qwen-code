@@ -176,7 +176,7 @@ export function createSessionDispatchPort(
         return {
           status: 'started',
           sessionId,
-          consumedOnStart: true,
+          consumedOnStart: false,
           activate() {
             const execution: AgentBodyState = {
               kind: 'running',

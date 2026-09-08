@@ -27,6 +27,7 @@ Current run ids, timestamps and limitations are recorded in
 | Concurrent same-thread handoff and human acceptance | Clean three-run peer handoff; 8,999 ms overlapping run lifetimes; both results submitted and Chrome Mark done succeeded. |
 | Child delegation and parent report | Earlier ACP demo reached done on child and parent, with manual startup retries; not a clean first-attempt run. |
 | Live human input | Same-run mid-turn transcript and consumed window verified; final review contains the correction. Late-drain/crash cases remain open. |
+| Initial input receipt | A real assigned run persisted its initial prompt, consumed the matching trigger and reached review. The transcript-before-receipt crash window remains to be force-killed. |
 | Cancellation | Working → stopping → cancelled observed; usage retained; unresponsive-child case remains open. |
 | Running task after daemon restart | SIGKILL after a durable checkpoint exposed a startup-discovery defect; after its fix, the same run/session recovered as attempt 2 and reached human acceptance. Other crash windows remain open. |
 | Human resolves a blocker | Real thread_block question, human selection, same-session continuation, JSON review, and Chrome Mark done verified. Other blocker-acknowledgement scopes remain an owner decision. |
@@ -238,6 +239,18 @@ false, transcript-written-before-consumed recovery, stale-host replacement, or
 the watchdog. The long replay run also exposed the conservative accounting
 policy visibly: it closed at `666,749 / 200,000` tokens because the limit is
 checked at admission, not between tool rounds.
+
+**Initial-receipt observation (2026-09-08).** Real ACP run
+`rn_bcd7f190-5958-4dcd-9c92-ea207d4aad16` posted
+`INITIAL-RECEIPT-8391` and closed with `thread_review`. Its durable trigger
+`ms_c7dcb7be-dda0-496f-90f7-e3663dec5130` is the sole consumed id and the
+committed watermark is sequence 1. Reloading session
+`b48bad11-6e7c-5110-92a1-e560bf56eec6` from disk found the assigned prompt and
+marker in its transcript. The session path now flushes that initial user record
+before writing the receipt; dispatch no longer marks it consumed before
+activation. This proves the normal path and source order, not the named
+process-exit injection between those two writes. No build, lint, test suite, or
+CI ran.
 
 ### Step 9 — REST and Web Shell
 

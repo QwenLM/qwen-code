@@ -414,9 +414,10 @@ Message sequence is monotonic per thread. `triggerMessageIds` means durably
 booked; `acceptedMessageIds` means the runtime queue accepted those inputs;
 `consumedMessageIds` is recorded from the correlated `EXTERNAL_MESSAGE` event
 when the old background runtime drains them. In the ACP session path, daemon
-queue-only input carries the run metadata and delivery id; the child checks the
-ambient binding, flushes its mid-turn transcript record, then records the consumed
-window under the workspace lock. Queue acceptance is not that receipt.
+input carries the run metadata and delivery watermark; the session checks the
+ambient binding, flushes the initial or mid-turn transcript record, then records
+the consumed window under the workspace lock. Queue acceptance is not that
+receipt.
 `committedThroughSequence` advances only across a
 contiguous consumed context window. On a failed enqueue, execution failure, or
 daemon restart, reconciliation rebooks everything not consumed and committed.
@@ -435,10 +436,11 @@ different processes and their wall clocks can disagree.
 
 At run start and direct delivery, the dispatcher sends one contiguous context
 window through `contextThroughSequence`, not just the triggering ids. The
-initial prompt is consumed when the turn starts; direct input becomes consumed
-only on its correlated runtime event. This makes the scalar watermark honest
-even when intervening posts targeted another agent. A clean but `unclosed`
-return blocks the workflow yet commits only demonstrably consumed input. A
+initial prompt becomes consumed only after its transcript record is durable;
+direct input follows the same transcript-before-receipt order. This makes the
+scalar watermark honest even when intervening posts targeted another agent. A
+clean but `unclosed` return blocks the workflow yet commits only demonstrably
+consumed input. A
 durable `blocked`/`review` close marker likewise lets restart reconciliation
 finish the workflow close without pretending an accepted-but-undrained message
 was read.

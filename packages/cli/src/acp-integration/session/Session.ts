@@ -232,6 +232,7 @@ import {
   runWithAgentRunContext,
   requireAgentRunContext,
   consumeAgentInput,
+  readThread,
   type AgentRunContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -5455,6 +5456,37 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
               } else {
                 recorder?.recordUserMessage(promptText);
+              }
+              const agentRun = parsePromptAgentRun(params);
+              if (agentRun) {
+                try {
+                  const thread = await readThread(
+                    this.config.getWorkingDir(),
+                    agentRun.threadId,
+                  );
+                  const delivered = thread?.messages.find(
+                    (message) =>
+                      message.sequence === agentRun.contextThroughSequence,
+                  );
+                  if (!recorder || !delivered) {
+                    throw new Error(
+                      'Agent input requires a transcript and delivery watermark',
+                    );
+                  }
+                  await recorder.flush();
+                  await consumeAgentInput(
+                    this.config.getWorkingDir(),
+                    delivered.id,
+                    delivered.sequence,
+                  );
+                } catch (error) {
+                  // The model may run twice after a receipt failure; losing the
+                  // task would be worse than replaying its durable input.
+                  debugLogger.warn(
+                    'Agent input receipt failed; replay remains pending',
+                    error,
+                  );
+                }
               }
             }
 
