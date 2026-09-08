@@ -42,8 +42,15 @@ function createTerminalTurnErrorScenario(sessionId: string) {
         type: 'turn_error',
         data: {
           sessionId,
+          // Deliberately self-identifying. The previous text read exactly like
+          // a production incident ("the model provider closed the response
+          // stream..."), and every visuals preview shows it four times -- one
+          // test, two themes, two viewports - so reviewers repeatedly read the
+          // preview as a live failure. Nothing here needs the copy to be
+          // realistic; the scenario only needs an error row to hang the Copy
+          // affordance on.
           message:
-            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+            'Sample error text for the visual harness. This turn did not really fail: the mock daemon injects this message so the error row and its Copy button can be captured.',
           promptId: 'prompt-turn-error-visual',
         },
       },
@@ -155,7 +162,7 @@ for (const theme of THEMES) {
 
       const errorRow = page
         .locator('[data-web-shell-message-row]')
-        .filter({ hasText: 'The model provider closed the response stream' });
+        .filter({ hasText: 'Sample error text for the visual harness' });
       const copyButton = errorRow.getByRole('button', {
         name: 'Copy',
         exact: true,
@@ -202,7 +209,7 @@ for (const theme of THEMES) {
         ).toBe(true);
         const touchErrorRow = touchPage
           .locator('[data-web-shell-message-row]')
-          .filter({ hasText: 'The model provider closed the response stream' });
+          .filter({ hasText: 'Sample error text for the visual harness' });
         const touchCopyButton = touchErrorRow.getByRole('button', {
           name: 'Copy',
           exact: true,
