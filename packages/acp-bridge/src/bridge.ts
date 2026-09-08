@@ -4130,6 +4130,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  // Last mode explicitly supplied by a daemon caller. This survives ACP child
+  // reaping, but settings-derived and agent-internal mode changes never enter
+  // it, so sessions without an explicit owner still use cold-load settings.
+  const sessionApprovalModeOverrides = new Map<string, ApprovalMode>();
+  const rememberApprovalModeOverride = (
+    sessionId: string,
+    mode: ApprovalMode | undefined,
+  ): void => {
+    if (mode !== undefined) sessionApprovalModeOverrides.set(sessionId, mode);
+  };
   const forwardRunningPromptCancel = async (
     entry: SessionEntry,
     pending: PendingPromptEntry,
@@ -8598,6 +8608,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (err instanceof SessionRestoreTimeoutError) throw err;
         restoreEvents.close();
         if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+          sessionApprovalModeOverrides.delete(req.sessionId);
           if (
             !ci.isDying &&
             hasNoChannelWork(ci, { ignoreRestoreId: req.sessionId })
@@ -8756,7 +8767,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       releaseAdmissionOnce();
       const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
-      const publicState = publicRestoreState(state);
+      let publicState = publicRestoreState(state);
       entry.restoreState = publicState;
       if (replayPartial === true) {
         entry.restoreReplayPartial = true;
@@ -8828,13 +8839,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       assertAttachableSessionEntry(req.sessionId, entry);
       const clientId = registerClient(entry, req.clientId);
       let previousApprovalMode: ApprovalMode | undefined;
-      if (req.approvalMode) {
+      const restoreApprovalMode =
+        req.approvalMode ?? sessionApprovalModeOverrides.get(req.sessionId);
+      if (
+        restoreApprovalMode &&
+        (req.approvalMode !== undefined ||
+          restoreApprovalMode !== entry.currentApprovalMode)
+      ) {
         previousApprovalMode = await applyApprovalModeForAttach(
           entry,
-          req.approvalMode,
+          restoreApprovalMode,
           clientId,
         );
         assertAttachableSessionEntry(req.sessionId, entry);
+        if (publicState.modes && entry.currentApprovalMode) {
+          publicState = {
+            ...publicState,
+            modes: {
+              ...publicState.modes,
+              currentModeId: entry.currentApprovalMode,
+            },
+          };
+          entry.restoreState = publicState;
+        }
       }
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -9575,19 +9602,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async loadSession(req) {
-      return restoreSession('load', req, {
+      const restored = await restoreSession('load', req, {
         ...(req.deferRestoreAskUserQuestionPrompt
           ? { deferRestorePrompt: true }
           : {}),
       });
+      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
+      return restored;
     },
 
     async resumeSession(req) {
-      return restoreSession('resume', req, {
+      const restored = await restoreSession('resume', req, {
         ...(req.deferRestoreAskUserQuestionPrompt
           ? { deferRestorePrompt: true }
           : {}),
       });
+      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
+      return restored;
     },
 
     async spawnStandaloneSession(req) {
@@ -9616,7 +9647,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async restoreStandaloneSession(action, req) {
-      return restoreSession(
+      const restored = await restoreSession(
         action,
         {
           ...req,
@@ -9624,6 +9655,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         { daemonOwnedStandaloneRestore: true },
       );
+      rememberApprovalModeOverride(restored.sessionId, req.approvalMode);
+      return restored;
     },
 
     async spawnOrAttach(req) {
@@ -9756,6 +9789,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await rollbackAttachRegistration(existing, clientId);
             throw error;
           }
+          rememberApprovalModeOverride(existing.sessionId, req.approvalMode);
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
@@ -9842,6 +9876,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await rollbackAttachRegistration(attachedEntry, clientId);
             throw error;
           }
+          rememberApprovalModeOverride(
+            attachedEntry.sessionId,
+            req.approvalMode,
+          );
           return {
             ...session,
             attached: true,
@@ -10004,7 +10042,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           : `${workspaceKey}#${randomUUID()}`;
       inFlightSpawns.set(tracker, promise);
       try {
-        return await promise;
+        const session = await promise;
+        sessionApprovalModeOverrides.delete(session.sessionId);
+        rememberApprovalModeOverride(session.sessionId, req.approvalMode);
+        return session;
       } finally {
         if (abandonedSettlement) {
           void abandonedSettlement.then(
@@ -13078,12 +13119,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
-      return await applyApprovalMode(
+      const result = await applyApprovalMode(
         entry,
         mode,
         opts.persist,
         originatorClientId,
       );
+      rememberApprovalModeOverride(sessionId, result.mode);
+      return result;
     },
 
     async generateSessionRecap(sessionId, _context) {

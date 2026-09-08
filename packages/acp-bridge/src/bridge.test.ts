@@ -26488,6 +26488,110 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('preserves a session approval mode after ACP child teardown', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        let currentMode = ApprovalMode.DEFAULT;
+        const handle = makeChannel({
+          loadSessionImpl: () => ({
+            modes: { currentModeId: currentMode, availableModes: [] },
+          }),
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = currentMode;
+              currentMode = (params as { mode: ApprovalMode }).mode;
+              return { previous, current: currentMode };
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionContext) {
+              return { state: { modes: { currentModeId: currentMode } } };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+      );
+      await bridge.closeSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+
+      expect(handles).toHaveLength(2);
+      expect(handles[1]?.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        params: { sessionId: session.sessionId, mode: ApprovalMode.YOLO },
+      });
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.YOLO);
+      await bridge.shutdown();
+    });
+
+    it('does not preserve an agent-internal mode over cold-load settings', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const handle = makeChannel({
+          loadSessionImpl: () => ({
+            modes: {
+              currentModeId: ApprovalMode.DEFAULT,
+              availableModes: [],
+            },
+          }),
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              return {
+                previous: ApprovalMode.DEFAULT,
+                current: (params as { mode: ApprovalMode }).mode,
+              };
+            }
+            return {};
+          },
+        });
+        handles.push(handle);
+        return handle.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      void handles[0]?.agentConnection.extNotification(
+        'qwen/notify/session/mode-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          currentModeId: ApprovalMode.YOLO,
+        },
+      );
+      await vi.waitFor(() => {
+        expect(
+          bridge.getDaemonStatusSnapshot().sessions[0]?.currentApprovalMode,
+        ).toBe(ApprovalMode.YOLO);
+      });
+      await bridge.closeSession(session.sessionId);
+
+      const restored = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+
+      expect(handles).toHaveLength(2);
+      expect(
+        handles[1]?.agent.extMethodCalls.filter(
+          ({ method }) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        ),
+      ).toEqual([]);
+      expect(restored.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+      await bridge.shutdown();
+    });
+
     it('reaps a tombstoned session when approval-mode attach rollback removes the last attach', async () => {
       const { factory, waitForApprovalMode, rejectApprovalMode } =
         deferredApprovalModeFactory();
