@@ -42,15 +42,8 @@ function createTerminalTurnErrorScenario(sessionId: string) {
         type: 'turn_error',
         data: {
           sessionId,
-          // Deliberately self-identifying. The previous text read exactly like
-          // a production incident ("the model provider closed the response
-          // stream..."), and every visuals preview shows it four times -- one
-          // test, two themes, two viewports - so reviewers repeatedly read the
-          // preview as a live failure. Nothing here needs the copy to be
-          // realistic; the scenario only needs an error row to hang the Copy
-          // affordance on.
           message:
-            'Sample error text for the visual harness. This turn did not really fail: the mock daemon injects this message so the error row and its Copy button can be captured.',
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
           promptId: 'prompt-turn-error-visual',
         },
       },
@@ -162,7 +155,7 @@ for (const theme of THEMES) {
 
       const errorRow = page
         .locator('[data-web-shell-message-row]')
-        .filter({ hasText: 'Sample error text for the visual harness' });
+        .filter({ hasText: 'The model provider closed the response stream' });
       const copyButton = errorRow.getByRole('button', {
         name: 'Copy',
         exact: true,
@@ -184,12 +177,9 @@ for (const theme of THEMES) {
       await expect(actions).toHaveCSS('opacity', '1');
       await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
 
-      // A context created here does NOT inherit `use` from the config, so the
-      // timezone has to be repeated or this one capture drifts from the rest.
       const touchContext = await browser.newContext({
         ...devices['Pixel 7'],
         baseURL,
-        timezoneId: 'UTC',
       });
       try {
         const touchPage = await touchContext.newPage();
@@ -209,7 +199,7 @@ for (const theme of THEMES) {
         ).toBe(true);
         const touchErrorRow = touchPage
           .locator('[data-web-shell-message-row]')
-          .filter({ hasText: 'Sample error text for the visual harness' });
+          .filter({ hasText: 'The model provider closed the response stream' });
         const touchCopyButton = touchErrorRow.getByRole('button', {
           name: 'Copy',
           exact: true,

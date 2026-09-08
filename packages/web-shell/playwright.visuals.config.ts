@@ -36,10 +36,6 @@ export default defineConfig({
   use: {
     baseURL,
     viewport,
-    // Timestamps render in local time (formatTimestamp uses getHours()), so pin
-    // the zone as well as the clock (harness.ts `freezeWallClock`). CI runners
-    // are already UTC; this is what makes a local capture match them.
-    timezoneId: 'UTC',
     trace: 'off',
     // Screenshots are captured explicitly; flows record video via their own
     // browser context (client/e2e/visuals/harness.ts) for stable filenames.

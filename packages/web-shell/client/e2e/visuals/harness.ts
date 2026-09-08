@@ -65,9 +65,7 @@ async function primeTheme(page: Page, theme: VisualTheme): Promise<void> {
 }
 
 /**
- * Wall-clock instant every capture renders at. Paired with `timezoneId: 'UTC'`
- * in playwright.visuals.config.ts it makes the rendered time-of-day identical
- * on every machine, not just within one job.
+ * Wall-clock instant every capture renders at.
  *
  * It is deliberately in the FUTURE relative to every date a fixture hardcodes.
  * Relative formatters measure `Date.now() - value` (`formatRelativeTime`), so a
@@ -270,9 +268,6 @@ export async function recordFlow(
   const context: BrowserContext = await browser.newContext({
     baseURL,
     viewport: { ...VISUAL_VIEWPORT },
-    // Contexts made here do not inherit `use` from the config, so repeat the
-    // timezone pin that pairs with `freezeWallClock`.
-    timezoneId: 'UTC',
     recordVideo: { dir: VIDEO_RAW_DIR, size: { ...VISUAL_VIEWPORT } },
   });
   let page: Page | undefined;

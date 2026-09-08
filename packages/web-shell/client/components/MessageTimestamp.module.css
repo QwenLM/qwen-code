@@ -8,35 +8,25 @@
 }
 
 /*
- * Anchored inside the message row rather than floating above it: the message
- * list (`.list`) is `overflow-y: auto`, so a tooltip spilling outside the row
- * box would be clipped or trigger a scrollbar. Staying within the row keeps it
- * visible at the scroll edges. `pointer-events: none` lets clicks and inner
- * hover interactions (tool expand, links) pass through.
+ * Anchored inside the message's top-right corner rather than floating above
+ * it: the message list (`.list`) is `overflow-y: auto`, so a tooltip spilling
+ * outside the row box would be clipped or trigger a scrollbar. Staying within
+ * the row keeps it visible at the scroll edges. `pointer-events: none` lets
+ * clicks and inner hover interactions (tool expand, links) pass through.
  *
- * Two details keep it from mangling the text it floats over. It sits at the
- * BOTTOM-right, not the top-right: the first line of a wrapped message runs the
- * full column width, so a top-anchored chip lands on it almost every time,
- * while the last line is a ragged remainder and rows that carry an action bar
- * (the turn-error Copy button) leave that corner empty outright. And the
- * background is fully opaque -- at 92% the glyph underneath bled through the
- * chip, which read as corrupted text rather than as an overlay ("finished."
- * rendering as "finisheu." under a 09:18:16 tip in the PR #11267 preview).
- *
- * This makes overlap rare, not impossible; a message whose last block is a
- * full-width code block or table still gets the chip in its corner. Reserving
- * space in flow instead was rejected: hover-time padding reflows the
- * transcript, and a permanent float notch shrinks every code block that
- * establishes its own formatting context.
+ * The background must stay FULLY opaque. At 92% the glyph underneath bled
+ * through the chip, so a covered word read as corrupted text rather than as an
+ * overlay -- "finished." rendering as "finisheu." under a 09:18:16 tip in a
+ * web-shell visuals preview. The chip still covers whatever sits in that
+ * corner; it just no longer garbles it.
  */
 .tip {
   position: absolute;
-  bottom: 2px;
+  top: 2px;
   right: 4px;
   z-index: 5;
   color: var(--muted-foreground);
   background: var(--background);
-  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 4px;
   font-size: 11px;
