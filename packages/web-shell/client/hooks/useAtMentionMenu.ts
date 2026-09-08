@@ -75,6 +75,7 @@ export interface AtMentionMenuState {
   providers: AtMentionProviderView[];
   items: AtMentionItem[];
   loading: boolean;
+  error?: string;
   itemMode?: 'default' | 'mcpServers' | 'mcpResources';
   mcpServerName?: string;
   fileDirectory?: string;
@@ -644,7 +645,12 @@ export function useAtMentionMenu({
         baseState,
       );
       if (!options.loadingAlreadySet) {
-        setMenu({ ...baseState, items: previousItems, loading: true });
+        setMenu({
+          ...baseState,
+          items: previousItems,
+          loading: true,
+          error: undefined,
+        });
       }
       Promise.resolve()
         .then(() =>
@@ -676,6 +682,7 @@ export function useAtMentionMenu({
               ),
               selectedIndex: 0,
               loading: false,
+              error: undefined,
             };
           });
         })
@@ -694,11 +701,12 @@ export function useAtMentionMenu({
               items: [],
               selectedIndex: 0,
               loading: false,
+              error: t('composerAdd.loadError'),
             };
           });
         });
     },
-    [getPreviousProviderItems, setMenu],
+    [getPreviousProviderItems, setMenu, t],
   );
 
   const scheduleLoadItems = useCallback(
@@ -717,7 +725,12 @@ export function useAtMentionMenu({
         query,
         baseState,
       );
-      setMenu({ ...baseState, items: previousItems, loading: true });
+      setMenu({
+        ...baseState,
+        items: previousItems,
+        loading: true,
+        error: undefined,
+      });
       if (hasCachedProviderData(providerId, query)) {
         loadItems(providerId, query, baseState, { loadingAlreadySet: true });
         return;
@@ -874,7 +887,12 @@ export function useAtMentionMenu({
         baseState.itemMode === 'mcpResources'
           ? stateRef.current.items
           : [];
-      setMenu({ ...baseState, items: previousItems, loading: true });
+      setMenu({
+        ...baseState,
+        items: previousItems,
+        loading: true,
+        error: undefined,
+      });
       if (builtinCacheRef.current.mcpResources.has(serverName)) {
         loadMcpResourceItems(serverName, query, baseState, {
           ...options,

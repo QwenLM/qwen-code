@@ -1596,11 +1596,24 @@ export function useComposerCore(
           ? async () => {
               for (let attempt = 1; ; attempt += 1) {
                 try {
-                  await client.ensureRuntime();
+                  const coordinator = await client.ensureRuntime();
+                  const capability = coordinator.capabilities?.extensions;
+                  if (
+                    capability &&
+                    (capability.state !== 'ready' ||
+                      capability.runtimeEpoch !== coordinator.runtimeEpoch)
+                  ) {
+                    throw new Error(
+                      capability.error?.message ??
+                        'Extension runtime catalog is not initialized.',
+                    );
+                  }
                   const status = await client.workspaceRuntimeExtensions();
                   if (
                     status.initialized === false ||
-                    (status.errors?.length ?? 0) > 0
+                    (status.errors?.length ?? 0) > 0 ||
+                    (coordinator.runtimeEpoch !== undefined &&
+                      status.runtimeEpoch !== coordinator.runtimeEpoch)
                   ) {
                     throw new Error(
                       status.errors?.[0]?.error ??

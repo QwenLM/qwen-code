@@ -146,6 +146,15 @@ afterEach(() => {
 });
 
 describe('AtMentionPanel', () => {
+  it('renders a provider load error instead of an empty result', () => {
+    mount({ ...itemsMenu(), items: [], error: 'Extension runtime failed' });
+
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toBe(
+      'Extension runtime failed',
+    );
+    expect(document.body.textContent).not.toContain('No results');
+  });
+
   it('renders provider categories in a listbox', () => {
     mount(categoriesMenu());
 

@@ -2730,6 +2730,7 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'extensions',
       loading: false,
       items: [],
+      error: 'composerAdd.loadError',
     });
     expect(warn).toHaveBeenCalledWith(
       'Failed to load @ extension suggestions',

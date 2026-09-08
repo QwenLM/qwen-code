@@ -506,6 +506,36 @@ it('surfaces the runtime diagnostic from an errored runtime catalog', async () =
   ).rejects.toThrow('manifest parse failed');
 });
 
+it('does not read a composer extension catalog when its capability is not ready', async () => {
+  const legacyLoad = vi.fn(async () => ({ extensions: [] as never[] }));
+  const workspaceRuntimeExtensions = vi.fn(async () => ({
+    extensions: [] as never[],
+  }));
+  optionalWorkspaceState.current = {
+    actions: { loadExtensionsStatus: legacyLoad },
+    capabilities: { features: ['workspace_extension_mentions'] },
+    client: {
+      workspaceByCwd: () => ({
+        ensureRuntime: vi.fn(async () => ({
+          capabilities: {
+            extensions: {
+              state: 'error',
+              error: { message: 'Extension capability failed.' },
+            },
+          },
+        })),
+        workspaceRuntimeExtensions,
+      }),
+    },
+  };
+
+  await mount({ atWorkspaceCwd: '/secondary' });
+  await expect(
+    latest!.workspaceActionsRef.current!.loadExtensionsStatus!(),
+  ).rejects.toThrow('Extension capability failed.');
+  expect(workspaceRuntimeExtensions).not.toHaveBeenCalled();
+});
+
 function pressHistoryKey(key: 'ArrowUp' | 'ArrowDown') {
   const editor = container!.querySelector('.cm-content')!;
   editor.dispatchEvent(
