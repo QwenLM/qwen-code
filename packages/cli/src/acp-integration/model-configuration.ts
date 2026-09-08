@@ -12,6 +12,7 @@ import {
   type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
+import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
 
 export type ModelReasoningConfiguration =
   | {
@@ -141,6 +142,12 @@ export function getConfiguredModelReasoning(
   modelId = config.getModel?.(),
   fallbackToManifest = true,
 ): ModelReasoningConfiguration | undefined {
+  if (
+    config.getActiveRuntimeModelSnapshot?.() ||
+    config.getModel?.().startsWith(ACP_ROUTE_ID_PREFIX)
+  ) {
+    return undefined;
+  }
   const generation = config.getContentGeneratorConfig?.();
   const authType = generation?.authType ?? config.getAuthType?.();
   const baseUrl =

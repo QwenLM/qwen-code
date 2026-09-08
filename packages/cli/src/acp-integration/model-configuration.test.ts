@@ -36,6 +36,17 @@ describe('model configuration manifest', () => {
     } as unknown as Config;
 
     expect(getConfiguredModelReasoning(config)).toBe(reasoning);
+    for (const guarded of [
+      { getActiveRuntimeModelSnapshot: () => ({ id: 'runtime-model' }) },
+      { getModel: () => 'qwen-route:v1:opaque' },
+    ]) {
+      expect(
+        getConfiguredModelReasoning({
+          ...config,
+          ...guarded,
+        } as unknown as Config),
+      ).toBeUndefined();
+    }
     expect(
       buildModelReasoningConfigOption('deepseek-v4-pro', {}, reasoning),
     ).toMatchObject({

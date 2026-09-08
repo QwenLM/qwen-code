@@ -1780,7 +1780,7 @@ describe('ContentGenerationPipeline', () => {
         { model, contents: [{ parts: [{ text: 'Hello' }], role: 'user' }] },
         'main',
       );
-      return (mockClient.chat.completions.create as Mock).mock.calls[0][0];
+      return (mockClient.chat.completions.create as Mock).mock.calls.at(-1)![0];
     }
 
     it.each([
@@ -1844,26 +1844,32 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('leaves a samplingParams reasoning object for the provider hook', async () => {
+    it('leaves nested reasoning for provider-owned wire paths', async () => {
       // `samplingParams` is the user's own wire shape and ships verbatim — the
       // contract `clampConfiguredReasoningEffort` already keeps — so a tier the
       // capability does not list must still reach the provider hook that
       // translates it instead of being deleted here.
-      const apiCall = await executeWithCapability(
-        {
-          thinking: true,
-          efforts: ['high', 'max'],
-          defaultEffort: 'high',
-          disableField: 'thinking',
-        },
-        {
-          samplingParams: {
-            reasoning: { effort: 'xhigh' },
-          } as ContentGeneratorConfig['samplingParams'],
-        },
-      );
+      const capability = {
+        thinking: true,
+        efforts: ['high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'thinking',
+      } as const;
+      const apiCall = await executeWithCapability(capability, {
+        samplingParams: {
+          reasoning: { effort: 'xhigh' },
+        } as ContentGeneratorConfig['samplingParams'],
+      });
       expect(apiCall['reasoning']).toEqual({ effort: 'xhigh' });
       expect(apiCall['reasoning_effort']).toBeUndefined();
+
+      const openRouterCall = await executeWithCapability(capability, {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: { effort: 'high' },
+        samplingParams: undefined,
+      });
+      expect(openRouterCall['reasoning']).toEqual({ effort: 'high' });
+      expect(openRouterCall['reasoning_effort']).toBeUndefined();
     });
 
     it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {

@@ -907,7 +907,8 @@ export class ContentGenerationPipeline {
     // contract `clampConfiguredReasoningEffort` keeps), so the capability
     // mapping must leave it for the provider hook to translate.
     if (
-      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      !isOpenRouterHostname(this.contentGeneratorConfig)
     ) {
       baseRequest = applyConfiguredReasoningEffort(
         baseRequest,
