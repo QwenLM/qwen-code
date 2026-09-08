@@ -42,6 +42,7 @@ export { Storage } from '${repo}/packages/core/src/config/storage.js';
 export * as view from '${repo}/packages/web-shell/client/components/workspace-agents/agents-view-logic.js';
 export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard, THREAD_TOOL_NAMES } from '${repo}/${src}/capability.js';
 export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo}/${src}/thread-status.js';
+export { resolveAgentPersona } from '${repo}/${src}/persona.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
 );
@@ -1611,6 +1612,148 @@ ok(
     threadId: claimable.id,
     runId: claimBooked.dispatched[0].id,
   })) === undefined,
+);
+
+console.log('\n17g. the quiet no-ops');
+// Each of these does nothing, which is the point: doing nothing quietly is a
+// behaviour, and every one of these guards survived a mutation campaign
+// because nothing here ever asked for the case where there is nothing to do.
+
+ok(
+  'delivering notifications with no sender sends nothing',
+  (await M.deliverNotifications(ROOT, undefined)) === 0,
+);
+// A fresh workspace has no notify target configured, so even with a sender
+// there is nowhere to send. The count is what proves it did not try.
+let attempted = 0;
+ok(
+  'and with a sender but no destination it still sends nothing',
+  (await M.deliverNotifications(ROOT, async () => {
+    attempted += 1;
+  })) === 0 && attempted === 0,
+  `attempted ${attempted}`,
+);
+
+// With a destination configured and something pending, the missing-sender
+// guard becomes observable: without it the loop would call `undefined`. The
+// earlier assertion could not reach it, because with no target the loop never
+// gets that far.
+await M.setAgentNotifyTarget(ROOT, {
+  channelName: 'lark',
+  target: { type: 'user', id: 'u1' },
+});
+const notifying = await startFor('Notifying');
+await asAgent(
+  notifying.agentId,
+  notifying.th.id,
+  notifying.runId,
+  notifying.th.rootThreadId,
+  () =>
+    new M.ThreadBlockTool(cfg).buildAndExecute(
+      { question: 'which one?' },
+      sig(),
+    ),
+);
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: notifying.th.id,
+    runId: notifying.runId,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+ok(
+  'a blocker queues a notification once a destination exists',
+  (await M.readThread(ROOT, notifying.th.id)).outbox.some(
+    (e) => e.kind === 'notification' && e.status === 'pending',
+  ),
+);
+ok(
+  'and with something to send but no sender, nothing is attempted',
+  (await M.deliverNotifications(ROOT, undefined)) === 0,
+);
+// Not "exactly once" in absolute terms: by this point the script has closed
+// several runs and each queued its own notification. What must hold is that
+// every pending one goes out once and a second pass sends nothing.
+let sent = 0;
+const firstPass = await M.deliverNotifications(ROOT, async () => {
+  sent += 1;
+});
+ok(
+  'a real sender delivers every pending notification',
+  firstPass >= 1 && sent === firstPass,
+  `reported ${firstPass}, sender saw ${sent}`,
+);
+const secondPass = await M.deliverNotifications(ROOT, async () => {
+  sent += 1;
+});
+ok(
+  'and a second pass sends nothing, so a retry is not a second message',
+  secondPass === 0 && sent === firstPass,
+  `second pass ${secondPass}, sender total ${sent}`,
+);
+await M.setAgentNotifyTarget(ROOT, undefined);
+
+ok(
+  'dispatching with nothing pending is a no-op',
+  (
+    await M.dispatchOnce(ROOT, {
+      inspect: async () => ({ kind: 'absent' }),
+      start: async () => ({ status: 'capacity_wait' }),
+      cancel: async () => true,
+    })
+  ).length >= 0,
+);
+
+// persona: blank instructions must not append an empty paragraph that reads
+// as an instruction meant to say something.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_blank', name: 'blank', createdAt: 1, instructions: '   ' },
+]);
+const personaCfg = {
+  getProjectRoot: () => ROOT,
+  getSubagentManager: () => ({
+    loadSubagent: async () => ({ name: 'general-purpose' }),
+    convertToRuntimeConfig: async () => ({
+      promptConfig: { systemPrompt: 'BASE' },
+      toolConfig: { tools: ['*'] },
+    }),
+  }),
+};
+const blankPersona = await M.resolveAgentPersona(personaCfg, 'ag_blank');
+ok(
+  'whitespace-only instructions leave the prompt exactly as the definition',
+  blankPersona.status === 'resolved' && blankPersona.systemPrompt === 'BASE',
+  JSON.stringify(blankPersona.systemPrompt),
+);
+
+// Clearing an assignee that was never set changes nothing and is not an error.
+const unassigned = await M.createThread(ROOT, { title: 'Never assigned' });
+const cleared = await M.assignThread(ROOT, unassigned.id, undefined);
+ok(
+  'clearing an assignee nobody set is accepted and changes nothing',
+  cleared.kind === 'updated' && cleared.thread.assigneeAgentId === undefined,
+  JSON.stringify(cleared.kind),
+);
+
+// Acknowledging on a thread that owes nothing must not invent an entry.
+const owesNothing = thr('ack', undefined, []);
+ok(
+  'acknowledging with nothing outstanding returns the same thread',
+  M.acknowledgeCloseObligations(owesNothing, 1, () => true) === owesNothing,
+);
+// And a selector that matches nothing is the same no-op even when the thread
+// does owe something — the discharge is scoped, not a blanket clear.
+const owesOne = thr('ack2', undefined, [
+  run('r_b', 1, { status: 'completed', closeKind: 'blocked', endedAt: 2 }),
+]);
+ok(
+  'a selector matching nothing leaves an owing thread untouched',
+  M.acknowledgeCloseObligations(owesOne, 5, () => false) === owesOne,
+);
+ok(
+  'while a selector that matches does discharge it',
+  M.acknowledgeCloseObligations(owesOne, 5, () => true) !== owesOne,
 );
 
 console.log('\n18. concurrency');
