@@ -3681,6 +3681,31 @@ describe('Server Config (config.ts)', () => {
       expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
     });
 
+    it('measures no-progress turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      for (let turn = 0; turn < 3; turn++) {
+        await vi.waitFor(() => expect(started).toHaveLength(turn + 1));
+        const permit = started[turn]!;
+        runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+        await runtime.finishTurn(permit);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        noProgressTurns: 3,
+      });
+    });
+
     it('rebinds the current Goal host to every replacement runtime', async () => {
       const config = new Config({
         ...baseParams,
