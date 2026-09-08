@@ -507,10 +507,12 @@ describe('worktreeResidue', () => {
     // The mismatch arm of the round trip: a real admin entry — a sibling's —
     // whose `gitdir` file names the sibling's `.git`, not this tree's.
     // `--show-toplevel` prints the directory the gitfile sits in, so the
-    // self-equality passes while the round trip catches the borrow. The arm
-    // needs its own witness: negating the comparison ships green without this
-    // test — measured, the gate then passes and certifies a tree measured
-    // against the sibling's index.
+    // self-equality would pass while the round trip catches the borrow. Inside
+    // a mount the LOCATION gate's own round-trip (`untrustedPointer`, R23-2)
+    // speaks first; this residue's identical check stays the answer outside
+    // one. Either way the verdict is a refusal, and removing the round trip
+    // from both layers turns this red — measured, the gate then passes and
+    // certifies a tree measured against the sibling's index.
     const sibling = join(repo, '.qwen', 'tmp', 'sibling-wt');
     gitRepo('worktree', 'add', '--detach', '-q', sibling, 'HEAD');
     const admin = readFileSync(join(sibling, '.git'), 'utf8')
@@ -521,7 +523,9 @@ describe('worktreeResidue', () => {
     const got = worktreeResidue(tree);
 
     expect(got.paths).toEqual([]);
-    expect(got.unmeasured).toContain('does not point back');
+    expect(got.unmeasured).toMatch(
+      /does not point back|a different tree's admin entry/,
+    );
   });
 
   it('says UNMEASURED — not "not a git worktree" — for a dangling backpointer', () => {
@@ -2382,6 +2386,35 @@ describe('untrustedGitfile', () => {
         join(repo, '.git'),
       );
       expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
+
+  itWhereContainmentExists(
+    "refuses a gitfile borrowing a SIBLING worktree's legitimate admin entry",
+    () => {
+      // The third shape (R23-2): the entry is REAL — outside the mount, so
+      // the location question passes, and not the common dir, so the shape
+      // question passes — but it belongs to a sibling, and every command
+      // through it measures and mutates THAT tree. Only the entry's own
+      // `gitdir` backpointer names its owner, so the round-trip is the arm
+      // that speaks here: removed, this tree is admitted and the assertion
+      // goes red.
+      const { repo, tree, mount } = pipelineTree();
+      const sibling = join(repo, '.qwen', 'tmp', 'review-pr-2');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', sibling, 'HEAD'],
+        {
+          cwd: repo,
+        },
+      );
+      const admin = readFileSync(join(sibling, '.git'), 'utf8')
+        .trim()
+        .replace(/^gitdir:\s*/, '');
+      writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+      expect(untrustedGitfile(tree, mount)).toContain(
+        "a different tree's admin entry",
+      );
     },
   );
 

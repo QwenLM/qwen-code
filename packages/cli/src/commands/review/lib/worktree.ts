@@ -397,6 +397,53 @@ function untrustedPointer(
       'repository instead of this tree'
     );
   }
+  // The backpointer round-trip the write paths already carry
+  // (scratch-tree.ts), because a rewritten gitfile has a THIRD shape the two
+  // questions above cannot see: a SIBLING worktree's legitimate admin entry.
+  // That entry is outside the mount (question 1 passes) and is not the common
+  // dir (question 2 passes — a linked worktree's common dir differs from its
+  // git dir), while every host-side command through it measures and mutates
+  // the SIBLING tree. The entry's `gitdir` file names the `.git` of the tree
+  // it belongs to; a borrowed entry names the sibling's. `isSubpath`, because
+  // `dir` here may be any directory inside the tree (the launch-directory
+  // form of this question) — the entry must own the tree `dir` stands in,
+  // not `dir` itself.
+  //
+  // Only a definitive MISMATCH is this arm's to name. A backpointer that
+  // cannot be read or resolved — a moved tree, a dangling `gitdir` file —
+  // redirects nothing (the tree still resolves through its own gitfile), and
+  // the downstream identity checks refuse that shape with their own reasons;
+  // refusing it here too would shadow exactly those witnesses. And the one
+  // writer who could corrupt a backpointer to duck the mismatch — reviewed
+  // code — cannot reach an entry outside the mount at all, which question 1
+  // has already established about this one.
+  let backpointer: string;
+  try {
+    // `\n` only, never `.trim()`: the same divergence `resolvedGitDir`
+    // documents — a path ending in U+00A0 or U+FEFF is resolved by git with
+    // the character kept and would be judged here with it gone.
+    backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').replace(
+      /\n$/,
+      '',
+    );
+  } catch {
+    return null;
+  }
+  let ownerTree: string;
+  let here: string;
+  try {
+    ownerTree = realpathSync(dirname(resolve(gitDir, backpointer)));
+    here = realpathSync(dir);
+  } catch {
+    return null;
+  }
+  if (ownerTree !== here && !isSubpath(ownerTree, here)) {
+    return (
+      "resolves to a different tree's admin entry — its gitdir " +
+      'backpointer names that tree, not this one, so every command ' +
+      'through it would measure and mutate the tree it actually belongs to'
+    );
+  }
   return null;
 }
 
