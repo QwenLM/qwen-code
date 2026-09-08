@@ -43,6 +43,7 @@ export * as view from '${repo}/packages/web-shell/client/components/workspace-ag
 export { buildAgentToolConfig, classifyAgentTool, createAgentToolInvocationGuard, THREAD_TOOL_NAMES } from '${repo}/${src}/capability.js';
 export { outstandingCloseObligations, acknowledgeCloseObligations } from '${repo}/${src}/thread-status.js';
 export { resolveAgentPersona } from '${repo}/${src}/persona.js';
+export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
 );
@@ -1754,6 +1755,47 @@ ok(
 ok(
   'while a selector that matches does discharge it',
   M.acknowledgeCloseObligations(owesOne, 5, () => true) !== owesOne,
+);
+
+console.log('\n17h. a report whose parent cannot go away');
+// The `!parent` branch in deliverParentReports guards a state the store
+// refuses to create: a thread with sub-threads cannot be deleted, so the
+// orphaned-report case is unreachable through any supported operation. That
+// refusal is the real guarantee, and it is what gets asserted; the guard
+// behind it stays as defence and stays uncatchable, which is the honest
+// reading rather than a test that fakes the state to look covered.
+const keptParent = await M.createThread(ROOT, { title: 'Cannot be deleted' });
+await M.createThread(ROOT, {
+  title: 'Its child',
+  parentThreadId: keptParent.id,
+});
+let deletionRefused = false;
+try {
+  await M.deleteThread(ROOT, keptParent.id);
+} catch {
+  deletionRefused = true;
+}
+ok(
+  'a thread with sub-threads cannot be deleted out from under them',
+  deletionRefused,
+);
+
+// The payload, though, is only a record of unknown fields, so a malformed one
+// can exist and the delivery pass must not take it personally.
+const malformed = await M.createThread(ROOT, { title: 'Malformed report' });
+await M.enqueueThreadEvent(ROOT, malformed.id, {
+  kind: 'parent_report',
+  payload: { event: 'child_in_review', parentThreadId: 42 },
+});
+let survivedMalformed = true;
+try {
+  await M.deliverParentReports(ROOT);
+} catch {
+  survivedMalformed = false;
+}
+ok(
+  'a report whose parent id is not even a string does not break the pass',
+  survivedMalformed,
 );
 
 console.log('\n18. concurrency');

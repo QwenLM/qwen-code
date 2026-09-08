@@ -260,6 +260,24 @@ that has never failed is not evidence.
 | `run-workspace-agents-crash.mjs`            | A writer SIGKILLed holding the lock: the store stays readable and writes return unaided                                                                                                                                                                                                                                                    |
 | `fuzz-workspace-agents.mjs`                 | Random operation sequences against the invariants. 25 seeds × 600 steps — 15,000 operations — with no violation                                                                                                                                                                                                                            |
 
+How much those checks are worth was measured rather than assumed. Disabling
+each of the 86 single-line guards in the subsystem one at a time and re-running
+the harness caught 8 at first and 28 now. The remaining survivors fall into
+three kinds, and the distinction matters more than the number:
+
+- **Unobservable.** Removing `if (pending.length === 0) return` walks an empty
+  list to the same end; removing the unset-assignee check re-assigns undefined
+  over undefined. No assertion can catch these and writing one would be
+  theatre.
+- **Unreachable.** `deliverParentReports` guards a report whose parent thread
+  is gone, but `deleteThread` refuses to delete a thread that has sub-threads,
+  so no supported operation produces that state. The refusal is asserted; the
+  guard behind it stays as defence.
+- **Somebody else's.** Most of store.ts's 39 survivors are per-field
+  validators. store.test.ts covers fail-closed at the record level — checked,
+  not assumed — but a single field check can be disabled with every suite
+  still green. That is a real if minor gap.
+
 What none of it covers: the vitest suites, which are larger and still need CI;
 partial-write recovery, since the file lock means two writers never touch one
 file and killing an idle holder never interrupts a write (`store.test.ts`
