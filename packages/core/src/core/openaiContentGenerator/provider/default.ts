@@ -17,6 +17,7 @@ import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -229,11 +230,8 @@ export class DefaultOpenAICompatibleProvider
     )
       return;
     const reasoning = body['reasoning'] as { effort?: unknown } | undefined;
-    if (reasoning?.effort === undefined) return;
-    if (
-      typeof body['reasoning_effort'] !== 'string' ||
-      !body['reasoning_effort']
-    ) {
+    if (typeof reasoning?.effort !== 'string' || !reasoning.effort) return;
+    if (isReasoningEffortPlaceholder(body['reasoning_effort'])) {
       body['reasoning_effort'] = reasoning.effort;
     }
     const { effort: _drop, ...rest } = reasoning;

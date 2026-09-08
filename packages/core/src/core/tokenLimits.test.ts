@@ -33,6 +33,7 @@ describe('normalize', () => {
     // right of the model name — the opposite side from the `family:model`
     // form above — so the half worth keeping is the left one.
     expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
+    expect(normalize('openai/gpt-5.5-pro:batch')).toBe('gpt-5.5-pro');
     expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
     expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
     expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');

@@ -1750,6 +1750,51 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it.each([
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+      },
+      'medium',
+    ],
+    [{ enabled: false, effort: 'default', efforts: [] }, 'default'],
+    [
+      {
+        enabled: true,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['medium'],
+      },
+      'none',
+    ],
+  ] as const)(
+    'toggles thinking using the supported default tier for %j',
+    async (reasoning, expected) => {
+      const onSelectReasoningEffort = vi.fn();
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: 'gpt-5.4',
+        availableModels: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+        onSelectReasoningEffort,
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const toggle = document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-thinking-toggle]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle?.click());
+      expect(onSelectReasoningEffort).toHaveBeenCalledWith(expected);
+    },
+  );
+
   it('localizes every fixed effort tier after a runtime language change', () => {
     const props: ChatEditorRenderProps = {
       visibleToolbarActions: ['model'],

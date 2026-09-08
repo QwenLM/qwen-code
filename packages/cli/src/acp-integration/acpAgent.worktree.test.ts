@@ -143,6 +143,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   getGptReasoningCapabilities: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReasoningEffortPlaceholder,
+  isOpenRouterHostname: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isOpenRouterHostname,
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,

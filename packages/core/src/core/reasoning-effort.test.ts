@@ -11,6 +11,7 @@ import {
   applyReasoningEffort,
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
   normalizeReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
@@ -19,6 +20,21 @@ describe('getGptReasoningCapabilities', () => {
   it.each([
     ['gpt-5', ['low', 'medium', 'high'], 'medium', true, true],
     ['gpt-5-mini', ['low', 'medium', 'high'], 'medium', true, true],
+    ['gpt-5-nano', ['low', 'medium', 'high'], 'medium', true, true],
+    [
+      'gpt-5.4-mini',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
+    [
+      'gpt-5.4-nano',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
     ['gpt-5.1', ['low', 'medium', 'high'], 'medium', false, false],
     ['gpt-5.1-codex', ['low', 'medium', 'high'], 'medium', true, true],
     [
@@ -63,6 +79,25 @@ describe('getGptReasoningCapabilities', () => {
     ['gpt-5.2-pro', ['medium', 'high', 'xhigh'], 'medium', true, true],
     ['gpt-5.5-pro', ['medium', 'high', 'xhigh'], 'high', true, true],
     ['gpt-5.6.1', REASONING_EFFORT_TIERS, 'medium', true, false],
+    ['bailian/gpt-5.6-sol', REASONING_EFFORT_TIERS, 'medium', true, false],
+    ['azure/gpt-5.6-terra', REASONING_EFFORT_TIERS, 'medium', true, false],
+    ['gpt-5.6-luna', REASONING_EFFORT_TIERS, 'medium', true, false],
+    ['litellm/gpt-6-astra', REASONING_EFFORT_TIERS, 'medium', true, true],
+    [' gpt-5.4 ', ['low', 'medium', 'high', 'xhigh'], 'medium', false, false],
+    [
+      'openai:gpt-5.4',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
+    [
+      'gateway|gpt-5.4',
+      ['low', 'medium', 'high', 'xhigh'],
+      'medium',
+      false,
+      false,
+    ],
     ['openai/gpt-5:free', ['low', 'medium', 'high'], 'medium', true, true],
     [
       'openai/gpt-5.5-pro:batch',
@@ -101,6 +136,18 @@ describe('getGptReasoningCapabilities', () => {
     'gpt-50',
     'my-gpt-5.4',
     'gpt-5.4custom',
+    'gpt-5-chatgpt',
+    'gpt-5-turbo',
+    'gpt-5-air',
+    'gpt-5-lite',
+    'gpt-5-instruct',
+    'gpt-5.0',
+    'gpt-5.10',
+    'gpt-5.99',
+    'gpt-5.4-realtime',
+    'gpt-5.4-pro-custom',
+    'gpt-5.6-sol-custom',
+    'bailian/gpt-5-turbo',
     'gpt-5-chat-latest',
     'openai/gpt-5.2-chat-latest',
     'openai/gpt-5.2-chat-latest:batch',
@@ -113,6 +160,21 @@ describe('getGptReasoningCapabilities', () => {
   ])('does not assign GPT reasoning controls to %s', (model) => {
     expect(getGptReasoningCapabilities(model)).toBeUndefined();
   });
+});
+
+describe('isReasoningEffortPlaceholder', () => {
+  it.each([undefined, null, ''])(
+    'accepts the cleared flat value %j',
+    (value) => {
+      expect(isReasoningEffortPlaceholder(value)).toBe(true);
+    },
+  );
+  it.each(['none', 'high', 'ludicrous', 42, false])(
+    'preserves the explicit flat value %j',
+    (value) => {
+      expect(isReasoningEffortPlaceholder(value)).toBe(false);
+    },
+  );
 });
 
 describe('REASONING_EFFORT_TIERS', () => {

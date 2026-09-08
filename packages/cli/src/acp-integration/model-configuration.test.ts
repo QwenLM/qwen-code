@@ -12,6 +12,7 @@ import {
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
   getModelConfiguration,
+  getGptReasoningOverrideState,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
@@ -319,4 +320,110 @@ describe('model configuration manifest', () => {
 
     expect(live.reasoning).toBe(false);
   });
+});
+
+describe('GPT raw reasoning reporting', () => {
+  it.each([null, { effort: 'low' }])(
+    'reports mandatory cleanup before an opaque nested override %j',
+    (reasoning) => {
+      expect(
+        getGptReasoningOverrideState({
+          model: 'gpt-6-astra',
+          reasoning: { effort: 'high' },
+          extra_body: { reasoning_effort: 'none', reasoning },
+        } as ContentGeneratorConfig),
+      ).toEqual({
+        enabled: true,
+        useDefaultEffort: true,
+        opaqueOverride: true,
+      });
+    },
+  );
+
+  it.each([
+    [{ model: 'custom-model', extra_body: { reasoning: false } }, undefined],
+    [{ reasoning: false, extra_body: { reasoning: false } }, undefined],
+    [
+      { extra_body: { reasoning: false } },
+      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+    ],
+    [
+      { extra_body: { reasoning: null } },
+      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+    ],
+    [
+      { extra_body: { reasoning: { effort: 'high' } } },
+      { enabled: true, useDefaultEffort: true, opaqueOverride: true },
+    ],
+    [
+      { extra_body: { reasoning: false, reasoning_effort: 'none' } },
+      { enabled: false, useDefaultEffort: false },
+    ],
+    [
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning: false },
+      },
+      { enabled: false },
+    ],
+    [
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      { enabled: true },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        extra_body: { reasoning_effort: 'none' },
+      },
+      { enabled: false, useDefaultEffort: true },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+      },
+      { enabled: false, useDefaultEffort: true },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: { effort: 'high' },
+        extra_body: { reasoning_effort: 'none' },
+      },
+      { enabled: false, useDefaultEffort: false },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+      },
+      { enabled: false, useDefaultEffort: true },
+    ],
+    [
+      {
+        model: 'gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning: { effort: 'high' }, reasoning_effort: 'none' },
+      },
+      { enabled: true },
+    ],
+  ] as const)(
+    'reports %j without inferring gateway behavior',
+    (overrides, expected) => {
+      const generation = {
+        model: 'gpt-5.5',
+        baseUrl: 'https://api.openai.com/v1',
+        ...overrides,
+      } as ContentGeneratorConfig;
+      expect(getGptReasoningOverrideState(generation)).toEqual(expected);
+    },
+  );
 });

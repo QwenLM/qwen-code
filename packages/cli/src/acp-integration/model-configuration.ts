@@ -7,6 +7,8 @@
 import {
   REASONING_EFFORT_TIERS,
   getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
+  isOpenRouterHostname,
   clampReasoningEffort,
   type Config,
   type ContentGeneratorConfig,
@@ -81,6 +83,70 @@ export type ModelReasoningConfigState = {
   effort?: ReasoningEffort;
   thinkingMandatory?: boolean;
 };
+
+export function getGptReasoningOverrideState(
+  generation: ContentGeneratorConfig,
+):
+  | { enabled?: boolean; useDefaultEffort?: boolean; opaqueOverride?: boolean }
+  | undefined {
+  const capabilities = getGptReasoningCapabilities(generation.model);
+  if (!capabilities || generation.reasoning === false) return undefined;
+  const raw = { ...generation.samplingParams, ...generation.extra_body };
+  const effort = raw['reasoning_effort'];
+  const nested = raw['reasoning'] as
+    | { enabled?: boolean; effort?: unknown; max_tokens?: number }
+    | false
+    | null
+    | undefined;
+  const openRouter = isOpenRouterHostname(generation);
+  const removedFlatNone =
+    (generation.thinkingMandatory === true || capabilities.thinkingMandatory) &&
+    effort === REASONING_EFFORT_NONE;
+  if (
+    typeof effort === 'string' &&
+    effort &&
+    !(removedFlatNone && nested !== undefined)
+  ) {
+    const discardedMandatoryTier =
+      removedFlatNone &&
+      nested === undefined &&
+      (!openRouter ||
+        !isReasoningEffortPlaceholder(
+          generation.samplingParams?.['reasoning_effort'],
+        ));
+    return {
+      enabled: effort !== REASONING_EFFORT_NONE,
+      useDefaultEffort: discardedMandatoryTier,
+    };
+  }
+  if (nested === undefined) return undefined;
+  if (!openRouter) {
+    // Raw nested fields are an opaque gateway extension outside OpenRouter.
+    return {
+      enabled: capabilities.defaultEnabled,
+      useDefaultEffort: true,
+      opaqueOverride: true,
+    };
+  }
+  if (nested === null) {
+    return { enabled: capabilities.defaultEnabled, useDefaultEffort: true };
+  }
+  if (
+    nested === false ||
+    nested.enabled === false ||
+    nested.effort === REASONING_EFFORT_NONE
+  ) {
+    return { enabled: false };
+  }
+  if (
+    nested.enabled === true ||
+    (typeof nested.effort === 'string' && nested.effort.length > 0) ||
+    (nested.max_tokens ?? 0) > 0
+  ) {
+    return { enabled: true };
+  }
+  return { enabled: capabilities.defaultEnabled, useDefaultEffort: true };
+}
 
 export function resolvePersistedReasoningConfigState(
   modelId: string | undefined,

@@ -367,6 +367,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   getGptReasoningCapabilities: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReasoningEffortPlaceholder,
+  isOpenRouterHostname: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isOpenRouterHostname,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -9398,13 +9404,118 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   );
 
   it.each([
+    ['gpt-5.4', 'xhigh'],
+    ['gpt-5-pro', 'high'],
+  ] as const)('applies a supported GPT effort for %s', async (model, value) => {
+    const sessionId = 'gpt-success-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getModel = vi.fn(() => model);
+    const generation = innerConfig.getContentGeneratorConfig();
+    Object.assign(generation, { model, reasoning: undefined });
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const result = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value,
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        result.configOptions.find((option) => option.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe(value);
+      expect(generation.reasoning).toEqual({ effort: value });
+      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      if (model === 'gpt-5-pro') {
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+          }),
+        ).rejects.toThrow('Unknown reasoning effort: medium');
+        expect(generation.reasoning).toEqual({ effort: 'high' });
+      }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it.each(['extra_body', 'samplingParams'] as const)(
+    'reports the mandatory GPT default when %s none discards the configured tier',
+    async (source) => {
+      const sessionId = 'gpt-mandatory-override-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn(() => 'gpt-6-astra');
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        [source]: { reasoning_effort: 'none' },
+      });
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          session.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe('medium');
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'xhigh',
+          }),
+        ).rejects.toThrow('Reasoning selection was not applied: xhigh');
+        expect(generation.reasoning).toEqual({ effort: 'high' });
+        expect(generation[source]).toEqual({ reasoning_effort: 'none' });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
     [
       { model: 'gpt-5.5', samplingParams: { reasoning_effort: 'none' } },
       'none',
     ],
     [
       { model: 'gpt-5.5', extra_body: { reasoning: { enabled: false } } },
+      'medium',
+    ],
+    [{ model: 'gpt-5.5', samplingParams: { reasoning: null } }, 'medium'],
+    [{ model: 'gpt-5.5', extra_body: { reasoning: null } }, 'medium'],
+    [
+      { model: 'gpt-5.5', samplingParams: { reasoning: { effort: 'none' } } },
+      'medium',
+    ],
+    [{ model: 'gpt-5.5', extra_body: { reasoning: false } }, 'medium'],
+    [
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning: { enabled: false } },
+      },
       'none',
+    ],
+    [
+      {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        extra_body: { reasoning: { effort: 'high' } },
+      },
+      'medium',
     ],
     [{ samplingParams: { reasoning_effort: null } }, 'none'],
     [{ samplingParams: { reasoning: {} } }, 'none'],
@@ -9417,8 +9528,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'none',
     ],
     [{ extra_body: { reasoning: { exclude: true } } }, 'none'],
-    [{ extra_body: { reasoning: { enabled: true } } }, 'medium'],
-    [{ extra_body: { reasoning: { max_tokens: 1024 } } }, 'medium'],
+    [{ extra_body: { reasoning: { enabled: true } } }, 'none'],
+    [{ extra_body: { reasoning: { max_tokens: 1024 } } }, 'none'],
     [
       {
         samplingParams: { reasoning_effort: 'none' },
@@ -9428,8 +9539,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ],
     [{ samplingParams: { reasoning_effort: 'high' } }, 'medium'],
     [{ extra_body: { reasoning_effort: 'high' } }, 'medium'],
-    [{ samplingParams: { reasoning: { effort: 'high' } } }, 'medium'],
-    [{ extra_body: { reasoning: { effort: 'high' } } }, 'medium'],
+    [{ samplingParams: { reasoning: { effort: 'high' } } }, 'none'],
+    [{ extra_body: { reasoning: { effort: 'high' } } }, 'none'],
     [{ samplingParams: { reasoning_effort: 'none' } }, 'none'],
     [{ extra_body: { reasoning: { enabled: false } } }, 'none'],
     [
@@ -9510,6 +9621,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     },
   );
+
+  it('does not confirm the displayed GPT default through an opaque override', async () => {
+    const sessionId = 'gpt-opaque-override-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getModel = vi.fn(() => 'gpt-5.5');
+    const generation = innerConfig.getContentGeneratorConfig();
+    Object.assign(generation, {
+      model: 'gpt-5.5',
+      reasoning: undefined,
+      extra_body: { reasoning: { effort: 'high' } },
+    });
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'medium',
+        }),
+      ).rejects.toThrow('Reasoning selection was not applied: medium');
+      expect(generation.reasoning).toBeUndefined();
+      const result = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'none',
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        result.configOptions.find((option) => option.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('none');
+      expect(generation.reasoning).toBe(false);
+      expect(generation.extra_body).toEqual({ reasoning: { effort: 'high' } });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';

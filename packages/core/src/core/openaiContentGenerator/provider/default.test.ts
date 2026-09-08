@@ -540,6 +540,22 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it.each(['', 42])(
+      'does not translate an invalid configured effort %j',
+      (effort) => {
+        const result = provider.buildRequest(
+          {
+            model: 'gpt-5.4',
+            messages: [],
+            reasoning: { effort },
+          } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+          'prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBeUndefined();
+        expect(result['reasoning']).toEqual({ effort });
+      },
+    );
+
     it('warns once however many requests the same provider clamps', () => {
       mockDebugLogger.warn.mockClear();
       const req = {
@@ -581,7 +597,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
       },
     );
 
-    it.each([undefined, null])(
+    it.each([undefined, null, ''])(
       'preserves a sibling budget with a %s flat override',
       (override) => {
         mockContentGeneratorConfig.extra_body = { reasoning_effort: override };

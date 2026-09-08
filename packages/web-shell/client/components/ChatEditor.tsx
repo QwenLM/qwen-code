@@ -1111,7 +1111,9 @@ function ModelReasoningControls({
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? 'default' : 'none')
+            void select(
+              enabled ? (reasoning.defaultEffort ?? 'default') : 'none',
+            )
           }
         />
       </div>

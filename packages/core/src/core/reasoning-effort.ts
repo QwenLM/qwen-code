@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { normalize } from './tokenLimits.js';
 
 /**
  * Unified reasoning-effort ladder exposed to users (e.g. via `/effort`).
@@ -48,43 +49,99 @@ export function getGptReasoningCapabilities(model: string | undefined):
       thinkingMandatory: boolean;
     }
   | undefined {
-  const normalized = (model?.toLowerCase() ?? '').replace(/:[\w.+-]+$/, '');
-  if (/^(?:openai\/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
-    return {
-      efforts: REASONING_EFFORT_TIERS,
-      defaultEffort: 'medium',
-      defaultEnabled: true,
-      thinkingMandatory: true,
-    };
+  const normalized = normalize(model ?? '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/^(gpt-5\.\d+)(?:\.\d+)+(?=-|$)/, '$1');
+  switch (normalized) {
+    case 'gpt-5':
+    case 'gpt-5-mini':
+    case 'gpt-5-nano':
+    case 'gpt-5.1-codex':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5-pro':
+      return {
+        efforts: ['high'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.1':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.2':
+    case 'gpt-5.4':
+    case 'gpt-5.4-mini':
+    case 'gpt-5.4-nano':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.1-codex-max':
+    case 'gpt-5.2-codex':
+    case 'gpt-5.3-codex':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.2-pro':
+    case 'gpt-5.4-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.5':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.5-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.6':
+    case 'gpt-5.6-sol':
+    case 'gpt-5.6-terra':
+    case 'gpt-5.6-luna':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-6-astra':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    default:
+      return undefined;
   }
-  const match = /^(?:openai\/)?gpt-5(?:\.(\d+))?(?:\.\d+)*(?:-|$)/.exec(
-    normalized,
-  );
-  if (!match || /-chat(?:-|$)/.test(normalized)) return undefined;
+}
 
-  const minor = Number(match[1] ?? 0);
-  const pro = /-pro(?:-|$)/.test(normalized);
-  const codex = /-codex(?:-|$)/.test(normalized);
-  const thinkingMandatory = minor === 0 || pro || codex;
-  const efforts: ReasoningEffort[] = pro
-    ? minor === 0
-      ? ['high']
-      : ['medium', 'high', 'xhigh']
-    : [
-        'low',
-        'medium',
-        'high',
-        ...(minor >= 2 || /-codex-max(?:-|$)/.test(normalized)
-          ? (['xhigh'] as const)
-          : []),
-        ...(minor >= 6 ? (['max'] as const) : []),
-      ];
-  return {
-    efforts,
-    defaultEffort: pro && (minor === 0 || minor >= 5) ? 'high' : 'medium',
-    defaultEnabled: thinkingMandatory || minor >= 5,
-    thinkingMandatory,
-  };
+export function isReasoningEffortPlaceholder(value: unknown): boolean {
+  return value == null || value === '';
 }
 
 /**

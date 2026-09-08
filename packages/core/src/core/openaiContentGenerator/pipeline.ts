@@ -29,7 +29,10 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
-import { getGptReasoningCapabilities } from '../reasoning-effort.js';
+import {
+  getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
+} from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
@@ -1191,7 +1194,10 @@ export class ContentGenerationPipeline {
           request.model || this.contentGeneratorConfig.model,
         ) &&
         configSamplingParams['reasoning'] === undefined &&
-        (configSamplingParams['reasoning_effort'] == null || rawEffort == null)
+        (isReasoningEffortPlaceholder(
+          configSamplingParams['reasoning_effort'],
+        ) ||
+          isReasoningEffortPlaceholder(rawEffort))
           ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
           : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
