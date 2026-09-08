@@ -542,6 +542,12 @@ const EN: Messages = {
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
+  'approval.explain': 'Explain',
+  'approval.explanation': 'Command explanation',
+  'approval.explaining': 'Explaining…',
+  'approval.explanationThinking': 'Thinking…',
+  'approval.explanationFailed': 'Explanation failed',
+  'approval.reExplain': 'Explain again',
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
@@ -649,6 +655,8 @@ const EN: Messages = {
     'Resolve the pending standalone conversation state before continuing.',
   'session.checkStatus': 'Check status',
   'session.retryCreation': 'Start a fresh conversation',
+  'session.writerBlocked':
+    'Another Qwen process or an unresolved writer lock may be blocking this conversation. Close it in other processes and try again. If it still fails, check local daemon diagnostics before recovery.',
   'session.directoryRecreated':
     'The transcript was recovered, but files from the previous private directory were not available.',
   'session.directoryMissing':
@@ -1113,6 +1121,15 @@ const EN: Messages = {
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'history.loadingEarlier': 'Loading earlier messages…',
+  'history.openEarlier': 'Open earlier history',
+  'history.loadEarlier': 'Load earlier',
+  'history.loadNewer': 'Load newer',
+  'history.returnLatest': 'Return to latest',
+  'history.viewUnavailable':
+    'History is temporarily unavailable while the session reconnects or repairs its transcript.',
+  'history.snapshotView': 'Historical snapshot · read-only',
+  'history.viewError':
+    'This section could not be loaded. Move the reading position and retry, or return to latest.',
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
@@ -1611,7 +1628,7 @@ const EN: Messages = {
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
-    'A running session cannot be archived; archiving would end its turn',
+    'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -1632,6 +1649,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.activeWork': 'Active work',
+  'sidebar.activityUnknown': 'Background activity unknown',
   'sidebar.waitingForApproval': 'Waiting for approval',
   'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
@@ -2348,6 +2367,8 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
   'goals.subtitle':
     'A goal keeps its session working until the condition is met. Only sessions that are currently loaded appear here — a goal advances only while its session is running.',
@@ -2695,6 +2716,10 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'contextUsage.refresh': 'Refresh',
+  'contextUsage.retry': 'Retry',
+  'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -3166,6 +3191,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -3376,6 +3403,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -4104,6 +4134,12 @@ const ZH: Messages = {
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
+  'approval.explain': '解释',
+  'approval.explanation': '命令解释',
+  'approval.explaining': '正在解释…',
+  'approval.explanationThinking': '思考中…',
+  'approval.explanationFailed': '解释失败',
+  'approval.reExplain': '重新解释',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
   'approval.option.restorePrevious': '是，恢复之前的模式',
@@ -4199,6 +4235,8 @@ const ZH: Messages = {
     '请先处理待确认的 Standalone 会话状态，再继续操作。',
   'session.checkStatus': '检查状态',
   'session.retryCreation': '开始新会话',
+  'session.writerBlocked':
+    '其他 Qwen 进程或未解决的写入锁可能阻止该会话访问。请在其他进程中关闭它后重试；若仍失败，请先查看本地 daemon 诊断日志再进行恢复。',
   'session.directoryRecreated':
     '会话记录已恢复，但之前私有目录中的文件未能恢复。',
   'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
@@ -4633,6 +4671,14 @@ const ZH: Messages = {
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'history.loadingEarlier': '正在加载更早消息…',
+  'history.openEarlier': '打开更早历史',
+  'history.loadEarlier': '加载更早记录',
+  'history.loadNewer': '加载较新记录',
+  'history.returnLatest': '返回最新',
+  'history.viewUnavailable': '会话正在重连或修复记录，历史暂时不可用。',
+  'history.snapshotView': '历史快照 · 只读',
+  'history.viewError':
+    '暂时无法加载此段记录。请移动阅读位置后重试，或返回最新。',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
   'history.retry': '重试',
@@ -5092,7 +5138,7 @@ const ZH: Messages = {
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
-    '不能归档运行中的会话，归档会终止其当前回合',
+    '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -5112,6 +5158,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.activeWork': '有活动任务',
+  'sidebar.activityUnknown': '后台活动状态未知',
   'sidebar.waitingForApproval': '等待批准',
   'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
@@ -5762,6 +5810,9 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
+  'goal.tokensOfBudget': (v) =>
+    `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': '目标',
   'goals.subtitle':
     '目标会让所在会话持续工作，直到条件满足。这里只列出当前已加载的会话——目标只在会话运行时才会推进。',
@@ -6084,6 +6135,10 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'contextUsage.refresh': '刷新',
+  'contextUsage.retry': '重试',
+  'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',
@@ -6529,6 +6584,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
@@ -6725,6 +6782,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',

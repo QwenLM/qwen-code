@@ -3,163 +3,236 @@ name: computer-use
 description: Control local desktop applications through Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
-# Computer Use with the CUA SDK
+## node_repl + @qwen-code/cua-sdk (Computer Use)
 
-- Prefer a dedicated connector or API. Use Computer Use only for UI state or
-  interactions the dedicated interface does not expose.
-- Perform Computer Use through `node_repl` and the typed `ComputerUse` API.
-  Do not use generic `callTool`, direct driver imports, AppleScript, JXA, or
-  synthesized-input utilities.
-- Observe the exact current window before acting. Prefer current element tokens
-  over screenshot coordinates; use coordinates only when accessibility is
-  incomplete and the screenshot provides the target.
-- Treat an action result as delivery evidence, not task completion. Decide from
-  fresh state and require stable postcondition evidence.
+- Use `node_repl` (JavaScript) for all Computer Use actions.
+- Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
+- Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
+- `node_repl` state is persistent across calls.
+- For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
 
-## Setup
+## Bootstrap
 
-If `node_repl` is unavailable, run these commands yourself:
+If `node_repl` is unavailable, run:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.2
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.3
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.3
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.4
 ```
 
-Tell the user to restart Qwen Code, then stop. If only the SDK import is
-missing, run the second command and retry.
+Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
+run the second command and retry.
 
-Create one persistent client per REPL kernel:
+Import the `ComputerUse` API directly once per fresh `node_repl` session:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
-globalThis.cuaRevisions ??= new Map();
 ```
 
-## Target and observe
+## API surface
 
-Use `listApps({signal:nodeRepl.signal})` and filter in JavaScript; print only
-likely matches. After selecting a real PID, call
-`listWindows({pid,signal:nodeRepl.signal})` and choose from returned
-metadata. Never guess a PID, window ID, element token, or coordinate. If the
-app is not running, start it with ordinary Node.js process APIs and refresh the
-lists.
-
-Maintain one revision cursor per window surface. The first observation has no
-base; later observations use only the last revision actually consumed for that
-same surface:
-
-```js
-globalThis.observeCuaWindow = async (target, options = {}) => {
-  const key = `${target.pid}:${target.windowId}`;
-  const state = await computer.observeWindow({
-    ...target,
-    ...options,
-    baseRevisionId: cuaRevisions.get(key),
-    signal: nodeRepl.signal,
-  });
-  if (state.revisionId) cuaRevisions.set(key, state.revisionId);
-  return state;
+```ts
+type WindowTarget = { pid: number; windowId: number };
+type ElementTarget = {
+  pid: number;
+  windowId?: number;
+  elementToken: string;
 };
+type CoordinateTarget = WindowTarget & { x: number; y: number };
+type PointOrElementTarget = CoordinateTarget | ElementTarget;
+type ExactActionTarget = WindowTarget | ElementTarget;
+type DeliveryOptions = { deliveryMode?: DeliveryMode };
+
+type ComputerUse = {
+  click: (
+    args: PointOrElementTarget &
+      DeliveryOptions & { button?: MouseButton; count?: number },
+  ) => Promise<object>;
+  doubleClick: (
+    args: PointOrElementTarget & DeliveryOptions,
+  ) => Promise<object>;
+  rightClick: (
+    args: PointOrElementTarget & DeliveryOptions & { modifier?: string[] },
+  ) => Promise<object>;
+  drag: (
+    args: WindowTarget &
+      DeliveryOptions & {
+        fromX: number;
+        fromY: number;
+        toX: number;
+        toY: number;
+      },
+  ) => Promise<object>;
+  observeWindow: (
+    args: WindowTarget & { disableDiff?: boolean; includeScreenshot?: boolean },
+  ) => Promise<WindowObservation>;
+  listApps: () => Promise<Array<App>>;
+  listWindows: (args: { pid: number }) => Promise<Array<Window>>;
+  performSecondaryAction: (
+    args: ElementTarget & { action: string },
+  ) => Promise<object>;
+  pressKey: (
+    args: ExactActionTarget &
+      DeliveryOptions & { key: string; modifiers?: string[] },
+  ) => Promise<object>;
+  hotkey: (
+    args: ExactActionTarget & DeliveryOptions & { keys: string[] },
+  ) => Promise<object>;
+  scroll: (
+    args: PointOrElementTarget &
+      DeliveryOptions & { direction: Direction; amount?: number },
+  ) => Promise<object>;
+  setValue: (args: ElementTarget & { value: string }) => Promise<object>;
+  typeText: (
+    args: ExactActionTarget & DeliveryOptions & { text: string },
+  ) => Promise<object>;
+  close: () => Promise<void>;
+};
+
+type App = {
+  name?: string;
+  bundle_id?: string;
+  pid?: number;
+  running?: boolean;
+  launch_path?: string;
+};
+
+type Window = {
+  window_id: number;
+  title?: string;
+  is_on_screen?: boolean;
+  on_current_space?: boolean;
+};
+
+type WindowObservation = {
+  pid: number;
+  windowId: number;
+  mode: 'full' | 'diff' | 'no_change';
+  resyncReason?: string;
+  text: string;
+  elements: Array<Element>;
+  screenshot?: Screenshot;
+};
+
+type Element = {
+  element_token?: string;
+  role?: string;
+  label?: string;
+  automation_id?: string;
+  value?: unknown;
+  actions?: string[];
+};
+
+type Screenshot = {
+  images: Array<{ mimeType: string; dataBase64: string }>;
+};
+
+type Direction = 'up' | 'down' | 'left' | 'right';
+type MouseButton = 'left' | 'right' | 'middle';
+type DeliveryMode = 'background' | 'foreground';
 ```
 
-Use accessibility text for efficient decisions. Request a screenshot when the
-tree is incomplete, visual layout matters, or action evidence conflicts with
-the tree. Emit only decision-relevant images:
+## Workflow
+
+### 1. Initialize
+
+Start by getting the state for the app and window you want to use. When the task
+names an app, filter for that name directly:
 
 ```js
+var apps = await computer.listApps();
+var matches = apps.filter(
+  (app) => app.name === 'Target App' || app.bundle_id === 'com.example.target',
+);
+nodeRepl.write(JSON.stringify(matches));
+
+var windows = await computer.listWindows({ pid: matches[0].pid });
+var target = { pid: matches[0].pid, windowId: windows[0].window_id };
+var state = await computer.observeWindow(target);
+nodeRepl.write(state.text); // This will return the accessibility tree
+```
+
+If you cannot identify an app from the task, prior context, or builtin apps,
+start by discovering the available apps:
+
+```js
+var apps = await computer.listApps();
+nodeRepl.write(JSON.stringify(apps));
+```
+
+After performing one or more UI actions, call `observeWindow(...)` before
+deciding what to do next. This keeps you in the current UI state. Read the
+current actionable `element_token` values from `state.elements`; tokens for
+unchanged elements remain valid across `diff` and `no_change` observations.
+
+For token efficiency, when appropriate, the accessibility tree will be returned
+as a diff from the most previous accessibility tree, listing only the elements
+that were removed, added, or changed. Prefer this default diff output; pass
+`disableDiff: true` only when you need a fresh full accessibility tree. If you
+disregard the text from a previous call to `observeWindow`, such as when you only
+emit the screenshot, get the full tree next time you inspect AX text.
+`state.elements` remains the current full actionable element list when
+`state.text` is a diff or reports no change.
+
+### 2. Actions using app
+
+Perform one or more actions, and then fetch the latest state:
+
+```js
+await computer.click({ pid: target.pid, elementToken });
+await computer.setValue({ pid: target.pid, elementToken, value: 'openai.com' });
+await computer.pressKey({ ...target, key: 'Enter' });
+await computer.typeText({ ...target, text: 'hello' });
+await computer.scroll({
+  pid: target.pid,
+  elementToken,
+  direction: 'down',
+  amount: 1,
+});
+await computer.performSecondaryAction({
+  pid: target.pid,
+  elementToken,
+  action: 'Show Menu',
+});
+nodeRepl.write((await computer.observeWindow(target)).text);
+```
+
+Notes:
+
+- Prefer `element_token`-based actions over coordinate actions. If AX actions or AX text are unavailable or behave unexpectedly, switch to screenshots, coordinate clicks, and key presses.
+- `doubleClick` and `rightClick` invoke their dedicated SDK actions; `rightClick` also accepts optional modifiers.
+- If the UI is not behaving as expected, try fetching the latest `observeWindow(...)` state to make sure you have the latest context.
+- Prefer using accessibility text over screenshots for efficiency, but if the interface is not fully working or not providing enough context, make sure to fetch a screenshot to get more context. The accessibility interface may be incomplete in some applications, so a screenshot helps fully understand what is going on.
+- `performSecondaryAction` invokes an accessibility action that an element exposes besides a normal click, such as expanding a disclosure row, showing a menu, incrementing a control, or cancelling something. It requires an action actually exposed for that element in the accessibility text. Do not guess action names.
+- `pressKey` presses one key and accepts optional modifiers; `hotkey` sends a key combination such as `{ keys: ['ctrl', 'c'] }`. Single-key examples include `"a"`, `"Enter"`, `"Tab"`, and `"Up"`.
+- Take care when passing strings containing `\n` or `\r` to `typeText`, as it simulates pressing the return key. Many apps with message composers or forms will respond by sending the message or submitting the form rather than inserting a newline.
+- The SDK targets an exact PID and window ID. If an action opens a dialog, menu, or new window, call `listWindows({ pid })` again and select the current window before continuing.
+
+## Reading screenshots
+
+Request a screenshot with the observation, read its accessibility text, and
+emit each returned image:
+
+`includeScreenshot: true` is the parameter that requests a screenshot.
+
+```js
+var state = await computer.observeWindow({
+  ...target,
+  includeScreenshot: true,
+});
+nodeRepl.write(state.text);
 for (const image of state.screenshot?.images ?? []) {
-  if (image?.dataBase64 && image?.mimeType) {
-    await nodeRepl.emitImage(
-      `data:${image.mimeType};base64,${image.dataBase64}`,
-    );
-  }
+  await nodeRepl.emitImage(`data:${image.mimeType};base64,${image.dataBase64}`);
 }
 ```
 
-If the SDK explicitly reports a missing/invalid base or a stale lineage,
-perform one observation with `forceFull: true`, replace that surface's cursor,
-then resume the normal helper. Do not make full observations the default.
-
-## Act and verify
-
-Choose the narrowest action supported by current state. Pass an observed
-`element_token` as `elementToken`. Use `performSecondaryAction` only when that
-exact action appears in the element's current `actions` list.
-
-Before acting, state a concrete observable postcondition. For postconditions
-expressible as window or element state, use `actAndVerify` with `verifyState`:
-
-```js
-try {
-  globalThis.lastCuaOutcome = await computer.actAndVerify({
-    action: () =>
-      computer.setValue({
-        ...target,
-        elementToken,
-        value: expectedValue,
-        signal: nodeRepl.signal,
-      }),
-    verify: () =>
-      computer.verifyState({
-        ...target,
-        expect: [
-          {
-            element: {
-              selector: { role: expectedRole, label_contains: expectedLabel },
-              value_equals: expectedValue,
-            },
-          },
-        ],
-        stableSamples: 2,
-        signal: nodeRepl.signal,
-      }),
-  });
-  nodeRepl.write(JSON.stringify(lastCuaOutcome));
-} catch (error) {
-  nodeRepl.write(JSON.stringify(error?.details ?? { message: String(error) }));
-  throw error;
-}
-```
-
-`verifyState.expect` accepts one to eight AND-combined predicates:
-
-- `{window:{exists, bounds?}}`
-- `{element:{selector:{role?, label_contains?}, exists:true?,
-value_equals?, enabled?, selected?}}`
-
-Element absence is not provable. `unknown` and `stable:false` are not success.
-When the postcondition is visual or unsupported, observe the exact window
-again with a screenshot and inspect the fresh result before deciding. If state
-is unexpected, observe again rather than repeating the action blindly.
-
-Read every action result. `effect` is `confirmed`, `partial`, `unverifiable`,
-`suspected_noop`, or `refused`; `route`, `delivery`, `evidence`, `escalation`,
-and `operation` explain what actually happened. A committed operation can
-still have `cancellationRequested:true`, so it still requires verification.
-Follow an advertised escalation only after fresh state shows it is needed.
-
-## Interaction details
-
-- After navigation, dialogs, menus, or other surface changes, refresh the
-  relevant window list and observe the new exact surface.
-- Use returned state to determine text-field behavior; do not assume typing
-  replaces existing text. Use the platform-appropriate select-all action when
-  replacement is required.
-- Prefer background delivery. Use `deliveryMode:'foreground'` only when the
-  action result or fresh state shows the background route is unavailable or
-  ineffective.
-- Stop as soon as the requested postcondition is stably satisfied. Do not add
-  extra cleanup actions that could undo the result.
-
-## Finish
+When all Computer Use work is complete:
 
 ```js
 await computer.close();
 globalThis.computer = undefined;
-globalThis.cuaRevisions = undefined;
-globalThis.observeCuaWindow = undefined;
 ```
 
-Reset the REPL only when no other persistent state is needed.
+Reset the Node REPL only when no other persistent state is needed.

@@ -390,12 +390,8 @@ function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
     deps?.liveConversationWorkspace
       ? {
           ...deps,
-          conversationRuntimeOwnershipFactory:
-            deps.conversationRuntimeOwnershipFactory ??
-            (() => ({
-              acquire: vi.fn(async () => ({ reclaimed: false })),
-              release: vi.fn(async () => false),
-            })),
+          checkLegacyConversationOwner:
+            deps.checkLegacyConversationOwner ?? vi.fn(async () => undefined),
         }
       : deps,
   );
@@ -684,6 +680,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_skill_settings_toggle',
   'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
+  'extension_activation_explicit_refresh',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
@@ -728,6 +725,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -806,6 +804,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
+      f !== 'session_worktree_reset_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice',
   ),
@@ -872,6 +871,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_live_state',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
+  'session_worktree_reset_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -4440,6 +4440,72 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it.each([
+      [undefined, 5_000],
+      ['', 5_000],
+      ['   ', 5_000],
+      ['invalid', 5_000],
+      ['10000ms', 5_000],
+      ['NaN', 5_000],
+      ['Infinity', 5_000],
+      ['0', 5_000],
+      ['-1', 5_000],
+      ['999', 5_000],
+      ['1000.5', 5_000],
+      ['2147483648', 5_000],
+      ['1000', 1_000],
+      ['10000', 10_000],
+      [' 30000 ', 30_000],
+      ['2147483647', 2_147_483_647],
+    ])(
+      'resolves live-state polling environment %s to %i ms',
+      async (value, expected) => {
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          daemonEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: value },
+        });
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(200);
+        expect(response.body.sessionLiveStatePollIntervalMs).toBe(expected);
+      },
+    );
+
+    it('keeps the process-wide live-state interval from the startup environment', async () => {
+      const daemonEnv = { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '10000' };
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const secondary: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+          effectiveEnv: { QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS: '30000' },
+        },
+      };
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primary.bridge,
+        workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+        daemonEnv,
+      });
+      daemonEnv.QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS = '20000';
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.body.sessionLiveStatePollIntervalMs).toBe(10_000);
+    });
+
     it('advertises workflow availability per workspace before a session exists', async () => {
       const primaryBridge = fakeBridge();
       const primary = makeWorkspaceRuntimeForTest({
@@ -7707,12 +7773,22 @@ describe('createServeApp', () => {
           .set('Authorization', 'Bearer secret')
           .send({ cancelled: true });
         releaseEnable?.();
-        await vi.waitFor(() => {
-          expect(
-            bridge.extensionEvents.filter(
-              (event) => event.status === 'enabled',
+        await vi.waitFor(async () => {
+          const operations = await Promise.all(
+            queued.map((response) =>
+              request(app)
+                .get(
+                  `/workspace/extensions/operations/${response.body.operationId}`,
+                )
+                .set('Host', `127.0.0.1:${tokenOpts.port}`)
+                .set('Authorization', 'Bearer secret'),
             ),
-          ).toHaveLength(9);
+          );
+          expect(
+            operations.every(
+              (operation) => operation.body.status === 'succeeded',
+            ),
+          ).toBe(true);
         });
       } finally {
         releaseEnable?.();
@@ -9278,7 +9354,7 @@ describe('createServeApp', () => {
       );
     });
 
-    it('queues extension enable and disable mutations', async () => {
+    it('commits extension enable and disable without refreshing sessions', async () => {
       const restore = mockExtensionManagerMethods();
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -9305,24 +9381,25 @@ describe('createServeApp', () => {
           .send({ scope: 'user' });
         expect(disable.status).toBe(202);
 
-        await vi.waitFor(() => {
-          expect(bridge.extensionEvents).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                status: 'enabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-              expect.objectContaining({
-                status: 'disabled',
-                name: 'test-ext',
-                refreshed: 1,
-                failed: 0,
-              }),
-            ]),
-          );
+        await vi.waitFor(async () => {
+          const enableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${enable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const disableOperation = await request(app)
+            .get(`/workspace/extensions/operations/${disable.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(enableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'enabled', name: 'test-ext' },
+          });
+          expect(disableOperation.body).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'disabled', name: 'test-ext' },
+          });
         });
+        expect(bridge.extensionEvents).toEqual([]);
         expect(
           vi.mocked(ExtensionManager.prototype.enableExtension),
         ).toHaveBeenCalledWith(
@@ -12538,7 +12615,7 @@ describe('createServeApp', () => {
     });
 
     it.each(['live', 'probe-error'] as const)(
-      'preserves a worktree when post-spawn cleanup is inconclusive (%s)',
+      'removes an unowned worktree when post-spawn cleanup is inconclusive (%s)',
       async (cleanupState) => {
         const generationGuard = createWorkspaceGenerationGuard();
         const removed: string[] = [];
@@ -12609,7 +12686,10 @@ describe('createServeApp', () => {
               opts: { requireZeroAttaches: true },
             },
           ]);
-          expect(removed).toEqual([]);
+          // Relocation never ran, so nothing can own the checkout: the
+          // worktree is removed even though the session cleanup outcome was
+          // inconclusive (live summary / probe error).
+          expect(removed).toEqual(['my-task']);
         } finally {
           mockWt.impl = undefined;
         }
@@ -16685,7 +16765,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps an unlocated restored prompt compatible without attesting isolation', async () => {
+    it('fails closed for an unlocated active restored prompt instead of attesting isolation', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -16725,6 +16805,76 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
+        // An active restored prompt whose cwd the bridge never reported is
+        // unlocated: the restore must fail closed rather than assigning the
+        // worktree without relocation or attestation.
+        expect(res.status).toBe(500);
+        expect(res.body.error).toBe('Active session is outside its worktree');
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+        expect(bridge.killCalls).toEqual([
+          {
+            sessionId: 'wt-session',
+            opts: { requireZeroAttaches: true },
+          },
+        ]);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'restored-client',
+          state: {},
+          hasActivePrompt: true,
+        }),
+      });
+      // No persisted source and none requested, so this is not a Channel
+      // restore and the route asks the bridge for no deferral. With
+      // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
+      // question during the cold restore, and that response reports an
+      // active prompt while carrying no `currentCwd` at all.
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({});
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        // The session is inside its checkout — a non-suppressed restore lets
+        // the child restore its own worktree context — and relocating it is
+        // impossible while its prompt is live. It keeps the worktree metadata
+        // without the attestation the route cannot earn, and survives.
         expect(res.status).toBe(200);
         expect(res.body.worktree).toEqual({
           slug: 'my-task',
@@ -16732,11 +16882,12 @@ describe('createServeApp', () => {
           branch: 'worktree-my-task',
         });
         expect(res.body.worktreeState).toBeUndefined();
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-        });
+        expect(bridge.loadCalls[0]).not.toHaveProperty(
+          'suppressWorktreeContextRestore',
+        );
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
         expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+        expect(bridge.killCalls).toHaveLength(0);
       } finally {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
@@ -17195,7 +17346,8 @@ describe('createServeApp', () => {
           second,
         ]);
 
-        expect(firstResponse.status).toBe(500);
+        expect(firstResponse.status).toBe(409);
+        expect(firstResponse.body.code).toBe('worktree_marker_missing');
         expect(secondResponse.status).toBe(200);
         expect(bridge.loadCalls).toHaveLength(2);
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
@@ -17562,8 +17714,16 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry: createWorkspaceRegistry([runtime]) },
       );
+      // The restore pre-reads the sidecar to pick its worktree-ownership lock
+      // key, so the generation must close on the post-load integrity read:
+      // the bridge has registered the cold session by then, which is what
+      // this cleanup path is about.
+      let sidecarReads = 0;
       mockWt.readSidecarStrict = async () => {
-        generationGuard.close();
+        sidecarReads++;
+        if (sidecarReads === 2) {
+          generationGuard.close();
+        }
         return { state: 'missing' };
       };
 
@@ -17694,7 +17854,8 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(500);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_marker_missing');
         expect(bridge.detachCalls).toEqual([
           { sessionId: 'wt-session', clientId: 'attached-client' },
         ]);
@@ -41740,8 +41901,17 @@ describe('Live Appshot server integration', () => {
       pushAudio: vi.fn(() => true),
       dispose: vi.fn(),
     } as unknown as LiveSessionCoordinator;
+    const stableBaseDir = path.join(tmp, 'stable');
+    const { writeLiveDiscoveryFile } = await import('./live/discovery.js');
+    await writeLiveDiscoveryFile(stableBaseDir, {
+      url: 'http://127.0.0.1:3210',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+      pid: process.pid,
+      instanceNonce: coordinator.daemonInstanceNonce,
+    });
     const app = createServeApp(baseOpts, undefined, {
       workspaceRegistry: registry,
+      liveDiscoveryStableBaseDir: stableBaseDir,
       liveConversationWorkspace: conversationWorkspace,
       liveCoordinator: coordinator,
       liveSessionCoordinator,
@@ -41751,6 +41921,8 @@ describe('Live Appshot server integration', () => {
     return {
       app,
       coordinator,
+      stableBaseDir,
+      liveSessionCoordinator,
       conversationWorkspace,
       preheat,
       getWorkspaceToolsStatus,
@@ -41778,6 +41950,72 @@ describe('Live Appshot server integration', () => {
       },
     };
   }
+
+  it.each(['live', 'dead'] as const)(
+    'refuses a foreign %s publisher for Live while standalone remains available',
+    async (ownerState) => {
+      const setup = await setupAppshotProbe();
+      try {
+        setup.connectHost('host_live_appshot_foreign_gate');
+        await vi.waitFor(() =>
+          expect(setup.coordinator.getStatus().available).toBe(true),
+        );
+        const captureHandler = setup.captureHandler;
+        expect(captureHandler).toEqual(expect.any(Function));
+        const capture = vi.spyOn(setup.coordinator, 'captureScreenContext');
+        const discovery = await import('./live/discovery.js');
+        const assertPublisher = vi.spyOn(
+          discovery,
+          'assertLiveDiscoveryPublisher',
+        );
+        const locator = discovery.getLiveDiscoveryPath(setup.stableBaseDir);
+        const original = JSON.parse(await fsp.readFile(locator, 'utf8'));
+        const foreignPid = ownerState === 'live' ? process.ppid : 2_147_483_647;
+        expect(foreignPid).not.toBe(process.pid);
+        if (ownerState === 'live')
+          expect(() => process.kill(foreignPid, 0)).not.toThrow();
+        else
+          expect(() => process.kill(foreignPid, 0)).toThrow(
+            expect.objectContaining({ code: 'ESRCH' }),
+          );
+        const foreignBytes = `${JSON.stringify({
+          ...original,
+          protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+          pid: foreignPid,
+          instanceNonce: 'foreign_live_publisher_nonce_0001',
+        })}\n`;
+        await fsp.writeFile(locator, foreignBytes);
+
+        const response = await request(setup.app)
+          .post('/live/start')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(assertPublisher).toHaveBeenCalledWith(setup.stableBaseDir, {
+          pid: process.pid,
+          instanceNonce: setup.coordinator.daemonInstanceNonce,
+        });
+        expect(response.status).toBe(503);
+        expect(response.body).toMatchObject({
+          code: 'conversation_runtime_in_use',
+          retryable: true,
+          error: 'The Conversations runtime is owned by another daemon.',
+        });
+        expect(setup.coordinator.getStatus().callId).toBeUndefined();
+        expect(setup.liveSessionCoordinator.start).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+        const sessions = await request(setup.app)
+          .get('/standalone/sessions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(sessions.status).toBe(200);
+        expect(sessions.body.sessions).toEqual([]);
+        await expect(fsp.readFile(locator, 'utf8')).resolves.toBe(foreignBytes);
+      } finally {
+        await setup.cleanup();
+      }
+    },
+  );
 
   it.each([
     {
