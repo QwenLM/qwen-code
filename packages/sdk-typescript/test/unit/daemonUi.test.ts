@@ -217,6 +217,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('drops kind-less in_progress subagentProgress frames but keeps the folded parent block on replay', () => {
+    const callId = 'parent-call-1';
+
+    const progressFrame = {
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: callId,
+          status: 'in_progress',
+          _meta: {
+            subagentType: 'Explore',
+            provenance: 'subagent',
+            subagentProgress: true,
+          },
+        },
+      },
+    };
+    expect(normalizeDaemonEvent(progressFrame)).toEqual([]);
+
+    const foldedParentFrame = {
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: callId,
+          status: 'completed',
+          kind: 'other',
+          title: 'Agent',
+          _meta: {
+            toolName: 'agent',
+            provenance: 'builtin',
+            subagentType: 'Explore',
+            subagentProgress: true,
+          },
+        },
+      },
+    };
+    const events = normalizeDaemonEvent(foldedParentFrame);
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[0].type).toBe('tool.update');
+  });
+
   it('preserves the initial tool title when a later update only has a tool name', () => {
     const initial = normalizeDaemonEvent({
       v: 1,
@@ -2389,14 +2436,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: { reason: 'slow' },
       }),
     ).toMatchObject([{ type: 'error', recoverable: true, text: 'slow' }]);
-    expect(
-      normalizeDaemonEvent({
-        id: 54,
-        v: 1,
-        type: 'slow_client_warning',
-        data: {},
-      }),
-    ).toMatchObject([{ type: 'status', text: 'SSE stream is lagging' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: { queueSize: 200, maxQueued: 256 },
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
+        queueSize: 200,
+        maxQueued: 256,
+      });
+    } finally {
+      warn.mockRestore();
+    }
     expect(
       normalizeDaemonEvent({
         id: 55,
@@ -3453,6 +3509,18 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
           sessionUpdate: 'usage_update',
           used: 46_351,
           size: 1_000_000,
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('does not surface session_info_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'session_info_update',
+          title: 'Durable title',
         },
       }),
     );
@@ -9160,6 +9228,7 @@ describe('parallel subAgent text interleaving fix', () => {
           result: 'large result',
           taskPrompt: 'large prompt',
           toolCalls: [{ callId: 'child-tool' }],
+          skills: ['repo-ops'],
           executionSummary: {
             inputTokens: 100,
             outputTokens: 20,
@@ -9177,6 +9246,13 @@ describe('parallel subAgent text interleaving fix', () => {
       taskPrompt: expect.anything(),
       toolCalls: expect.anything(),
     });
+    // The keep-set is what survives compaction. This pins `skills`
+    // specifically — not the whole set — because dropping it from that list
+    // otherwise ships green and a session restored from a persisted
+    // transcript silently loses the skill list the live run recorded.
+    expect(
+      (state.blocks[1] as { rawOutput?: Record<string, unknown> }).rawOutput,
+    ).toMatchObject({ skills: ['repo-ops'] });
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
