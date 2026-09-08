@@ -2402,14 +2402,6 @@ export class DingtalkChannel extends ChannelBase {
     await this.sendReply(chatId, text, atUserId, sourceLabel);
   }
 
-  protected override onResponsePending(
-    _chatId: string,
-    _sessionId: string,
-    segment: ChannelOutputSegmentContext,
-  ): void {
-    this.interactionPresenter?.startStatusCard(segment.runId, segment);
-  }
-
   protected override onResponseProgress(
     _chatId: string,
     text: string,

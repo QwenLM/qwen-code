@@ -24,6 +24,7 @@ interface RunPresentation {
   statusContext?: ChannelOutputSegmentContext;
   projectionChain: Promise<void>;
   activeSegmentId?: string;
+  completedOutput?: string;
   senderPrefix?: string;
   senderRawPrefix?: string;
   sourceLabel?: string;
@@ -110,10 +111,10 @@ export class DingtalkInteractionPresenter {
     });
   }
 
-  startStatusCard(runId: string, segment?: ChannelOutputSegmentContext): void {
+  startStatusCard(runId: string): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
-    const statusContext = this.ensureStatusContext(run, segment);
+    const statusContext = this.ensureStatusContext(run);
     void this.enqueue(run, () => {
       const statusCards = this.options.statusCards;
       const target = this.cardTarget(statusContext.target);
@@ -145,6 +146,7 @@ export class DingtalkInteractionPresenter {
     }
     const existing = this.segments.get(segment.segmentId);
     if (existing && existing.run !== run) return;
+    if (!existing && !chunk.trim()) return;
     const presentation = existing ?? {
       run,
       context: segment,
@@ -153,8 +155,9 @@ export class DingtalkInteractionPresenter {
     presentation.content = this.boundContent(presentation.content + chunk);
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
-    const statusContext = this.ensureStatusContext(run, segment);
-    void this.enqueue(run, () => {
+    void this.enqueue(run, async () => {
+      if (run.completedOutput) await this.completeCurrentCard(run);
+      const statusContext = this.ensureStatusContext(run, segment);
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
@@ -198,6 +201,15 @@ export class DingtalkInteractionPresenter {
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
       if (reason === 'completed' && segment?.requestFinal === false) {
+        statusCards?.replace(
+          statusContext,
+          this.cardTarget(statusContext.target),
+          this.withSourcePrefix(run, text || presentation.content),
+        );
+        if (await statusCards?.flushPending(statusContext.segmentId)) {
+          run.completedOutput = this.boundContent(text || presentation.content);
+          return true;
+        }
         run.statusContext = undefined;
         run.cardDelivered = undefined;
       }
@@ -342,7 +354,12 @@ export class DingtalkInteractionPresenter {
         );
         this.options.statusCards?.fail(
           statusContext.segmentId,
-          this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
+          this.withSenderPrefix(
+            run,
+            [run.completedOutput, '本次处理失败，请稍后重试。']
+              .filter(Boolean)
+              .join('\n\n'),
+          ),
         );
         await this.redeliverCardDeliveredContent(run);
       } else if (terminal === 'cancelled') {
@@ -353,7 +370,12 @@ export class DingtalkInteractionPresenter {
             this.cardTarget(statusContext.target),
             this.withSenderPrefix(
               run,
-              detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+              [
+                run.completedOutput,
+                detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
             ),
           );
         }
@@ -363,22 +385,7 @@ export class DingtalkInteractionPresenter {
         );
         run.cardDelivered = undefined;
       } else {
-        // Completing without a final segment (e.g. an empty response after the
-        // last boundary) leaves the eagerly created card running forever.
-        const statusContext = run.statusContext;
-        if (statusContext) {
-          await this.options.statusCards?.complete(
-            statusContext.segmentId,
-            '',
-            (retained) =>
-              retained
-                ? this.withSenderPrefix(
-                    run,
-                    this.withoutRenderedSourcePrefix(run, retained),
-                  )
-                : retained,
-          );
-        }
+        await this.completeCurrentCard(run);
       }
     });
     void finalization.then(
@@ -389,6 +396,25 @@ export class DingtalkInteractionPresenter {
         if (this.runs.get(runId) === run) this.runs.delete(runId);
       },
     );
+  }
+
+  private async completeCurrentCard(run: RunPresentation): Promise<void> {
+    const statusContext = run.statusContext;
+    if (!statusContext) return;
+    await this.options.statusCards?.complete(
+      statusContext.segmentId,
+      '',
+      (retained) =>
+        retained
+          ? this.withSenderPrefix(
+              run,
+              this.withoutRenderedSourcePrefix(run, retained),
+            )
+          : retained,
+    );
+    run.completedOutput = undefined;
+    run.statusContext = undefined;
+    run.cardDelivered = undefined;
   }
 
   reserveProjection(

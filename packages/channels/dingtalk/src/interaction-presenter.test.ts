@@ -238,8 +238,8 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
   });
 
-  it('starts a running card during the gap and reuses it for the next streamed output', async () => {
-    const { presenter, client, statusCards } = createHarness();
+  it('keeps the current card running until the next output has text', async () => {
+    const { presenter, client, statusCards, projectionOrder } = createHarness();
     presenter.startStatusCard('run-1');
     await presenter.closeOutput(
       'first',
@@ -248,13 +248,27 @@ describe('DingtalkInteractionPresenter', () => {
       segment('first', { requestFinal: false }),
     );
     const next = segment('next');
-    presenter.startStatusCard('run-1', next);
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(1);
+    expect(projectionOrder).not.toContain('finalize:segment-1');
+    const first = vi.mocked(client.createAndDeliver).mock.calls[0][0];
+    expect(statusCards.claimStop(first.outTrackId, 'owner-1').kind).toBe(
+      'accepted',
+    );
+    presenter.replaceOutput(next, '   ');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(1);
+    presenter.replaceOutput(next, 'Partial second output');
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
     );
+    expect(projectionOrder).toEqual([
+      'create:status',
+      'finalize:segment-1',
+      'create:status',
+    ]);
     const created = vi.mocked(client.createAndDeliver).mock.calls[1][0];
     expect(created.cardParamMap.statusLine).toMatch(/^Running/);
-    presenter.replaceOutput(next, 'Partial second output');
+    expect(created.cardParamMap.content).toBe('Partial second output');
     await new Promise((resolve) => setTimeout(resolve, 0));
     await statusCards.flushPending('next');
     expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
@@ -270,32 +284,60 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
   });
 
-  it('stops a pending card and ignores late continuation or text', async () => {
-    const { presenter, client } = createHarness();
+  it('completes the existing card when no further output arrives', async () => {
+    const { presenter, client, sendFallback } = createHarness();
     presenter.startStatusCard('run-1');
     await presenter.closeOutput(
       'first',
-      'First output',
+      'Only output',
       'completed',
       segment('first', { requestFinal: false }),
     );
-    presenter.startStatusCard('run-1', segment('next'));
+    presenter.terminalizeRun('run-1', 'completed');
     await vi.waitFor(() =>
-      expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: 'Only output',
+            statusLine: expect.stringMatching(/^Completed/),
+            hasAction: 'false',
+          }),
+        }),
+      ),
     );
-    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
-    presenter.startStatusCard('run-1', segment('late'));
-    presenter.replaceOutput(segment('next'), 'Late output');
-    await vi.waitFor(() =>
-      expect(
-        JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
-      ).toContain('任务已停止'),
-    );
-    expect(client.createAndDeliver).toHaveBeenCalledTimes(2);
-    expect(
-      JSON.stringify(vi.mocked(client.openOrUpdateStream).mock.calls),
-    ).not.toContain('Late output');
+    expect(client.createAndDeliver).toHaveBeenCalledTimes(1);
+    expect(sendFallback).not.toHaveBeenCalled();
   });
+
+  it.each(['cancelled', 'failed'] as const)(
+    'ends the existing card on %s while waiting and ignores late output',
+    async (terminal) => {
+      const { presenter, client } = createHarness();
+      presenter.startStatusCard('run-1');
+      await presenter.closeOutput(
+        'first',
+        'First output',
+        'completed',
+        segment('first', { requestFinal: false }),
+      );
+      presenter.terminalizeRun('run-1', terminal, 'cancel_command');
+      presenter.startStatusCard('run-1');
+      presenter.replaceOutput(segment('next'), 'Late output');
+      await vi.waitFor(() =>
+        expect(
+          JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
+        ).toContain(terminal === 'cancelled' ? '任务已停止' : '本次处理失败'),
+      );
+      expect(
+        vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap
+          .content,
+      ).toContain('First output');
+      expect(client.createAndDeliver).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(vi.mocked(client.openOrUpdateStream).mock.calls),
+      ).not.toContain('Late output');
+    },
+  );
 
   it('buffers compact plain output before the first background task is known', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
