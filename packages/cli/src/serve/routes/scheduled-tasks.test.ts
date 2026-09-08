@@ -17,6 +17,7 @@ import {
   Storage,
   getCronFilePath,
   readCronTasks,
+  removeCronTasks,
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -30,6 +31,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { removeTasksForSessions } from '../scheduled-task-session-lifecycle.js';
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
@@ -729,8 +731,99 @@ describe('scheduled-tasks routes', () => {
       id: created.body.id,
       recurring: false,
       sessionMode: 'per_run',
+      enabled: false,
     });
-    expect(stored[0]?.runs).toBeUndefined();
+    expect(stored[0]?.runs).toHaveLength(1);
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
+  });
+
+  it('keeps a failed per-run one-shot paused until explicitly re-enabled', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const spawnsAfterFailure = h.bridge.spawned.length;
+
+    const retry = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('task_disabled');
+    expect(h.bridge.spawned).toHaveLength(spawnsAfterFailure);
+    expect((await readCronTasks(h.workspace))[0]?.runs).toHaveLength(1);
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true });
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.enabled).toBe(true);
+
+    const rerun = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(rerun.status).toBe(200);
+    expect(h.bridge.prompts).toHaveLength(1);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('does not restore a per-run one-shot deleted during failed model selection', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    const id = created.body.id as string;
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      const child = await spawnOrAttach(req);
+      expect(await readCronTasks(h.workspace)).toEqual([]);
+      expect(await removeCronTasks(h.workspace, [id])).toBe(0);
+      return { ...child, modelApplied: false };
+    });
+
+    const run = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.prompts).toEqual([]);
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('does not restore a per-run one-shot whose parent is deleted during dispatch', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    const id = created.body.id as string;
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      const child = await spawnOrAttach(req);
+      expect(await readCronTasks(h.workspace)).toEqual([]);
+      expect(req.parentSessionId).toBe(created.body.sessionId);
+      await removeTasksForSessions(h.workspace, [req.parentSessionId!]);
+      return { ...child, modelApplied: false };
+    });
+
+    const run = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.prompts).toEqual([]);
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   it('restores a per-run one-shot when prompt admission rejects asynchronously', async () => {
@@ -763,8 +856,13 @@ describe('scheduled-tasks routes', () => {
       id: created.body.id,
       recurring: false,
       sessionMode: 'per_run',
+      enabled: false,
     });
-    expect(stored[0]?.runs).toBeUndefined();
+    expect(stored[0]?.runs).toHaveLength(1);
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
     expect((await organization.readSnapshot()).sessions.has('sess-2')).toBe(
       false,
     );
@@ -830,7 +928,7 @@ describe('scheduled-tasks routes', () => {
     expect(run.status).toBe(500);
     expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     const stored = await readCronTasks(h.workspace);
-    // The retry the 500 invites must find the task, not a 404.
+    // The failed task remains visible alongside the unrelated write.
     expect(stored.map((t) => t.id).sort()).toEqual(
       ['concurrent-task', created.body.id].sort(),
     );
@@ -1832,6 +1930,23 @@ describe('scheduled-tasks routes', () => {
     expect(checks).toBe(1);
   });
 
+  it('does not create task storage when deleting from a workspace without a task file', async () => {
+    const directory = path.dirname(getCronFilePath(h.workspace));
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    const deleted = await request(h.app).delete(
+      '/scheduled-tasks/missing-task',
+    );
+
+    expect(deleted.status).toBe(404);
+    expect(deleted.body.code).toBe('task_not_found');
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('deletes a task, then 404s on repeat', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
@@ -1859,6 +1974,13 @@ describe('scheduled-tasks routes', () => {
 
     const again = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(again.status).toBe(404);
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(2);
     // A no-op delete (already gone) closes nothing further.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
   });

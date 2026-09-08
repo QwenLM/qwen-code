@@ -1935,7 +1935,7 @@ describe('StandaloneSessionService', () => {
     });
   });
 
-  it('keeps the model failure when rollback requires runtime quarantine', async () => {
+  it('preserves the child directory when model rollback requires runtime quarantine', async () => {
     const childSessionId = '22222222-2222-4222-8222-222222222222';
     const storageParentSessionId = sessionId.toUpperCase();
     vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
@@ -1988,15 +1988,13 @@ describe('StandaloneSessionService', () => {
         'child task',
       ),
     ).rejects.toMatchObject({
-      code: 'model_selection_failed',
+      code: 'standalone_creation_outcome_unknown',
       sessionId: childSessionId,
     });
 
     expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
     expect(removeSession).not.toHaveBeenCalled();
-    expect(harness.discardEmptyConversationDirectory).toHaveBeenCalledWith(
-      childSessionId,
-    );
+    expect(harness.discardEmptyConversationDirectory).not.toHaveBeenCalled();
   });
 
   it('returns an in-flight create without re-entering the runtime or storage', async () => {

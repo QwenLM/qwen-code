@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   Storage,
+  getCronFilePath,
   readCronTasks,
   updateCronTasks,
   type DurableCronTask,
@@ -118,6 +119,32 @@ describe('scheduled-task session lifecycle', () => {
     expect(Object.keys(await byId()).sort()).toEqual(['b', 'c']);
   });
 
+  it('advances deletion generations only for tasks removed with their session', async () => {
+    await seed([
+      task({ id: 'a', sessionId: 'sess-1' }),
+      task({ id: 'b', sessionId: 'sess-1', recurring: false }),
+      task({ id: 'c', sessionId: 'sess-2' }),
+    ]);
+
+    await removeTasksForSessions(workspace, ['sess-1']);
+
+    let generations = new Map<string, number>();
+    await updateCronTasks(workspace, (tasks) => tasks, {
+      observeDeletionIds: ['a', 'b', 'c'],
+      onDeletionGenerations: (observed) => {
+        generations = new Map(observed);
+      },
+    });
+    expect(generations).toEqual(
+      new Map([
+        ['a', 1],
+        ['b', 1],
+        ['c', 0],
+      ]),
+    );
+    expect(Object.keys(await byId())).toEqual(['c']);
+  });
+
   it('is a no-op when nothing matches (no write, ordinary sessions untouched)', async () => {
     await seed([task({ id: 'a', sessionId: 'sess-1' })]);
     await disableTasksForSessions(workspace, ['unrelated']);
@@ -126,6 +153,40 @@ describe('scheduled-task session lifecycle', () => {
     const tasks = await byId();
     expect(Object.keys(tasks)).toEqual(['a']);
     expect(tasks['a']!.enabled).toBeUndefined();
+  });
+
+  it('records session deletion even while its one-shot task is consumed', async () => {
+    await seed([]);
+
+    await removeTasksForSessions(workspace, ['sess-1']);
+
+    let generations = new Map<string, number>();
+    await updateCronTasks(workspace, (tasks) => tasks, {
+      observeDeletionIds: ['session:sess-1', 'session:sess-2'],
+      onDeletionGenerations: (observed) => {
+        generations = new Map(observed);
+      },
+    });
+    expect(generations).toEqual(
+      new Map([
+        ['session:sess-1', 1],
+        ['session:sess-2', 0],
+      ]),
+    );
+    expect(await readCronTasks(workspace)).toEqual([]);
+  });
+
+  it('does not create task storage when deleting an unrelated session', async () => {
+    const directory = path.dirname(getCronFilePath(workspace));
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    await removeTasksForSessions(workspace, ['unrelated']);
+
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('empty session id list is a no-op', async () => {

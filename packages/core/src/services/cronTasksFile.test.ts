@@ -7,6 +7,7 @@ import {
   addCronTask,
   annotateCronRunSession,
   appendCronRun,
+  cronTaskSessionDeletionId,
   generateCronTaskId,
   getCronFilePath,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -520,6 +521,19 @@ describe('cronTasksFile', () => {
         fs.stat(path.dirname(getCronFilePath(tmpDir))),
       ).rejects.toThrow();
     });
+  });
+
+  it('canonicalizes UUID deletion keys while keeping legacy and Arena IDs distinct', () => {
+    const uuid = 'ABCDEF12-3456-4789-ABCD-123456789ABC';
+    expect(cronTaskSessionDeletionId(uuid)).toBe(
+      `session:${uuid.toLowerCase()}`,
+    );
+    expect(cronTaskSessionDeletionId('legacy-A')).not.toBe(
+      cronTaskSessionDeletionId('legacy-a'),
+    );
+    expect(cronTaskSessionDeletionId(`${uuid}-agent-A`)).toBe(
+      `session:${uuid}-agent-A`,
+    );
   });
 
   describe('updateCronTasks', () => {

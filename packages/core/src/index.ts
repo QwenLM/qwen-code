@@ -326,6 +326,7 @@ export type {
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,

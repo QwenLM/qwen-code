@@ -632,15 +632,15 @@ export function ScheduledTasksDialog({
   const [routingOptionsError, setRoutingOptionsError] = useState<string | null>(
     null,
   );
-  const formWorkspaceCwd = useMemo(() => {
-    if (lockedWorkspace) return lockedWorkspace.cwd;
-    if (formWorkspaceId) {
-      return operableWorkspaces.find(
-        (workspace) => workspace.id === formWorkspaceId,
-      )?.cwd;
-    }
-    return operableWorkspaces.find((workspace) => workspace.primary)?.cwd;
-  }, [formWorkspaceId, lockedWorkspace, operableWorkspaces]);
+  const formWorkspace =
+    lockedWorkspace ??
+    operableWorkspaces.find(
+      (workspace) => workspaceActionId(workspace) === formWorkspaceId,
+    );
+  const formWorkspaceMissing =
+    formWorkspaceId !== undefined &&
+    (!formWorkspace || (!formWorkspace.primary && !formWorkspace.trusted));
+  const formWorkspaceCwd = formWorkspace?.cwd;
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   useEffect(() => {
     if (!currentSessionSchedulingAvailable) {
@@ -691,13 +691,17 @@ export function ScheduledTasksDialog({
   }, []);
 
   useEffect(() => {
-    if (!showForm || runDestination !== 'per_run') return;
     const seq = ++routingOptionsLoadSeqRef.current;
-    setRoutingOptionsLoading(true);
+    if (!showForm || runDestination !== 'per_run') return;
     setRoutingOptionsError(null);
     setSessionGroups([]);
     setGroupColors([]);
     setModelOptions([]);
+    if (formWorkspaceMissing) {
+      setRoutingOptionsLoading(false);
+      return;
+    }
+    setRoutingOptionsLoading(true);
     void Promise.allSettled([
       actions.listSessionGroups(formWorkspaceCwd),
       actions.loadProviders(formWorkspaceCwd),
@@ -749,7 +753,13 @@ export function ScheduledTasksDialog({
           setRoutingOptionsLoading(false);
         }
       });
-  }, [actions, formWorkspaceCwd, runDestination, showForm]);
+  }, [
+    actions,
+    formWorkspaceCwd,
+    formWorkspaceMissing,
+    runDestination,
+    showForm,
+  ]);
 
   const reload = useCallback(async () => {
     const seq = ++reloadSeqRef.current;
@@ -860,11 +870,6 @@ export function ScheduledTasksDialog({
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
-  const formWorkspace = lockedWorkspace
-    ? lockedWorkspace
-    : operableWorkspaces.find(
-        (workspace) => workspaceActionId(workspace) === formWorkspaceId,
-      );
   const currentSessionDisabledReason = (() => {
     if (!currentSessionSchedulingAvailable) {
       return t('scheduledTasks.session.currentUnsupported');
@@ -1107,6 +1112,10 @@ export function ScheduledTasksDialog({
   );
 
   const handleSubmit = useCallback(async () => {
+    if (formWorkspaceMissing) {
+      setFormError('The selected workspace is unavailable or untrusted');
+      return;
+    }
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -1216,6 +1225,7 @@ export function ScheduledTasksDialog({
     editingId,
     formWorkspaceCwd,
     formWorkspaceId,
+    formWorkspaceMissing,
     groupChoice,
     modelServiceId,
     name,

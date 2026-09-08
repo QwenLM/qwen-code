@@ -21,6 +21,7 @@ import type {
 import {
   addCronTask,
   annotateCronRunSession,
+  cronTaskSessionDeletionId,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -310,7 +311,10 @@ export class CronScheduler {
   private consumedPerRunOneShots = new Set<string>();
   // The durable deletion generation observed by the task-file mutation that
   // removed each consumed one-shot.
-  private consumedPerRunRemovalGenerations = new Map<string, number>();
+  private consumedPerRunRemovalGenerations = new Map<
+    string,
+    ReadonlyMap<string, number>
+  >();
   // Restored tasks bypass missed detection until a real fire, delete, or edit.
   private restoredPerRunOneShots = new Set<string>();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
@@ -1348,11 +1352,17 @@ export class CronScheduler {
     );
   }
 
-  /** Restores a durable per-run one-shot that fired but never dispatched. */
+  /** Pauses and records a durable per-run one-shot that never dispatched. */
   async restoreConsumedOneShot(taskId: string): Promise<boolean> {
     const projectRoot = this.projectRoot;
     const snapshot = this.restorablePerRunOneShots.get(taskId);
-    if (!projectRoot || !snapshot || !this.consumedPerRunOneShots.has(taskId)) {
+    const firedAt = snapshot?.task.lastFiredAt;
+    if (
+      !projectRoot ||
+      !snapshot ||
+      firedAt == null ||
+      !this.consumedPerRunOneShots.has(taskId)
+    ) {
       return false;
     }
 
@@ -1375,32 +1385,44 @@ export class CronScheduler {
     this.pendingRemoval.delete(taskId);
     this.armedDurableOneShots.delete(taskId);
     this.restoredPerRunOneShots.add(taskId);
-    let restoreGeneration: number | undefined;
+    let restoreGenerations: ReadonlyMap<string, number> = new Map();
     let restored = false;
     try {
       await updateCronTasks(
         projectRoot,
         (tasks) => {
-          if (restoreGeneration !== removalGeneration) return tasks;
+          if (
+            [...removalGeneration].some(
+              ([id, generation]) => restoreGenerations.get(id) !== generation,
+            )
+          )
+            return tasks;
           const existing = tasks.findIndex((task) => task.id === taskId);
+          const current = tasks[existing] ?? snapshot.task;
+          const failed: DurableCronTask = {
+            ...current,
+            enabled: false,
+            lastFiredAt: firedAt,
+            runs: appendCronRun(current.runs, {
+              at: firedAt,
+              kind: 'scheduled',
+              sessionDispatchFailed: true,
+            }),
+          };
           restored = true;
           if (existing !== -1) {
-            const current = tasks[existing]!;
-            if (current.lastFiredAt === snapshot.task.lastFiredAt) return tasks;
             return tasks.map((task, index) =>
-              index === existing
-                ? { ...task, lastFiredAt: snapshot.task.lastFiredAt }
-                : task,
+              index === existing ? failed : task,
             );
           }
           const next = [...tasks];
-          next.splice(Math.min(snapshot.index, next.length), 0, snapshot.task);
+          next.splice(Math.min(snapshot.index, next.length), 0, failed);
           return next;
         },
         {
-          observeDeletionIds: [taskId],
+          observeDeletionIds: [...removalGeneration.keys()],
           onDeletionGenerations: (generations) => {
-            restoreGeneration = generations.get(taskId);
+            restoreGenerations = generations;
           },
         },
       );
@@ -1415,6 +1437,7 @@ export class CronScheduler {
       this.restoredPerRunOneShots.delete(taskId);
       return false;
     }
+    this.jobs.delete(taskId);
     this.consumedPerRunOneShots.delete(taskId);
     this.consumedPerRunRemovalGenerations.delete(taskId);
     return true;
@@ -1627,7 +1650,16 @@ export class CronScheduler {
         for (const id of removedByFire) {
           const generation = removalGenerations.get(id);
           if (generation !== undefined && this.consumedPerRunOneShots.has(id)) {
-            this.consumedPerRunRemovalGenerations.set(id, generation);
+            const observed = new Map([[id, generation]]);
+            const sessionId =
+              this.restorablePerRunOneShots.get(id)?.task.sessionId;
+            if (sessionId) {
+              const key = cronTaskSessionDeletionId(sessionId);
+              const sessionGeneration = removalGenerations.get(key);
+              if (sessionGeneration === undefined) continue;
+              observed.set(key, sessionGeneration);
+            }
+            this.consumedPerRunRemovalGenerations.set(id, observed);
           }
         }
       };
@@ -1675,7 +1707,14 @@ export class CronScheduler {
                 };
               }),
           {
-            observeDeletionIds: removedIds,
+            observeDeletionIds: (tasks) => [
+              ...removedIds,
+              ...tasks.flatMap((task) =>
+                removed.has(task.id) && task.sessionId
+                  ? [cronTaskSessionDeletionId(task.sessionId)]
+                  : [],
+              ),
+            ],
             onDeletionGenerations: (generations) => {
               removalGenerations = generations;
             },

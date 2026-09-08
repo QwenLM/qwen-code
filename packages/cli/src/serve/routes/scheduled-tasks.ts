@@ -32,8 +32,11 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { isDeepStrictEqual } from 'node:util';
+import { access } from 'node:fs/promises';
 import {
   readCronTasks,
+  getCronFilePath,
+  cronTaskSessionDeletionId,
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
@@ -499,24 +502,46 @@ async function rollbackCronMutation(
  * keepalive binding a task, another client's PATCH), and an equality-gated
  * undo would silently decline — permanently destroying a schedule that never
  * executed. Restores at the task's original position and no-ops when the task
- * is somehow still present.
+ * is still present or was explicitly deleted. Failed tasks stay paused with
+ * their run outcome until the user re-enables them.
  */
 async function restoreConsumedOneShot(
   target: ScheduledTaskTarget,
   before: DurableCronTask[] | undefined,
-  id: string,
+  failedTask: DurableCronTask,
+  removalGenerations: ReadonlyMap<string, number> | undefined,
   route: string,
 ): Promise<void> {
+  const id = failedTask.id;
   const index = before?.findIndex((t) => t.id === id) ?? -1;
   const original = index === -1 ? undefined : before![index];
-  if (!original) return;
+  if (!original || !removalGenerations) return;
+  let restoreGenerations: ReadonlyMap<string, number> | undefined;
   await runWithScheduledTaskTarget(target, () =>
-    updateCronTasks(target.workspaceCwd, (tasks) => {
-      if (tasks.some((t) => t.id === id)) return tasks; // never consumed → no write
-      const restored = [...tasks];
-      restored.splice(Math.min(index, restored.length), 0, original);
-      return restored;
-    }),
+    updateCronTasks(
+      target.workspaceCwd,
+      (tasks) => {
+        if (
+          [...removalGenerations].some(
+            ([key, generation]) => restoreGenerations?.get(key) !== generation,
+          )
+        )
+          return tasks;
+        if (tasks.some((t) => t.id === id)) return tasks;
+        const restored = [...tasks];
+        restored.splice(Math.min(index, restored.length), 0, {
+          ...failedTask,
+          enabled: false,
+        });
+        return restored;
+      },
+      {
+        observeDeletionIds: [...removalGenerations.keys()],
+        onDeletionGenerations: (generations) => {
+          restoreGenerations = generations;
+        },
+      },
+    ),
   ).catch((error) => {
     writeStderrLine(
       `qwen serve: ${route} failed to restore the consumed one-shot task: ${error instanceof Error ? error.message : String(error)}`,
@@ -1748,8 +1773,14 @@ function registerScheduledTaskCrudRoutes(
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
-        await runWithScheduledTaskTarget(target, () =>
-          updateCronTasks(
+        await runWithScheduledTaskTarget(target, async () => {
+          try {
+            await access(getCronFilePath(workspaceCwd));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+            throw error;
+          }
+          await updateCronTasks(
             workspaceCwd,
             (tasks) => {
               const idx = tasks.findIndex((t) => t.id === id);
@@ -1766,10 +1797,10 @@ function registerScheduledTaskCrudRoutes(
             },
             {
               assertCanCommit: target.assertGenerationOpen,
-              deletionIds: () => (removed ? [id] : []),
+              deletionIds: [id],
             },
-          ),
-        );
+          );
+        });
       } catch (err) {
         if (sendActivityGateError(res, err)) return;
         if (sendGenerationClosedError(res, err)) return;
@@ -1851,6 +1882,7 @@ function registerScheduledTaskCrudRoutes(
       let updated: DurableCronTask | undefined;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
+      let removalGenerations: ReadonlyMap<string, number> | undefined;
       try {
         await runWithScheduledTaskTarget(target, () =>
           updateCronTasks(
@@ -1902,7 +1934,18 @@ function registerScheduledTaskCrudRoutes(
               rollbackAfter = nextTasks;
               return nextTasks;
             },
-            { assertCanCommit: target.assertGenerationOpen },
+            {
+              assertCanCommit: target.assertGenerationOpen,
+              observeDeletionIds: (tasks) => {
+                const task = tasks.find((task) => task.id === id);
+                return task?.sessionId
+                  ? [id, cronTaskSessionDeletionId(task.sessionId)]
+                  : [id];
+              },
+              onDeletionGenerations: (generations) => {
+                removalGenerations = generations;
+              },
+            },
           ),
         );
       } catch (err) {
@@ -1990,13 +2033,13 @@ function registerScheduledTaskCrudRoutes(
           } else {
             // The mutation above consumed this one-shot before dispatch so it
             // could not race its scheduled slot. A synchronous admission
-            // failure means nothing ran, so put it back unconditionally — the
-            // 500 below invites a retry, and a declined undo would answer that
-            // retry with 404 for a schedule that never executed.
+            // failure preserves the failed run for inspection, paused until
+            // explicitly re-enabled. A concurrent delete vetoes restoration.
             await restoreConsumedOneShot(
               target,
               rollbackBefore,
-              id,
+              updated,
+              removalGenerations,
               `POST ${base}/${id}/run fresh-session dispatch`,
             );
           }

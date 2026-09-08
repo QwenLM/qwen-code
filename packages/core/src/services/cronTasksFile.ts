@@ -460,6 +460,16 @@ async function acquireUpdateLock(
   }
 }
 
+export function cronTaskSessionDeletionId(sessionId: string): string {
+  const canonicalId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      sessionId,
+    )
+      ? sessionId.toLowerCase()
+      : sessionId;
+  return `session:${canonicalId}`;
+}
+
 /**
  * Applies `mutate` to the on-disk task list in a single read-modify-write
  * cycle. Cycles are serialized — by a mutex within this process, guarded
@@ -475,7 +485,9 @@ export async function updateCronTasks(
   options: {
     assertCanCommit?: () => void;
     deletionIds?: readonly string[] | (() => readonly string[]);
-    observeDeletionIds?: readonly string[];
+    observeDeletionIds?:
+      | readonly string[]
+      | ((tasks: readonly DurableCronTask[]) => readonly string[]);
     onDeletionGenerations?: (generations: ReadonlyMap<string, number>) => void;
   } = {},
 ): Promise<void> {
@@ -483,7 +495,12 @@ export async function updateCronTasks(
   return getUpdateMutex(filePath).runExclusive(async () => {
     const release = await acquireUpdateLock(filePath);
     try {
-      const observedIds = new Set(options.observeDeletionIds ?? []);
+      const tasks = await readCronTasks(projectRoot);
+      const observedIds = new Set(
+        typeof options.observeDeletionIds === 'function'
+          ? options.observeDeletionIds(tasks)
+          : (options.observeDeletionIds ?? []),
+      );
       let generations: Map<string, number> | undefined;
       if (observedIds.size > 0) {
         const observedGenerations = await readTaskDeletionGenerations(filePath);
@@ -497,7 +514,6 @@ export async function updateCronTasks(
           ),
         );
       }
-      const tasks = await readCronTasks(projectRoot);
       const next = mutate(tasks);
       const deletionIds =
         typeof options.deletionIds === 'function'

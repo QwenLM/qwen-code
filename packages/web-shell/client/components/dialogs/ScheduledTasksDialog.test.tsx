@@ -1535,20 +1535,24 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
-    await act(async () => {
-      root!.render(
-        <I18nProvider language="en">
-          <ScheduledTasksDialog
-            onRunPrompt={vi.fn()}
-            onCreateViaChat={vi.fn()}
-            workspaces={ws}
-            lockedWorkspace={lockedWorkspace}
-            onError={vi.fn()}
-          />
-        </I18nProvider>,
-      );
-    });
-    await flush();
+    const rerender = async (nextWorkspaces: typeof WORKSPACES) => {
+      await act(async () => {
+        root!.render(
+          <I18nProvider language="en">
+            <ScheduledTasksDialog
+              onRunPrompt={vi.fn()}
+              onCreateViaChat={vi.fn()}
+              workspaces={nextWorkspaces}
+              lockedWorkspace={lockedWorkspace}
+              onError={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+      await flush();
+    };
+    await rerender(ws);
+    return { rerender };
   }
 
   const findWorkspaceSelect = () =>
@@ -2027,6 +2031,91 @@ describe('ScheduledTasksDialog multi-workspace', () => {
       }),
       'id-other',
     );
+  });
+
+  it.each(['removed', 'untrusted'])(
+    'blocks routing reads and writes when the edited workspace becomes %s',
+    async (change) => {
+      const { rerender } = await mountMulti({
+        'id-other': [baseTask({ sessionMode: 'per_run' })],
+      });
+      actions.listSessionGroups.mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      });
+      actions.loadProviders.mockResolvedValue({ providers: [] });
+      actions.createSessionGroup.mockResolvedValue({ id: 'created-group' });
+      click(document.querySelector('[aria-label="Edit"]'));
+      await flush();
+      expect(actions.listSessionGroups).toHaveBeenCalledWith('/repo/other');
+      expect(actions.loadProviders).toHaveBeenCalledWith('/repo/other');
+      actions.listSessionGroups.mockClear();
+      actions.loadProviders.mockClear();
+
+      await rerender(
+        change === 'removed'
+          ? WORKSPACES.filter((workspace) => workspace.id !== 'id-other')
+          : WORKSPACES.map((workspace) =>
+              workspace.id === 'id-other'
+                ? { ...workspace, trusted: false }
+                : workspace,
+            ),
+      );
+      expect.soft(actions.listSessionGroups).not.toHaveBeenCalled();
+      expect.soft(actions.loadProviders).not.toHaveBeenCalled();
+
+      const group = Array.from(document.querySelectorAll('select')).find(
+        (select) => select.querySelector('option[value="__create_group__"]'),
+      );
+      act(() => {
+        group!.value = '__create_group__';
+        group!.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const groupName = Array.from(document.querySelectorAll('label'))
+        .find((label) => label.textContent?.includes('New group name'))
+        ?.querySelector('input');
+      input(groupName!, 'Nightly');
+      click(findButton('Save'));
+      await flush();
+
+      expect.soft(actions.createSessionGroup).not.toHaveBeenCalled();
+      expect.soft(actions.updateScheduledTask).not.toHaveBeenCalled();
+      expect.soft(actions.createScheduledTask).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain(
+        'The selected workspace is unavailable or untrusted',
+      );
+    },
+  );
+
+  it('ignores pending routing options when the edited workspace disappears', async () => {
+    const { rerender } = await mountMulti({
+      'id-other': [baseTask({ sessionMode: 'per_run' })],
+    });
+    const groups = deferred();
+    const providers = deferred();
+    actions.listSessionGroups.mockReturnValue(groups.promise);
+    actions.loadProviders.mockReturnValue(providers.promise);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+
+    await rerender(
+      WORKSPACES.filter((workspace) => workspace.id !== 'id-other'),
+    );
+    await act(async () => {
+      groups.resolve({
+        groups: [{ id: 'stale-group', name: 'Stale group' }],
+        colorOptions: ['blue'],
+      });
+      providers.resolve({
+        providers: [
+          { models: [{ modelId: 'stale-model', name: 'Stale model' }] },
+        ],
+      });
+    });
+    await flush();
+
+    expect(document.querySelector('option[value="stale-group"]')).toBeNull();
+    expect(document.querySelector('option[value="stale-model"]')).toBeNull();
   });
 
   it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {
