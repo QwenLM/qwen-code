@@ -11049,6 +11049,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
   it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
+      sessionLiveStatePollIntervalMs: 10_000,
       workspaces: [
         {
           id: 'primary',
@@ -11073,6 +11074,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: true,
+        pollIntervalMs: 10_000,
         workspaceCwds: ['/tmp/project', '/tmp/live'],
         groupWorkspaceCwds: [],
       },
@@ -11095,6 +11097,7 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       mockWorkspace.client,
       {
         enabled: false,
+        pollIntervalMs: undefined,
         workspaceCwds: [],
         groupWorkspaceCwds: [],
       },
