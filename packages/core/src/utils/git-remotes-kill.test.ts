@@ -139,14 +139,76 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
   });
 
   it('fails the removal verification closed on a killed scope read', async () => {
-    // remove ok → probe ok → repo-scope re-read lists nothing → the
-    // all-scope verification read is killed: reject, never certify, and
-    // never leak the partial dump.
+    // pointing-branches snapshot ok → remove ok → probe ok → repo-scope
+    // re-read lists nothing → the all-scope verification read is killed:
+    // reject, never certify, and never leak the partial dump.
     runGit
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
-      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // repo-scope read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
       .mockRejectedValueOnce(killedDumpError()); // all-scope verification
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('strips the dump from a killed pre-removal snapshot read', async () => {
+    // The snapshot read precedes the mutation: a killed read must reject
+    // stripped before `git remote remove` ever runs.
+    const calls = runGit.mock.calls.length;
+    runGit.mockRejectedValueOnce(killedDumpError());
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+    expect(runGit.mock.calls.length).toBe(calls + 1);
+  });
+
+  it('strips the dump from a killed branch-key read after removal', async () => {
+    // snapshot finds one pointing branch → remove ok → probe ok →
+    // listing empty → all-scope verification empty → the branch-key read
+    // is killed mid-dump: reject stripped, never certify past the guard.
+    runGit
+      .mockResolvedValueOnce('worktree\u0000branch.feat.remote\norigin\u0000')
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockRejectedValueOnce(killedDumpError()); // branch-key read
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('strips the dump from a killed upstream-survivor read after cleanup', async () => {
+    // snapshot (no branch keys) → remove ok → probe ok → listing empty →
+    // all-scope verification empty → worktree sweep read → worktree
+    // re-verify → the upstream-survivor read is killed mid-dump: reject
+    // stripped, never certify past the guard.
+    runGit
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree sweep read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree re-verify
+      .mockRejectedValueOnce(killedDumpError()); // upstream-survivor read
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );

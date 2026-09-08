@@ -618,15 +618,33 @@ describe('fetchGitRemotes config parsing', () => {
     ['true', true],
     ['yes', true],
     // git's integer grammar includes hex and k/m/g unit factors; `1e1`,
-    // invalid octals and quoted padding make git die at read time, so the
-    // listing certifies neither.
+    // invalid octals and quoted trailing padding make git die at read
+    // time, so the listing certifies neither. strtoimax skips LEADING
+    // whitespace, and the maybe_bool bound is [INT_MIN, INT_MAX].
     ['0x1', true],
     ['0x0', false],
     ['1k', true],
     ['08', false],
     ['1e1', false],
+    [' 1', true],
     [' true ', false],
     [' 1 ', false],
+    // strtoimax skips leading whitespace but takes the sign ATTACHED to
+    // the digits; uppercase hex/unit forms; maybe_bool bounds to
+    // [INT_MIN, INT_MAX]. Anything its parser does not consume dies in
+    // git, so the listing certifies neither for those spellings.
+    ['+ 1', false],
+    ['- 1', false],
+    ['+1', true],
+    ['\u00a01', false],
+    ['1K', true],
+    ['0X1', true],
+    ['2147483647', true],
+    ['2147483648', false],
+    ['-2147483648', true],
+    ['-2147483649', false],
+    ['1g', true],
+    ['2g', false],
   ])('reads promisor=%j as %s', async (value, expected) => {
     const dir = makeRepo();
     git(dir, 'config', 'remote.origin.url', 'https://example.com/o/r.git');
@@ -761,11 +779,302 @@ describe('fetchGitRemotes repository scope', () => {
     git(wt, 'branch', 'feat');
     git(wt, 'config', 'branch.feat.remote', 'wtonly');
     git(wt, 'config', 'branch.feat.merge', 'refs/heads/main');
+    // The worktree-scope upstream keys git cannot unset either: leaving
+    // them behind would dangle `branch.wfeat.remote = <gone>`.
+    git(wt, 'branch', 'wfeat');
+    git(wt, 'config', '--worktree', 'branch.wfeat.remote', 'wtonly');
+    git(wt, 'config', '--worktree', 'branch.wfeat.merge', 'refs/heads/main');
 
     const remotes = await gitRemoteRemove(wt, 'wtonly', fixtureEnv);
     expect(remotes).toEqual([]);
     expect(git(wt, 'for-each-ref', 'refs/remotes')).toBe('');
+    const config = git(wt, 'config', '--list');
+    expect(config).not.toContain('branch.feat.remote');
+    expect(config).not.toContain('branch.wfeat.remote');
+    expect(config).not.toContain('branch.wfeat.merge');
+  });
+
+  it('clears worktree-scope upstream keys on a local remote removal', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // The remote section is at local scope, so git rm exits 0 — but its
+    // branch-key cleanup only writes the file it can write, leaving the
+    // worktree-held upstream key dangling.
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
+    git(wt, 'config', '--worktree', 'branch.feat.merge', 'refs/heads/main');
+
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
     expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
+  });
+
+  it('clears a multi-valued worktree upstream key by exact value', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.wtonly.url',
+      'https://example.com/wt.git',
+    );
+    git(wt, 'branch', 'feat');
+    // git resolves the LAST value of a multi-valued key; both entries
+    // point at the removed remote, so both may go (a plain --unset exits
+    // 5 here).
+    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'wtonly');
+    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'wtonly');
+    git(
+      wt,
+      'config',
+      '--worktree',
+      '--add',
+      'branch.feat.merge',
+      'refs/heads/main',
+    );
+    git(
+      wt,
+      'config',
+      '--worktree',
+      '--add',
+      'branch.feat.merge',
+      'refs/heads/main',
+    );
+
+    const remotes = await gitRemoteRemove(wt, 'wtonly', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
+  });
+
+  it('clears a worktree merge key whose remote key lives at local scope', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    // git rm unsets this one itself (local file), but cannot write the
+    // worktree-held merge key — attribution must come from the
+    // pre-removal snapshot, not the post-removal config.
+    git(wt, 'config', 'branch.feat.remote', 'origin');
+    git(wt, 'config', '--worktree', 'branch.feat.merge', 'refs/heads/main');
+
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
+  });
+
+  it('clears a worktree pushRemote without touching the fetch upstream', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.wtonly.url',
+      'https://example.com/wt.git',
+    );
+    git(wt, 'branch', 'tri');
+    // The branch fetches from the surviving remote but pushes to the
+    // removed one: git's rm unsets pushRemote independently of the remote
+    // match, so the cleanup must clear it — while the merge key belongs
+    // to the surviving upstream and stays.
+    git(wt, 'config', '--worktree', 'branch.tri.remote', 'upstream');
+    git(wt, 'config', '--worktree', 'branch.tri.merge', 'refs/heads/main');
+    git(wt, 'config', '--worktree', 'branch.tri.pushremote', 'wtonly');
+
+    const remotes = await gitRemoteRemove(wt, 'wtonly', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    const config = git(wt, 'config', '--list');
+    expect(config).not.toContain('branch.tri.pushremote');
+    expect(config).toContain('branch.tri.remote');
+    expect(config).toContain('branch.tri.merge');
+  });
+
+  it('clears a worktree remote.pushDefault that resolves to the removed remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(wt, 'config', '--worktree', 'remote.pushDefault', 'origin');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'upstream');
+
+    const remotes = await gitRemoteRemove(wt, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    const config = git(wt, 'config', '--list');
+    expect(config).not.toContain('remote.pushdefault');
+    expect(config).toContain('branch.feat.remote');
+  });
+
+  it('converges the upstream cleanup on a retry after a failed cleanup', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // The remote section is at local scope, so git rm removes it
+    // successfully — the lock only blocks the upstream cleanup.
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
+    const configWorktree = path.join(
+      dir,
+      '.git',
+      'worktrees',
+      `${path.basename(dir)}-wt`,
+      'config.worktree',
+    );
+    fs.writeFileSync(`${configWorktree}.lock`, '');
+    // First attempt: the section goes but the cleanup dies on the lock.
+    await expect(gitRemoteRemove(wt, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    fs.rmSync(`${configWorktree}.lock`);
+    // Retry: git answers no-such-remote (the section is gone), which must
+    // still converge the upstream cleanup instead of dead-ending.
+    await expect(gitRemoteRemove(wt, 'origin', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+  });
+
+  it('refuses to certify when a worktree upstream key cannot be unset', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // The remote section is at LOCAL scope, so git rm exits 0 and the
+    // section gates all pass: only the branch-key cleanup can fail, and
+    // the re-verification guard is what turns that into a refusal.
+    git(wt, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(wt, 'branch', 'feat');
+    git(wt, 'config', '--worktree', 'branch.feat.remote', 'origin');
+    const configWorktree = path.join(
+      dir,
+      '.git',
+      'worktrees',
+      `${path.basename(dir)}-wt`,
+      'config.worktree',
+    );
+    // git writes config via lock+rename, so a stale lock file is the
+    // deterministic write failure (chmod cannot stop the rename).
+    fs.writeFileSync(`${configWorktree}.lock`, '');
+    await expect(gitRemoteRemove(wt, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    // Fail-closed: the upstream key survives rather than being certified
+    // cleaned.
+    expect(fs.readFileSync(configWorktree, 'utf8')).toContain(
+      'remote = origin',
+    );
+  });
+
+  it('refuses to certify an upstream key surviving in an included file', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // git's rm unsets branch.<b>.remote only in .git/config: the key held
+    // in an include.path'd file is scope-`local` and survives the
+    // certified removal into a dangling `branch.main.remote = <gone>`.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "main"]\n\tremote = origin\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const config = git(dir, 'config', '--list', '--show-scope');
+    // The remote section IS gone — only the include-held key survives,
+    // uneditable by this module.
+    expect(config).not.toContain('remote.origin.url');
+    expect(config).toContain('local\tbranch.main.remote=origin');
+  });
+
+  it('refuses to certify an include-held pushDefault resolving to the removed remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // Same shape as the include-held branch key: `git push` would keep
+    // resolving the default to the gone remote.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[remote]\n\tpushDefault = origin\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const config = git(dir, 'config', '--list', '--show-scope');
+    expect(config).not.toContain('remote.origin.url');
+    expect(config).toContain('local\tremote.pushdefault=origin');
+  });
+
+  it('refuses to certify an upstream key surviving at global scope', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // The global file is shared by every repository — outside what this
+    // module will edit — so the only honest answer is a refusal.
+    git(dir, 'config', '--global', 'branch.main.remote', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const config = git(dir, 'config', '--list', '--show-scope');
+    expect(config).not.toContain('remote.origin.url');
+    expect(config).toContain('global\tbranch.main.remote=origin');
+    expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
+      'origin\n',
+    );
+  });
+
+  it('refuses when git rm unmasks a same-valued inherited upstream key', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // git's rm unsets the .git/config copy because its value matches —
+    // unmasking the identical global record it cannot write.
+    git(dir, 'config', '--global', 'branch.main.remote', 'origin');
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const config = git(dir, 'config', '--list', '--show-scope');
+    expect(config).not.toContain('local\tbranch.main.remote');
+    expect(config).toContain('global\tbranch.main.remote=origin');
+  });
+
+  it('does not refuse an inherited upstream key shadowed by a surviving remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // The local copy shadows the global one, so main effectively tracks
+    // the SURVIVING upstream — git's rm leaves both alone (verified on
+    // git 2.50.1: its branch-key unset compares effective values), and
+    // the survivor check must resolve the same way rather than matching
+    // raw records.
+    git(dir, 'config', '--global', 'branch.main.remote', 'origin');
+    git(dir, 'config', '--local', 'branch.main.remote', 'upstream');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    const config = git(dir, 'config', '--list', '--show-scope');
+    expect(config).toContain('local\tbranch.main.remote=upstream');
+    expect(config).toContain('global\tbranch.main.remote=origin');
   });
 
   it('completes a worktree-scope removal despite a dotted sibling name', async () => {
