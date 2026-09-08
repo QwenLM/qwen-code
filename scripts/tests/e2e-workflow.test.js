@@ -10,6 +10,7 @@ import { parse } from 'yaml';
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
+  const e2eRunScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
   const buildSandboxScript = readFileSync('scripts/build_sandbox.js', 'utf8');
   const yml = parse(workflow);
 
@@ -41,17 +42,18 @@ describe('e2e workflow', () => {
     );
 
     expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
-    expect(runStep.run).toMatch(
+    expect(runStep.run).toContain('.github/scripts/run-e2e-tests.sh');
+    expect(e2eRunScript).toMatch(
       /^\s*npx cross-env .*QWEN_SANDBOX=docker vitest run .*--poolOptions\.forks\.maxForks=3/m,
     );
-    expect(runStep.run).toMatch(
+    expect(e2eRunScript).toMatch(
       /^\s*QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- .*--poolOptions\.forks\.maxForks=3/m,
     );
     expect(
-      runStep.run.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
+      e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(2);
     expect(
-      runStep.run.match(
+      e2eRunScript.match(
         /cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.singleFork/g,
       ),
     ).toHaveLength(2);
@@ -67,19 +69,19 @@ describe('e2e workflow', () => {
     });
 
     it('serializes image preparation on the shared Docker host', () => {
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain(
         'docker-sandbox-build-e2e-${GITHUB_SHA}.lock',
       );
-      expect(runStep.run).toContain('flock --wait 1800 8');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 8');
+      expect(e2eRunScript).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
       );
-      expect(runStep.run).toContain('flock --shared --wait 1800 9');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --shared --wait 1800 9');
+      expect(e2eRunScript).toContain(
         'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
       );
-      expect(runStep.run).toContain('flock --wait 1800 7');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 7');
+      expect(e2eRunScript).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
     });
@@ -88,20 +90,20 @@ describe('e2e workflow', () => {
       expect(runStep.env.BUILD_SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.sandbox=true',
       );
-      expect(runStep.run).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
-      expect(runStep.run).toContain('docker image inspect "$sandbox_image"');
+      expect(e2eRunScript).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
+      expect(e2eRunScript).toContain('docker image inspect "$sandbox_image"');
     });
 
     it('pins each shard to the prepared image ID', () => {
-      expect(runStep.run).toContain("docker image inspect --format '{{.Id}}'");
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain("docker image inspect --format '{{.Id}}'");
+      expect(e2eRunScript).toContain(
         'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
       );
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {
-      expect(runStep.run.match(/build_image/g)).toHaveLength(3);
-      expect(runStep.run).toContain(
+      expect(e2eRunScript.match(/build_image/g)).toHaveLength(3);
+      expect(e2eRunScript).toContain(
         'npm run build:sandbox -- -s --no-prune -i "$sandbox_image"',
       );
       expect(buildSandboxScript).toContain(".option('prune'");
@@ -124,9 +126,9 @@ describe('e2e workflow', () => {
       expect(runStep.env.SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}',
       );
-      expect(runStep.run).toContain('trap cleanup_e2e_job EXIT');
-      expect(runStep.run).toContain("trap 'exit 1' INT TERM");
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('trap cleanup_e2e_job EXIT');
+      expect(e2eRunScript).toContain("trap 'exit 1' INT TERM");
+      expect(e2eRunScript).toContain(
         '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
       );
       expect(cleanupStep.if).toContain('always()');
@@ -145,17 +147,17 @@ describe('e2e workflow', () => {
       // kept shared through its whole test phase, then shard 2/3 timed out
       // behind the coordinator lock shard 1/3 was still holding. Image
       // preparation may only ever wait on locks bounded by a build.
-      const sharedIndex = runStep.run.indexOf('flock --shared --wait 1800 9');
-      const buildLockIndex = runStep.run.indexOf('flock --wait 1800 7');
-      const releaseIndex = runStep.run.indexOf('flock --unlock 7');
-      const testIndex = runStep.run.indexOf('vitest run');
+      const sharedIndex = e2eRunScript.indexOf('flock --shared --wait 1800 9');
+      const buildLockIndex = e2eRunScript.indexOf('flock --wait 1800 7');
+      const releaseIndex = e2eRunScript.indexOf('flock --unlock 7');
+      const testIndex = e2eRunScript.indexOf('vitest run');
       expect(sharedIndex).toBeGreaterThanOrEqual(0);
       expect(buildLockIndex).toBeGreaterThan(sharedIndex);
       expect(releaseIndex).toBeGreaterThan(buildLockIndex);
       expect(testIndex).toBeGreaterThan(releaseIndex);
-      expect(runStep.run).not.toContain('acquire_daemon_write_lock');
-      expect(runStep.run).not.toContain('flock --unlock 9');
-      expect(runStep.run).not.toContain('flock --nonblock 9');
+      expect(e2eRunScript).not.toContain('acquire_daemon_write_lock');
+      expect(e2eRunScript).not.toContain('flock --unlock 9');
+      expect(e2eRunScript).not.toContain('flock --nonblock 9');
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
@@ -166,10 +168,10 @@ describe('e2e workflow', () => {
       // inherits the descriptor and outlives its job keeps holding the lock
       // on the host. This shell keeps its own copy of the descriptor, so
       // closing it in children costs nothing.
-      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
-      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
-      expect(runStep.run).toContain('exec 7>&-');
-      expect(runStep.run).toContain('exec 8>&-');
+      expect(e2eRunScript).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(e2eRunScript).toContain('--shard="$shard" 9>&-');
+      expect(e2eRunScript).toContain('exec 7>&-');
+      expect(e2eRunScript).toContain('exec 8>&-');
       const cleanupStep = steps.find(
         (step) => step.name === 'Prune dangling docker images',
       );
@@ -208,28 +210,28 @@ describe('e2e workflow', () => {
     });
 
     it('wraps the sandbox:none shard command in a retryable function', () => {
-      expect(runStep.run).toContain('run_shard() {');
+      expect(e2eRunScript).toContain('run_shard() {');
     });
 
     it('retries the full shard command, shard and excludes included', () => {
       // Everything after `--` is forwarded to vitest by the npm script, so
       // shard and exclude coverage lives only in this argument list. The
       // excludes are shared verbatim with the docker leg above.
-      expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard='${{ matrix.shard }}'",
+      expect(e2eRunScript).toContain(
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --exclude '**/qwen-serve-routes.test.ts' --poolOptions.forks.maxForks=3 --shard=\"$shard\"",
       );
     });
 
     it('retries the sandbox:none shard exactly once', () => {
-      expect(runStep.run).toContain('run_shard || {');
+      expect(e2eRunScript).toContain('run_shard || {');
       // Definition + first attempt + one retry: the second attempt's exit
       // status is the step's, and a third attempt would burn pool time for
       // nothing.
-      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      expect(e2eRunScript.match(/run_shard/g)).toHaveLength(3);
       // End-anchored scope: the retry is the group's last command and the
       // group is the script's last statement. A retry moved outside the
       // `|| { ... }` would run unconditionally, re-running green shards too.
-      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
+      expect(e2eRunScript).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
     });
 
     it('gates the retry on the remaining job budget', () => {
@@ -237,7 +239,7 @@ describe('e2e workflow', () => {
       // that exits the step when the job cannot fit another shard. Shape
       // only — bash itself witnesses the execution semantics in
       // e2e-shard-retry.test.js.
-      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      const group = e2eRunScript.slice(e2eRunScript.indexOf('run_shard || {'));
       expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
     });
 
@@ -259,24 +261,16 @@ describe('e2e workflow', () => {
       expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
     });
 
-    it('keeps the default step shell the execution harness assumes', () => {
-      // e2e-shard-retry.test.js executes this step's script under `bash -e`,
-      // GitHub's default Linux step shell only while the step carries no
-      // `shell:` override and neither the workflow nor the job a `defaults:`
-      // block. Any of those switches the lane's shell semantics — explicit
-      // `bash` expands to `bash --noprofile --norc -e -o pipefail {0}` —
-      // while the harness keeps executing the old shell, so every execution
-      // witness stays green for a contract the lane no longer runs. Absence
-      // only: this pins e2e.yml, not workflows that deliberately set a shell.
-      expect(runStep.shell).toBeUndefined();
-      expect(yml.defaults).toBeUndefined();
-      expect(yml.jobs['e2e-test-linux'].defaults).toBeUndefined();
+    it('passes the matrix sandbox and shard to the runner script', () => {
+      expect(runStep.run).toBe(
+        "exec bash .github/scripts/run-e2e-tests.sh '${{ matrix.sandbox }}' '${{ matrix.shard }}'",
+      );
     });
 
     it('does not retry the docker leg', () => {
       // The bulk run and isolated serve-routes run each execute once.
       const commands = [
-        ...runStep.run.matchAll(/QWEN_SANDBOX=docker vitest run/g),
+        ...e2eRunScript.matchAll(/QWEN_SANDBOX=docker vitest run/g),
       ];
       expect(commands).toHaveLength(2);
       // Structure, not just count: wrapping either command in a function and
@@ -287,7 +281,7 @@ describe('e2e workflow', () => {
       // something wraps it.
       for (const command of commands) {
         let depth = 0;
-        for (const ch of runStep.run.slice(0, command.index)) {
+        for (const ch of e2eRunScript.slice(0, command.index)) {
           if (ch === '{') depth += 1;
           if (ch === '}') depth -= 1;
         }
@@ -393,18 +387,12 @@ describe('e2e workflow', () => {
     it('keeps the docker sandbox image build on the leg', () => {
       // The image builds inside Docker from the checkout, so it is not part
       // of the archive; the leg still prepares it under the host locks.
-      const runStep = yml.jobs['e2e-test-linux'].steps.find(
-        (step) => step.name === 'Run E2E tests',
-      );
-      expect(runStep.run).toContain('npm run build:sandbox');
+      expect(e2eRunScript).toContain('npm run build:sandbox');
     });
   });
 
   it('routes Linux E2E scratch files away from /tmp', () => {
-    const runStep = yml.jobs['e2e-test-linux'].steps.find(
-      (step) => step.name === 'Run E2E tests',
-    );
-    expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
-    expect(runStep.run).toContain('rm -rf "$QWEN_CI_TMPDIR"');
+    expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
+    expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
   });
 });

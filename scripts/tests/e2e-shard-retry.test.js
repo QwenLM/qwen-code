@@ -15,24 +15,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parse } from 'yaml';
 
-// Executes the e2e workflow's 'Run E2E tests' script under GitHub Actions'
-// default Linux step shell — `bash -e {0}`: the step has no `shell:` override
-// and e2e.yml no `defaults:` block (both absences pinned in
-// e2e-workflow.test.js), so no pipefail — with npm stubbed and the
-// clock pinned, so the retry's exit-code semantics and the budget gate's
-// exact threshold are witnessed by bash rather than by shape assertions
-// alone. A failure-swallowing mutation (a group-level `|| true`) or a missing
-// budget gate turns these red. Bash-driven, so it is excluded from the
+// Executes the E2E runner with npm stubbed and the clock pinned, so the
+// retry's exit-code semantics and budget gate are witnessed by bash rather
+// than by shape assertions alone. Bash-driven, so it is excluded from the
 // Windows lanes in vitest.config.ts.
 describe('e2e workflow sandbox:none shard retry execution', () => {
-  const yml = parse(readFileSync('.github/workflows/e2e.yml', 'utf8'));
-  const steps = yml.jobs['e2e-test-linux'].steps;
-  const runStep = steps.find((step) => step.name === 'Run E2E tests');
-  const script = runStep.run
-    .replaceAll('${{ matrix.sandbox }}', 'sandbox:none')
-    .replaceAll('${{ matrix.shard }}', '1/3');
+  const script = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
 
   function runStepScript({ failCalls, elapsedSeconds }) {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-e2e-retry-'));
@@ -68,16 +57,20 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       let exitCode = 0;
       let output = '';
       try {
-        output = execFileSync('bash', ['-e', scriptFile], {
-          env: {
-            ...process.env,
-            PATH: `${dir}:${process.env.PATH}`,
-            NPM_CALL_COUNT_FILE: callCountFile,
-            NPM_FAIL_CALLS: failCalls,
-            E2E_JOB_START_EPOCH: String(now - elapsedSeconds),
+        output = execFileSync(
+          'bash',
+          ['-e', scriptFile, 'sandbox:none', '1/3'],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              NPM_CALL_COUNT_FILE: callCountFile,
+              NPM_FAIL_CALLS: failCalls,
+              E2E_JOB_START_EPOCH: String(now - elapsedSeconds),
+            },
+            encoding: 'utf8',
           },
-          encoding: 'utf8',
-        });
+        );
       } catch (err) {
         exitCode = err.status;
         output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
