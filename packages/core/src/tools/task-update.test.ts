@@ -315,6 +315,10 @@ describe('TaskUpdateTool', () => {
 
     expect(result.error).toBeDefined();
     expect(result.error?.message).toContain('owner changed');
+    expect(result.error?.message).toContain('content-only task_update');
+    expect(result.error?.message).toContain(
+      'without re-delivering the assignment',
+    );
     expect(dispatchAssignedTask).not.toHaveBeenCalled();
     expect(await getTask(TEAM, task.id)).toMatchObject({
       status: 'in_progress',
@@ -353,6 +357,41 @@ describe('TaskUpdateTool', () => {
     expect(dispatchAssignedTask).not.toHaveBeenCalled();
     expect(await getTask(TEAM, task.id)).toMatchObject({
       status: 'completed',
+      owner: 'alice',
+    });
+  });
+
+  it('rejects a status-only update from a stale snapshot', async () => {
+    const dispatchAssignedTask = vi.fn(async () => true);
+    const teamManager = {
+      validateTaskOwner: vi.fn(() => undefined),
+      dispatchAssignedTask,
+    };
+    tool = new TaskUpdateTool(makeConfig(DEFAULT_MODE, teamManager));
+    const task = await createTask(TEAM, {
+      subject: 'Pending',
+      description: 'desc',
+    });
+    taskUpdateMock.beforeUpdate = async (realUpdateTask) => {
+      await realUpdateTask(
+        TEAM,
+        task.id,
+        { status: 'in_progress', owner: 'alice' },
+        { callerName: 'alice' },
+      );
+    };
+
+    const result = await tool
+      .build({ taskId: task.id, status: 'completed' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('owner changed');
+    expect(result.error?.message).toContain('status changed');
+    expect(result.error?.message).not.toContain('without re-delivering');
+    expect(dispatchAssignedTask).not.toHaveBeenCalled();
+    expect(await getTask(TEAM, task.id)).toMatchObject({
+      status: 'in_progress',
       owner: 'alice',
     });
   });

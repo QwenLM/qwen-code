@@ -23,7 +23,7 @@ import {
   onTasksUpdated,
   notifyTasksUpdated,
   TaskOwnershipError,
-  TaskOwnerChangedError,
+  TaskSnapshotChangedError,
   RECIPROCAL_CALLER,
   normalizeTaskId,
 } from './tasks.js';
@@ -426,16 +426,57 @@ describe('tasks', () => {
           result.status === 'rejected',
       );
       expect(rejected).toHaveLength(1);
-      expect(rejected[0]!.reason).toBeInstanceOf(TaskOwnerChangedError);
+      expect(rejected[0]!.reason).toBeInstanceOf(TaskSnapshotChangedError);
       expect((rejected[0]!.reason as Error).message).toContain('owner changed');
-      expect((rejected[0]!.reason as Error).message).toContain(
-        'content-only task_update',
-      );
-      expect((rejected[0]!.reason as Error).message).toContain(
-        'without re-delivering',
-      );
       const final = await getTask('team', task.id);
       expect(['alice', 'bob']).toContain(final?.owner);
+    });
+
+    it('reports only the expected fields that changed', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+        owner: 'alice',
+      });
+      await updateTask('team', task.id, { status: 'in_progress' });
+      await updateTask(
+        'team',
+        task.id,
+        { status: 'completed' },
+        { callerName: 'alice' },
+      );
+
+      const update = updateTask(
+        'team',
+        task.id,
+        { status: 'pending' },
+        { expectedStatus: 'in_progress' },
+      );
+
+      await expect(update).rejects.toMatchObject({
+        expectedStatus: 'in_progress',
+        actualStatus: 'completed',
+      });
+      await expect(update).rejects.toThrow('status changed');
+      await expect(update).rejects.not.toThrow('owner changed');
+    });
+
+    it('does not check an undefined expected status', async () => {
+      const task = await createTask('team', {
+        subject: 'Shared',
+        description: '',
+      });
+
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { status: 'in_progress' },
+          { expectedStatus: undefined },
+        ),
+      ).resolves.toMatchObject({
+        status: 'in_progress',
+      });
     });
 
     it('rejects a stale leader assignment when status changed', async () => {
@@ -460,7 +501,7 @@ describe('tasks', () => {
           { expectedOwner: 'alice', expectedStatus: 'in_progress' },
         ),
       ).rejects.toMatchObject({
-        name: 'TaskOwnerChangedError',
+        name: 'TaskSnapshotChangedError',
         expectedStatus: 'in_progress',
         actualStatus: 'completed',
       });

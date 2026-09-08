@@ -358,33 +358,34 @@ export class TaskOwnershipError extends Error {
   }
 }
 
-export class TaskOwnerChangedError extends Error {
+export class TaskSnapshotChangedError extends Error {
   constructor(
     readonly taskId: string,
     readonly expectedOwner: string | undefined,
     readonly actualOwner: string | undefined,
-    readonly expectedStatus?: SwarmTaskStatus,
-    readonly actualStatus?: SwarmTaskStatus,
+    readonly expectedStatus: SwarmTaskStatus | undefined,
+    readonly actualStatus: SwarmTaskStatus | undefined,
+    checksExpectedOwner: boolean,
+    checksExpectedStatus: boolean,
   ) {
     const label = (owner: string | undefined) => owner ?? 'unassigned';
     const changes: string[] = [];
-    if (expectedOwner !== actualOwner) {
+    if (checksExpectedOwner && expectedOwner !== actualOwner) {
       changes.push(
         `owner changed from "${label(expectedOwner)}" to "${label(actualOwner)}"`,
       );
     }
-    if (expectedStatus !== undefined && expectedStatus !== actualStatus) {
+    if (checksExpectedStatus && expectedStatus !== actualStatus) {
       changes.push(
         `status changed from "${expectedStatus}" to "${actualStatus}"`,
       );
     }
     super(
-      `Task #${taskId} ${changes.join(' and ')} before this assignment ` +
-        `committed. Current state is owner "${label(actualOwner)}", status ` +
-        `"${actualStatus}". Re-read the task before retrying. A content-only ` +
-        `task_update persists changes without re-delivering the assignment.`,
+      `Task #${taskId} ${changes.join(' and ')} before this update committed. ` +
+        `Current state is owner "${label(actualOwner)}", status ` +
+        `"${actualStatus}". Re-read the task before retrying.`,
     );
-    this.name = 'TaskOwnerChangedError';
+    this.name = 'TaskSnapshotChangedError';
   }
 }
 
@@ -442,8 +443,8 @@ export async function updateTask(
       }
       const task = JSON.parse(raw) as SwarmTask;
 
-      const checksExpectedOwner = opts && 'expectedOwner' in opts;
-      const checksExpectedStatus = opts && 'expectedStatus' in opts;
+      const checksExpectedOwner = opts !== undefined && 'expectedOwner' in opts;
+      const checksExpectedStatus = opts?.expectedStatus !== undefined;
       if (checksExpectedOwner || checksExpectedStatus) {
         const expectedOwner = opts.expectedOwner
           ? sanitizeName(opts.expectedOwner)
@@ -453,12 +454,14 @@ export async function updateTask(
           (checksExpectedOwner && expectedOwner !== actualOwner) ||
           (checksExpectedStatus && opts.expectedStatus !== task.status)
         ) {
-          throw new TaskOwnerChangedError(
+          throw new TaskSnapshotChangedError(
             taskId,
             expectedOwner,
             actualOwner,
             opts.expectedStatus,
             task.status,
+            checksExpectedOwner,
+            checksExpectedStatus,
           );
         }
       }

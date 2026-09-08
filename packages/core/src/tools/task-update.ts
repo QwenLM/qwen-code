@@ -36,7 +36,7 @@ import {
   getTask,
   listTasks,
   TaskOwnershipError,
-  TaskOwnerChangedError,
+  TaskSnapshotChangedError,
   RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
 import { LEADER_NAME, type SwarmTask } from '../agents/team/types.js';
@@ -506,12 +506,18 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     } catch (err) {
       if (
         err instanceof TaskOwnershipError ||
-        err instanceof TaskOwnerChangedError
+        err instanceof TaskSnapshotChangedError
       ) {
+        const dispatchHint =
+          err instanceof TaskSnapshotChangedError && explicitOwner !== undefined
+            ? ' A content-only task_update persists changes without ' +
+              're-delivering the assignment.'
+            : '';
+        const message = err.message + dispatchHint;
         return {
-          llmContent: err.message,
-          returnDisplay: err.message,
-          error: { message: err.message },
+          llmContent: message,
+          returnDisplay: message,
+          error: { message },
         };
       }
       throw err;
