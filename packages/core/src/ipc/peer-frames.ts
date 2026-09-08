@@ -163,6 +163,9 @@ export type PeerFrame = PeerUserFrame | PeerControlFrame;
  */
 const MSG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+/** Largest authentication token retained from an untrusted peer frame. */
+export const MAX_RETAINED_REPLY_TOKEN_CHARS = 256;
+
 /**
  * The one handle form every id comparison and display uses: dashes
  * stripped, case folded. `/peers` resolution prints and matches handles in
@@ -254,6 +257,12 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     const fromMode = parsed['fromMode'];
     const toSessionId = optionalString(parsed['toSessionId']);
     const replyToken = optionalString(parsed['replyToken']);
+    if (
+      replyToken !== undefined &&
+      replyToken.length > MAX_RETAINED_REPLY_TOKEN_CHARS
+    ) {
+      return null;
+    }
     return {
       msgV,
       msgId,

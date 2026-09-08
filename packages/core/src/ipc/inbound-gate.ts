@@ -314,7 +314,11 @@ export interface InboundGateOptions {
    * `reportStatus`, and expected to fold a burst into few receipts rather
    * than answering each drop.
    */
-  reportDropped?: (frame: PeerUserFrame, reason: PeerDropReason) => void;
+  reportDropped?: (
+    frame: PeerUserFrame,
+    reason: PeerDropReason,
+    origin?: PeerOrigin,
+  ) => void;
   /** Tell this session's user. Absent means nobody is told. */
   onDropped?: (
     frame: PeerUserFrame,
@@ -433,6 +437,8 @@ export class InboundGate {
   private expiryTimer: NodeJS.Timeout | null = null;
   /** How fast senders may arrive. See `peer-admission.ts`. */
   private readonly admission: PeerAdmission;
+  private admissionSessionObserved = false;
+  private admissionSessionId: string | undefined;
 
   constructor(private readonly options: InboundGateOptions) {
     this.admission = options.admission ?? new PeerAdmission();
@@ -618,6 +624,15 @@ export class InboundGate {
     frame: PeerUserFrame,
     origin: PeerOrigin = { selfSent: false },
   ): GateDecision {
+    const sessionId = this.options.getSessionId?.();
+    if (
+      this.admissionSessionObserved &&
+      this.admissionSessionId !== sessionId
+    ) {
+      this.admission.reset();
+    }
+    this.admissionSessionObserved = true;
+    this.admissionSessionId = sessionId;
     // Timers can be starved or slept through (a suspended laptop), so
     // every entry point sweeps before it reads the buffer rather than
     // trusting the timer to have fired.
@@ -650,6 +665,7 @@ export class InboundGate {
       debugLogger.debug(
         `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
       );
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, settled);
       return 'refused';
     }
@@ -670,6 +686,7 @@ export class InboundGate {
       )
     ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
+      this.forgetAdmittedBody(frame, origin);
       void this.report(frame, 'held');
       return 'held';
     }
@@ -920,9 +937,10 @@ export class InboundGate {
     debugLogger.debug(
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
-    const receipts = settling.map((entry) =>
-      this.report(entry.frame, 'expired'),
-    );
+    const receipts = settling.map((entry) => {
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      return this.report(entry.frame, 'expired');
+    });
     this.notifyHeldChange();
     // The caller tears the socket down next and the process exits right
     // after: a receipt still in flight when close resolves is a receipt
@@ -1008,6 +1026,11 @@ export class InboundGate {
     );
   }
 
+  /** Undo an admitted queued message that was invalidated outside the gate. */
+  forgetAdmittedMessage(senderKey: string, messageId: string): void {
+    this.admission.forgetMessage(senderKey, messageId);
+  }
+
   /**
    * Turn a message away without the model or the user ever seeing it, and
    * say so to both audiences.
@@ -1030,7 +1053,7 @@ export class InboundGate {
   ): GateDecision {
     debugLogger.debug(`dropped peer message ${frame.msgId} (${reason})`);
     try {
-      this.options.reportDropped?.(frame, reason);
+      this.options.reportDropped?.(frame, reason, origin);
     } catch (error) {
       debugLogger.debug(`reportDropped(${reason}) threw: ${describe(error)}`);
     }
@@ -1106,6 +1129,7 @@ export class InboundGate {
       debugLogger.debug(
         `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
       );
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'expired');
       void this.report(entry.frame, 'expired');
     }

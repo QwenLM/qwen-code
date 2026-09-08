@@ -14,6 +14,7 @@ import {
   describeDropReason,
   encodePeerFrame,
   MAX_DROPPED_MSG_IDS,
+  MAX_RETAINED_REPLY_TOKEN_CHARS,
   parsePeerAuthLine,
   parsePeerFrame,
   PEER_FRAME_VERSION,
@@ -62,6 +63,17 @@ describe('parsePeerFrame — user frames', () => {
     expect(
       parsePeerFrame(line({ ...validUser, toSessionId: 'sess-9' })),
     ).toMatchObject({ toSessionId: 'sess-9' });
+  });
+
+  it('rejects a reply token too large to retain', () => {
+    expect(
+      parsePeerFrame(
+        line({
+          ...validUser,
+          replyToken: 'x'.repeat(MAX_RETAINED_REPLY_TOKEN_CHARS + 1),
+        }),
+      ),
+    ).toBeNull();
   });
 
   it('treats a non-string toSessionId as unaddressed', () => {

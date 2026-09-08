@@ -41,6 +41,7 @@ const {
   getOwnPeerIdentity,
   lookupSentPeerMessageForTest,
   MAX_TRACKED_SENDS,
+  refundSendPacerMessage,
   resetSendPacerForTest,
   resetSentPeerMessagesForTest,
   senderModeClass,
@@ -665,10 +666,12 @@ describe('settleSentPeerMessage', () => {
     const id = await sendOne();
     expect(settleSentPeerMessage(id, 'held')).toEqual({
       address: 'app-ab',
+      ipcPath: '/tmp/s1.sock',
       previous: 'pending',
     });
     expect(settleSentPeerMessage(id, 'delivered')).toEqual({
       address: 'app-ab',
+      ipcPath: '/tmp/s1.sock',
       previous: 'held',
     });
   });
@@ -998,6 +1001,7 @@ describe('dropped receipts on the send side', () => {
     trackSentPeerMessageForTest('sent-1', 'app-a');
     expect(settleSentPeerMessage('sent-1', 'dropped')).toEqual({
       address: 'app-a',
+      ipcPath: 'app-a',
       previous: 'pending',
     });
   });
@@ -1042,6 +1046,22 @@ describe('the mirror and the receiver disagreeing', () => {
       approvalMode: ApprovalMode.DEFAULT,
     });
   }
+
+  it('ages repeat records across a system suspend like the receiver', async () => {
+    const monotonic = 0;
+    let wall = 0;
+    setSendPacerClockForTest(
+      () => monotonic,
+      () => wall,
+    );
+    try {
+      expect((await send('same body')).kind).toBe('sent');
+      wall += PEER_ADMISSION_LIMITS.dedupWindowMs + 1;
+      expect((await send('same body')).kind).toBe('sent');
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
 
   it('does not un-drain the mirror with a refund that lands after the drain', async () => {
     // The drain is the receiver's own word on its level. A refund from a
@@ -1111,6 +1131,24 @@ describe('the mirror and the receiver disagreeing', () => {
         'turns away a repeat',
       );
       expect((await send('B')).kind).toBe('sent');
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('refunds the token for a message rejected before admission', async () => {
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i += 1) {
+        expect((await send(`body ${i}`)).kind).toBe('sent');
+      }
+      const firstId = sendPeerFrame.mock.calls[0]?.[1].msgId as string;
+      expect((await send('over capacity')).kind).toBe('failed');
+
+      refundSendPacerMessage(target.ipcPath, firstId);
+
+      expect((await send('after misaddressed')).kind).toBe('sent');
     } finally {
       setSendPacerClockForTest();
     }

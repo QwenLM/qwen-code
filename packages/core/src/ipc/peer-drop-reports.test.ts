@@ -146,6 +146,23 @@ describe('DropReceiptCoalescer', () => {
     ]);
   });
 
+  it('does not merge authenticated origins that claim the same address', () => {
+    const clock = stubClock();
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer(
+      (receipt) => {
+        sent.push(receipt);
+      },
+      { now: clock.now },
+    );
+    const frame = frameFrom('/tmp/shared.sock');
+
+    coalescer.note(frame, { selfSent: true }, 'rate-limited');
+    coalescer.note(frame, { selfSent: false }, 'rate-limited');
+
+    expect(sent).toHaveLength(2);
+  });
+
   it('caps the ids one receipt lists', () => {
     const clock = stubClock();
     const sent: DroppedReceipt[] = [];
@@ -405,6 +422,37 @@ describe('DropReceiptCoalescer bounds', () => {
     expect(sent[0]?.frame.from).toBe(prefix);
     expect(vi.getTimerCount()).toBe(1);
     coalescer.dispose();
+  });
+
+  it('does not retain an oversized reply token in a deferred receipt', () => {
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer((receipt) => {
+      sent.push(receipt);
+    });
+    const oversized = {
+      ...frameFrom('/tmp/peer.sock'),
+      replyToken: 'x'.repeat(500_000),
+    };
+
+    coalescer.note(oversized, 'rate-limited');
+    coalescer.note(oversized, 'rate-limited');
+    void coalescer.flush(10);
+
+    expect(sent.at(-1)?.frame).not.toHaveProperty('replyToken');
+    coalescer.dispose();
+  });
+
+  it('emits a narrow notice without the rejected message body', () => {
+    const notices: DropNotice[] = [];
+    const throttle = new DropNoticeThrottle((notice) => notices.push(notice));
+
+    throttle.note(
+      frameFrom('/tmp/peer.sock', 'x'.repeat(100_000)),
+      PEER,
+      'duplicate',
+    );
+
+    expect(notices[0]?.frame).not.toHaveProperty('message');
   });
 
   it('leaves no timer behind when a batch is evicted from the table', () => {

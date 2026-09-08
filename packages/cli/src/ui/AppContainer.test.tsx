@@ -8367,7 +8367,7 @@ describe('AppContainer State Management', () => {
         'Dropped a message from another session (docs-cd (/tmp/peer.sock)): ' +
           'it repeated its previous message within ' +
           `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s. ` +
-          '(+12 more dropped, not all from this sender)',
+          '(+12 more dropped during this notice window)',
       );
       // The count is a session-wide total once the notice budget is
       // spent, so it must not be labelled as this sender's own.
@@ -8403,13 +8403,25 @@ describe('AppContainer State Management', () => {
 
       act(() => {
         peer.emitDropped({
+          frame: { ...frame, fromName: undefined },
+          origin: { selfSent: true },
+          reason: 'rate-limited',
+          suppressed: 0,
+        });
+      });
+      expect(notices()[4]).toContain(
+        'a process this session started (/tmp/peer.sock)',
+      );
+
+      act(() => {
+        peer.emitDropped({
           frame: { ...frame, from: undefined, fromName: undefined },
           origin: { selfSent: false },
           reason: 'rate-limited',
           suppressed: 0,
         });
       });
-      expect(notices()[4]).toContain('from another session');
+      expect(notices()[5]).toContain('from another session');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

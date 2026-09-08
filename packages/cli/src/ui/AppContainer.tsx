@@ -2820,10 +2820,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // state the category.
       const who =
         name.length > 0 ? (address ? `${name} (${address})` : name) : address;
+      const selfSentWho = name || address;
       const sender = origin.controller
         ? `a trusted controller (${flattenPeerLabel(origin.controller.label)})`
         : origin.selfSent
-          ? 'a process this session started'
+          ? selfSentWho
+            ? `a process this session started (${selfSentWho})`
+            : 'a process this session started'
           : who
             ? `another session (${who})`
             : 'another session';
@@ -2848,7 +2851,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // too, and naming one peer beside a total that is not its own
             // is how the wrong peer gets blamed for a flood.
             (suppressed > 0
-              ? ` (+${suppressed} more dropped, not all from this sender)`
+              ? ` (+${suppressed} more dropped during this notice window)`
               : ''),
         },
         Date.now(),

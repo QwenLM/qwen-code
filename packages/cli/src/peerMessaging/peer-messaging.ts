@@ -53,8 +53,10 @@ import {
   type PeerFrame,
   type PeerInbox,
   type PeerOrigin,
+  peerSenderKey,
   type PeerUserFrame,
   readPeerControllerRegistrySync,
+  refundSendPacerMessage,
   resolveControllerToken,
   sendDeliveryStatus,
   type SettledPeerReceipt,
@@ -67,6 +69,7 @@ const debugLogger = createDebugLogger('PEER_MESSAGING');
 /** Identity needed to re-check a queued frame's recipient at drain time. */
 export interface PeerQueuedDelivery {
   msgId: string;
+  admissionKey?: string;
   from?: string;
   replyToken?: string;
   toSessionId?: string;
@@ -203,6 +206,8 @@ export interface PeerMessagingOptions {
   drainMirror?: (ipcPath: string) => void;
   /** Remove messages the receiver confirmed never reached its model. */
   forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
+  /** Refund a message rejected before the receiver's admission meter. */
+  refundMirror?: (ipcPath: string, messageId: string) => void;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
@@ -229,6 +234,8 @@ export class PeerMessaging {
     ipcPath: string,
     messageIds: readonly string[],
   ) => void = forgetSendPacerMessages;
+  private refundMirror: (ipcPath: string, messageId: string) => void =
+    refundSendPacerMessage;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private readonly dropListeners = new Set<(notice: DropNotice) => void>();
   /** Notices raised before anything subscribed; see `onDropped`. */
@@ -310,7 +317,8 @@ export class PeerMessaging {
       ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
       deliver: (frame, origin) => messaging.deliver(frame, origin),
-      reportDropped: (frame, reason) => dropReceipts.note(frame, reason),
+      reportDropped: (frame, reason, origin) =>
+        dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
       onDropped: (frame, origin, reason) =>
         dropNotices.note(frame, origin, reason),
       reportStatus: (frame, status) => {
@@ -342,6 +350,7 @@ export class PeerMessaging {
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
     messaging.drainMirror = options.drainMirror ?? drainSendPacer;
     messaging.forgetMirror = options.forgetMirror ?? forgetSendPacerMessages;
+    messaging.refundMirror = options.refundMirror ?? refundSendPacerMessage;
 
     // Any pair still in the environment at this point was inherited from an
     // ancestor session, and every exit below this line other than a bound
@@ -709,13 +718,15 @@ export class PeerMessaging {
     const ids = [frame.origMsgId, ...(frame.droppedMsgIds ?? [])];
     let first: SettledPeerReceipt | undefined;
     let settledCount = 0;
-    const settledIds: string[] = [];
+    const settledByPath = new Map<string, string[]>();
     for (const id of ids) {
       const settled = this.settleSentMessage(id, 'dropped');
       if (!settled) continue;
       first ??= settled;
       settledCount += 1;
-      settledIds.push(id);
+      const pathIds = settledByPath.get(settled.ipcPath) ?? [];
+      pathIds.push(id);
+      settledByPath.set(settled.ipcPath, pathIds);
     }
     if (!first) {
       debugLogger.debug(
@@ -728,19 +739,16 @@ export class PeerMessaging {
     );
     // The receiver never gave these bodies to its model, so its duplicate
     // baseline no longer contains them and the sender's mirror must agree.
-    if (
-      frame.from &&
-      (frame.dropReason === 'rate-limited' || frame.dropReason === 'queue-full')
-    ) {
-      this.forgetMirror(frame.from, settledIds);
+    for (const [ipcPath, idsForPath] of settledByPath) {
+      this.forgetMirror(ipcPath, idsForPath);
     }
-    if (frame.dropReason === 'rate-limited' && frame.from) {
+    if (frame.dropReason === 'rate-limited') {
       // The mirror bucket also said there was room and the receiver
       // disagreed: empty it so the next send waits for the rate the
       // receiver actually refills at rather than for the one guessed here.
       // Keyed by the receipt's `from`, which is the receiver's own socket
       // path — the same string the mirror reserved against.
-      this.drainMirror(frame.from);
+      for (const ipcPath of settledByPath.keys()) this.drainMirror(ipcPath);
     }
     this.emitReceipt({
       status: 'dropped',
@@ -780,12 +788,12 @@ export class PeerMessaging {
       debugLogger.debug(
         `delivery status from ${settled.address}: ${settled.previous} -> ${frame.status} for ${frame.origMsgId}`,
       );
-      if (
-        frame.from &&
-        frame.status !== 'held' &&
-        frame.status !== 'delivered'
-      ) {
-        this.forgetMirror(frame.from, [frame.origMsgId]);
+      if (frame.status !== 'held' && frame.status !== 'delivered') {
+        if (frame.status === 'misaddressed') {
+          this.refundMirror(settled.ipcPath, frame.origMsgId);
+        } else {
+          this.forgetMirror(settled.ipcPath, [frame.origMsgId]);
+        }
       }
       this.emitReceipt({
         status: frame.status,
@@ -926,6 +934,7 @@ export class PeerMessaging {
         }),
         {
           msgId: frame.msgId,
+          admissionKey: peerSenderKey(frame, origin),
           ...(frame.from !== undefined ? { from: frame.from } : {}),
           ...(frame.replyToken !== undefined
             ? { replyToken: frame.replyToken }
@@ -961,6 +970,9 @@ export class PeerMessaging {
         },
         delivery.replyToken,
       );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
     return false;
   }

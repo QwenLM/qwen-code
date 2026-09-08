@@ -106,12 +106,14 @@ let receipts: PeerFrame[];
 /** Addresses whose send-side mirror a receipt emptied. */
 let drained: string[];
 let forgotten: Array<{ ipcPath: string; messageIds: readonly string[] }>;
+let refunded: Array<{ ipcPath: string; messageIds: readonly string[] }>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
   drained = [];
   forgotten = [];
+  refunded = [];
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
@@ -207,7 +209,13 @@ async function start(
     settleSentMessage?: (
       msgId: string,
       status: string,
-    ) => { address: string; previous: 'pending' | 'held' } | undefined;
+    ) =>
+      | {
+          address: string;
+          ipcPath: string;
+          previous: 'pending' | 'held';
+        }
+      | undefined;
     reassertSessionRecord?: () => Promise<void>;
     getPolicySetting?: () => InboundPolicy | undefined;
     getHeldExpiryMs?: () => number | null;
@@ -217,6 +225,7 @@ async function start(
     dropReceiptTrailMs?: number;
     drainMirror?: (ipcPath: string) => void;
     forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
+    refundMirror?: (ipcPath: string, messageId: string) => void;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -237,6 +246,8 @@ async function start(
     drainMirror: (ipcPath: string) => drained.push(ipcPath),
     forgetMirror: (ipcPath, messageIds) =>
       forgotten.push({ ipcPath, messageIds }),
+    refundMirror: (ipcPath, messageId) =>
+      refunded.push({ ipcPath, messageIds: [messageId] }),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -276,6 +287,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         msgId === 'sent-0001'
           ? {
               address: 'docs-cd [ab12cd]',
+              ipcPath: '/tmp/peer.sock',
               previous: 'pending',
             }
           : undefined,
@@ -329,6 +341,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT, {
       settleSentMessage: () => ({
         address: 'docs-cd',
+        ipcPath: '/tmp/peer.sock',
         previous: 'pending',
       }),
     });
@@ -346,6 +359,31 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(forgotten).toEqual([
       { ipcPath: '/tmp/peer.sock', messageIds: ['sent-0002'] },
     ]);
+  });
+
+  it('refunds a misaddressed send against its recorded path', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        ipcPath: '/tmp/actual-peer.sock',
+        previous: 'pending',
+      }),
+    });
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'misaddressed',
+        origMsgId: 'sent-0003',
+        from: '/tmp/forged-peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(refunded).toEqual([
+      { ipcPath: '/tmp/actual-peer.sock', messageIds: ['sent-0003'] },
+    ]);
+    expect(forgotten).toEqual([]);
   });
 
   it('settles receipts through the real ledger when none is injected', async () => {
@@ -409,6 +447,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT, {
       settleSentMessage: () => ({
         address: 'docs-cd',
+        ipcPath: '/tmp/peer.sock',
         previous: 'pending',
       }),
     });
@@ -578,6 +617,33 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted).toHaveLength(1);
   });
 
+  it('starts a fresh admission conversation after the session id changes', async () => {
+    let current = 'session-a';
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => current,
+    });
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'same words',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      }),
+    );
+    current = 'session-b';
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'same words',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-b',
+      }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(2);
+  });
+
   it('drops a held frame when the session id swaps before reevaluation', async () => {
     const sender = await startSenderInbox();
     let mode = ApprovalMode.YOLO;
@@ -648,6 +714,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(queued).toEqual([
       {
         msgId: frame.msgId,
+        admissionKey: `peer:${sender.socketPath}`,
         from: sender.socketPath,
         toSessionId: 'session-a',
       },
@@ -660,6 +727,18 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       .filter((receipt) => receipt.type === 'control')
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['delivered', 'misaddressed']);
+
+    current = 'session-a';
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'queued before /clear',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+    expect(queued).toHaveLength(2);
   });
 
   it('drains a matching or unpinned queued envelope', async () => {
@@ -952,7 +1031,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       // Above the burst's own spread, so five drops arriving over several
       // socket round trips still fold into one batch, and well under the
       // wait loop's ceiling so that batch lands inside the test.
-      dropReceiptTrailMs: 200,
+      dropReceiptTrailMs: 250,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -2050,7 +2129,7 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     const sender = await startSenderInbox();
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
       admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
-      dropReceiptTrailMs: 10,
+      dropReceiptTrailMs: 250,
     });
 
     for (let i = 0; i < 6; i++) {
@@ -2108,13 +2187,12 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
       emitted.push({ status, dropped, dropReason, address }),
     );
 
-    trackSentPeerMessageForTest('sent-a', 'app-ab');
-    trackSentPeerMessageForTest('sent-b', 'app-ab');
-
     // The receipt's `from` is the receiver's own socket path, which is
     // exactly what the send-side mirror is keyed by — so this also pins
     // that the drain reaches the right bucket.
     const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    trackSentPeerMessageForTest('sent-a', 'app-ab', receiverPath);
+    trackSentPeerMessageForTest('sent-b', 'app-ab', receiverPath);
     await send(
       m.socketPath!,
       buildDeliveryStatusFrame({
@@ -2143,11 +2221,11 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     ]);
   });
 
-  it('corrects queue-full bodies but preserves a duplicate baseline', async () => {
+  it('corrects the per-message baseline for every dropped receipt', async () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT);
-    trackSentPeerMessageForTest('sent-c', 'app-ab');
-    trackSentPeerMessageForTest('sent-d', 'app-ab');
     const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    trackSentPeerMessageForTest('sent-c', 'app-ab', receiverPath);
+    trackSentPeerMessageForTest('sent-d', 'app-ab', receiverPath);
 
     await send(
       m.socketPath!,
@@ -2169,12 +2247,13 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     );
     await settle();
 
-    // Neither reason says that the receiver's token level is exhausted.
-    // Queue-full did not retain the body; duplicate did retain an earlier
-    // equal body, so that mirror record remains the dedup baseline.
+    // Neither reason says that the receiver's token level is exhausted,
+    // but both rejected frames are removed from the sender's per-message
+    // baseline so it matches the receiver's retained admission records.
     expect(drained).toEqual([]);
     expect(forgotten).toEqual([
       { ipcPath: receiverPath, messageIds: ['sent-c'] },
+      { ipcPath: receiverPath, messageIds: ['sent-d'] },
     ]);
   });
 
@@ -2336,7 +2415,7 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
     // A slow-but-alive peer is still owed what was folded before close()
     // resolves: the flush waits inside the cleanup budget rather than
     // giving up while the receipt is mid-write.
-    const slow = await startSlowSenderInbox(800);
+    const slow = await startSlowSenderInbox(600);
     const started = await PeerMessaging.start({
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => ApprovalMode.DEFAULT,

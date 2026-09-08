@@ -2103,7 +2103,12 @@ describe('a message settled without the far model seeing it', () => {
   });
 
   it('lets an honest retry land after a full hold buffer turned it away', () => {
-    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    const h = harness({
+      policy: 'hold',
+      admission: new PeerAdmission({
+        limits: { globalBucketCapacity: MAX_HELD_MESSAGES + 2 },
+      }),
+    });
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
       h.gate.admit(frame({ from: `/tmp/filler-${i}.sock` }));
     }

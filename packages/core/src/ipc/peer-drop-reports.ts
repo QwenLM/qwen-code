@@ -36,7 +36,11 @@
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PeerDropReason } from './peer-admission.js';
 import { peerSenderKey, type PeerOrigin } from './inbound-gate.js';
-import { MAX_DROPPED_MSG_IDS, type PeerUserFrame } from './peer-frames.js';
+import {
+  MAX_DROPPED_MSG_IDS,
+  MAX_RETAINED_REPLY_TOKEN_CHARS,
+  type PeerUserFrame,
+} from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_DROP_REPORTS');
 
@@ -131,11 +135,6 @@ interface ReceiptBatch {
   detached: boolean;
 }
 
-function replyAddressOf(frame: PeerUserFrame): string | undefined {
-  if (!frame.from) return undefined;
-  return peerSenderKey(frame, { selfSent: false }).slice('peer:'.length);
-}
-
 function receiptTargetOf(
   frame: PeerUserFrame,
   from: string,
@@ -143,7 +142,10 @@ function receiptTargetOf(
   return {
     msgId: frame.msgId,
     from,
-    ...(frame.replyToken !== undefined ? { replyToken: frame.replyToken } : {}),
+    ...(frame.replyToken !== undefined &&
+    frame.replyToken.length <= MAX_RETAINED_REPLY_TOKEN_CHARS
+      ? { replyToken: frame.replyToken }
+      : {}),
   };
 }
 
@@ -185,15 +187,24 @@ export class DropReceiptCoalescer {
   }
 
   /** Record a drop. Sends now, or joins the batch already waiting. */
-  note(frame: PeerUserFrame, reason: PeerDropReason): void {
+  note(
+    frame: PeerUserFrame,
+    originOrReason: PeerOrigin | PeerDropReason,
+    maybeReason?: PeerDropReason,
+  ): void {
     if (this.disposed) return;
+    const origin =
+      typeof originOrReason === 'string' ? { selfSent: false } : originOrReason;
+    const reason =
+      typeof originOrReason === 'string' ? originOrReason : maybeReason;
+    if (reason === undefined) return;
     // No reply address, no receipt. Nothing is lost that could have been
     // delivered: a sender that gave no `from` cannot be told anything.
-    const replyAddress = replyAddressOf(frame);
+    const replyAddress = frame.from?.slice(0, 256);
     if (replyAddress === undefined) return;
 
     const now = this.now();
-    const batch = this.touch(`${replyAddress}\u0000${reason}`);
+    const batch = this.touch(`${peerSenderKey(frame, origin)}\u0000${reason}`);
 
     // The first drop in a window answers at once — a sender that has just
     // started overrunning should learn immediately, while it can still
@@ -442,7 +453,7 @@ export class DropReceiptCoalescer {
 }
 
 export interface DropNotice {
-  frame: PeerUserFrame;
+  frame: Pick<PeerUserFrame, 'from' | 'fromName'>;
   origin: PeerOrigin;
   reason: PeerDropReason;
   /**
@@ -515,7 +526,15 @@ export class DropNoticeThrottle {
     state.lastReportAt = now;
 
     try {
-      this.emit({ frame, origin, reason, suppressed });
+      this.emit({
+        frame: {
+          ...(frame.from !== undefined ? { from: frame.from } : {}),
+          ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
+        },
+        origin,
+        reason,
+        suppressed,
+      });
     } catch (error) {
       debugLogger.debug(`drop-notice listener threw: ${describe(error)}`);
     }

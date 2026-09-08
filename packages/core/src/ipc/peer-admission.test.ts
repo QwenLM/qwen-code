@@ -345,6 +345,20 @@ describe('PeerAdmission', () => {
       });
     });
 
+    it('removes every record owned by a re-used message id', () => {
+      const admission = new PeerAdmission();
+
+      admission.admit({ senderKey: 'peer', body: 'X', messageId: 'a' });
+      admission.admit({ senderKey: 'peer', body: 'Y', messageId: 'b' });
+      admission.admit({ senderKey: 'peer', body: 'X', messageId: 'a' });
+      admission.forgetBody('peer', 'X', 'a');
+      admission.forgetBody('peer', 'Y', 'b');
+
+      expect(admission.admit({ senderKey: 'peer', body: 'X' })).toEqual({
+        admitted: true,
+      });
+    });
+
     it('does not remove a later delivered copy with the same body', () => {
       const clock = stubClock();
       const admission = new PeerAdmission({

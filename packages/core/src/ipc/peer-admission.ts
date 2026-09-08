@@ -22,7 +22,7 @@
  * So arrival is metered before policy runs. Three numbers do it:
  *
  *   per sender   30 at once, then one every two seconds
- *   all senders  60 at once, then one a second
+ *   all senders  32 at once, then one a second
  *   duplicates   the same body from one peer inside 30 seconds
  *
  * The per-sender bucket is the real limit; the global one exists because
@@ -50,6 +50,7 @@
 
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { canonicalizeMsgId } from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_ADMISSION');
 
@@ -82,12 +83,9 @@ export interface PeerAdmissionLimits {
   /**
    * Burst across every sender combined — `from` is self-asserted.
    *
-   * Deliberately allowed to exceed the buffers downstream (`MAX_HELD_MESSAGES`,
-   * `MAX_ACCEPTED_BACKLOG`, both 50): neither of them evicts what a user
-   * already has, so a burst larger than a buffer costs its own tail a
-   * `queue-full` drop rather than costing someone else their message.
-   * Shrinking those buffers below this figure is safe; teaching either one
-   * to evict again is not.
+   * Kept at half the 64-send outbound ceiling so an admitted burst cannot
+   * occupy every receipt slot. The downstream buffers are larger (50 each),
+   * so the meter remains the first bound a rotating sender reaches.
    */
   globalBucketCapacity: number;
   globalRefillPerSecond: number;
@@ -102,7 +100,7 @@ export const PEER_ADMISSION_LIMITS: Readonly<PeerAdmissionLimits> = {
   bucketCapacity: 30,
   refillPerSecond: 0.5,
   dedupWindowMs: 30_000,
-  globalBucketCapacity: 60,
+  globalBucketCapacity: 32,
   globalRefillPerSecond: 1,
   maxTrackedSenders: 256,
 };
@@ -141,8 +139,19 @@ export function refillBucket(
 }
 
 /** A bucket has something to spend only at a whole token. */
-function hasToken(tokens: number): boolean {
+export function hasToken(tokens: number): boolean {
   return tokens >= 1;
+}
+
+/** Whether a remembered body is still inside the shared repeat window. */
+export function isBodyWithinWindow(
+  at: number,
+  atWall: number,
+  now: number,
+  wallNow: number,
+  windowMs: number,
+): boolean {
+  return Math.max(now - at, wallNow - atWall) < windowMs;
 }
 
 /**
@@ -267,10 +276,14 @@ export class PeerAdmission {
 
     const meter = this.trackSender(request.senderKey, now);
 
-    meter.bodies = meter.bodies.filter(
-      (record) =>
-        Math.max(now - record.at, wallNow - record.atWall) <
+    meter.bodies = meter.bodies.filter((record) =>
+      isBodyWithinWindow(
+        record.at,
+        record.atWall,
+        now,
+        wallNow,
         this.limits.dedupWindowMs,
+      ),
     );
 
     const bodyHash = request.exemptFromDedup
@@ -348,9 +361,27 @@ export class PeerAdmission {
         (messageId === undefined || record.messageId === messageId)
       ) {
         meter.bodies.splice(index, 1);
-        return;
       }
     }
+  }
+
+  /** Undo every repeat record owned by one admitted message. */
+  forgetMessage(senderKey: string, messageId: string): void {
+    const meter = this.senders.get(senderKey);
+    if (meter === undefined) return;
+    const canonicalId = canonicalizeMsgId(messageId);
+    meter.bodies = meter.bodies.filter(
+      (record) =>
+        record.messageId === undefined ||
+        canonicalizeMsgId(record.messageId) !== canonicalId,
+    );
+  }
+
+  /** Start a fresh per-session conversation without replacing the gate. */
+  reset(): void {
+    this.senders.clear();
+    this.globalTokens = this.limits.globalBucketCapacity;
+    this.globalRefill = this.now();
   }
 
   /**

@@ -15,7 +15,9 @@ import type { ApprovalMode } from '../config/approval-mode.js';
 import { readOwnSessionRecord } from '../services/session-registry.js';
 import { modeClass } from './inbound-gate.js';
 import {
+  hasToken,
   hashBody,
+  isBodyWithinWindow,
   PEER_ADMISSION_LIMITS,
   PEER_BURST_WINDOW_MS,
   refillBucket,
@@ -81,6 +83,8 @@ export function senderModeClass(mode: ApprovalMode): 'bypass' | 'prompting' {
 export interface SentPeerMessage {
   /** The address the model used, as list_agents printed it. */
   address: string;
+  /** Exact socket path the send-side mirror reserved against. */
+  ipcPath: string;
   /** Last receipt applied, or 'pending' before any. */
   state: PeerDeliveryStatus | 'pending';
 }
@@ -88,6 +92,7 @@ export interface SentPeerMessage {
 /** A receipt that moved a sent message to a new state. */
 export interface SettledPeerReceipt {
   address: string;
+  ipcPath: string;
   previous: PeerDeliveryStatus | 'pending';
 }
 
@@ -172,7 +177,7 @@ export function settleSentPeerMessage(
   }
   const previous = entry.state;
   entry.state = status;
-  return { address: entry.address, previous };
+  return { address: entry.address, ipcPath: entry.ipcPath, previous };
 }
 
 /**
@@ -206,8 +211,9 @@ export function lookupSentPeerMessageForTest(
 export function trackSentPeerMessageForTest(
   msgId: string,
   address: string,
+  ipcPath = address,
 ): void {
-  trackSent(msgId, { address, state: 'pending' });
+  trackSent(msgId, { address, ipcPath, state: 'pending' });
 }
 
 /** Test-only: forget every tracked send. */
@@ -246,6 +252,8 @@ interface PacedBody {
   messageId: string;
   hash: string;
   at: number;
+  atWall: number;
+  generation: number;
 }
 
 interface PacedTarget {
@@ -281,9 +289,23 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
     return existing;
   }
   while (pacedTargets.size >= MAX_PACED_TARGETS) {
-    const oldest = pacedTargets.keys().next().value;
-    if (oldest === undefined) break;
-    pacedTargets.delete(oldest);
+    let victim: string | undefined;
+    for (const [candidate, target] of pacedTargets) {
+      const level = refillBucket(
+        target.tokens,
+        target.lastRefill,
+        now,
+        PEER_ADMISSION_LIMITS.bucketCapacity,
+        PEER_ADMISSION_LIMITS.refillPerSecond,
+      );
+      if (level >= PEER_ADMISSION_LIMITS.bucketCapacity) {
+        victim = candidate;
+        break;
+      }
+    }
+    victim ??= pacedTargets.keys().next().value;
+    if (victim === undefined) break;
+    pacedTargets.delete(victim);
   }
   const fresh: PacedTarget = {
     tokens: PEER_ADMISSION_LIMITS.bucketCapacity,
@@ -298,13 +320,18 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
 }
 
 let pacerNow: () => number = () => performance.now();
+let pacerWallNow: () => number = () => Date.now();
 
 /**
  * Test-only: drive the pacer's clock. Pass nothing to restore the
  * monotonic clock production runs on.
  */
-export function setSendPacerClockForTest(now?: () => number): void {
+export function setSendPacerClockForTest(
+  now?: () => number,
+  wallNow?: () => number,
+): void {
   pacerNow = now ?? (() => performance.now());
+  pacerWallNow = wallNow ?? (() => Date.now());
 }
 
 /**
@@ -325,6 +352,7 @@ function reservePacerToken(
   | { ok: false; repeat: true }
   | { ok: false; repeat?: false; sentInBurst: number } {
   const now = pacerNow();
+  const wallNow = pacerWallNow();
   const target = pacedTargetFor(ipcPath, now);
   target.tokens = refillBucket(
     target.tokens,
@@ -335,14 +363,20 @@ function reservePacerToken(
   );
   target.lastRefill = now;
 
-  if (target.tokens < 1) {
+  if (!hasToken(target.tokens)) {
     // Refused before the burst window rolls over, so the count this
     // quotes is the window that emptied the bucket, not a fresh one.
     return { ok: false, sentInBurst: target.sentInBurst };
   }
 
-  target.bodies = target.bodies.filter(
-    (record) => now - record.at < PEER_ADMISSION_LIMITS.dedupWindowMs,
+  target.bodies = target.bodies.filter((record) =>
+    isBodyWithinWindow(
+      record.at,
+      record.atWall,
+      now,
+      wallNow,
+      PEER_ADMISSION_LIMITS.dedupWindowMs,
+    ),
   );
   const bodyHash = hashBody(body);
   const lastBody = target.bodies.at(-1);
@@ -379,6 +413,8 @@ function reservePacerToken(
     messageId: canonicalizeMsgId(messageId),
     hash: bodyHash,
     at: now,
+    atWall: wallNow,
+    generation,
   });
   target.sentInBurst += 1;
 
@@ -392,8 +428,8 @@ function reservePacerToken(
       // session what its level really is. Handing a token back now would
       // silently undo that and write the very message the drain exists to
       // hold back.
+      target.sentInBurst = Math.max(0, target.sentInBurst - 1);
       if (target.generation === generation) {
-        target.sentInBurst = Math.max(0, target.sentInBurst - 1);
         target.tokens = Math.min(
           PEER_ADMISSION_LIMITS.bucketCapacity,
           target.tokens + 1,
@@ -440,6 +476,26 @@ export function forgetSendPacerMessages(
   const target = pacedTargets.get(ipcPath);
   if (target === undefined) return;
   forgetPacedBodies(target, messageIds);
+}
+
+/** Refund a send the receiver proved was addressed to another session. */
+export function refundSendPacerMessage(
+  ipcPath: string,
+  messageId: string,
+): void {
+  const target = pacedTargets.get(ipcPath);
+  if (target === undefined) return;
+  const canonicalId = canonicalizeMsgId(messageId);
+  const record = target.bodies.find((body) => body.messageId === canonicalId);
+  if (record === undefined) return;
+  target.sentInBurst = Math.max(0, target.sentInBurst - 1);
+  if (record.generation === target.generation) {
+    target.tokens = Math.min(
+      PEER_ADMISSION_LIMITS.bucketCapacity,
+      target.tokens + 1,
+    );
+  }
+  forgetPacedBodies(target, [messageId]);
 }
 
 function forgetPacedBodies(
@@ -609,11 +665,11 @@ export async function sendToPeer(
       peer,
       address,
       reason: reservation.repeat
-        ? 'that exact message went to that session within the last 30 seconds, and its ' +
+        ? `that exact message went to that session within the last ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} seconds, and its ` +
           'inbox turns away a repeat before anyone reads it, so this one was not sent. ' +
           'Say something different, or wait for a reply rather than re-sending.'
         : `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
-          'in the last minute and more would be dropped by its rate limit, so this one was ' +
+          `in the last ${PEER_BURST_WINDOW_MS / 1000} seconds and more would be dropped by its rate limit, so this one was ` +
           'not sent. Batch what remains into one message, or wait a little before sending more.',
     };
   }
@@ -625,6 +681,7 @@ export async function sendToPeer(
   // forgets it again.
   trackSent(frame.msgId, {
     address,
+    ipcPath: peer.ipcPath,
     state: 'pending',
   });
   try {
@@ -633,6 +690,10 @@ export async function sendToPeer(
     });
     return { kind: 'sent', peer, address };
   } catch (error) {
+    const errorCode = error instanceof PeerSendError ? error.code : undefined;
+    if (errorCode !== 'ETIMEDOUT') {
+      reservation.refund();
+    }
     if (
       error instanceof PeerSendError &&
       (error.code === 'ENOENT' ||
@@ -644,10 +705,6 @@ export async function sendToPeer(
         error.code === 'EBUSY')
     ) {
       sentMessages.delete(canonicalizeMsgId(frame.msgId));
-      // Nothing reached the receiver, so nothing was metered there: give
-      // the token back rather than charging the caller for a send that
-      // never happened.
-      reservation.refund();
     }
     return {
       kind: 'failed',
