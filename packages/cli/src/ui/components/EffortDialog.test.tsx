@@ -52,6 +52,36 @@ describe('EffortDialog', () => {
     expect(lastFrame() ?? '').not.toContain('No effort configured');
   });
 
+  it('lists only the tiers the resolved model exposes', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog onSelect={vi.fn()} efforts={['high', 'max']} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('1.');
+    expect(frame).toContain('2.');
+    expect(frame).not.toContain('3.');
+    expect(frame).not.toContain('medium');
+    expect(frame).not.toContain('xhigh');
+  });
+
+  it('reports a configured tier the resolved model does not expose', () => {
+    // A global `model.reasoningEffort` carried over from another model reaches
+    // the picker; mapping that miss onto the first listed tier would read as
+    // "high is current" and a bare Enter would persist it over the stored value.
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog
+        onSelect={vi.fn()}
+        currentEffort="low"
+        efforts={['high', 'max']}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('low is not available for this model');
+    expect(frame).not.toContain('No effort configured');
+  });
+
   it('registers an active Escape handler that cancels with undefined', () => {
     const onSelect = vi.fn();
     renderWithProviders(<EffortDialog onSelect={onSelect} />);
