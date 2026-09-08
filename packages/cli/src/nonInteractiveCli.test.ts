@@ -5300,6 +5300,33 @@ describe('runNonInteractive', () => {
     );
     setupMetricsMock();
     const abortController = new AbortController();
+    const writes: string[] = [];
+    let stdoutAtExit = '';
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    vi.mocked(process.exit).mockImplementation((code) => {
+      stdoutAtExit = writes.join('');
+      throw new Error(`process.exit(${code}) called`);
+    });
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+        monitorId: 'mon_abort',
+        toolUseId: 'tool_monitor_abort',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+      cb?.({
+        monitorId: 'mon_abort',
+        toolUseId: 'tool_monitor_abort',
+        description: 'Watch abort window',
+      });
+    });
     mockLlmClient.sendMessageStream.mockReturnValue(
       (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
         yield {
@@ -5320,6 +5347,228 @@ describe('runNonInteractive', () => {
       ),
     ).rejects.toThrow('process.exit(130) called');
     expect(process.exit).toHaveBeenCalledWith(130);
+    const envelopesAtExit = stdoutAtExit
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(envelopesAtExit).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'task_notification',
+        data: expect.objectContaining({ task_id: 'mon_abort' }),
+      }),
+    );
+  });
+
+  it('flushes notifications before aborting after a drain-item stream', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const abortController = new AbortController();
+    const writes: string[] = [];
+    let stdoutAtExit = '';
+    let backgroundTaskNotification:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            agentId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    vi.mocked(process.exit).mockImplementation((code) => {
+      stdoutAtExit = writes.join('');
+      throw new Error(`process.exit(${code}) called`);
+    });
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+        monitorId: 'mon_drain_abort',
+        toolUseId: 'tool_monitor_drain_abort',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+      cb?.({
+        monitorId: 'mon_drain_abort',
+        toolUseId: 'tool_monitor_drain_abort',
+        description: 'Watch drain abort window',
+      });
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        backgroundTaskNotification = cb ?? undefined;
+      },
+    );
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation((cb) => {
+      cb?.({
+        agentId: 'bg_drain_abort',
+        toolUseId: 'tool_bg_drain_abort',
+        description: 'Background task during drain',
+        subagentType: 'general-purpose',
+      });
+    });
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+    const drainStream = async function* () {
+      yield {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'drain-aborted-tool',
+          name: 'test-tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'drain-abort',
+        },
+      } satisfies ServerLlmStreamEvent;
+      backgroundTaskNotification?.(
+        'Background task completed',
+        '<task-notification>completed</task-notification>',
+        {
+          agentId: 'bg_drain_abort',
+          toolUseId: 'tool_bg_drain_abort',
+          status: 'completed',
+        },
+      );
+      abortController.abort();
+    };
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([finished]))
+      .mockReturnValueOnce(drainStream());
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'drain-abort', {
+        abortController,
+      }),
+    ).rejects.toThrow('process.exit(130) called');
+
+    expect(process.exit).toHaveBeenCalledWith(130);
+    expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    const envelopesAtExit = stdoutAtExit
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(envelopesAtExit).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'task_notification',
+        data: expect.objectContaining({
+          task_id: 'bg_drain_abort',
+          status: 'completed',
+        }),
+      }),
+    );
+  });
+
+  it('pairs background tasks before a terminal API error result', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const writes: string[] = [];
+    let taskNotification:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            agentId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    let taskPending = true;
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        taskNotification = cb ?? undefined;
+      },
+    );
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation((cb) => {
+      cb?.({
+        agentId: 'bg_terminal_error',
+        toolUseId: 'tool_bg_terminal_error',
+        description: 'Background task before provider failure',
+        subagentType: 'general-purpose',
+      });
+    });
+    mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockImplementation(
+      () => taskPending,
+    );
+    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+      setTimeout(() => {
+        taskNotification?.(
+          'Background task cancelled',
+          '<task-notification>cancelled</task-notification>',
+          {
+            agentId: 'bg_terminal_error',
+            toolUseId: 'tool_bg_terminal_error',
+            status: 'cancelled',
+          },
+        );
+        taskPending = false;
+      }, 0);
+    });
+    const errorMessage = 'provider failed with a background task running';
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: errorMessage } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'terminal-error-background-task',
+      ),
+    ).rejects.toThrow(errorMessage);
+
+    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    const envelopes = writes
+      .join('')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const startedIndex = envelopes.findIndex(
+      (envelope) =>
+        envelope.type === 'system' &&
+        envelope.subtype === 'task_started' &&
+        envelope.data?.task_id === 'bg_terminal_error',
+    );
+    const notificationIndex = envelopes.findIndex(
+      (envelope) =>
+        envelope.type === 'system' &&
+        envelope.subtype === 'task_notification' &&
+        envelope.data?.task_id === 'bg_terminal_error' &&
+        envelope.data?.status === 'cancelled',
+    );
+    const resultIndex = envelopes.findIndex(
+      (envelope) => envelope.type === 'result',
+    );
+    expect(startedIndex).toBeGreaterThanOrEqual(0);
+    expect(notificationIndex).toBeGreaterThan(startedIndex);
+    expect(resultIndex).toBeGreaterThan(notificationIndex);
   });
 
   it('falls back to stderr when a stream-json error result cannot be emitted', async () => {
@@ -5348,6 +5597,36 @@ describe('runNonInteractive', () => {
     expect(
       processStderrSpy.mock.calls.map((call) => call[0]).join(''),
     ).toContain('[API Error: provider failed mid-stream]');
+  });
+
+  it('keeps JSON stderr parseable when its stdout result cannot be emitted', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    processStdoutSpy.mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: 'provider failed in JSON mode' } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'json-emit-error'),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = processStderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+    expect(JSON.parse(stderr)).toMatchObject({
+      error: {
+        type: 'AlreadyReportedError',
+        message: '[API Error: provider failed in JSON mode]',
+      },
+    });
   });
 
   it('should handle API errors in text mode and exit with error code', async () => {
@@ -5398,6 +5677,9 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+    expect(errorOutput.match(/401 Incorrect API key provided/g)).toHaveLength(
+      1,
+    );
     expect(streamDrained).toBe(true);
   });
 

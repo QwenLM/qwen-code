@@ -925,6 +925,18 @@ export async function runNonInteractive(
       config.getMonitorRegistry().abortAll();
       flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
+    const abortBackgroundTasksAndHoldBackNotifications = async () => {
+      const registry = config.getBackgroundTaskRegistry();
+      registry.abortAll();
+      // `abortAll()` marks each task `cancelled` synchronously, but the
+      // matching task_notification is emitted later by the task's natural
+      // handler. Keep the same bounded holdback for every terminal path that
+      // aborts tasks so stream-json never closes with an unpaired task_started.
+      const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+      while (Date.now() < holdbackDeadline && registry.hasUnfinalizedTasks()) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
 
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
@@ -1657,21 +1669,7 @@ export async function runNonInteractive(
           'Headless Goal ended with structured output',
           GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
-        registry.abortAll();
-        // `abortAll()` marks each task `cancelled` synchronously, but
-        // the matching `task_notification` is emitted later by the
-        // task's natural handler. Hold back briefly (capped at
-        // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
-        // `task_started` paired with its terminal notification, without
-        // blocking exit on a slow agent that the user has already
-        // declared done.
-        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
-        while (
-          Date.now() < holdbackDeadline &&
-          registry.hasUnfinalizedTasks()
-        ) {
-          await new Promise((r) => setTimeout(r, 50));
-        }
+        await abortBackgroundTasksAndHoldBackNotifications();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
         const metrics = uiTelemetryService.getMetrics();
@@ -2504,6 +2502,9 @@ export async function runNonInteractive(
         totalApiDurationMs += Date.now() - apiStartTime;
 
         if (abortController.signal.aborted) {
+          await abortBackgroundTasksAndHoldBackNotifications();
+          flushQueuedNotificationsToSdk(localQueue);
+          finalizeOneShotMonitors();
           await routeAbort();
         }
         if (terminalApiError) {
@@ -2820,6 +2821,7 @@ export async function runNonInteractive(
               totalApiDurationMs += Date.now() - itemApiStartTime;
 
               if (abortController.signal.aborted) {
+                await abortBackgroundTasksAndHoldBackNotifications();
                 flushQueuedNotificationsToSdk(localQueue);
                 finalizeOneShotMonitors();
                 await routeAbort();
@@ -3163,6 +3165,7 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      await abortBackgroundTasksAndHoldBackNotifications();
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
@@ -3231,7 +3234,10 @@ export async function runNonInteractive(
               emitErr instanceof Error ? emitErr.message : String(emitErr)
             }`,
           );
-          if (outputFormat !== OutputFormat.TEXT) {
+          if (
+            outputFormat === OutputFormat.STREAM_JSON &&
+            (isAlreadyReportedError || !ownsAdapter || recoverableCancellation)
+          ) {
             process.stderr.write(`${message}\n`);
           }
         }
