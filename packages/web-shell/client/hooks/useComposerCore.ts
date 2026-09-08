@@ -129,11 +129,11 @@ import {
 // Mirrors @codemirror/view's own browser.ios detection (vendor + mobile UA
 // or iPadOS 13+ maxTouchPoints).
 export const isIosCodeMirrorComposer =
+  typeof navigator !== 'undefined' &&
   /Apple Computer/.test(navigator.vendor) &&
   (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
-export const isAndroidCodeMirrorComposer = /\bAndroid\b/.test(
-  navigator.userAgent,
-);
+export const isAndroidCodeMirrorComposer =
+  typeof navigator !== 'undefined' && /\bAndroid\b/.test(navigator.userAgent);
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
 [data-web-shell-tooltip-portal] {
