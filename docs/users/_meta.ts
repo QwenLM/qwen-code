@@ -16,6 +16,7 @@ export default {
   'integration-github-action': 'GitHub Actions',
   'qwen-serve': 'Daemon mode (qwen serve)',
   'qwen-serve-deploy-local': 'Daemon mode — local launch templates',
+  'conversations-recovery': 'Conversations writer locks and recovery',
   'Code with Qwen Code': {
     type: 'separator',
     title: 'Code with Qwen Code', // Title is optional

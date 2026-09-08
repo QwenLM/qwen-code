@@ -581,6 +581,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       sessionId: string;
       clientCount: number;
       hasActivePrompt: boolean;
+      activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
       updatedAt?: string;
