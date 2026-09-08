@@ -4163,6 +4163,31 @@ describe('Session', () => {
     expect(session.isTurnIdle()).toBe(true);
   });
 
+  it('reports an active turn from a non-prompt source under the close gate', async () => {
+    const internals = session as unknown as {
+      notificationProcessing: boolean;
+      notificationCompletion: Promise<void> | null;
+    };
+    let resolveNotification!: () => void;
+    internals.notificationProcessing = true;
+    internals.notificationCompletion = new Promise<void>((resolve) => {
+      resolveNotification = resolve;
+    });
+
+    expect(session.hasActiveTurn()).toBe(true);
+    const releaseClose = session.beginClose();
+    expect(session.hasActiveTurn()).toBe(true);
+    expect(session.isTurnIdle()).toBe(false);
+
+    releaseClose();
+    resolveNotification();
+    internals.notificationProcessing = false;
+    internals.notificationCompletion = null;
+
+    expect(session.hasActiveTurn()).toBe(false);
+    expect(session.isTurnIdle()).toBe(true);
+  });
+
   it('rejects a prompt when a history mutation begins during writer admission', async () => {
     let resolveAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
