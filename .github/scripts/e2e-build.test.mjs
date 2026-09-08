@@ -438,7 +438,8 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
   // or overwrite removed, the names drifting apart — is silent until the
   // next transient stall reddens a main run again, so pin the contract.
   const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
-  const uploads = doc.jobs.build.steps.filter((s) =>
+  const buildSteps = doc.jobs.build.steps;
+  const uploads = buildSteps.filter((s) =>
     String(s.uses || '').startsWith('actions/upload-artifact@'),
   );
   const downloads = Object.values(doc.jobs).flatMap((job) =>
@@ -448,12 +449,28 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
   );
 
   it('keeps the two-attempt shape with the retry gated on the first outcome', () => {
-    assert.equal(
-      uploads.length,
-      2,
-      'the build job must upload the archive exactly twice: first attempt plus one bounded retry',
+    // Scope to the archive, not the action: an unrelated second artifact
+    // in the build job must not redden the retry contract, and the two
+    // attempts are bound by step name, never by position.
+    const archiveUploads = uploads.filter(
+      (s) => s.with?.name === uploads[0]?.with?.name,
     );
-    const [first, retry] = uploads;
+    assert.equal(
+      archiveUploads.length,
+      2,
+      'the e2e-build archive must be uploaded exactly twice: first attempt plus one bounded retry',
+    );
+    const first = archiveUploads.find(
+      (s) => s.name === 'Upload build artifact',
+    );
+    const retry = archiveUploads.find(
+      (s) => s.name === 'Upload build artifact (retry)',
+    );
+    assert.ok(first, "the build job must have an 'Upload build artifact' step");
+    assert.ok(
+      retry,
+      "the build job must have an 'Upload build artifact (retry)' step",
+    );
     // The first attempt's failure must not red the job before the retry
     // runs; the retry carries no continue-on-error, so a double failure
     // still fails the job and a deterministic failure (missing archive)
@@ -461,35 +478,77 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     assert.equal(first.id, 'upload-build');
     assert.equal(first['continue-on-error'], true);
     assert.equal(retry['continue-on-error'], undefined);
-    assert.match(String(retry.if), /steps\.upload-build\.outcome == 'failure'/);
+    // A job-level key computes the build conclusion green whatever either
+    // attempt exits, and every leg behind needs: ['build'] then runs against
+    // a missing artifact. isolated-nightly's deliberate job-level key is a
+    // different job — this pins build only.
+    assert.equal(doc.jobs.build['continue-on-error'], undefined);
+    // The whole expression, not a substring: a prepended failure() conjunct
+    // is false once the first attempt's continue-on-error absorbs the stall
+    // (its conclusion is success; only its outcome is failure), so the retry
+    // would never run while a substring pin still reads green.
+    assert.equal(retry.if, "${{ steps.upload-build.outcome == 'failure' }}");
     // The stalled first attempt reserves the artifact name for the run,
     // and v4+ 409s a same-name upload — without overwrite the retry (and
     // a manual re-run of the job) fails on Conflict, not on the network.
     assert.equal(retry.with.overwrite, true);
     // Both attempts publish the same payload under the same name; the
     // missing-archive guard rides on both so a pack regression fails
-    // fast in either attempt.
+    // fast in either attempt. overwrite is the one intentional asymmetry,
+    // so compare the with: blocks rather than a hand-picked key subset.
     assert.equal(first.with['if-no-files-found'], 'error');
-    assert.equal(retry.with['if-no-files-found'], 'error');
-    for (const key of ['name', 'path', 'compression-level', 'retention-days']) {
-      assert.deepEqual(
-        retry.with[key],
-        first.with[key],
-        `retry must carry the same ${key} as the first attempt`,
-      );
-    }
+    const retryWith = { ...retry.with };
+    delete retryWith.overwrite;
+    assert.deepEqual(
+      retryWith,
+      first.with,
+      'retry must publish the same payload as the first attempt',
+    );
+    assert.equal(
+      retry.uses,
+      first.uses,
+      'both attempts must run the same action pin',
+    );
+    // Pin the handoff, not just the agreement: a pack-to-upload drift
+    // (rename or reorder) fails every leg at download time while two
+    // mutually consistent path: strings would still read green.
+    const pack = buildSteps.find((s) => s.name === 'Pack build outputs');
+    assert.ok(pack, "the build job must have a 'Pack build outputs' step");
+    assert.ok(
+      pack.run.includes(first.with.path.split('/').pop()),
+      'pack step must write the archive the upload publishes',
+    );
+    assert.ok(
+      buildSteps.indexOf(pack) < buildSteps.indexOf(first) &&
+        buildSteps.indexOf(first) < buildSteps.indexOf(retry),
+      'pack must run before the first attempt, which must run before the retry',
+    );
   });
 
-  it('feeds every download leg the artifact name the upload publishes', () => {
+  it('feeds every download leg a name the workflow actually uploads', () => {
+    // Compare against every name the workflow uploads: a consumed name no
+    // job uploads still fails, while a second, correctly-uploaded artifact
+    // does not. The four known legs' agreement with the first attempt's
+    // name is already pinned in scripts/tests/e2e-workflow.test.js.
     const consumed = new Set(downloads.map((s) => s.with?.name));
+    const uploaded = new Set(
+      Object.values(doc.jobs).flatMap((job) =>
+        (job.steps ?? [])
+          .filter((s) =>
+            String(s.uses || '').startsWith('actions/upload-artifact@'),
+          )
+          .map((s) => s.with?.name),
+      ),
+    );
+    for (const name of consumed) {
+      assert.ok(
+        uploaded.has(name),
+        `a leg downloads '${name}', which no job uploads`,
+      );
+    }
     assert.ok(
       consumed.has(uploads[0].with.name),
-      'no leg downloads the artifact name the build job publishes',
-    );
-    assert.deepEqual(
-      [...consumed],
-      [uploads[0].with.name],
-      'a leg downloads a name the build job never uploads, or a second name appeared',
+      'no leg downloads the artifact the build job publishes',
     );
   });
 });
