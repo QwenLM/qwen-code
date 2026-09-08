@@ -121,4 +121,62 @@ describe('applyRestoredSessionApprovalMode', () => {
       expect(target.setApprovalMode).not.toHaveBeenCalled();
     },
   );
+
+  it('applies a record whose settings provenance still matches', () => {
+    const target = config();
+    const payload = {
+      mode: ApprovalMode.PLAN,
+      prePlanMode: ApprovalMode.AUTO_EDIT,
+      settingsApprovalMode: 'auto_edit',
+    };
+
+    const rejected = applyRestoredSessionApprovalMode(
+      target,
+      projection({ kind: 'valid', payload }),
+      { settingsApprovalMode: 'auto_edit' },
+    );
+
+    expect(rejected).toBe(false);
+    expect(target.restoreApprovalModeState).toHaveBeenCalledWith(payload);
+  });
+
+  it('applies a provenance-free record without consulting the settings value', () => {
+    const target = config();
+    const payload = { mode: ApprovalMode.YOLO };
+
+    const rejected = applyRestoredSessionApprovalMode(
+      target,
+      projection({ kind: 'valid', payload }),
+      { settingsApprovalMode: null },
+    );
+
+    expect(rejected).toBe(false);
+    expect(target.restoreApprovalModeState).toHaveBeenCalledWith(payload);
+  });
+
+  it.each([
+    ['deleted', 'yolo', null],
+    ['added', null, 'yolo'],
+    ['changed', 'yolo', 'auto_edit'],
+  ] as const)(
+    'holds back a recorded mode when the workspace setting was %s since it was written',
+    (_label, recorded, current) => {
+      const target = config();
+
+      const rejected = applyRestoredSessionApprovalMode(
+        target,
+        projection({
+          kind: 'valid',
+          payload: {
+            mode: ApprovalMode.YOLO,
+            settingsApprovalMode: recorded,
+          },
+        }),
+        { settingsApprovalMode: current },
+      );
+
+      expect(rejected).toBe(true);
+      expect(target.restoreApprovalModeState).not.toHaveBeenCalled();
+    },
+  );
 });

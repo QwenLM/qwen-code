@@ -10872,6 +10872,45 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
+    it('keeps a queued manual plan-exit notice across a rollback-style restore', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      // A manual PLAN -> DEFAULT exit queues the one-shot notice for the
+      // next model turn.
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      config.restoreApprovalModeState(
+        { mode: ApprovalMode.DEFAULT },
+        { preserveManualPlanExitNotice: true },
+      );
+
+      expect(config.takePendingManualPlanExitNotice()).toEqual({
+        version: 1,
+        currentMode: ApprovalMode.DEFAULT,
+      });
+    });
+
+    it('does not fabricate a manual plan-exit notice when a rollback re-exits PLAN', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      // Simulate a failed enter-PLAN transition: the mode moved to PLAN and
+      // the notice event cleared, but the transition is about to be rolled
+      // back — its restore crossing PLAN -> DEFAULT is not a user exit.
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      config.restoreApprovalModeState(
+        { mode: ApprovalMode.DEFAULT },
+        { preserveManualPlanExitNotice: true },
+      );
+
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
     it('queues approval snapshots after daemon persistence is enabled', async () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -10914,6 +10953,38 @@ describe('setApprovalMode with folder trust', () => {
         prePlanMode: ApprovalMode.AUTO_EDIT,
       });
       expect(assertCanStartTurn).not.toHaveBeenCalled();
+    });
+
+    it('stamps the workspace approvalMode provenance onto persisted snapshots', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const recordSessionApprovalMode = vi.fn().mockResolvedValue(true);
+      const internal = config as unknown as {
+        chatRecordingService: {
+          recordSessionApprovalMode: typeof recordSessionApprovalMode;
+        };
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = { recordSessionApprovalMode };
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setSessionApprovalModeProvenanceProvider(() => 'auto_edit');
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      await config.waitForSessionApprovalModePersistence();
+      expect(recordSessionApprovalMode).toHaveBeenNthCalledWith(1, {
+        mode: ApprovalMode.AUTO_EDIT,
+        settingsApprovalMode: 'auto_edit',
+      });
+
+      // The provider follows the live settings value; a deleted key is
+      // stamped as null so a later cold restore can observe the change.
+      config.setSessionApprovalModeProvenanceProvider(() => null);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      await config.waitForSessionApprovalModePersistence();
+      expect(recordSessionApprovalMode).toHaveBeenNthCalledWith(2, {
+        mode: ApprovalMode.DEFAULT,
+        settingsApprovalMode: null,
+      });
     });
 
     it('persists the restored plan exit target', async () => {
@@ -11160,6 +11231,28 @@ describe('setApprovalMode with folder trust', () => {
       });
     });
 
+    it('arms recorder rewind re-anchoring when persistence is enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const recorder = {
+        hasWriteOwnership: vi.fn().mockReturnValue(false),
+        recordSessionApprovalMode: vi.fn().mockResolvedValue(true),
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+        enableSessionApprovalModeRecording: vi.fn(),
+      };
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue(
+        recorder as never,
+      );
+
+      await config.enableSessionApprovalModePersistence(false);
+
+      expect(
+        recorder.enableSessionApprovalModeRecording,
+      ).toHaveBeenCalledOnce();
+    });
+
     it('requires ownership when session writer leases are enabled', async () => {
       const config = new Config({
         ...baseParams,
@@ -11220,6 +11313,33 @@ describe('setApprovalMode with folder trust', () => {
         config.waitForSessionApprovalModePersistence(),
       ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
       await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+    });
+
+    it('propagates the recorder latched failure through the persistence barrier', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const transcriptChanged = new SessionTranscriptChangedError();
+      const recorder = {
+        recordSessionApprovalMode: vi.fn().mockResolvedValue(false),
+        getWriteFailure: vi.fn().mockReturnValue(transcriptChanged),
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+        hasWriteOwnership: vi.fn().mockReturnValue(true),
+      };
+      const internal = config as unknown as {
+        chatRecordingService: typeof recorder;
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = recorder;
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      // The barrier sits ahead of the recorder's own assertCanStartTurn, so
+      // it must surface the latched failure's classification rather than a
+      // bare SessionWriterUnavailableError.
+      await expect(config.assertCanStartTurn()).rejects.toMatchObject({
+        errorKind: 'session_transcript_changed',
+      });
     });
 
     it('persists a later mode after a recoverable write failure', async () => {

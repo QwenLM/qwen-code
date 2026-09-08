@@ -271,6 +271,7 @@ import { restoreSessionModelThenAuthenticate } from './session-model-persistence
 import {
   applyRestoredSessionApprovalMode,
   isRestrictedApprovalModeConfig,
+  rawSettingsApprovalMode,
 } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -5399,8 +5400,12 @@ class QwenAgent implements Agent {
             requestedApprovalMode,
             projection,
           );
+        let restoredApprovalModeRejectedBySettings = false;
         if (!requestedApprovalModeApplied) {
-          applyRestoredSessionApprovalMode(config, projection);
+          restoredApprovalModeRejectedBySettings =
+            applyRestoredSessionApprovalMode(config, projection, {
+              settingsApprovalMode: rawSettingsApprovalMode(settings.merged),
+            });
         }
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
@@ -5419,7 +5424,11 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
-            persistInitialApprovalMode: requestedApprovalModeApplied,
+            // A record held back on settings provenance must be repaired
+            // durably: persist the settings-derived boot mode in its place.
+            persistInitialApprovalMode:
+              requestedApprovalModeApplied ||
+              restoredApprovalModeRejectedBySettings,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -5774,8 +5783,12 @@ class QwenAgent implements Agent {
             requestedApprovalMode,
             projection,
           );
+        let restoredApprovalModeRejectedBySettings = false;
         if (!requestedApprovalModeApplied) {
-          applyRestoredSessionApprovalMode(config, projection);
+          restoredApprovalModeRejectedBySettings =
+            applyRestoredSessionApprovalMode(config, projection, {
+              settingsApprovalMode: rawSettingsApprovalMode(settings.merged),
+            });
         }
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
@@ -5794,7 +5807,11 @@ class QwenAgent implements Agent {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
             approvalModeConvergenceBaseline,
-            persistInitialApprovalMode: requestedApprovalModeApplied,
+            // A record held back on settings provenance must be repaired
+            // durably: persist the settings-derived boot mode in its place.
+            persistInitialApprovalMode:
+              requestedApprovalModeApplied ||
+              restoredApprovalModeRejectedBySettings,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -11238,12 +11255,15 @@ class QwenAgent implements Agent {
             config.getApprovalModeRevision() === transitionRevision
           ) {
             try {
-              config.restoreApprovalModeState({
-                mode: previous,
-                ...(previousPrePlanMode === undefined
-                  ? {}
-                  : { prePlanMode: previousPrePlanMode }),
-              });
+              config.restoreApprovalModeState(
+                {
+                  mode: previous,
+                  ...(previousPrePlanMode === undefined
+                    ? {}
+                    : { prePlanMode: previousPrePlanMode }),
+                },
+                { preserveManualPlanExitNotice: true },
+              );
               config.setAutoModeDenialState(previousAutoModeDenialState);
             } catch (rollbackError) {
               debugLogger.warn(
@@ -13546,6 +13566,12 @@ class QwenAgent implements Agent {
                 try {
                   config.setApprovalMode(reloadedSessionMode);
                   transitionRevision = config.getApprovalModeRevision();
+                  await config.waitForSessionApprovalModePersistence?.();
+                  // PLAN-entry side effects run only once the transition is
+                  // durable, so a failed and rolled-back entry cannot disarm
+                  // an in-flight approved plan. Like Session.setMode, they
+                  // apply even when a concurrent transition superseded this
+                  // one.
                   if (
                     reloadedSessionMode === ApprovalMode.PLAN &&
                     previousMode !== ApprovalMode.PLAN
@@ -13553,7 +13579,6 @@ class QwenAgent implements Agent {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
-                  await config.waitForSessionApprovalModePersistence?.();
                   const transitionStillCurrent =
                     config.getApprovalModeRevision() === transitionRevision;
                   if (transitionStillCurrent) {
@@ -13575,12 +13600,15 @@ class QwenAgent implements Agent {
                     config.getApprovalModeRevision() === transitionRevision
                   ) {
                     try {
-                      config.restoreApprovalModeState({
-                        mode: previousMode,
-                        ...(previousPrePlanMode === undefined
-                          ? {}
-                          : { prePlanMode: previousPrePlanMode }),
-                      });
+                      config.restoreApprovalModeState(
+                        {
+                          mode: previousMode,
+                          ...(previousPrePlanMode === undefined
+                            ? {}
+                            : { prePlanMode: previousPrePlanMode }),
+                        },
+                        { preserveManualPlanExitNotice: true },
+                      );
                       config.setAutoModeDenialState(
                         previousAutoModeDenialState,
                       );
@@ -14585,6 +14613,9 @@ class QwenAgent implements Agent {
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
       }
+      config.setSessionApprovalModeProvenanceProvider?.(() =>
+        rawSettingsApprovalMode(this.settings.merged),
+      );
       await config.enableSessionApprovalModePersistence?.(
         options.persistInitialApprovalMode,
       );

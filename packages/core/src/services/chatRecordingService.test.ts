@@ -2943,6 +2943,146 @@ describe('ChatRecordingService', () => {
       ).toBe(false);
     });
 
+    it('does not re-anchor a projected-restore approval record on rewind without the persistence opt-in', async () => {
+      // A runtime that merely resumed a transcript carrying a
+      // session_approval_mode record never opted into approval-mode
+      // persistence. The rewind must not stamp this runtime's live Config
+      // mode onto the branch, or a later daemon cold load would honour it
+      // over the workspace setting.
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'restored-tail',
+        turnParentUuids: [null],
+        sessionApprovalMode: {
+          kind: 'valid',
+          payload: { mode: ApprovalMode.DEFAULT },
+        },
+      });
+      service.recordUserMessage([{ text: 'first' }]);
+      await service.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      service.rewindRecording(0, { truncatedCount: 1 });
+      await service.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(
+        written.some((record) => record.subtype === 'session_approval_mode'),
+      ).toBe(false);
+    });
+
+    it('does not re-anchor a legacy-restored approval record on rewind without the persistence opt-in', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'approval-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: { mode: ApprovalMode.DEFAULT },
+              cwd: '/test/project/root',
+              version: '1.0.0',
+            },
+            {
+              uuid: 'user-1',
+              parentUuid: 'approval-1',
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:01.000Z',
+              type: 'user',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              message: { role: 'user', parts: [{ text: 'resumed turn' }] },
+            },
+          ],
+        },
+        lastCompletedUuid: 'user-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      service.recordUserMessage([{ text: 'second' }]);
+      await service.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      service.rewindRecording(1, { truncatedCount: 1 });
+      await service.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(
+        written.some((record) => record.subtype === 'session_approval_mode'),
+      ).toBe(false);
+    });
+
+    it('re-anchors the live mode on rewind once the persistence opt-in is armed', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'restored-tail',
+        turnParentUuids: [null],
+        sessionApprovalMode: {
+          kind: 'valid',
+          payload: { mode: ApprovalMode.YOLO },
+        },
+      });
+      service.enableSessionApprovalModeRecording();
+      service.recordUserMessage([{ text: 'first' }]);
+      await service.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      service.rewindRecording(0, { truncatedCount: 1 });
+      await service.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_approval_mode',
+      ]);
+      expect(written[1]?.systemPayload).toEqual({
+        mode: ApprovalMode.DEFAULT,
+      });
+    });
+
+    it('stamps the config snapshot provenance onto the rewind re-anchor', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'restored-tail',
+        turnParentUuids: [null],
+        sessionApprovalMode: {
+          kind: 'valid',
+          payload: { mode: ApprovalMode.YOLO, settingsApprovalMode: 'yolo' },
+        },
+      });
+      service.enableSessionApprovalModeRecording();
+      (
+        mockConfig as unknown as {
+          sessionApprovalModeSnapshot: () => unknown;
+        }
+      ).sessionApprovalModeSnapshot = vi.fn().mockReturnValue({
+        mode: ApprovalMode.DEFAULT,
+        settingsApprovalMode: null,
+      });
+      service.recordUserMessage([{ text: 'first' }]);
+      await service.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      service.rewindRecording(0, { truncatedCount: 1 });
+      await service.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const reanchored = written.find(
+        (record) => record.subtype === 'session_approval_mode',
+      );
+      expect(reanchored?.systemPayload).toEqual({
+        mode: ApprovalMode.DEFAULT,
+        settingsApprovalMode: null,
+      });
+    });
+
     it('re-anchors the live config state onto the rewind branch', async () => {
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       await chatRecordingService.recordSessionApprovalMode({

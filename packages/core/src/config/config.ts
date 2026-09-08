@@ -2271,6 +2271,14 @@ export class Config {
   private sessionApprovalModePersistenceEnabled = false;
   private sessionApprovalModePersistenceTail: Promise<void> = Promise.resolve();
   private approvalModePersistenceSuppressed = false;
+  /**
+   * Supplies the raw workspace `tools.approvalMode` value stamped onto every
+   * persisted approval-mode snapshot, so a cold restore can tell whether the
+   * setting still holds the value the record was written under.
+   */
+  private sessionApprovalModeProvenanceProvider:
+    | (() => string | null)
+    | undefined;
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
     kind: 'clear',
@@ -7083,20 +7091,43 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
-  restoreApprovalModeState(payload: SessionApprovalModeRecordPayload): void {
+  restoreApprovalModeState(
+    payload: SessionApprovalModeRecordPayload,
+    options?: {
+      /**
+       * Set by rollback callers: a rolled-back transition neither queued nor
+       * consumed a manual plan-exit notice, so the notice event must survive
+       * the restore untouched — including any change the restore's own
+       * setApprovalMode would stamp on a PLAN crossing.
+       */
+      preserveManualPlanExitNotice?: boolean;
+    },
+  ): void {
     // Snapshot once, from the final state: `setApprovalMode` would otherwise
     // queue an intermediate PLAN record whose prePlanMode is the live mode
     // the session was never restored from.
     this.approvalModePersistenceSuppressed = true;
+    const preservedNotice = options?.preserveManualPlanExitNotice
+      ? {
+          ...Config.prototype.getManualPlanExitNoticeEventState.call(this),
+        }
+      : undefined;
     try {
       this.setApprovalMode(payload.mode);
     } finally {
       this.approvalModePersistenceSuppressed = false;
     }
-    // Restoring or initializing a session establishes its current state; it
-    // is not a user-driven PLAN exit that the next model turn must explain.
-    Config.prototype.getManualPlanExitNoticeEventState.call(this).kind =
-      'clear';
+    if (preservedNotice) {
+      const event =
+        Config.prototype.getManualPlanExitNoticeEventState.call(this);
+      event.version = preservedNotice.version;
+      event.kind = preservedNotice.kind;
+    } else {
+      // Restoring or initializing a session establishes its current state; it
+      // is not a user-driven PLAN exit that the next model turn must explain.
+      Config.prototype.getManualPlanExitNoticeEventState.call(this).kind =
+        'clear';
+    }
     if (payload.mode === ApprovalMode.PLAN) {
       const prePlanMode = payload.prePlanMode ?? ApprovalMode.DEFAULT;
       this.prePlanMode =
@@ -8697,13 +8728,24 @@ export class Config {
     return this.chatRecordingService;
   }
 
-  private sessionApprovalModeSnapshot(): SessionApprovalModeRecordPayload {
-    return this.approvalMode === ApprovalMode.PLAN
-      ? {
-          mode: this.approvalMode,
-          prePlanMode: this.getPrePlanMode(),
-        }
-      : { mode: this.approvalMode };
+  sessionApprovalModeSnapshot(): SessionApprovalModeRecordPayload {
+    const base =
+      this.approvalMode === ApprovalMode.PLAN
+        ? {
+            mode: this.approvalMode,
+            prePlanMode: this.getPrePlanMode(),
+          }
+        : { mode: this.approvalMode };
+    const settingsApprovalMode = this.sessionApprovalModeProvenanceProvider?.();
+    return settingsApprovalMode === undefined
+      ? base
+      : { ...base, settingsApprovalMode };
+  }
+
+  setSessionApprovalModeProvenanceProvider(
+    provider: (() => string | null) | undefined,
+  ): void {
+    this.sessionApprovalModeProvenanceProvider = provider;
   }
 
   private queueSessionApprovalModePersistence(): void {
@@ -8719,7 +8761,11 @@ export class Config {
     const payload = this.sessionApprovalModeSnapshot();
     const persist = async () => {
       const persisted = await recorder.recordSessionApprovalMode(payload);
-      if (!persisted) throw new SessionWriterUnavailableError();
+      if (!persisted) {
+        throw (
+          recorder.getWriteFailure?.() ?? new SessionWriterUnavailableError()
+        );
+      }
     };
     const pending = this.sessionApprovalModePersistenceTail.then(
       persist,
@@ -8743,6 +8789,7 @@ export class Config {
       throw new SessionWriterUnavailableError();
     }
     this.sessionApprovalModePersistenceEnabled = true;
+    recorder.enableSessionApprovalModeRecording?.();
     if (persistCurrentMode) {
       this.queueSessionApprovalModePersistence();
     }

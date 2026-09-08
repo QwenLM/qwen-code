@@ -587,6 +587,13 @@ export interface SessionModelRecordPayload {
 export interface SessionApprovalModeRecordPayload {
   mode: ApprovalMode;
   prePlanMode?: ApprovalMode;
+  /**
+   * Raw workspace `tools.approvalMode` value observed when this snapshot was
+   * written (null when the key was absent). Cold restore lets the recorded
+   * mode win only while the workspace value still matches, so an operator
+   * edit made while the session was reaped is not silently overwritten.
+   */
+  settingsApprovalMode?: string | null;
 }
 
 export type SessionApprovalModeRestoreState =
@@ -605,6 +612,7 @@ export function normalizeSessionApprovalModePayload(
   const candidate = payload as {
     mode?: unknown;
     prePlanMode?: unknown;
+    settingsApprovalMode?: unknown;
   };
   if (
     typeof candidate.mode !== 'string' ||
@@ -612,22 +620,37 @@ export function normalizeSessionApprovalModePayload(
   ) {
     return undefined;
   }
+  const settingsApprovalMode =
+    typeof candidate.settingsApprovalMode === 'string' ||
+    candidate.settingsApprovalMode === null
+      ? candidate.settingsApprovalMode
+      : undefined;
   const mode = candidate.mode as ApprovalMode;
-  if (mode !== ApprovalMode.PLAN) return { mode };
+  if (mode !== ApprovalMode.PLAN) {
+    return settingsApprovalMode === undefined
+      ? { mode }
+      : { mode, settingsApprovalMode };
+  }
   const prePlanMode =
     typeof candidate.prePlanMode === 'string' &&
     APPROVAL_MODE_VALUES.has(candidate.prePlanMode) &&
     candidate.prePlanMode !== ApprovalMode.PLAN
       ? (candidate.prePlanMode as ApprovalMode)
       : ApprovalMode.DEFAULT;
-  return { mode, prePlanMode };
+  return settingsApprovalMode === undefined
+    ? { mode, prePlanMode }
+    : { mode, prePlanMode, settingsApprovalMode };
 }
 
 function sessionApprovalModePayloadsEqual(
   a: SessionApprovalModeRecordPayload,
   b: SessionApprovalModeRecordPayload,
 ): boolean {
-  return a.mode === b.mode && a.prePlanMode === b.prePlanMode;
+  return (
+    a.mode === b.mode &&
+    a.prePlanMode === b.prePlanMode &&
+    a.settingsApprovalMode === b.settingsApprovalMode
+  );
 }
 
 export function isValidSessionModelPayload(
@@ -1017,6 +1040,15 @@ export class ChatRecordingService {
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
     | undefined;
+  /**
+   * Armed only when this process opted the session into approval-mode
+   * persistence (Config.enableSessionApprovalModePersistence) or itself
+   * recorded an approval mode. A recorder that merely restored a transcript
+   * carrying a session_approval_mode record must not re-anchor one on
+   * rewind: the re-anchor writes this runtime's live Config mode, which a
+   * later daemon cold load would honour over the workspace setting.
+   */
+  private sessionApprovalModeRecordingEnabled = false;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
@@ -1735,6 +1767,23 @@ export class ChatRecordingService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Arms rewind re-anchoring for this recorder. Called by
+   * Config.enableSessionApprovalModePersistence so the rewind gate tracks
+   * the daemon opt-in rather than transcript history.
+   */
+  enableSessionApprovalModeRecording(): void {
+    this.sessionApprovalModeRecordingEnabled = true;
+  }
+
+  /**
+   * The latched failure that permanently degraded this recorder, preferring
+   * the integrity classification — mirrors enterWriteFailure's return.
+   */
+  getWriteFailure(): Error | undefined {
+    return this.integrityFailure ?? this.writeFailure;
   }
 
   close(options?: { handoff?: boolean }): Promise<void> {
@@ -2539,14 +2588,19 @@ export class ChatRecordingService {
         });
       }
 
-      // Re-anchor only for sessions that already record approval modes
-      // (the daemon persistence opt-in); a session that never recorded one
-      // must not gain a restorable record from a rewind.
-      if (this.currentSessionApprovalMode) {
-        const liveSessionApprovalMode = normalizeSessionApprovalModePayload({
-          mode: this.config.getApprovalMode(),
-          prePlanMode: this.config.getPrePlanMode(),
-        });
+      // Re-anchor only for sessions this process records approval modes for
+      // (the daemon persistence opt-in); merely resuming a transcript that
+      // carries a record must not gain a restorable record from a rewind.
+      if (
+        this.sessionApprovalModeRecordingEnabled &&
+        this.currentSessionApprovalMode
+      ) {
+        const liveSessionApprovalMode = normalizeSessionApprovalModePayload(
+          this.config.sessionApprovalModeSnapshot?.() ?? {
+            mode: this.config.getApprovalMode(),
+            prePlanMode: this.config.getPrePlanMode(),
+          },
+        );
         this.currentSessionApprovalMode = liveSessionApprovalMode;
         if (liveSessionApprovalMode) {
           this.appendRecord({
@@ -2840,6 +2894,7 @@ export class ChatRecordingService {
   async recordSessionApprovalMode(
     payload: SessionApprovalModeRecordPayload,
   ): Promise<boolean> {
+    this.sessionApprovalModeRecordingEnabled = true;
     const normalized = normalizeSessionApprovalModePayload(payload);
     if (!normalized) return false;
     if (

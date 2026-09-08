@@ -10502,12 +10502,15 @@ export class Session implements SessionContext {
         this.config.getApprovalModeRevision() === transitionRevision
       ) {
         try {
-          this.config.restoreApprovalModeState({
-            mode: previousApprovalMode,
-            ...(previousPrePlanMode === undefined
-              ? {}
-              : { prePlanMode: previousPrePlanMode }),
-          });
+          this.config.restoreApprovalModeState(
+            {
+              mode: previousApprovalMode,
+              ...(previousPrePlanMode === undefined
+                ? {}
+                : { prePlanMode: previousPrePlanMode }),
+            },
+            { preserveManualPlanExitNotice: true },
+          );
           this.config.setAutoModeDenialState(previousAutoModeDenialState);
         } catch (rollbackError) {
           debugLogger.warn('session/set_mode rollback failed', rollbackError);
@@ -12992,12 +12995,15 @@ export class Session implements SessionContext {
                     this.config.getApprovalModeRevision() === transitionRevision
                   ) {
                     try {
-                      this.config.restoreApprovalModeState({
-                        mode: previousMode,
-                        ...(previousPrePlanMode === undefined
-                          ? {}
-                          : { prePlanMode: previousPrePlanMode }),
-                      });
+                      this.config.restoreApprovalModeState(
+                        {
+                          mode: previousMode,
+                          ...(previousPrePlanMode === undefined
+                            ? {}
+                            : { prePlanMode: previousPrePlanMode }),
+                        },
+                        { preserveManualPlanExitNotice: true },
+                      );
                     } catch (rollbackError) {
                       debugLogger.warn(
                         'confirm-and-switch approval-mode rollback failed',
@@ -13233,6 +13239,12 @@ export class Session implements SessionContext {
           if (staleTodoPlanApproval) return staleTodoPlanApproval;
 
           await this.config.waitForSessionApprovalModePersistence?.();
+          // The barrier is a suspension point between the staleness gate
+          // above and execute(): a plan approval invalidated while parked
+          // here (e.g. a concurrent session/set_mode) must be observed before
+          // the tool runs on the revoked approval. The gate is idempotent.
+          const staleAfterBarrier = await cancelStaleTodoPlanApproval();
+          if (staleAfterBarrier) return staleAfterBarrier;
           const persistenceBoundaryCancellation =
             cancelBeforeExecutionIfAborted(toolName);
           if (persistenceBoundaryCancellation) {
@@ -13484,6 +13496,7 @@ export class Session implements SessionContext {
             const postExecutionApprovalMode = this.config.getApprovalMode();
             const postExecutionApprovalModeRevision =
               this.config.getApprovalModeRevision();
+            let planLifecycleRolledBack = false;
             try {
               await this.sendCurrentModeUpdateNotification();
             } catch (error) {
@@ -13493,12 +13506,20 @@ export class Session implements SessionContext {
                   postExecutionApprovalModeRevision
               ) {
                 try {
-                  this.config.restoreApprovalModeState({
-                    mode: preExecutionApprovalMode,
-                    ...(preExecutionPrePlanMode === undefined
-                      ? {}
-                      : { prePlanMode: preExecutionPrePlanMode }),
-                  });
+                  this.config.restoreApprovalModeState(
+                    {
+                      mode: preExecutionApprovalMode,
+                      ...(preExecutionPrePlanMode === undefined
+                        ? {}
+                        : { prePlanMode: preExecutionPrePlanMode }),
+                    },
+                    { preserveManualPlanExitNotice: true },
+                  );
+                  if (isExitPlanModeTool) {
+                    // The executed exit stamped the workflow-plan revision
+                    // approved; a rolled-back exit must not keep it armed.
+                    this.config.clearSessionWorkflowPlanRevision?.();
+                  }
                 } catch (rollbackError) {
                   debugLogger.warn(
                     'plan lifecycle approval-mode rollback failed',
@@ -13508,13 +13529,25 @@ export class Session implements SessionContext {
                 this.config.setAutoModeDenialState(
                   preExecutionAutoModeDenialState,
                 );
-                throw error;
+                planLifecycleRolledBack = true;
+                // The tool already ran successfully: the transcript, hooks,
+                // and model must see the execution that happened, not a
+                // synthetic UNHANDLED_EXCEPTION. Only the mode change is
+                // rolled back.
+                debugLogger.warn(
+                  'plan lifecycle mode notification was not durable; rolled the mode back',
+                  error,
+                );
               }
             }
             // PLAN-entry side effects run only once the transition is
             // durable, so a failed and rolled-back entry cannot disarm an
-            // in-flight approved plan.
-            if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+            // in-flight approved plan. A rolled-back exit restored PLAN
+            // rather than entering it, so it must not run either.
+            if (
+              !planLifecycleRolledBack &&
+              this.config.getApprovalMode() === ApprovalMode.PLAN
+            ) {
               this.clearActiveTodoPlanRevision();
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }

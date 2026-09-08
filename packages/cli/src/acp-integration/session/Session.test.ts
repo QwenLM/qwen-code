@@ -5914,10 +5914,13 @@ describe('Session', () => {
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.YOLO,
       );
-      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith({
-        mode: ApprovalMode.PLAN,
-        prePlanMode: ApprovalMode.AUTO_EDIT,
-      });
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.AUTO_EDIT,
+        },
+        { preserveManualPlanExitNotice: true },
+      );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(prePlanMode).toBe(ApprovalMode.AUTO_EDIT);
       expect(mockConfig.setAutoModeDenialState).toHaveBeenCalledWith(
@@ -5966,9 +5969,10 @@ describe('Session', () => {
       expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
       expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
       expect(clearSessionWorkflowPlanRevision).not.toHaveBeenCalled();
-      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith({
-        mode: ApprovalMode.DEFAULT,
-      });
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
+        { mode: ApprovalMode.DEFAULT },
+        { preserveManualPlanExitNotice: true },
+      );
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
 
@@ -29286,7 +29290,7 @@ describe('Session', () => {
       },
     );
 
-    it('rolls back an enter-plan transition when its persistence fails', async () => {
+    it('rolls back an enter-plan transition when its persistence fails, still reporting the executed result', async () => {
       let mode = ApprovalMode.DEFAULT;
       const executeSpy = vi.fn().mockImplementation(async () => {
         mode = ApprovalMode.PLAN;
@@ -29326,9 +29330,10 @@ describe('Session', () => {
       ]);
 
       expect(executeSpy).toHaveBeenCalledOnce();
-      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith({
-        mode: ApprovalMode.DEFAULT,
-      });
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
+        { mode: ApprovalMode.DEFAULT },
+        { preserveManualPlanExitNotice: true },
+      );
       expect(mode).toBe(ApprovalMode.DEFAULT);
       expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -29337,9 +29342,103 @@ describe('Session', () => {
           }),
         }),
       );
-      expect(result.parts[0]?.functionResponse?.response).toEqual(
+      // The tool already ran: the model and transcript must see the
+      // execution that happened, not a synthetic UNHANDLED_EXCEPTION.
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'entered',
+      });
+    });
+
+    it('reports the executed result and disarms the plan stamp when an exit-plan transition rolls back', async () => {
+      let mode = ApprovalMode.PLAN;
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.DEFAULT;
+        return { llmContent: 'approved', returnDisplay: 'approved' };
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.EXIT_PLAN_MODE,
+        kind: core.Kind.Think,
+        build: vi.fn().mockReturnValue({
+          params: {},
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getConfirmationDetails: vi.fn(),
+          getDescription: vi.fn().mockReturnValue('Exit plan mode'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.restoreApprovalModeState = vi.fn((payload) => {
+        mode = payload.mode;
+      });
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      const messageBus = {
+        request: vi.fn().mockImplementation(async () => ({
+          success: true,
+          output: { decision: 'allow' },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('plan snapshot failed'));
+      const emitError = vi.spyOn(
+        (
+          session as unknown as {
+            toolCallEmitter: {
+              emitError: (...args: unknown[]) => unknown;
+            };
+          }
+        ).toolCallEmitter,
+        'emitError',
+      );
+      const clearActiveTodoPlanRevision = vi.spyOn(
+        session,
+        'clearActiveTodoPlanRevision',
+      );
+
+      const result = await (
+        session as unknown as RunToolCallsForTest
+      ).runToolCalls(new AbortController().signal, 'prompt-exit-plan', [
+        {
+          id: 'call-exit-plan-persistence',
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          args: {},
+        },
+      ]);
+
+      expect(executeSpy).toHaveBeenCalledOnce();
+      // Only the mode change is rolled back; the transcript, hooks, and
+      // model must see the execution that happened.
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
+        { mode: ApprovalMode.PLAN, prePlanMode: ApprovalMode.DEFAULT },
+        { preserveManualPlanExitNotice: true },
+      );
+      expect(mode).toBe(ApprovalMode.PLAN);
+      // The executed exit stamped the workflow-plan revision approved; the
+      // rolled-back exit must not keep it armed.
+      expect(
+        mockConfig.clearSessionWorkflowPlanRevision,
+      ).toHaveBeenCalledOnce();
+      // Restoring PLAN is not entering it: entry side effects stay off.
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'approved',
+      });
+      expect(emitError).not.toHaveBeenCalled();
+      const hookEvents = messageBus.request.mock.calls.map(
+        ([request]) => (request as { eventName?: string }).eventName,
+      );
+      expect(hookEvents).toContain('PostToolUse');
+      expect(hookEvents).not.toContain('PostToolUseFailure');
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
         expect.objectContaining({
-          error: expect.stringContaining('plan snapshot failed'),
+          update: expect.objectContaining({
+            sessionUpdate: 'current_mode_update',
+          }),
         }),
       );
     });
@@ -29418,9 +29517,10 @@ describe('Session', () => {
       ]);
 
       expect(executeSpy).not.toHaveBeenCalled();
-      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith({
-        mode: ApprovalMode.AUTO,
-      });
+      expect(mockConfig.restoreApprovalModeState).toHaveBeenCalledWith(
+        { mode: ApprovalMode.AUTO },
+        { preserveManualPlanExitNotice: true },
+      );
       expect(mode).toBe(ApprovalMode.AUTO);
       expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -33439,6 +33539,95 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'Tool call was cancelled before execution.',
+      });
+    });
+
+    it('cancels a revision-bound plan exit invalidated while approval persistence settles', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const executeSpy = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.EXIT_PLAN_MODE,
+        kind: core.Kind.Think,
+        build: vi.fn().mockReturnValue({
+          params: { plan: 'Original plan' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'plan',
+            title: 'Approve plan',
+            plan: 'Original plan',
+            hideAlwaysAllow: true,
+            onConfirm,
+          }),
+          getDescription: vi.fn().mockReturnValue('Plan:'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        }),
+      });
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+      let releasePersistence!: () => void;
+      mockConfig.waitForSessionApprovalModePersistence = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releasePersistence = resolve;
+          }),
+      );
+
+      // Bind the todo plan revision exactly as a real todo_write plan
+      // update would, while the session is in PLAN.
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      const runPromise = (
+        session as unknown as RunToolCallsForTest
+      ).runToolCalls(new AbortController().signal, 'prompt-exit-plan-stale', [
+        {
+          id: 'call-exit-plan-stale',
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'Original plan' },
+        },
+      ]);
+      await vi.waitFor(() =>
+        expect(
+          mockConfig.waitForSessionApprovalModePersistence,
+        ).toHaveBeenCalledOnce(),
+      );
+
+      // The plan approval is revoked while the tool is parked on the
+      // persistence barrier: the staleness gate must observe it before
+      // execute() runs on the revoked approval.
+      session.clearActiveTodoPlanRevision();
+      releasePersistence();
+      const result = await runPromise;
+
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.Cancel,
+      );
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: expect.stringContaining('Workflow revision changed'),
       });
     });
 
