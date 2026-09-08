@@ -114,6 +114,12 @@ export const TranscriptViewport = forwardRef<
       offset: row.getBoundingClientRect().top - top,
     };
   }, [historical, pin, rows, scroller, toolSources]);
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+  const refreshAnchor = () => {
+    // Virtual rows may not exist when the scroll event starts the request.
+    anchor.current = captureRef.current() ?? anchor.current;
+  };
   useImperativeHandle(
     ref,
     () => ({
@@ -208,7 +214,7 @@ export const TranscriptViewport = forwardRef<
   const load = (direction: 'older' | 'newer') => {
     anchor.current = capture();
     entryDirection.current = direction;
-    void viewport.load(direction);
+    void viewport.load(direction, refreshAnchor);
   };
   const handleScrollIntent = () => {
     scrollIntent.current += 1;
@@ -310,7 +316,7 @@ export const TranscriptViewport = forwardRef<
                   size="sm"
                   onClick={() => {
                     anchor.current = capture();
-                    viewport.retry();
+                    viewport.retry(refreshAnchor);
                   }}
                 >
                   {t('history.retry')}

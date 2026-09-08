@@ -18,6 +18,7 @@ const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
   collapseRows: false,
+  hideRows: false,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
@@ -37,7 +38,7 @@ vi.mock('./MessageList', () => ({
       );
       return (
         <div data-web-shell-message-list>
-          {props.messages.flatMap((message) => [
+          {(observed.hideRows ? [] : props.messages).flatMap((message) => [
             <div
               key={message.id}
               data-message-row-key={`msg:${message.id}`}
@@ -72,6 +73,7 @@ afterEach(() => {
   root = undefined;
   container?.remove();
   observed.collapseRows = false;
+  observed.hideRows = false;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -324,6 +326,31 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
       ).toBe(expected);
     },
   );
+
+  it('captures rows materialized after a boundary request starts before admitting the page', async () => {
+    const { click, row, getTranscriptPage, settleFrames, render } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    observed.hideRows = true;
+    render();
+    let resolve!: (value: DaemonSessionTranscriptPage) => void;
+    getTranscriptPage.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await click('history.loadEarlier');
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    observed.hideRows = false;
+    render();
+    const before = row(targetKey).getBoundingClientRect().top;
+    await act(async () => resolve(page(['old1', 'old2'])));
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
 
   it('restores a collapse row independently of its sibling prompt sharing its source', async () => {
     const { click, list, row, getTranscriptPage, settleFrames } = await setup({
