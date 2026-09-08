@@ -123,10 +123,11 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
-  | 'tokenUsage';
+  | 'tokenUsage'
+  | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Token usage is opt-in. */
+  /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
@@ -169,6 +170,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens context usage for the current session, when available. */
+  onOpenContextUsage?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
