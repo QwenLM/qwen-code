@@ -145,6 +145,7 @@ export type DispatchResultKind =
   | 'started'
   | 'delivered'
   | 'delivery_race'
+  | 'cancelling'
   | 'cancelled'
   | 'requeued'
   | 'recovered_terminal'
@@ -455,12 +456,23 @@ async function reconcileInterruptedRuns(
           });
           continue;
         }
-        await port.cancel?.({
-          agent,
-          threadId: thread.id,
-          runId: run.id,
-          attempt: run.attempts,
-        });
+        if (state.kind === 'running') {
+          const requested = await port.cancel?.({
+            agent,
+            threadId: thread.id,
+            runId: run.id,
+            attempt: run.attempts,
+          });
+          if ((await port.inspect(agent)).kind === 'running') {
+            records.push({
+              ...base,
+              kind: 'cancelling',
+              detail: requested ? 'awaiting_runtime_stop' : 'cancel_not_accepted',
+            });
+            continue;
+          }
+        }
+        await chargeRunUsage(projectRoot, port, agent, thread.id, run);
         await withAgentStoreTransaction(projectRoot, (transaction) =>
           finishRunInTransaction(transaction, {
             threadId: thread.id,

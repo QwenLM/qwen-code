@@ -259,7 +259,16 @@ export function createSessionDispatchPort(
       }
     },
 
-    async cancel({ agent }): Promise<boolean> {
+    async cancel({ agent, threadId, runId, attempt }): Promise<boolean> {
+      const execution = executions.get(agent.id);
+      if (
+        execution?.kind !== 'running' ||
+        execution.threadId !== threadId ||
+        execution.runId !== runId ||
+        execution.attempt !== attempt
+      ) {
+        return false;
+      }
       const session = sessionFor(bridge, workspaceCwd, agent);
       if (!session) return false;
       try {

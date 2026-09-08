@@ -582,7 +582,8 @@ booking again.
 | `capacity_wait`     | leave queued and expose runtime-capacity backpressure; do not consume a launch attempt                     |
 | `started`           | bind the run/session, prompt watermark, and transcript start atomically                                    |
 | `launch_failed`     | mark terminal `failed` with typed `failureStage`; release pending capacity and notify after retry policy   |
-| `cancelled`         | mark queued runs cancelled immediately; request runtime cancellation for running work                      |
+| `cancelling`        | request cancellation of the bound active attempt; remain stopping while the runtime still reports running |
+| `cancelled`         | mark queued runs cancelled immediately; for active work, confirm the runtime stopped and charge usage first |
 | `unclosed_run`      | preserve final text and commit consumed input; if no successor is runnable, block instead of guessing done |
 
 The booking outcome and dispatcher result are intentionally separate. A durable

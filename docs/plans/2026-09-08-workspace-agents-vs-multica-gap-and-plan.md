@@ -4,6 +4,31 @@
 
 ### Browser/source acceptance observations, 2026-09-08
 
+#### Cancellation — wait for the runtime, then account for usage
+
+The dispatcher previously ignored the cancellation result and immediately wrote
+cancelled, even while the runtime still reported running. It now keeps cancelling
+until a fresh runtime inspection no longer reports running; refusal and accepted
+but incomplete cancellation have distinct dispatch details. The session adapter
+also checks thread/run/attempt before cancelling, and terminal reconciliation
+charges usage before writing cancelled.
+
+A direct source check observed both rejected and accepted-but-running requests
+remain cancelling. When the stub runtime stopped, the run became cancelled and
+its 125-minus-100 usage delta was recorded as 25 tokens. A single regression
+case was added to the existing dispatcher test file; the suite was not run.
+
+Chrome task `th_9b557bad-6888-4695-a0ed-b72abfd70c98` initially completed before
+the cancellation click could reach it; that first run is not cancellation
+evidence. A second human-requested run,
+`rn_2b38c719-44d5-46c8-92fd-f9b0af25e785`, posted sequential checkpoints.
+Chrome showed working → stopping → no active run after Cancel. The store
+confirmed cancelled, startedAt=1788848724048, endedAt=1788848741171, and 594,802
+tokens accounted to that run. Checkpoints 1–7 exist; checkpoint 8 and a review
+from the cancelled run do not. The thread is blocked with an explicit cancelled
+run reason and no successor, not in_progress. Its two-run history remains in the
+local demo workspace. This does not verify an unresponsive child or forced kill.
+
 #### Same-thread peer handoff — clean first-attempt demo
 
 Chrome task `th_00df8e71-3a7f-4c83-876c-290a7a22d878` reused demo-leader and

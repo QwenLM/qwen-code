@@ -406,6 +406,36 @@ describe('dispatchOnce', () => {
     ).toBe(true);
   });
 
+  it('keeps cancellation pending until the body stops and charges its usage', async () => {
+    const thread = await seedQueued({
+      runs: [
+        run({ status: 'cancelling', attempts: 1, usageBaselineTokens: 100 }),
+      ],
+    });
+    let state: AgentBodyState = {
+      kind: 'running',
+      threadId: thread.id,
+      runId: 'rn_1',
+      attempt: 1,
+    };
+    const driver = {
+      ...port({ inspect: async () => state }),
+      cancel: async () => false,
+      totalTokens: async () => 125,
+    };
+    expect((await dispatchOnce(PROJECT_ROOT, driver))[0]?.kind).toBe(
+      'cancelling',
+    );
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
+      'cancelling',
+    );
+    state = { kind: 'completed' };
+    await dispatchOnce(PROJECT_ROOT, driver);
+    const stopped = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
+    expect(stopped.status).toBe('cancelled');
+    expect(stopped.usageByRound[0]?.tokens).toBe(25);
+  });
+
   it('chooses the runtime entry point from the body state', async () => {
     await seedQueued();
     for (const [state, action] of [
