@@ -215,6 +215,53 @@ describe('assistant turn settlement projection', () => {
     expect(settled).not.toHaveProperty('message');
   });
 
+  it('does not settle a streaming assistant block as the turn answer', () => {
+    // The block-level streaming guard must fire: the insight-segment adapter
+    // branch pushes its assistant messages without `isStreaming`, so only the
+    // block scan stands in front of publishing a still-streaming fragment.
+    harness.blocks = [
+      assistantBlock(
+        'assistant-1',
+        '{"insight_progress":{"stage":"planning","progress":0.5}} after',
+        { promptId: 'prompt-live', streaming: true },
+      ),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled).not.toHaveProperty('message');
+  });
+
+  it('does not settle a merged message that absorbed a streaming block from another prompt', () => {
+    // The message-level streaming guard must fire: consecutive top-level
+    // assistant blocks merge, and the merged message inherits the trailing
+    // block's `streaming` even though that block is outside this prompt's
+    // `promptBlockIds`.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-live',
+      }),
+      assistantBlock('assistant-2', 'next turn still typing', {
+        promptId: 'prompt-other',
+        streaming: true,
+      }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled).not.toHaveProperty('message');
+  });
+
   it('publishes only the fields the host contract declares', () => {
     harness.blocks = [];
     // Internal-only widening: a field added to the internal event (and to no
