@@ -212,11 +212,18 @@ export class SessionCatalogStore {
     string,
     Map<string, number>
   >();
+  private readonly liveStateFailureStreaks = new Map<string, number>();
+  private liveSessionRevision = 0;
+  private readonly liveSessionRevisions = new Map<string, number>();
   private readonly liveSessionsByWorkspace = new Map<
     string,
     ReadonlyMap<string, DaemonSessionLiveState>
   >();
   private readonly liveSessionListeners = new Map<string, Set<() => void>>();
+  private readonly liveSessionObservationListeners = new Map<
+    string,
+    Set<() => void>
+  >();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -244,25 +251,31 @@ export class SessionCatalogStore {
         this.liveStateWorkspaceUsers.set(workspaceCwd, remaining);
       else {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
-        this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
-        this.liveStatePendingActivity.delete(workspaceCwd);
-        this.clearLiveSessions(workspaceCwd);
-        for (const entry of this.entries.values()) {
-          if (entry.query.workspaceCwd !== workspaceCwd) continue;
-          this.resetPollSchedule(entry);
-          if (entry.waiters.length > 0) {
-            entry.desiredRevision += 1;
-            if (entry.queuedJob?.staged) this.removeQueuedJob(entry);
-            this.ensureScheduled(entry, PRIORITY.interactive, false);
-          } else if (
-            entry.subscribers.size > 0 &&
-            (entry.invalidated ||
-              (hasAutoLoadSubscriber(entry) &&
-                (entry.snapshot.page === undefined || entry.snapshot.stale)))
-          ) {
-            this.requestBackground(entry, 'initial');
+        // React releases the old view before retaining its same-commit
+        // replacement. Let that handoff keep the authoritative snapshot.
+        queueMicrotask(() => {
+          if (this.liveStateWorkspaceUsers.has(workspaceCwd)) return;
+          this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+          this.liveStatePendingActivity.delete(workspaceCwd);
+          this.liveStateFailureStreaks.delete(workspaceCwd);
+          this.clearLiveSessions(workspaceCwd);
+          for (const entry of this.entries.values()) {
+            if (entry.query.workspaceCwd !== workspaceCwd) continue;
+            this.resetPollSchedule(entry);
+            if (entry.waiters.length > 0) {
+              entry.desiredRevision += 1;
+              if (entry.queuedJob?.staged) this.removeQueuedJob(entry);
+              this.ensureScheduled(entry, PRIORITY.interactive, false);
+            } else if (
+              entry.subscribers.size > 0 &&
+              (entry.invalidated ||
+                (hasAutoLoadSubscriber(entry) &&
+                  (entry.snapshot.page === undefined || entry.snapshot.stale)))
+            ) {
+              this.requestBackground(entry, 'initial');
+            }
           }
-        }
+        });
       }
     };
   }
@@ -630,6 +643,27 @@ export class SessionCatalogStore {
     return this.liveSessionsByWorkspace.has(workspaceCwd);
   }
 
+  getLiveSessionRevision(workspaceCwd: string): number | undefined {
+    return this.liveSessionRevisions.get(workspaceCwd);
+  }
+
+  /**
+   * Drop the retained live-state snapshot after its channel has failed for
+   * long enough that the snapshot can no longer be called current. Readers
+   * then report the answer as unknown rather than serving a last-known value
+   * indefinitely — a daemon that dies mid-turn must not leave a pane believing
+   * the turn is still running for the life of the tab (#9487).
+   */
+  markWorkspaceLiveStateUnavailable(workspaceCwd: string): void {
+    this.clearLiveSessions(workspaceCwd);
+  }
+
+  recordLiveStateFailure(workspaceCwd: string): number {
+    const streak = (this.liveStateFailureStreaks.get(workspaceCwd) ?? 0) + 1;
+    this.liveStateFailureStreaks.set(workspaceCwd, streak);
+    return streak;
+  }
+
   subscribeLiveSessions(
     workspaceCwd: string,
     listener: () => void,
@@ -642,6 +676,24 @@ export class SessionCatalogStore {
       listeners.delete(listener);
       if (listeners.size === 0) {
         this.liveSessionListeners.delete(workspaceCwd);
+      }
+    };
+  }
+
+  subscribeLiveSessionObservations(
+    workspaceCwd: string,
+    listener: () => void,
+  ): () => void {
+    const existing = this.liveSessionObservationListeners.get(workspaceCwd);
+    const listeners = existing ?? new Set<() => void>();
+    if (!existing) {
+      this.liveSessionObservationListeners.set(workspaceCwd, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.liveSessionObservationListeners.delete(workspaceCwd);
       }
     };
   }
@@ -740,13 +792,21 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
   ): void {
+    this.liveStateFailureStreaks.delete(workspaceCwd);
     const next = new Map<string, DaemonSessionLiveState>();
     for (const session of liveSessions) {
       next.set(session.sessionId, session);
     }
     const previous = this.liveSessionsByWorkspace.get(workspaceCwd);
-    if (previous && liveSessionSnapshotsEqual(previous, next)) return;
-    this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    const changed = !previous || !liveSessionSnapshotsEqual(previous, next);
+    if (changed) this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    this.liveSessionRevisions.set(workspaceCwd, ++this.liveSessionRevision);
+    const observationListeners =
+      this.liveSessionObservationListeners.get(workspaceCwd);
+    if (observationListeners) {
+      for (const listener of [...observationListeners]) listener();
+    }
+    if (!changed) return;
     const listeners = this.liveSessionListeners.get(workspaceCwd);
     if (listeners) {
       for (const listener of [...listeners]) listener();
@@ -755,6 +815,12 @@ export class SessionCatalogStore {
 
   private clearLiveSessions(workspaceCwd: string): void {
     if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
+    this.liveSessionRevisions.delete(workspaceCwd);
+    const observationListeners =
+      this.liveSessionObservationListeners.get(workspaceCwd);
+    if (observationListeners) {
+      for (const listener of [...observationListeners]) listener();
+    }
     const listeners = this.liveSessionListeners.get(workspaceCwd);
     if (listeners) {
       for (const listener of [...listeners]) listener();
@@ -935,8 +1001,11 @@ export class SessionCatalogStore {
     this.liveStateWorkspaceUsers.clear();
     this.liveStateWorkspaceRefreshRequests.clear();
     this.liveStatePendingActivity.clear();
+    this.liveStateFailureStreaks.clear();
+    this.liveSessionRevisions.clear();
     this.liveSessionsByWorkspace.clear();
     this.liveSessionListeners.clear();
+    this.liveSessionObservationListeners.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();

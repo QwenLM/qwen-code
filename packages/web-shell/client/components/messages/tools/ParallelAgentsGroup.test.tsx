@@ -142,6 +142,11 @@ describe('ParallelAgentsGroup activity rendering', () => {
         row.getAttribute('data-agent-status'),
       ),
     ).toEqual(['active', 'completed', 'failed']);
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-transcript-tool-call-id]'),
+      ).map((row) => row.getAttribute('data-transcript-tool-call-id')),
+    ).toEqual(['active', 'done', 'failed']);
     expect(container.querySelector('[class*="track"]')).toBeNull();
     expect(container.querySelector('[class*="ruler"]')).toBeNull();
   });

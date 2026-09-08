@@ -9,7 +9,31 @@ export function artifactKindLabel(
   workspacePath?: string,
 ): string {
   const ext = pathExtension(workspacePath);
+  if (AUDIO_EXTENSIONS.has(ext)) return 'Audio';
   switch (ext) {
+    case '.htm':
+    case '.html':
+      return 'HTML';
+    case '.md':
+    case '.markdown':
+    case '.mdx':
+      return 'Markdown';
+    case '.pdf':
+      return 'PDF';
+    case '.avif':
+    case '.bmp':
+    case '.gif':
+    case '.ico':
+    case '.jpeg':
+    case '.jpg':
+    case '.png':
+    case '.svg':
+    case '.webp':
+      return 'Image';
+    case '.mov':
+    case '.mp4':
+    case '.webm':
+      return 'Video';
     case '.doc':
     case '.docx':
     case '.docm':
@@ -65,16 +89,15 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
   '.odp',
 ]);
 
+const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
+
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
+  ...AUDIO_EXTENSIONS,
   '.pdf',
   '.mp4',
   '.mov',
   '.webm',
-  '.mp3',
-  '.wav',
-  '.m4a',
-  '.ogg',
 ]);
 
 export function isOfficeDocumentPath(workspacePath?: string): boolean {
@@ -118,10 +141,21 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   return false;
 }
 
-function pathExtension(workspacePath?: string): string {
-  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
+export function pathExtension(workspacePath?: string): string {
+  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
+  const name = path.split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+export function isAudioArtifact(
+  workspacePath?: string,
+  mimeType?: string,
+): boolean {
+  return (
+    AUDIO_EXTENSIONS.has(pathExtension(workspacePath)) ||
+    normalizeArtifactMimeType(mimeType).startsWith('audio/')
+  );
 }
 
 // Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the
@@ -141,7 +175,10 @@ export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType
     ? artifactType
-    : artifactKindLabel(artifact.kind, artifact.workspacePath);
+    : artifactKindLabel(
+        artifact.kind,
+        artifact.workspacePath ?? artifact.url ?? artifact.title,
+      );
 }
 
 export function formatArtifactSize(sizeBytes: number | undefined): string {
