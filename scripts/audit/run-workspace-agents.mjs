@@ -29,7 +29,7 @@ const src = 'packages/core/src/agents/workspace-agents';
 await fs.writeFile(
   entry,
   `export * from '${repo}/${src}/store.js';
-export { selectCandidates } from '${repo}/${src}/dispatcher.js';
+export { selectCandidates, deliverParentReports, deliverNotifications, dispatchOnce } from '${repo}/${src}/dispatcher.js';
 export { assembleAgentPrompt } from '${repo}/${src}/prompt.js';
 export { decideDispatch, resolveTargets } from '${repo}/${src}/dispatch-policy.js';
 export * from '${repo}/${src}/thread-actions.js';
@@ -995,6 +995,150 @@ ok(
   M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: false })
     .status === 'blocked',
   M.resolveThreadStatus({ thread: wth, hasLiveChildDependency: false }).status,
+);
+
+console.log('\n15. a child reporting back to its parent');
+// The outbox exists so a sub-thread's conclusion reaches the thread that
+// delegated it, exactly once, even if the delivery is retried.
+const pp = await startFor('Parent work');
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_kid', name: 'kid', createdAt: 1 },
+]);
+await asAgent(pp.agentId, pp.th.id, pp.runId, pp.th.rootThreadId, () =>
+  new M.ThreadCreateTool(cfg).buildAndExecute(
+    { title: 'The smaller half', assignee: 'kid' },
+    sig(),
+  ),
+);
+const kid = (await M.listThreads(ROOT)).threads.find(
+  (t) => t.parentThreadId === pp.th.id,
+);
+ok(
+  'delegating booked the child a run',
+  kid.runs.length === 1,
+  String(kid.runs.length),
+);
+
+const kidRun = kid.runs[0].id;
+await M.claimRun(ROOT, { threadId: kid.id, runId: kidRun });
+await asAgent(kid.assigneeAgentId, kid.id, kidRun, kid.rootThreadId, () =>
+  new M.ThreadReviewTool(cfg).buildAndExecute({ summary: 'Half done.' }, sig()),
+);
+await M.withAgentStoreTransaction(ROOT, (tx) =>
+  M.finishRunInTransaction(tx, {
+    threadId: kid.id,
+    runId: kidRun,
+    outcome: { status: 'completed', attempt: 1 },
+  }),
+);
+const closedKid = await M.readThread(ROOT, kid.id);
+ok(
+  'the child queues a report for its parent',
+  closedKid.outbox.some(
+    (e) => e.kind === 'parent_report' && e.status === 'pending',
+  ),
+  JSON.stringify(closedKid.outbox.map((e) => [e.kind, e.status])),
+);
+
+const beforeParent = (await M.readThread(ROOT, pp.th.id)).messages.length;
+ok(
+  'delivering the report reaches the parent',
+  (await M.deliverParentReports(ROOT)) >= 1,
+);
+const afterParent = await M.readThread(ROOT, pp.th.id);
+ok(
+  'and posts on it',
+  afterParent.messages.length > beforeParent,
+  `${beforeParent} -> ${afterParent.messages.length}`,
+);
+ok(
+  'the report is acknowledged, not left pending',
+  !(await M.readThread(ROOT, kid.id)).outbox.some(
+    (e) => e.kind === 'parent_report' && e.status === 'pending',
+  ),
+);
+ok(
+  'delivering again sends nothing, so a retry is not a second message',
+  (await M.deliverParentReports(ROOT)) === 0 &&
+    (await M.readThread(ROOT, pp.th.id)).messages.length ===
+      afterParent.messages.length,
+);
+
+console.log('\n16. crash recovery');
+// The daemon can die mid-turn. On the next tick the dispatcher has to decide,
+// from the runtime's answer alone, whether each live run is still real.
+const fakePort = (state, extra = {}) => ({
+  inspect: async () => state,
+  start: async () => ({
+    status: 'started',
+    sessionId: 's',
+    consumedOnStart: true,
+  }),
+  cancel: async () => true,
+  ...extra,
+});
+
+const c1 = await startFor('Crashed body');
+const beforeRecovery = (await M.readThread(ROOT, c1.th.id)).runs.find(
+  (r) => r.id === c1.runId,
+).status;
+ok('the run is running before the crash', beforeRecovery === 'running');
+// The body is gone and the run has drained its input: nothing left to do.
+let recs = await M.dispatchOnce(ROOT, fakePort({ kind: 'completed' }));
+const afterRecovery = (await M.readThread(ROOT, c1.th.id)).runs.find(
+  (r) => r.id === c1.runId,
+);
+ok(
+  'a completed body closes the run rather than leaving it live forever',
+  afterRecovery.status === 'completed',
+  afterRecovery.status,
+);
+ok(
+  'and the dispatcher says so in its record',
+  recs.some((r) => r.kind === 'recovered_terminal'),
+  JSON.stringify(recs.map((r) => r.kind)),
+);
+
+const c2 = await startFor('Vanished body');
+// Absent, not completed: the body disappeared without finishing, so the first
+// attempt is retried rather than written off.
+recs = await M.dispatchOnce(ROOT, fakePort({ kind: 'absent' }));
+const retried = (await M.readThread(ROOT, c2.th.id)).runs.find(
+  (r) => r.id === c2.runId,
+);
+// The durable evidence is the attempt count, not the status: one dispatchOnce
+// requeues the run and then, in the same pass, starts it again — so reading
+// `queued` back is a race with the very recovery being tested.
+ok(
+  'a vanished body is retried, and the attempt count says so',
+  retried.attempts === 2,
+  `status=${retried.status} attempts=${retried.attempts}`,
+);
+ok(
+  'and the record names the requeue',
+  recs.some((r) => r.kind === 'requeued'),
+);
+
+const c3 = await startFor('Divergent body');
+// The runtime says it is working something else. Guessing which is right is
+// how two runs end up believing they own one thread.
+recs = await M.dispatchOnce(
+  ROOT,
+  fakePort({
+    kind: 'running',
+    threadId: 'th_somewhere_else',
+    runId: 'rn_other',
+  }),
+);
+const untouched = (await M.readThread(ROOT, c3.th.id)).runs.find(
+  (r) => r.id === c3.runId,
+);
+ok(
+  'a divergent body is reported and the run is left alone',
+  untouched.status === 'running' &&
+    recs.some((r) => r.kind === 'runtime_divergence'),
+  `${untouched.status} ${JSON.stringify(recs.map((r) => r.kind))}`,
 );
 
 await fs.rm(tmp, { recursive: true, force: true });
