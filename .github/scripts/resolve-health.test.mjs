@@ -59,6 +59,7 @@ function comment(
   pr = 1,
   updated_at = created_at,
   author_association = 'COLLABORATOR',
+  eyes = 1,
 ) {
   const id = (nextId += 1);
   return {
@@ -69,18 +70,31 @@ function comment(
     updated_at,
     body,
     html_url: `https://github.com/QwenLM/qwen-code/pull/${pr}#issuecomment-${id}`,
+    eyes,
   };
 }
 // Default COLLABORATOR: the association a maintainer's comment carries, and
 // the only kind the producer would have served — see ANSWERABLE_ASSOCIATIONS.
+// The default `eyes` is the same neutrality on the acknowledgement layer:
+// the producer's reaction is present exactly on the requests it accepted,
+// and a fixture that does not exercise the owed gate models a served request.
 const request = (
   at,
   pr,
   user = 'maintainer',
   updated_at = at,
   author_association = 'COLLABORATOR',
+  eyes = 1,
 ) =>
-  comment(user, at, '@qwen-code /resolve', pr, updated_at, author_association);
+  comment(
+    user,
+    at,
+    '@qwen-code /resolve',
+    pr,
+    updated_at,
+    author_association,
+    eyes,
+  );
 const result = (at, sentence, pr) =>
   comment(BOT, at, `${RESULT_MARKER}\n${sentence}\n\nDetails.`, pr);
 
@@ -346,11 +360,20 @@ describe('resolve-health: classification', () => {
       /needs\.authorize\.outputs\.should_review == 'true'/,
     );
     assert.ok(resolvePr.includes("- name: 'Report skipped request'"));
+    // The acceptance signal the deficit gate reads (isOwed in assess()):
+    // the job's acknowledgement step posts the `eyes` reaction on the
+    // request comment behind the same authorize gate, so it is present
+    // exactly on the requests the lane accepted. Should the step go or
+    // the reaction kind change, every request reads as refused and the
+    // deficit signal goes silent.
+    assert.ok(resolvePr.includes("- name: 'Acknowledge resolve request'"));
+    assert.match(resolvePr, /-f content='eyes'/);
     const publish = producerJob('publish-resolution');
     assert.match(publish, /needs\.resolve-pr\.outputs\.decision == 'run'/);
     assert.ok(publish.includes("- name: 'Report result'"));
     // ...and the permission set that gate applies. The watch's set is wider
-    // on purpose (a read-only collaborator still counts), never narrower.
+    // on purpose, never narrower — the acknowledgement gate (isOwed), not
+    // the set, is what keeps a refused request from reading as a deficit.
     const authorize = producer.slice(
       producer.indexOf('\n  authorize:'),
       producer.indexOf('\n  review-pr:'),
@@ -848,6 +871,116 @@ describe('resolve-health: assessment', () => {
     assert.equal(carried.newestRequest, null);
   });
 
+  it('gates every deficit on the producer having acknowledged the request', () => {
+    // ANSWERABLE_ASSOCIATIONS is deliberately wider than "has write" (a
+    // read-only collaborator is inside it), and the producer refuses the
+    // extra population in silence: authorize skips the whole job, so a
+    // refused request gets no run, no result — and no acknowledgement.
+    // Counted as a deficit, three such requests file "0 consecutive
+    // failures, 3 unanswered requests" against a healthy lane, and one
+    // holds the close gate for the rest of the window. The signal that
+    // separates them is the producer's own: resolve-pr's first step posts
+    // an `eyes` reaction on the request comment only when authorize said
+    // yes. A deficit — the roster, or the close gate's veto — requires it.
+    const existing = { number: 42, createdAt: FILED_AT, texts: [] };
+    // The witness population: three refused requests from read-only
+    // collaborators, hours old and never acknowledged, on a lane that is
+    // demonstrably healthy. They neither alarm nor veto.
+    const refused = [0, 1, 2].map((h) => ({
+      number: 51 + h,
+      state: 'open',
+      comments: [
+        request(
+          `2026-08-27T0${h}:00:00Z`,
+          51 + h,
+          'read-only-collaborator',
+          `2026-08-27T0${h}:00:00Z`,
+          'COLLABORATOR',
+          0,
+        ),
+      ],
+    }));
+    const healthy = {
+      number: 90,
+      state: 'open',
+      comments: [result('2026-08-27T09:00:00Z', PUSHED, 90)],
+    };
+    const refusedLane = assess([...refused, healthy], { now });
+    assert.equal(refusedLane.unanswered.length, 0);
+    assert.equal(refusedLane.alarm, false);
+    assert.equal(refusedLane.unserved, null);
+    assert.deepEqual(
+      decide(refusedLane, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // The same three requests WITH the acknowledgement behave as they
+    // always have: answered by their own results, they neither alarm nor
+    // veto, and the close proceeds.
+    const served = [0, 1, 2].map((h) => ({
+      number: 61 + h,
+      state: 'open',
+      comments: [
+        request(`2026-08-27T0${h}:00:00Z`, 61 + h),
+        result(`2026-08-27T0${h}:05:00Z`, PUSHED, 61 + h),
+      ],
+    }));
+    const servedLane = assess(served, { now });
+    assert.equal(servedLane.unanswered.length, 0);
+    assert.equal(servedLane.alarm, false);
+    assert.equal(servedLane.unserved, null);
+    assert.deepEqual(
+      decide(servedLane, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // And an acknowledged request that never got its result still counts.
+    const owedLane = assess(
+      [
+        {
+          number: 71,
+          state: 'open',
+          comments: [request('2026-08-27T06:00:00Z', 71)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(owedLane.unanswered.length, 1);
+    // The one grace: the reaction lands minutes after the comment, so a
+    // request still inside the queue gap is owed without it — an
+    // in-flight request must keep vetoing a recovery close. Half an hour
+    // old, never acknowledged, and the veto is the ONLY thing refusing
+    // this close: the push postdates the request, and nothing else does.
+    const inFlight = assess(
+      [
+        {
+          number: 81,
+          state: 'open',
+          comments: [
+            request(
+              '2026-08-27T11:30:00Z',
+              81,
+              'maintainer',
+              '2026-08-27T11:30:00Z',
+              'COLLABORATOR',
+              0,
+            ),
+          ],
+        },
+        {
+          number: 90,
+          state: 'open',
+          comments: [result('2026-08-27T11:35:00Z', PUSHED, 90)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(inFlight.unanswered.length, 0);
+    assert.equal(inFlight.unserved, '2026-08-27T11:30:00Z');
+    assert.deepEqual(
+      decide(inFlight, existing).map((a) => a.type),
+      ['comment'],
+    );
+  });
+
   it('does not count a comment edited into a request', () => {
     // The producer fires on comment creation only; an edit never starts a
     // run, so an edited comment never receives a result and must not be
@@ -874,7 +1007,10 @@ describe('resolve-health: assessment', () => {
 
   it('counts a request aged exactly the stale window', () => {
     // The boundary is inclusive (`>=`): a request aged exactly staleHours
-    // counts; one one second younger does not.
+    // counts; one one second younger does not. Run on the DEFAULT: every
+    // other staleness test passes staleHours explicitly and main() never
+    // overrides it, so this is also the only pin on the documented
+    // three-hour window itself.
     const prs = [
       {
         number: 30,
@@ -885,7 +1021,7 @@ describe('resolve-health: assessment', () => {
         ],
       },
     ];
-    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    const a = assess(prs, { now, unansweredThreshold: 1 });
     assert.deepEqual(
       a.unanswered.map((u) => u.at),
       ['2026-08-27T09:00:00Z'],
@@ -2811,6 +2947,7 @@ describe('resolve-health: reading the comment feed', () => {
           '2026-08-27T00:00:00Z',
           'u1',
           Buffer.from('@qwen-code /resolve').toString('base64'),
+          '1',
         ].join('\t'),
         // An empty association column, as `(.author_association // "")`
         // emits when the API omits the field: the row must still parse
@@ -2823,6 +2960,7 @@ describe('resolve-health: reading the comment feed', () => {
           '2026-08-27T00:10:00Z',
           'u2',
           Buffer.from('@qwen-code /resolve').toString('base64'),
+          '0',
         ].join('\t'),
         '',
       ].join('\n');
@@ -2830,7 +2968,15 @@ describe('resolve-health: reading the comment feed', () => {
     const prs = fetchPrs(gh, 'QwenLM/qwen-code', '2026-08-20');
     const jq = calls[1][calls[1].indexOf('--jq') + 1];
     assert.match(jq, /author_association/);
+    // The acknowledgement count is the same kind of lifeline: if the jq
+    // stops projecting it, every request parses as refused and the deficit
+    // signal goes just as silently.
+    assert.match(jq, /reactions\.eyes/);
     assert.equal(prs[0].comments[0].author_association, 'CONTRIBUTOR');
+    assert.deepEqual(
+      prs[0].comments.map((c) => c.eyes),
+      [1, 0],
+    );
     assert.deepEqual(
       prs[0].comments.map((c) => [c.author_association, c.created_at]),
       [
@@ -3264,6 +3410,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-25T00:00:00Z',
             'u1',
             b64('@qwen-code /resolve'),
+            '1',
           ].join('\t'),
           [
             '2',
@@ -3273,6 +3420,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-25T00:05:00Z',
             'u2',
             b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
+            '0',
           ].join('\t'),
           [
             '3',
@@ -3282,6 +3430,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-26T00:00:00Z',
             'u3',
             b64('@qwen-code /resolve'),
+            '1',
           ].join('\t'),
           [
             '4',
@@ -3291,6 +3440,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-26T00:05:00Z',
             'u4',
             b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
+            '0',
           ].join('\t'),
           '',
         ].join('\n');
@@ -3305,6 +3455,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-26T01:00:00Z',
             'u5',
             b64(`${RESULT_MARKER}\n${AGENT_FAILED}`),
+            '0',
           ].join('\t'),
           '',
         ].join('\n');
@@ -3403,6 +3554,7 @@ describe('resolve-health: end to end against a recording gh', () => {
                 c.updated_at ?? c.created_at,
                 c.html_url,
                 b64(c.body),
+                c.eyes ?? 0,
               ].join('\t'),
             )
             .map((l) => `${l}\n`)
@@ -3476,6 +3628,7 @@ describe('resolve-health: end to end against a recording gh', () => {
                   c.updated_at ?? c.created_at,
                   c.html_url,
                   b64(c.body),
+                  c.eyes ?? 0,
                 ].join('\t')}\n`,
             )
             .join('');
@@ -3582,6 +3735,11 @@ describe('resolve-health: end to end against a recording gh', () => {
         c.args[2] === 'POST' && c.args[3] === 'repos/QwenLM/qwen-code/issues',
     );
     assert.deepEqual(JSON.parse(create.input).labels, [DEFAULTS.label]);
+    // The value itself, not only its self-consistency: every assertion
+    // above reads DEFAULTS.label, so a rename would ship green while
+    // orphaning the live tracking issue (found by the old label) and
+    // filing a duplicate beside it.
+    assert.equal(DEFAULTS.label, 'scope/ci-cd');
   });
 
   it('honours the unanswered-request knob through main()', () => {
@@ -3736,6 +3894,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-26T00:00:00Z',
             'u6',
             b64('@qwen-code /resolve'),
+            '1',
           ].join('\t'),
           [
             '7',
@@ -3745,6 +3904,7 @@ describe('resolve-health: end to end against a recording gh', () => {
             '2026-08-26T01:00:00Z',
             'u7',
             b64(`${RESULT_MARKER}\n${PUSHED}`),
+            '0',
           ].join('\t'),
           '',
         ].join('\n');
@@ -3796,10 +3956,10 @@ describe('resolve-health: end to end against a recording gh', () => {
   });
 
   it('keeps reporting when the tracking issue body was edited into the current state', () => {
-    // Until the first update comment the body is the ONLY state source, so a
-    // triage user editing its marker to the state the next tick computes
-    // makes sameState() true and the watch reports nothing through an
-    // evolving outage — and re-editing each tick is cheap. The decoy is the
+    // The body is never a state source — state is read only from the
+    // watch's own unedited comments — so a triage user editing the body's
+    // marker to the state the next tick computes must not make sameState()
+    // true and silence the watch through an evolving outage. The decoy is the
     // cheaper shape of the same attack: plant a labelled issue carrying the
     // marker and a forged state, and the created-desc lookup adopts it
     // instead of the genuine one, which is then never updated or closed.
@@ -3871,6 +4031,10 @@ describe('qwen-resolve-health.yml', () => {
     assert.ok(
       Array.isArray(workflow.on.schedule) && workflow.on.schedule.length === 1,
     );
+    // The string, not only the shape: the header's "four times a day" and
+    // the per-tick API-volume math both rest on it, and a shape-only
+    // assertion lets a rewrite ship green.
+    assert.equal(workflow.on.schedule[0].cron, '23 */6 * * *');
     // The inputs are the operator's knobs; the env expressions above fall
     // back to the same defaults, so the two spellings must agree.
     const inputs = workflow.on.workflow_dispatch.inputs;

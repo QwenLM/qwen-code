@@ -30,6 +30,7 @@ export const DEFAULTS = Object.freeze({
   threshold: 5,
   unansweredThreshold: 3,
   staleHours: 3,
+  ackHours: 1,
   windowDays: 7,
   bot: 'qwen-code-dev-bot',
   label: 'scope/ci-cd',
@@ -185,12 +186,14 @@ function headline(body) {
 // directly as COLLABORATOR. Everything else (CONTRIBUTOR,
 // FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, MANNEQUIN, NONE, and a field the API
 // did not return) cannot hold write, so dropping it never hides a request the
-// lane would have answered. Deliberately WIDER than "has write": a read-only
-// collaborator still counts, which leaves a false alarm possible for three of
-// those in one window but keeps the watch from silencing a real outage. The
-// permission API itself is not an option here — it needs a PAT (see
-// qwen-code-pr-review.yml's authorize job), which a scheduled watch has no
-// reason to hold.
+// lane would have answered. Deliberately WIDER than "has write" — narrowing
+// the set risks silencing a real outage, never anything else. The false
+// alarm that width used to buy (a read-only collaborator sits inside it, and
+// the producer refuses them the same silence) is what the acknowledgement
+// gate in assess() closes, so the set keeps its width for the barrier, the
+// sightings record, and the pairing population. The permission API itself is
+// not an option here — it needs a PAT (see qwen-code-pr-review.yml's
+// authorize job), which a scheduled watch has no reason to hold.
 //
 // The field is evaluated at READ time, not comment-creation time, so it
 // drifts with permission changes inside the window: a requester whose org
@@ -211,7 +214,9 @@ export const ANSWERABLE_ASSOCIATIONS = new Set([
   'COLLABORATOR',
 ]);
 
-// prs: [{ number, state, comments: [{ id, user, author_association, created_at, updated_at, body, html_url }] }]
+// prs: [{ number, state, comments: [{ id, user, author_association, created_at, updated_at, body, html_url, eyes }] }]
+// `eyes` is the reaction count the acknowledgement gate reads (see isOwed
+// below).
 // options.recorded: [[id, created_at, association], ...] — the first-sight
 // judgments carried in the tracking issue's state; a recorded id is judged
 // by the record, never by the live field (see ANSWERABLE_ASSOCIATIONS).
@@ -268,8 +273,29 @@ export function assess(prs, options = {}) {
     c.user !== opts.bot &&
     ANSWERABLE_ASSOCIATIONS.has(recorded.get(c.id) ?? c.author_association) &&
     isRequest(c.body);
+  // The association set is deliberately wider than "has write", so it
+  // cannot by itself separate a request the lane accepted from one it
+  // refused in silence — a read-only collaborator sits inside it, and
+  // authorize skips the whole job on a refusal. What separates them is the
+  // producer's own acceptance signal: `Acknowledge resolve request`,
+  // resolve-pr's first step, posts an `eyes` reaction on the request
+  // comment and runs only when authorize said yes, so it is present exactly
+  // on the requests the lane accepted and absent on every silent refusal. A
+  // deficit — the roster below, or the close gate's veto — requires it:
+  // three read-only collaborators asking inside one window no longer file
+  // "0 consecutive failures, 3 unanswered requests" against a healthy lane,
+  // and no single refused request arms the veto for the rest of the window.
+  // One grace covers the queue gap: the reaction lands seconds-to-minutes
+  // after the comment (queue, authorize, the job's first steps), so a
+  // request younger than ackHours is owed even before it can have landed —
+  // a genuinely in-flight request must still veto a recovery close. The
+  // count cannot say WHO reacted; a requester reacting to their own refused
+  // request re-arms only the failure this gate removes, never more.
+  const isOwed = (c) =>
+    (c.eyes ?? 0) > 0 ||
+    now.getTime() - Date.parse(c.created_at) < opts.ackHours * 3_600_000;
   const isAnswerableRequest = (c) =>
-    isRequestShaped(c) && c.updated_at === c.created_at;
+    isRequestShaped(c) && c.updated_at === c.created_at && isOwed(c);
   for (const pr of prs) {
     const comments = [...pr.comments]
       .filter((c) => c.created_at >= windowStart)
@@ -378,8 +404,13 @@ export function assess(prs, options = {}) {
           prResults.some((r) => r.at > e[1]),
       )
       .map((e) => ({ id: e[0], created_at: e[1] }));
+    // The live arm owes a result only to a request the producer
+    // acknowledged (isOwed): a still-live refused request — inside the
+    // association set, refused in silence — otherwise holds this gate's veto
+    // for the rest of the window, the same fact the vanished arm's guard
+    // reads on the recorded side.
     const gateRequests = [
-      ...comments.filter(isRequestShaped),
+      ...comments.filter((c) => isRequestShaped(c) && isOwed(c)),
       ...vanished,
     ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
     // The close gate's own attribution, which the roster's proxy below cannot
@@ -698,9 +729,9 @@ function validState(state) {
   return state;
 }
 
-export function readState(issueBodyAndComments) {
+export function readState(texts) {
   let state = null;
-  for (const text of issueBodyAndComments) {
+  for (const text of texts) {
     const m = text.match(STATE_RE);
     if (m) {
       try {
@@ -1053,7 +1084,7 @@ export function fetchPrs(gh, repo, since) {
         'per_page=100',
         '--paginate',
         '--jq',
-        '.[] | [.id, .user.login, (.author_association // ""), .created_at, .updated_at, .html_url, (.body // "" | @base64)] | @tsv',
+        '.[] | [.id, .user.login, (.author_association // ""), .created_at, .updated_at, .html_url, (.body // "" | @base64), (.reactions.eyes // 0)] | @tsv',
       ]),
     ).map(
       ([
@@ -1064,6 +1095,7 @@ export function fetchPrs(gh, repo, since) {
         updated_at,
         html_url,
         body,
+        eyes,
       ]) => ({
         id: Number(id),
         user,
@@ -1075,6 +1107,10 @@ export function fetchPrs(gh, repo, since) {
         updated_at,
         html_url,
         body: b64(body),
+        // resolve-pr's acknowledgement reaction, left exactly on the
+        // requests authorize accepted — the signal assess()'s owed gate
+        // reads. `// 0` above keeps it numeric when nothing reacted.
+        eyes: Number(eyes),
       }),
     ),
   }));
