@@ -35,11 +35,35 @@ Discovery-level disabling suppresses active extension Skills through
 the child producer. Safe mode and untrusted contexts never load extensions.
 
 An absent extensions root is an empty inventory; no extension store is created.
-Unreadable roots and errors propagated by the shared store/loader return
-`initialized: false` with explicit errors. Individual artifact handling remains
-owned by the shared loader: malformed manifests are skipped with its diagnostic,
-whereas a dangling extension entry propagates an error. This stage does not add
-per-artifact diagnostics to the response or change the loader's failure policy.
+With a present root the read reconciles through the shared store: a missing or
+drifted store is initialized in place under the store's exclusive lock,
+rewriting `extension-store/state.json`, creating its `state.previous.json`
+rollback copy, and rewriting the legacy `extension-enablement.json` projection.
+Once reconciled, later reads write nothing. Unreadable roots and errors
+propagated by the shared store/loader return `initialized: false` with explicit
+errors, and that failure is deliberately all-or-nothing: one bad extension
+artifact (for example a dangling directory entry) fails the entire catalog,
+project, user and bundled Skills included, until the artifact is repaired.
+Individual artifact handling remains owned by the shared loader: malformed
+manifests are skipped with its diagnostic, whereas a dangling extension entry
+propagates an error. This stage does not add per-artifact diagnostics or
+per-level degradation to the response, or change the loader's failure policy.
 Existing facade caching, source preference and invalidation behavior remain
 unchanged; the tracking issue assigns cache lifecycle and concurrency changes
 to stage 4.
+
+**Known later-stage items (recorded during review, deliberately not in this
+stage):**
+
+- The sibling `/workspace/extensions` route resolves its locale through
+  `loadSettings` without `skipLoadEnvironment`, so a workspace `.env`
+  `QWEN_CODE_LANG` can diverge from this provider's language resolution.
+- The inactive-entry append and sort assembly duplicates the child producer's
+  (`acpAgent.ts`), keeping the child's `level:extensionName:name` dedupe key.
+- Extension mutations do not invalidate the config-catalog providers this stage
+  populates, so a committed install, update, enable/disable or uninstall can
+  leave stale extension Skill state on the skills config routes until an
+  unrelated skill mutation, a workspace removal, or a restart. The
+  invalidation wiring and `refreshCacheIfSourcesChanged` revalidation belong
+  to stage 4.
+- The active-Skill `enabled` judgment mirrors `Config.isSkillEnabled` by hand.
