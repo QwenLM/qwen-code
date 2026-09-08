@@ -16,6 +16,20 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
+export const MAX_CRON_TASK_ROUTING_ID_LENGTH = 128;
+
+export function isValidCronTaskRoutingId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_CRON_TASK_ROUTING_ID_LENGTH &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
+  );
+}
+
 /**
  * One entry in a recurring task's bounded run history — a record that the
  * task actually fired, surfaced by the Web Shell scheduled-tasks page. Only
@@ -115,6 +129,11 @@ export interface DurableCronTask {
   /** Where executions run. Absent defaults to the historical behavior:
    * every fire reuses the task's bound session. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. Absent uses the
+   * workspace default. */
+  modelServiceId?: string;
+  /** Named session group assigned to each fresh per-run session. */
+  groupId?: string;
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -244,6 +263,14 @@ let updateStaleSeq = 0;
 // cleanup hook at this lifetime.
 const updateMutexes = new Map<string, Mutex>();
 
+// Per-task tombstones are durable because scheduled-task routes run in the
+// daemon while the scheduler that may restore a consumed one-shot runs in an
+// ACP child. Both files are read and written under the task-file lock below.
+interface CronTaskDeletionGenerations {
+  version: 1;
+  entries: Array<[string, number]>;
+}
+
 function getUpdateMutex(filePath: string): Mutex {
   let mutex = updateMutexes.get(filePath);
   if (!mutex) {
@@ -251,6 +278,54 @@ function getUpdateMutex(filePath: string): Mutex {
     updateMutexes.set(filePath, mutex);
   }
   return mutex;
+}
+
+async function readTaskDeletionGenerations(
+  filePath: string,
+): Promise<Map<string, number>> {
+  const statePath = `${filePath}.deletions`;
+  let raw: string;
+  try {
+    raw = await fs.readFile(statePath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map();
+    throw error;
+  }
+
+  const parsed = JSON.parse(raw) as Partial<CronTaskDeletionGenerations>;
+  if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
+    throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  const generations = new Map<string, number>();
+  for (const entry of parsed.entries) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== 'string' ||
+      !Number.isSafeInteger(entry[1]) ||
+      entry[1] < 1 ||
+      generations.has(entry[0])
+    ) {
+      throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+    }
+    generations.set(entry[0], entry[1]);
+  }
+  return generations;
+}
+
+async function writeTaskDeletionGenerations(
+  filePath: string,
+  generations: ReadonlyMap<string, number>,
+  assertCanCommit?: () => void,
+): Promise<void> {
+  const state: CronTaskDeletionGenerations = {
+    version: 1,
+    entries: [...generations],
+  };
+  await atomicWriteJSON(`${filePath}.deletions`, state, {
+    noFollow: true,
+    assertCanCommit,
+  });
 }
 
 export function getCronFilePath(projectRoot: string): string {
@@ -385,6 +460,16 @@ async function acquireUpdateLock(
   }
 }
 
+export function cronTaskSessionDeletionId(sessionId: string): string {
+  const canonicalId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      sessionId,
+    )
+      ? sessionId.toLowerCase()
+      : sessionId;
+  return `session:${canonicalId}`;
+}
+
 /**
  * Applies `mutate` to the on-disk task list in a single read-modify-write
  * cycle. Cycles are serialized — by a mutex within this process, guarded
@@ -397,14 +482,60 @@ async function acquireUpdateLock(
 export async function updateCronTasks(
   projectRoot: string,
   mutate: (tasks: DurableCronTask[]) => DurableCronTask[],
-  options: { assertCanCommit?: () => void } = {},
+  options: {
+    assertCanCommit?: () => void;
+    deletionIds?: readonly string[] | (() => readonly string[]);
+    observeDeletionIds?:
+      | readonly string[]
+      | ((tasks: readonly DurableCronTask[]) => readonly string[]);
+    onDeletionGenerations?: (generations: ReadonlyMap<string, number>) => void;
+  } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
   return getUpdateMutex(filePath).runExclusive(async () => {
     const release = await acquireUpdateLock(filePath);
     try {
       const tasks = await readCronTasks(projectRoot);
+      const observedIds = new Set(
+        typeof options.observeDeletionIds === 'function'
+          ? options.observeDeletionIds(tasks)
+          : (options.observeDeletionIds ?? []),
+      );
+      let generations: Map<string, number> | undefined;
+      if (observedIds.size > 0) {
+        const observedGenerations = await readTaskDeletionGenerations(filePath);
+        generations = observedGenerations;
+        options.onDeletionGenerations?.(
+          new Map(
+            [...observedIds].map((id) => [
+              id,
+              observedGenerations.get(id) ?? 0,
+            ]),
+          ),
+        );
+      }
       const next = mutate(tasks);
+      const deletionIds =
+        typeof options.deletionIds === 'function'
+          ? options.deletionIds()
+          : options.deletionIds;
+      if (deletionIds?.length) {
+        generations ??= await readTaskDeletionGenerations(filePath);
+        for (const id of new Set(deletionIds)) {
+          const generation = (generations.get(id) ?? 0) + 1;
+          if (!Number.isSafeInteger(generation)) {
+            throw new Error(
+              `Scheduled-task deletion generation overflow for ${id}`,
+            );
+          }
+          generations.set(id, generation);
+        }
+        await writeTaskDeletionGenerations(
+          filePath,
+          generations,
+          options.assertCanCommit,
+        );
+      }
       if (next !== tasks) {
         await writeCronTasks(projectRoot, next, options);
       }
@@ -427,17 +558,25 @@ export async function removeCronTasks(
   ids: string[],
 ): Promise<number> {
   const idSet = new Set(ids);
-  // Lock-free pre-check: a miss must be entirely side-effect free — taking
-  // the update lock would mkdir .qwen/ just to discover there is nothing
-  // to remove. The authoritative filter re-runs under the lock below.
-  const current = await readCronTasks(projectRoot);
-  if (!current.some((t) => idSet.has(t.id))) return 0;
+  // Avoid creating the tasks directory for a project with no task file. When
+  // the file exists, even a miss records the delete tombstone so an in-flight
+  // cross-process restore cannot resurrect the task.
+  try {
+    await fs.access(getCronFilePath(projectRoot));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
   let removed = 0;
-  await updateCronTasks(projectRoot, (tasks) => {
-    const remaining = tasks.filter((t) => !idSet.has(t.id));
-    removed = tasks.length - remaining.length;
-    return removed === 0 ? tasks : remaining;
-  });
+  await updateCronTasks(
+    projectRoot,
+    (tasks) => {
+      const remaining = tasks.filter((t) => !idSet.has(t.id));
+      removed = tasks.length - remaining.length;
+      return removed === 0 ? tasks : remaining;
+    },
+    { deletionIds: ids },
+  );
   return removed;
 }
 
@@ -527,6 +666,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
       typeof obj['sessionOwnedByTask'] === 'boolean') &&
     (obj['sessionMode'] === undefined ||
       obj['sessionMode'] === 'persistent' ||
+      obj['sessionMode'] === 'per_run') &&
+    (obj['modelServiceId'] === undefined ||
+      isValidCronTaskRoutingId(obj['modelServiceId'])) &&
+    (obj['groupId'] === undefined ||
+      isValidCronTaskRoutingId(obj['groupId'])) &&
+    ((obj['modelServiceId'] === undefined && obj['groupId'] === undefined) ||
       obj['sessionMode'] === 'per_run') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))

@@ -326,6 +326,7 @@ export type {
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,
@@ -334,6 +335,8 @@ export {
   annotateCronRunSession,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  isValidCronTaskRoutingId,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';

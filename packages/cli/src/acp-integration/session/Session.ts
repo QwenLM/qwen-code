@@ -108,6 +108,7 @@ import {
   createHookOutput,
   wrapUserPromptSubmitContext,
   generateToolUseId,
+  isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
@@ -1482,12 +1483,15 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId?: string;
+  groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -8761,6 +8765,33 @@ export class Session implements SessionContext {
           );
         });
     };
+    const restoreOneShot = async (): Promise<void> => {
+      if (job.recurring !== false || !job.id) return;
+      try {
+        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        if (!restored) {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not restore its unexecuted one-shot: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (
+      (job.modelServiceId !== undefined &&
+        !isValidCronTaskRoutingId(job.modelServiceId)) ||
+      (job.groupId !== undefined && !isValidCronTaskRoutingId(job.groupId))
+    ) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
+      );
+      await record({ dispatchFailed: true });
+      await restoreOneShot();
+      return;
+    }
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
@@ -8788,6 +8819,8 @@ export class Session implements SessionContext {
                 sourceId: scheduledTaskRunSourceId(job.id),
               }
             : {}),
+          ...(job.modelServiceId ? { model: job.modelServiceId } : {}),
+          ...(job.groupId ? { groupId: job.groupId } : {}),
           callerSessionId: this.sessionId,
         },
       );
@@ -8800,10 +8833,30 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const requiresFreshSessionRouting =
+        job.modelServiceId !== undefined || job.groupId !== undefined;
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' &&
+              error !== null &&
+              typeof (error as Record<string, unknown>)['message'] === 'string'
+            ? (error as Record<string, unknown>)['message']
+            : String(error);
       debugLogger.warn(
-        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+        requiresFreshSessionRouting
+          ? `Scheduled task ${taskId} could not create a fresh session with its requested routing: ${errorMessage}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${errorMessage}`,
       );
-      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      await record(
+        requiresFreshSessionRouting
+          ? { dispatchFailed: true }
+          : { sessionId: this.sessionId, dispatchFailed: true },
+      );
+      if (requiresFreshSessionRouting) {
+        await restoreOneShot();
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',

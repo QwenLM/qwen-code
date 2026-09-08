@@ -1097,6 +1097,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
@@ -20813,6 +20814,34 @@ describe('QwenAgent sessionIdContext binding', () => {
     });
 
     runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not persist a scheduled-task run model as the workspace default', async () => {
+    const setModel = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({ setModel }),
+    );
+
+    await agent.unstable_setSessionModel({
+      sessionId,
+      modelId: 'qwen-max(openai)',
+      _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+    });
+
+    expect(setModel).toHaveBeenCalledWith(
+      {
+        sessionId,
+        modelId: 'qwen-max(openai)',
+        _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+      },
+      { persistDefault: false },
+    );
+
     mockConnectionState.resolve();
     await agentPromise;
   });

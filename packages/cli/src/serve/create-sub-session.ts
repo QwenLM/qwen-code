@@ -40,6 +40,7 @@ import {
   createDebugLogger,
   escapeXml,
   SessionService,
+  Storage,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -58,6 +59,7 @@ import {
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import { createSessionOrganizationService } from './session-organization-helpers.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -140,6 +142,7 @@ export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   getStandaloneSessionService?: () => StandaloneSubSessionService | undefined;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
   notifySentCompletion?: boolean;
@@ -732,6 +735,7 @@ export function createSubSessionLauncher(
     getBridge,
     getStandaloneSessionService,
     boundWorkspace,
+    runtimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
   } = opts;
@@ -857,7 +861,7 @@ export function createSubSessionLauncher(
     // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
-    let promptDispatched = false;
+    let promptAdmitted = false;
 
     try {
       const promptId = randomUUID();
@@ -878,7 +882,6 @@ export function createSubSessionLauncher(
         sub = created.session;
         lastEventId = created.initialPrompt.lastEventId;
         turn = created.initialPrompt.turn;
-        promptDispatched = true;
       } else {
         sub = await bridge.spawnOrAttach({
           workspaceCwd: boundWorkspace,
@@ -893,6 +896,9 @@ export function createSubSessionLauncher(
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
+      if (info.model && sub.modelApplied === false) {
+        throw new Error(`sub-session model selection failed: ${info.model}`);
+      }
       if (isolatedWorkspace && !standalone) {
         const isolatedCwd =
           await isolatedWorkspace.materializeDirectory(sessionId);
@@ -929,6 +935,10 @@ export function createSubSessionLauncher(
         promptAdmission = new Promise<void>((resolve) => {
           markPromptAdmitted = resolve;
         });
+        const onPromptAdmitted = () => {
+          promptAdmitted = true;
+          markPromptAdmitted();
+        };
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -936,9 +946,8 @@ export function createSubSessionLauncher(
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
           undefined,
-          { promptId, onPromptAdmitted: markPromptAdmitted },
+          { promptId, onPromptAdmitted },
         );
-        promptDispatched = true;
       }
 
       // The result comes from the event stream (turn_error surfaces failures);
@@ -948,21 +957,44 @@ export function createSubSessionLauncher(
         log.debug('sub-session: sendPrompt rejected', sessionId, String(err));
       });
 
-      if (info.completion === 'sent') {
-        if (isScheduledTaskRunSource(info) && promptAdmission) {
-          await Promise.race([
-            promptAdmission,
-            turn.then(
-              () => undefined,
-              (err) =>
-                Promise.reject(
-                  new Error(
-                    `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
-                  ),
+      if (isScheduledTaskRunSource(info) && promptAdmission) {
+        await Promise.race([
+          promptAdmission,
+          turn.then(
+            () => undefined,
+            (err) =>
+              Promise.reject(
+                new Error(
+                  `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
                 ),
-            ),
-          ]);
+              ),
+          ),
+        ]);
+      }
+
+      if (info.groupId) {
+        try {
+          const assign = () =>
+            createSessionOrganizationService(
+              boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              groupId: info.groupId,
+              color: null,
+            });
+          if (runtimeBaseDir) {
+            await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, assign);
+          } else {
+            await assign();
+          }
+          bridge.markSessionCatalogChanged();
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: scheduled-task session ${sessionId} could not be assigned to group ${info.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
+      }
+
+      if (info.completion === 'sent') {
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -1104,67 +1136,83 @@ export function createSubSessionLauncher(
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
       if (spawnedSession !== undefined && isolatedWorkspace && !standalone) {
+        const sessionId = spawnedSession.sessionId;
         let sessionClosed = false;
         try {
           if (spawnedSession.attached) {
             if (spawnedSession.clientId) {
-              await bridge.detachClient(
-                spawnedSession.sessionId,
-                spawnedSession.clientId,
-              );
+              await bridge.detachClient(sessionId, spawnedSession.clientId);
             }
           } else {
-            sessionClosed = await bridge.killSession(spawnedSession.sessionId, {
+            sessionClosed = await bridge.killSession(sessionId, {
               requireZeroAttaches: true,
             });
           }
         } catch (cleanupError) {
           log.debug(
             'sub-session: isolated session rollback failed',
-            spawnedSession.sessionId,
+            sessionId,
             cleanupError,
           );
         }
         if (sessionClosed) {
-          if (!promptDispatched) {
+          if (!promptAdmitted) {
             try {
-              const transcriptRemoved = await new SessionService(
-                boundWorkspace,
-              ).removeSession(spawnedSession.sessionId);
+              const removeTranscript = () =>
+                new SessionService(boundWorkspace).removeSession(sessionId);
+              const transcriptRemoved = runtimeBaseDir
+                ? await Storage.runWithResolvedRuntimeBaseDir(
+                    runtimeBaseDir,
+                    removeTranscript,
+                  )
+                : await removeTranscript();
               if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
                 'sub-session: isolated transcript cleanup failed',
-                spawnedSession.sessionId,
+                sessionId,
                 cleanupError,
               );
             }
           }
           try {
-            await isolatedWorkspace.discardEmptyDirectory(
-              spawnedSession.sessionId,
-            );
+            await isolatedWorkspace.discardEmptyDirectory(sessionId);
           } catch (cleanupError) {
             log.debug(
               'sub-session: isolated workspace cleanup failed',
-              spawnedSession.sessionId,
+              sessionId,
               cleanupError,
             );
           }
         }
       } else if (spawnedSession !== undefined && !standalone) {
-        // Both guards are load-bearing. `.catch()` swallows the async
-        // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
-        // inside the catch block, so an escaping throw here would replace `err`
-        // — the real launch failure — with the cleanup failure.
+        // Cleanup failures must not replace `err`, the real launch failure.
+        const sessionId = spawnedSession.sessionId;
+        let sessionClosed = false;
         try {
-          void bridge.closeSession(spawnedSession.sessionId).catch(() => {});
+          await bridge.closeSession(sessionId);
+          sessionClosed = true;
         } catch (closeErr) {
-          log.debug(
-            'sub-session: closeSession threw',
-            spawnedSession.sessionId,
-            closeErr,
-          );
+          log.debug('sub-session: closeSession threw', sessionId, closeErr);
+        }
+        if (sessionClosed && !promptAdmitted) {
+          try {
+            const removeTranscript = () =>
+              new SessionService(boundWorkspace).removeSession(sessionId);
+            const transcriptRemoved = runtimeBaseDir
+              ? await Storage.runWithResolvedRuntimeBaseDir(
+                  runtimeBaseDir,
+                  removeTranscript,
+                )
+              : await removeTranscript();
+            if (transcriptRemoved) bridge.markSessionCatalogChanged();
+          } catch (cleanupError) {
+            log.debug(
+              'sub-session: transcript cleanup failed',
+              sessionId,
+              cleanupError,
+            );
+          }
         }
       }
       writeStderrLine(
