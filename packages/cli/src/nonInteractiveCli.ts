@@ -859,6 +859,18 @@ export async function runNonInteractive(
       throw new Error('Operation cancelled.');
     };
 
+    const logSkippedTerminalToolCalls = (
+      requests: ToolCallRequestInfo[],
+    ): void => {
+      if (requests.length === 0) return;
+      const calls = requests
+        .map((request) => `${request.name}(${request.callId})`)
+        .join(', ');
+      debugLogger.warn(
+        `[Headless] Skipping buffered tool calls after terminal API error: ${calls}`,
+      );
+    };
+
     interface LocalQueueItem {
       displayText: string;
       modelText: string;
@@ -2491,7 +2503,11 @@ export async function runNonInteractive(
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
+        if (abortController.signal.aborted) {
+          await routeAbort();
+        }
         if (terminalApiError) {
+          logSkippedTerminalToolCalls(toolCallRequests);
           throw new AlreadyReportedError(terminalApiError);
         }
 
@@ -2803,7 +2819,13 @@ export async function runNonInteractive(
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
 
+              if (abortController.signal.aborted) {
+                flushQueuedNotificationsToSdk(localQueue);
+                finalizeOneShotMonitors();
+                await routeAbort();
+              }
               if (itemTerminalApiError) {
+                logSkippedTerminalToolCalls(itemToolCallRequests);
                 throw new AlreadyReportedError(itemTerminalApiError);
               }
 
@@ -3209,6 +3231,9 @@ export async function runNonInteractive(
               emitErr instanceof Error ? emitErr.message : String(emitErr)
             }`,
           );
+          if (outputFormat !== OutputFormat.TEXT) {
+            process.stderr.write(`${message}\n`);
+          }
         }
       }
       if (budgetExceeded) {

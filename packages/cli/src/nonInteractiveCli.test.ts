@@ -5265,6 +5265,7 @@ describe('runNonInteractive', () => {
     const cleanup = vi.fn();
     const unregisterCleanup = registerCleanup(cleanup);
     const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    const onResultEmitted = vi.fn();
     const errorMessage = 'temporary provider failure';
     mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
@@ -5279,9 +5280,11 @@ describe('runNonInteractive', () => {
       await expect(
         runNonInteractive(mockConfig, mockSettings, 'test', 'session-error', {
           adapter,
+          onResultEmitted,
         }),
       ).rejects.toThrow(errorMessage);
       expect(cleanup).not.toHaveBeenCalled();
+      expect(onResultEmitted).toHaveBeenCalledTimes(1);
       const results = processStdoutSpy.mock.calls
         .map((call) => String(call[0]))
         .filter((line) => JSON.parse(line).type === 'result');
@@ -5289,6 +5292,62 @@ describe('runNonInteractive', () => {
     } finally {
       unregisterCleanup();
     }
+  });
+
+  it('routes an abort after a terminal API error through cancellation', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const abortController = new AbortController();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        yield {
+          type: LlmEventType.Error,
+          value: { error: { message: 'provider down' } },
+        };
+        abortController.abort();
+      })(),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'terminal-error-abort',
+        { abortController },
+      ),
+    ).rejects.toThrow('process.exit(130) called');
+    expect(process.exit).toHaveBeenCalledWith(130);
+  });
+
+  it('falls back to stderr when a stream-json error result cannot be emitted', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    vi.spyOn(adapter, 'emitResult').mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Error,
+          value: { error: { message: 'provider failed mid-stream' } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'emit-error', {
+        adapter,
+      }),
+    ).rejects.toThrow('provider failed mid-stream');
+    expect(
+      processStderrSpy.mock.calls.map((call) => call[0]).join(''),
+    ).toContain('[API Error: provider failed mid-stream]');
   });
 
   it('should handle API errors in text mode and exit with error code', async () => {
@@ -5306,8 +5365,12 @@ describe('runNonInteractive', () => {
       },
     };
 
+    let streamDrained = false;
     mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents([apiErrorEvent]),
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        yield apiErrorEvent;
+        streamDrained = true;
+      })(),
     );
 
     let thrownError: Error | null = null;
@@ -5335,6 +5398,7 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+    expect(streamDrained).toBe(true);
   });
 
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
