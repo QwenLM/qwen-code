@@ -2077,6 +2077,37 @@ describe('release workflow', () => {
     );
   });
 
+  it('reaps only the Docker integration containers owned by its job', () => {
+    const owner = '${{ github.run_id }}-${{ github.run_attempt }}-release';
+    const steps = releaseYaml.jobs.integration_docker.steps;
+    const testStep = steps.find(
+      (step) => step.name === 'Run Docker Integration Tests',
+    );
+    const cleanupStep = steps.find(
+      (step) => step.name === 'Remove job-owned release containers',
+    );
+
+    expect(testStep.env.RELEASE_CONTAINER_OWNER).toBe(owner);
+    expect(testStep.env.SANDBOX_FLAGS).toContain(
+      'org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}',
+    );
+    expect(dockerIntegrationScript).toContain(
+      'trap cleanup_release_containers EXIT',
+    );
+    expect(dockerIntegrationScript).toContain("trap 'exit 1' INT TERM");
+    expect(dockerIntegrationScript).toContain(
+      '--filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}"',
+    );
+    expect(cleanupStep.if).toContain('always()');
+    expect(cleanupStep.env.RELEASE_CONTAINER_OWNER).toBe(owner);
+    expect(cleanupStep.run).toBe(
+      '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup',
+    );
+    expect(dockerIntegrationScript).toContain('docker rm -f > /dev/null');
+    expect(dockerIntegrationScript.match(/docker ps -aq/g)).toHaveLength(2);
+    expect(dockerIntegrationScript).toContain('release containers remain');
+  });
+
   it('digest-pins every sandbox base image', () => {
     // integration_docker builds on the shared pool, whose docker daemon
     // store persists across jobs: a co-resident job can retag a mutable
@@ -2530,11 +2561,15 @@ describe('release lane runner routing', () => {
     ]) {
       const job = releaseYaml.jobs[name];
       expect(job.env.RUNNER_ENVIRONMENT, name).toBeUndefined();
-      const testSteps = job.steps.filter((step) =>
-        /(?:vitest|test:integration|run-release-docker-integration)/.test(
-          String(step.run ?? ''),
-        ),
-      );
+      const testSteps = job.steps.filter((step) => {
+        const command = String(step.run ?? '');
+        return (
+          !command.endsWith(' cleanup') &&
+          /(?:vitest|test:integration|run-release-docker-integration)/.test(
+            command,
+          )
+        );
+      });
       expect(testSteps, name).toHaveLength(expectedSteps);
       for (const step of testSteps) {
         expect(step.env.RUNNER_ENVIRONMENT, `${name}: ${step.name}`).toBe(
