@@ -1463,6 +1463,88 @@ ok(
   ).some((o) => o.kind === 'failure'),
 );
 
+console.log('\n17e. tokens actually get charged');
+// The money gate. `f663f779a1` moved accounting onto the session's own
+// counter, and the mutation campaign showed nothing here ever reached
+// chargeRunUsage: the fake port in the recovery section has no `totalTokens`,
+// so the whole path returned at its first line.
+const charged = await startFor('Charged work');
+await M.bindRunSession(ROOT, {
+  threadId: charged.th.id,
+  runId: charged.runId,
+  attempt: 1,
+  sessionId: 'agent-charged',
+  contextThroughSequence: 1,
+  // Without this the trigger message counts as undrained and the dispatcher
+  // requeues instead of closing, so charging is never reached — which is how
+  // this fixture failed the first time.
+  consumedOnStart: true,
+  usageBaselineTokens: 1000,
+});
+// The session says it has spent 1,750 in total; 1,000 of that predates this
+// run, so this run owes 750.
+const chargingPort = {
+  inspect: async () => ({ kind: 'completed' }),
+  start: async () => ({ status: 'started', sessionId: 's' }),
+  cancel: async () => true,
+  totalTokens: async () => 1750,
+};
+await M.dispatchOnce(ROOT, chargingPort);
+const chargedRun = (await M.readThread(ROOT, charged.th.id)).runs.find(
+  (r) => r.id === charged.runId,
+);
+ok(
+  'the run is charged the difference, not the whole session',
+  chargedRun.usageByRound.reduce((sum, u) => sum + u.tokens, 0) === 750,
+  JSON.stringify(chargedRun.usageByRound),
+);
+ok(
+  'and the thread tree total reflects it',
+  (await M.readThread(ROOT, charged.th.id)).tokensUsed >= 750,
+  String((await M.readThread(ROOT, charged.th.id)).tokensUsed),
+);
+
+const uncharged = await startFor('Spent nothing');
+await M.bindRunSession(ROOT, {
+  threadId: uncharged.th.id,
+  runId: uncharged.runId,
+  attempt: 1,
+  sessionId: 'agent-uncharged',
+  contextThroughSequence: 1,
+  consumedOnStart: true,
+  usageBaselineTokens: 1750,
+});
+await M.dispatchOnce(ROOT, chargingPort);
+ok(
+  'a run that spent nothing records nothing',
+  (await M.readThread(ROOT, uncharged.th.id)).runs.find(
+    (r) => r.id === uncharged.runId,
+  ).usageByRound.length === 0,
+);
+
+const unreadable = await startFor('Unreadable meter');
+await M.bindRunSession(ROOT, {
+  threadId: unreadable.th.id,
+  runId: unreadable.runId,
+  attempt: 1,
+  sessionId: 'agent-unreadable',
+  contextThroughSequence: 1,
+  consumedOnStart: true,
+  usageBaselineTokens: 10,
+});
+// A runtime that cannot say what it spent must under-count rather than guess:
+// charging a number nobody reported would spend a person's budget on a hunch.
+await M.dispatchOnce(ROOT, {
+  ...chargingPort,
+  totalTokens: async () => undefined,
+});
+ok(
+  'a runtime that cannot report usage charges nothing',
+  (await M.readThread(ROOT, unreadable.th.id)).runs.find(
+    (r) => r.id === unreadable.runId,
+  ).usageByRound.length === 0,
+);
+
 console.log('\n18. concurrency');
 // Everything above ran one operation at a time, which is the one shape a
 // store with a mutation lock is guaranteed to survive. These run together.
