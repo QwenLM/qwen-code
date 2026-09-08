@@ -206,6 +206,10 @@ describe('extensions manager logic', () => {
     expect(extensionSnapshotsCurrent(1, activation, runtime, coordinator)).toBe(
       false,
     );
+    // A lagging projection (appliedGeneration behind the catalog) no longer
+    // drops the live rows: the runtime agrees with the coordinator on the
+    // current epoch, so its rows are still overlaid; only the projection's
+    // own activation terms stay generation-gated.
     expect(
       mergeExtensionCatalog(
         [configured],
@@ -226,10 +230,12 @@ describe('extensions manager logic', () => {
         2,
       )[0],
     ).toMatchObject({
-      isActive: false,
+      isActive: true,
       workspaceActivation: 'disabled',
-      details: { skills: [] },
+      details: { skills: ['runtime-skill'] },
     });
+    // A catalog a generation behind the projection likewise keeps the live
+    // rows; the projection terms drop out because its generation disagrees.
     expect(
       mergeExtensionCatalog(
         [configured],
@@ -239,8 +245,79 @@ describe('extensions manager logic', () => {
         1,
       )[0],
     ).toMatchObject({
-      isActive: false,
-      details: { skills: [] },
+      isActive: true,
+      details: { skills: ['runtime-skill'] },
     });
+  });
+
+  it('keeps the live runtime rows when the projection is unavailable', () => {
+    const catalogEntry: ExtensionCatalogEntry = {
+      id: 'demo',
+      name: 'demo',
+      version: '1.0.0',
+      defaultActivation: 'enabled',
+      workspaceOverrideCount: 0,
+    };
+    const runtimeEntry = {
+      ...extension('demo', 'Demo Display Name', 'live runtime description'),
+      isActive: false,
+      updateState: 'update available' as const,
+      details: {
+        mcpServers: [],
+        commands: [],
+        skills: ['runtime-skill'],
+        agents: [],
+        contextFiles: [],
+        settings: [],
+      },
+    };
+    const runtime = {
+      v: 1 as const,
+      workspaceCwd: '/work/a',
+      initialized: true,
+      runtimeEpoch: 4,
+      extensions: [runtimeEntry],
+    };
+    const coordinator = {
+      v: 1 as const,
+      workspaceCwd: '/work/a',
+      state: 'idle' as const,
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        extensions: {
+          state: 'ready' as const,
+          revision: 1,
+          runtimeEpoch: 4,
+          desiredGeneration: 2,
+          appliedGeneration: 2,
+        },
+      },
+    };
+
+    // The projection read failed (null): the merge must still keep the
+    // runtime's isActive/details/updateState instead of degrading to the
+    // bare durable catalog entry.
+    expect(
+      mergeExtensionCatalog([catalogEntry], null, runtime, coordinator, 2)[0],
+    ).toMatchObject({
+      isActive: false,
+      displayName: 'Demo Display Name',
+      updateState: 'update available',
+      details: { skills: ['runtime-skill'] },
+    });
+
+    // Without a coordinator there is no epoch to agree on, so the live rows
+    // stay dropped.
+    expect(
+      mergeExtensionCatalog([catalogEntry], null, runtime, undefined, 2)[0],
+    ).toMatchObject({
+      id: 'demo',
+      workspaceOverrideCount: 0,
+    });
+    expect(
+      mergeExtensionCatalog([catalogEntry], null, runtime, undefined, 2)[0]
+        ?.isActive,
+    ).toBeUndefined();
   });
 });

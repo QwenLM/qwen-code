@@ -161,6 +161,12 @@ function extensionIsActive(extension: ManagedExtensionEntry): boolean {
   ) {
     return extension.workspaceActivation === 'enabled';
   }
+  // An unknown workspace override (the projection is unavailable or stale)
+  // leaves the live row's state as the only workspace-scoped truth; prefer
+  // it over the user-scope default.
+  if (extension.workspaceActivation === undefined) {
+    return extension.isActive ?? extension.defaultActivation === 'enabled';
+  }
   return extension.defaultActivation
     ? extension.defaultActivation === 'enabled'
     : (extension.isActive ?? false);
@@ -606,7 +612,14 @@ export function ExtensionsManagerPage({
             workspace.client.extensionCatalog(),
             workspaceClient.workspaceExtensions().catch(() => null),
           ]);
-          if (requestId !== loadRequestRef.current) return;
+          if (requestId !== loadRequestRef.current) return observedTrusted;
+          // Resolve the trust as soon as the projection answers: the runtime
+          // leg below is trust-gated, so its 403 must not discard a trust
+          // value this load already holds.
+          observedTrusted = activation ? activation.trusted : null;
+          if (observedTrusted !== null) {
+            setWorkspaceTrusted(observedTrusted);
+          }
           apply(
             mergeExtensionCatalog(
               catalog.extensions,
@@ -623,7 +636,7 @@ export function ExtensionsManagerPage({
           }
           const coordinator = await workspaceClient.ensureRuntime();
           const runtime = await workspaceClient.workspaceRuntimeExtensions();
-          if (requestId !== loadRequestRef.current) return;
+          if (requestId !== loadRequestRef.current) return observedTrusted;
           if (
             !extensionSnapshotsCurrent(
               catalog.generation,
@@ -636,7 +649,11 @@ export function ExtensionsManagerPage({
               workspace.client.extensionCatalog(),
               workspaceClient.workspaceExtensions().catch(() => null),
             ]);
-            if (requestId !== loadRequestRef.current) return;
+            if (requestId !== loadRequestRef.current) return observedTrusted;
+            observedTrusted = activation ? activation.trusted : observedTrusted;
+            if (observedTrusted !== null) {
+              setWorkspaceTrusted(observedTrusted);
+            }
           }
           apply(
             mergeExtensionCatalog(
@@ -675,7 +692,6 @@ export function ExtensionsManagerPage({
               );
             }
           }
-          observedTrusted = activation ? activation.trusted : null;
         } else {
           const projection = workspace.workspaceCwd
             ? workspace.client
@@ -733,6 +749,7 @@ export function ExtensionsManagerPage({
             );
           }
         }
+        return observedTrusted;
       } finally {
         if (requestId === loadRequestRef.current) setLoading(false);
       }
@@ -964,6 +981,27 @@ export function ExtensionsManagerPage({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let retryDelay = 1000;
+    // A failure exit must release the notice owner runMutation latched, or
+    // the runtime-error gate stays shut for the rest of the mount. For an
+    // uninstall the release runs after the exit's own reload, mirroring the
+    // success settle below.
+    const settleFailedMutation = () => {
+      clearInteraction(pendingMutation.operationId);
+      setPendingMutation(null);
+      setBusyName(null);
+      mutationInFlightRef.current = false;
+      const releaseMessageOwner = () => {
+        setMessageOwner((owner) =>
+          owner === pendingMutation.name ? null : owner,
+        );
+      };
+      if (pendingMutation.operation === 'uninstall') {
+        uninstallInFlightNameRef.current = null;
+        void load(true).finally(releaseMessageOwner);
+      } else {
+        releaseMessageOwner();
+      }
+    };
     const poll = async () => {
       try {
         const operation = await actions.extensionOperationStatus(
@@ -982,28 +1020,14 @@ export function ExtensionsManagerPage({
           } else {
             setMessageTone('error');
             setMessage(t('extensions.manage.operationFailed'));
-            clearInteraction(pendingMutation.operationId);
-            setPendingMutation(null);
-            setBusyName(null);
-            mutationInFlightRef.current = false;
-            if (pendingMutation.operation === 'uninstall') {
-              uninstallInFlightNameRef.current = null;
-              void load(true);
-            }
+            settleFailedMutation();
           }
           return;
         }
         if (operation.status === 'failed') {
           setMessageTone('error');
           setMessage(operation.error ?? t('extensions.manage.operationFailed'));
-          clearInteraction(pendingMutation.operationId);
-          setPendingMutation(null);
-          setBusyName(null);
-          mutationInFlightRef.current = false;
-          if (operation.operation === 'uninstall') {
-            uninstallInFlightNameRef.current = null;
-            void load(true);
-          }
+          settleFailedMutation();
           return;
         }
         if (
@@ -1064,14 +1088,7 @@ export function ExtensionsManagerPage({
         setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
         if (error instanceof DaemonHttpError && error.status === 404) {
-          clearInteraction(pendingMutation.operationId);
-          setPendingMutation(null);
-          setBusyName(null);
-          mutationInFlightRef.current = false;
-          if (pendingMutation.operation === 'uninstall') {
-            uninstallInFlightNameRef.current = null;
-            void load(true);
-          }
+          settleFailedMutation();
           return;
         }
         timer = setTimeout(() => void poll(), retryDelay);
@@ -1131,7 +1148,12 @@ export function ExtensionsManagerPage({
           setMessageTone('error');
           setMessage(error instanceof Error ? error.message : String(error));
         })
-        .finally(() => setCheckingName(null));
+        .finally(() => {
+          setCheckingName(null);
+          // Release the notice owner latched above or the runtime-error gate
+          // stays shut for the rest of the mount (mirrors runMutation).
+          setMessageOwner((owner) => (owner === name ? null : owner));
+        });
     },
     [
       actions,
@@ -1383,6 +1405,10 @@ export function ExtensionsManagerPage({
         setMessage(error instanceof Error ? error.message : String(error));
       } finally {
         setBusyName(null);
+        // The action's own reload has already settled (or never ran), so
+        // release the notice owner — holding it would keep the
+        // runtime-error gate shut for the rest of the mount.
+        setMessageOwner((owner) => (owner === extension.name ? null : owner));
       }
     },
     [

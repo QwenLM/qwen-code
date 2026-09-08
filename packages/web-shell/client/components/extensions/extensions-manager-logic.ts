@@ -51,14 +51,18 @@ export function mergeExtensionCatalog(
       entry,
     ]),
   );
+  // The runtime overlay is gated on the runtime agreeing with the
+  // coordinator on epoch and initialization — not on the projection. The
+  // projection is a separate read that can fail outright or lag the catalog
+  // by a generation; neither makes the live rows any less true, and dropping
+  // them would reduce the merge to the bare durable catalog.
   const runtimeCurrent =
     catalogGeneration !== undefined &&
-    extensionSnapshotsCurrent(
-      catalogGeneration,
-      activation,
-      runtime,
-      coordinator,
-    );
+    coordinator !== undefined &&
+    runtime?.initialized === true &&
+    runtime.runtimeEpoch === coordinator.runtimeEpoch &&
+    coordinator.capabilities?.extensions?.runtimeEpoch ===
+      coordinator.runtimeEpoch;
   const runtimeById = new Map(
     (runtimeCurrent ? (runtime?.extensions ?? []) : []).map((entry) => [
       entry.id,

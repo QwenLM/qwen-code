@@ -1699,4 +1699,82 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(values).toContain(''); // '' = the primary (its undefined action id)
     expect(wsSelect.value).toBe(''); // default targets the primary, no desync
   });
+
+  it('fails closed when the form workspace leaves the operable list', async () => {
+    const ensureRuntime = vi.fn(async () => ({}));
+    const workspaceRuntimeExtensions = vi.fn(async () => ({
+      initialized: true,
+      runtimeEpoch: 3,
+      errors: [],
+      extensions: [
+        { id: 'ext-secondary', name: 'secondary-ext', isActive: true },
+      ],
+    }));
+    const workspaceByCwd = vi.fn(() => ({
+      ensureRuntime,
+      workspaceRuntimeExtensions,
+    }));
+    const primaryEnsure = vi.fn(async () => ({}));
+    const primaryCatalog = vi.fn(async () => ({
+      initialized: true,
+      errors: [],
+      extensions: [
+        { id: 'ext-primary', name: 'primary-only-ext', isActive: true },
+      ],
+    }));
+    optionalWorkspaceState.current = {
+      capabilities: { features: ['workspace_extension_mentions'] },
+      client: {
+        ensureWorkspaceRuntime: primaryEnsure,
+        workspaceRuntimeExtensions: primaryCatalog,
+        workspaceByCwd,
+      },
+    };
+    await mountMulti({ primary: [], 'id-other': [] });
+    click(findButton('New scheduled task'));
+
+    const wsSelect = findWorkspaceSelect()!;
+    act(() => {
+      wsSelect.value = 'id-other';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    click(findButtonContaining('Extensions'));
+    await flush();
+    expect(workspaceByCwd).toHaveBeenCalledWith('/repo/other');
+    expect(document.body.textContent).toContain('secondary-ext');
+
+    // The workspace's trust is revoked while the form is open: it leaves the
+    // operable list, so the form's pinned target can no longer be resolved.
+    const revoked = WORKSPACES.map((ws) =>
+      ws.id === 'id-other' ? { ...ws, trusted: false } : ws,
+    );
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={vi.fn()}
+            onCreateViaChat={vi.fn()}
+            workspaces={revoked}
+            onError={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // Reopen the picker: the unresolvable target must fail closed rather
+    // than fall through to the primary's catalog.
+    click(findButtonContaining('Extensions'));
+    await flush();
+    click(findButtonContaining('Extensions'));
+    await flush();
+
+    expect(primaryEnsure).not.toHaveBeenCalled();
+    expect(primaryCatalog).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'The selected workspace is no longer available.',
+    );
+    expect(document.body.textContent).not.toContain('secondary-ext');
+    expect(document.body.textContent).not.toContain('primary-only-ext');
+  });
 });

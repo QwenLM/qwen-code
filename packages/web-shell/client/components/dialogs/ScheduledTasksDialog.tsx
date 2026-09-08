@@ -883,10 +883,20 @@ export function ScheduledTasksDialog({
             ) === true &&
             !(formWorkspace?.primary === true && !formWorkspace.trusted)
           ) {
+            // undefined = the primary's trust-free unqualified route; null =
+            // the form still names a workspace that left the operable list
+            // (e.g. its trust was revoked). The two must not be conflated:
+            // an unresolvable secondary must never read the primary's
+            // catalog.
             const client =
-              formWorkspace?.primary === false
-                ? workspace.client.workspaceByCwd(formWorkspace.cwd)
-                : undefined;
+              formWorkspace === undefined && formWorkspaceId !== undefined
+                ? null
+                : formWorkspace?.primary === false
+                  ? workspace.client.workspaceByCwd(formWorkspace.cwd)
+                  : undefined;
+            if (client === null) {
+              throw new Error('The selected workspace is no longer available.');
+            }
             const coordinator = client
               ? await client.ensureRuntime()
               : await workspace.client.ensureWorkspaceRuntime();
@@ -967,6 +977,7 @@ export function ScheduledTasksDialog({
     [
       actions,
       formWorkspace,
+      formWorkspaceId,
       referenceKind,
       resetReferenceState,
       updateReferencePickerPosition,
