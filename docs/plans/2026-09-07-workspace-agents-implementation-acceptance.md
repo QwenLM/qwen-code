@@ -36,6 +36,23 @@ Current run ids, timestamps and limitations are recorded in
 | Storage and reliability gates in steps 3/7/8 | Historical tests/observations remain below; no blanket revalidation claim for the current ACP path, nor a completed failure-injection matrix. |
 | External notifications | Consumer exists, but no recipient is configured for current acceptance; no external send authorized or observed. |
 
+The 2026-09-08 delegation run after the Agent Builder reuse change exposed one
+routing false positive: the leader's summary containing the scoped package
+`@qwen-code/qwen-code` produced `agent_unknown(qwen-code)`. Mention parsing now
+ignores `@token` immediately followed by `/`; agent addresses followed by normal
+punctuation are unchanged. This was found by the real model path, not by a test
+exercise.
+
+The same run exposed an acceptance loop: the parent had already consumed the
+child's `in_review` report and submitted its own review, but marking the child
+done emitted another parent report and spent a third leader run. Child-done
+reports are now suppressed when the parent is already `in_review` or `done`;
+the parent panel reads the child's final state directly. Open, in-progress and
+blocked parents still receive the durable report. A direct daemon-route check
+with an `in_review` parent observed the child become `done` with zero
+`child_done` outbox events and the parent retain zero posts/runs; the temporary
+records were deleted afterward.
+
 Gate check (2026-09-08): before the fix, the same 12-turn experiment persisted
 the skip outcomes but produced zero notifications while both runs stayed live.
 Gate admission now writes its notification in the same transaction, without
@@ -156,6 +173,22 @@ the product.
 This proves the demo steps 1-5 only. The forced `queueExternalInput` miss,
 12-turn ping-pong, daemon reaper replacement, and bare-mode exposure remain
 unrun, so the full step-7 gate is not yet claimed.
+
+**ACP-session delegation observation (2026-09-08).** Root
+`th_8c68f839-637d-4472-9f8d-8544d13646f3` assigned the existing
+`demo-leader`, which created child
+`th_9cec20a2-0bd8-41fc-94e7-3de1a6fa495a`, assigned the existing
+`demo-worker`, and closed its first run with `thread_wait`. The worker read the
+repository root `package.json`, posted `@qwen-code/qwen-code` and `>=22.0.0`,
+and closed with `thread_review`. Its run ended at `1788859290728`; the durable
+parent report was posted at `1788859290779` (51 ms), and the leader's next run
+started at `1788859291693` (965 ms after the child ended). Both leader runs used
+session `63465788-a16b-5328-92fc-8020330969a9`; the worker used
+`b48bad11-6e7c-5110-92a1-e560bf56eec6`. The leader posted both values and
+closed the parent with `thread_review`. Chrome first refused parent acceptance
+with `descendants_not_done`; after the person accepted the child, both records
+were marked `done`. No new agent was created. The run also exposed the scoped
+package mention and redundant child-done wake defects recorded above.
 
 **Direct steering and concurrency observation (2026-09-07).** In thread
 `th_6c12d77c-7d8a-4cd5-a535-2030a4c06d45`, a human post made while Alice's run

@@ -21,7 +21,9 @@ import type { WorkspaceAgent } from './types.js';
  * A candidate `@token`. The character before `@` must not be a word
  * character, which is what keeps `user@example.com` and `a@b` from reading as
  * mentions of `example` and `b`. Trailing punctuation is left outside the
- * capture so "ask @alice, then @bob." resolves both names.
+ * capture so "ask @alice, then @bob." resolves both names. A slash immediately
+ * after the token marks a scoped package or repository such as `@scope/name`,
+ * not an agent address.
  */
 const MENTION_PATTERN =
   /(?<![\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
@@ -52,6 +54,12 @@ export function parseMentions(
   for (const match of text.matchAll(MENTION_PATTERN)) {
     const name = match[1];
     if (!name) continue;
+    if (
+      match.index !== undefined &&
+      text[match.index + match[0].length] === '/'
+    ) {
+      continue;
+    }
     const agent = findAgentByName(agents, name);
     if (!agent) {
       const lowered = name.toLowerCase();

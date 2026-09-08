@@ -1366,6 +1366,13 @@ export function registerWorkspaceAgentRoutes(
               };
             }
             const now = Date.now();
+            const parent = target.parentThreadId
+              ? byId.get(target.parentThreadId)
+              : undefined;
+            const parentNeedsDoneReport =
+              parent !== undefined &&
+              parent.status !== 'in_review' &&
+              parent.status !== 'done';
             const updated = await transaction.writeThread({
               ...target,
               status: 'done',
@@ -1377,6 +1384,7 @@ export function registerWorkspaceAgentRoutes(
                     : run,
               ),
               outbox:
+                parentNeedsDoneReport &&
                 target.parentThreadId &&
                 !target.outbox.some(
                   (event) => event.payload['event'] === 'child_done',
