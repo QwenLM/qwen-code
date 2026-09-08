@@ -14071,7 +14071,7 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
-    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const modelReasoning = getConfiguredModelReasoning(config, modelId);
     if (
       !isReasoningSelectionSupported(
         modelId,
