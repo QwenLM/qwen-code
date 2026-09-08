@@ -1096,12 +1096,9 @@ describe('positional fallback when identity does not resolve', () => {
   it('maps an unmarked non-first target positionally when an earlier twin holds the mark (R27-1)', () => {
     // Two entrances re-minted the same id, so both P and Q carry it in the
     // UI. Retrying Q re-pushes Q's own entry UNMARKED while P's entry keeps
-    // the mark. Rewinding to Q must map positionally onto Q's own boundary,
-    // not resolve onto P's marked twin entry. No compressed prefix is
-    // involved and the twin is EARLIER, so neither conjunct of the R26-1
-    // `ambiguousTwinPrefix` gate fires; only the resolution-site whitelist
-    // (skip identity whenever another real turn claims the target's id)
-    // catches it. Positional answer is 2; the shortcut returns 0 today.
+    // the mark. Rewinding to Q must map positionally onto Q's own boundary
+    // (2), not resolve onto P's marked twin entry (0). The ownership proof
+    // is what catches it: P's entry carries P's text, not Q's.
     const pEntry = userContent('p');
     markApiHistoryPrompt(pEntry, 'session########1');
     const ui: HistoryItem[] = [
@@ -1120,7 +1117,7 @@ describe('positional fallback when identity does not resolve', () => {
   });
 });
 
-describe('round-28 ownership gate: companion shapes of the R27-1 whitelist', () => {
+describe('ownership gate: shapes a UI-claimant whitelist got wrong', () => {
   // The round-27 fix whitelisted the identity lookup by scanning the UI
   // history for twin claimants and preferring the positional walk. The
   // round-28 review showed that cascade still resolved a target onto a
@@ -1372,7 +1369,7 @@ describe('round-29: same-text twins defeat the text ownership proof', () => {
   });
 });
 
-describe('round-30: the proof cannot distinguish the target from a same-text impostor', () => {
+describe('same-text impostors the text proof alone cannot reject', () => {
   // Round-29 demotes the text proof whenever the same text is in play
   // twice, but the gate still accepts a same-text impostor whenever the
   // proof cannot distinguish the target from it: a claimant-less re-send

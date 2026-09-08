@@ -98,14 +98,10 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * genuine prompt, so for ordinary text a plain part comparison is
  * sufficient.
  *
- * Round-30 exception: a placeholder-shaped target text proves nothing. A
- * cleared media-only entry carries exactly that shape and keeps its mark
- * through microcompaction, and the documented exact-match collision means
- * a genuine prompt with the same full text is indistinguishable from the
- * cleared entry once serialized. The proof refuses such text outright so
- * the caller falls back to the positional walk (whose loud -1 is the
- * fail-safe pinned for the collision class) instead of resolving onto the
- * placeholder entry and silently truncating everything after it.
+ * A placeholder-shaped target text is ambiguous on its own — a cleared
+ * media-only entry carries exactly that shape and keeps its mark through
+ * microcompaction — so the caller pairs this proof with an ordinal check
+ * for those targets rather than trusting the text alone.
  */
 function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
   if (entry.role !== 'user' || !entry.parts) return false;
@@ -219,57 +215,18 @@ export function computeApiTruncationIndex(
     target.promptId &&
     !target.promptIdFileKeyOnly
   ) {
-    // Ownership gate (round-28 structural close of the twin-trust class that
-    // R24-1 .. R27-1 each patched per-entrance, refined by round-29).
-    // Identities are minted `sessionId########<n>` by entrances whose
-    // counters restart independently, so a `promptId` can be worn by API
-    // entries that do NOT belong to the rewind target: an earlier/later
-    // twin's entry, a cron/duplicate re-send with no UI claimant, or an
-    // absorbed turn's re-minted mark. A unique post-`startIndex` match is
-    // therefore never provably the target's own entry on the id alone — the
-    // round-27 attempt to whitelist by scanning the UI history for twin
-    // claimants still resolved a target onto a twin's boundary whenever the
-    // positional walk could not land (or landed late) while an impostor wore
-    // the id.
+    // Ownership gate. Identities are minted `sessionId########<n>` by
+    // entrances whose counters restart independently, so an entry wearing the
+    // target's id is not necessarily the target's own: it can be an earlier
+    // or later twin's, a claimant-less re-send's, or an absorbed turn's
+    // re-minted mark. A unique match is therefore not proof on the id alone.
     //
-    // The target's OWN entry is the one whose user prompt text equals the
-    // target's text. Accept the identity match only under that ownership
-    // proof, and prefer it over the positional walk: it lands exactly even
-    // when the walk is desynchronized by an absorbed turn or a placeholder
-    // collision. Any other outcome — no match, an ambiguous (multi) match, a
-    // match owned by a different turn, or a NON-UNIQUE ownership proof —
-    // falls back to the positional walk, the exact pre-identity behavior,
-    // whose loud -1 is the safe refusal.
-    //
-    // Round-29 uniqueness: the text proof stops being a proof whenever the
-    // same text is in play twice. Cron/duplicate re-sends and re-minted
-    // twins re-send the SAME prompt text, so an impostor's entry passes the
-    // text gate and the resolution lands on a boundary that is not the
-    // target's own — silently dropping context the UI still shows, or
-    // keeping context the UI deleted (the same-text variants of R27-1 and
-    // R26-1). The proof is unique only when no other real non-file-key-only
-    // UI turn claims the same promptId with the same text (with two
-    // claimants the matched entry could belong to either), and at most one
-    // post-`startIndex` entry carries the target's text (a second copy is a
-    // re-send whose mark can sit at a different position than the target's
-    // own boundary). file-key-only restored items never own marked entries,
-    // so they still cannot demote a proof — the pinned surviving-twin
-    // resolutions stay correct because the surviving twin IS the rewind
-    // target in those states and no other turn claims its id with its text.
-    // Demoting a same-text state is conservative: it can turn an exact
-    // resolution into a loud -1 (the walk is desynced there), never a
-    // silent wrong boundary. The durable close remains per-entry provenance
-    // (non-re-mintable ids) at the mint sites.
-    //
-    // Round-30 residue: the proof still cannot distinguish the target from
-    // a same-text impostor when exactly one same-text entry is in play — a
-    // claimant-less re-send (no UI claimant to scan) or a placeholder
-    // collision re-mint (the cleared-media entry itself passes the text
-    // proof). Two demotions backstop it without a new gate condition: the
-    // proof refuses placeholder-shaped text outright (see
-    // `isApiEntryOwnedByText`), and an acceptance whose positional walk
-    // lands EARLIER than the match trusts the walk instead (see the
-    // acceptance branch below).
+    // The target's own entry is the one carrying the target's text, so accept
+    // a match only under that proof and prefer it over the positional walk —
+    // it lands exactly even where the walk is desynced by an absorbed turn.
+    // Any other outcome falls back to the walk, whose loud -1 is the safe
+    // refusal. `docs/design/rewind-stable-prompt-identity.md` lists every
+    // accepted condition and why each exists.
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
@@ -304,13 +261,10 @@ export function computeApiTruncationIndex(
       }
       return true;
     };
-    // Round-32: the round-30 demotion refused the text proof outright
-    // whenever the target's own text is a cleared-media placeholder. That
-    // shape is not always an impostor — it is also this PR's headline
-    // reproduction, a genuine prompt the user typed whose whole text equals
-    // the generated placeholder, whose own entry IS the match. Refusing it
-    // sent the exact case #9437 was filed for back to the positional walk,
-    // which excludes placeholders from its count and lands one turn late.
+    // A cleared-media placeholder as the target's OWN text is ambiguous: it
+    // is either a cleared media-only entry wearing a re-minted mark, or a
+    // genuine prompt the user typed whose whole text equals the generated
+    // placeholder — the #9437 collision, whose own entry IS the match.
     //
     // Text alone cannot separate the two: a cleared media-only entry and a
     // genuine placeholder-texted prompt are byte-identical once serialized.
@@ -340,21 +294,15 @@ export function computeApiTruncationIndex(
       ownershipProven(identifiedIndex) &&
       ownershipProofIsUnique()
     ) {
-      // Round-30 backstop: even a unique, ownership-proven match cannot be
-      // trusted when the positional walk lands EARLIER than it. An earlier
-      // landing means counted prompt entries precede the match that the UI
-      // turn count does not account for — entries of turns the UI deleted,
-      // or of a claimant-less re-send whose UI item never existed — while
-      // the target's own entry is absent. Accepting the match would then
-      // truncate at the impostor's boundary and silently keep the
-      // prompt+response of a turn the UI deleted. No compressed prefix can
-      // explain this desync (startIndex skips the prefix, and excluded
-      // placeholder/reminder entries desync the walk LATE, never early),
-      // so the walk's earlier answer is the exact pre-identity boundary —
-      // the safe baseline this gate exists to preserve. A walk that lands
-      // late or cannot land (-1) leaves the identity preferred: that is the
-      // absorbed-turn/placeholder-collision exactness pinned by the
-      // round-28 tests.
+      // Even a unique, ownership-proven match cannot be trusted when the
+      // positional walk lands EARLIER than it: counted entries precede the
+      // match that the UI turn count does not account for — entries of turns
+      // the UI deleted, or of a claimant-less re-send — while the target's
+      // own entry is absent. No compressed prefix explains that (startIndex
+      // skips the prefix, and excluded entries desync the walk LATE, never
+      // early), so the walk's earlier answer is the exact pre-identity
+      // boundary. A walk that lands late or cannot land leaves identity
+      // preferred, which is the absorbed-turn exactness this gate is for.
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
         return positional;
