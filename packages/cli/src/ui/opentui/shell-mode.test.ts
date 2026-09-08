@@ -481,6 +481,31 @@ describe('executeUserShell', () => {
     );
   });
 
+  it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {
+    const events: OpenTuiStreamEvent[] = [];
+    let executeArgs: unknown[] = [];
+    executeMock.mockImplementation((...args: unknown[]) => {
+      executeArgs = args;
+      return Promise.resolve({
+        pid: 1,
+        result: Promise.resolve(makeResult()),
+      });
+    });
+    const done = executeUserShell(
+      makeConfig(false),
+      'echo hi \\',
+      (event) => events.push(event),
+      new AbortController().signal,
+      { width: 80, height: 24 },
+    );
+    await done;
+    // The appended `;` must start its own line: a bare `;` right after the
+    // backslash is escaped into a literal `;` argument (bash runs `ls ';'`).
+    expect(executeArgs[0]).toMatch(
+      /^\{ echo hi \\\n;\n\}; __code=\$\?; pwd > "[^"]+"; exit \$__code$/,
+    );
+  });
+
   it('marks a signal termination as failed on both leg shapes (R1-67)', async () => {
     for (const overrides of [
       { signal: 9, exitCode: null },

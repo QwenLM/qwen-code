@@ -160,6 +160,30 @@ describe('useShellCommandProcessor', () => {
     expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
   });
 
+  it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'echo hi \\',
+        new AbortController().signal,
+      );
+    });
+
+    const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
+    // The appended `;` must start its own line: a bare `;` right after the
+    // backslash is escaped into a literal `;` argument (bash runs `ls ';'`).
+    const wrappedCommand = `{ echo hi \\\n;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    expect(mockShellExecutionService).toHaveBeenCalledWith(
+      wrappedCommand,
+      '/test/dir',
+      expect.any(Function),
+      expect.any(Object),
+      false,
+      expect.any(Object),
+    );
+  });
+
   it('should handle successful execution and update history correctly', async () => {
     const { result } = renderProcessorHook();
 

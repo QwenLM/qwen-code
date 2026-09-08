@@ -58,6 +58,14 @@ export async function executeUserShell(
     let command = rawQuery.trim();
     const pwdFileName = `shell_pwd_${crypto.randomBytes(6).toString('hex')}.tmp`;
     pwdFilePath = path.join(os.tmpdir(), pwdFileName);
+    // A command ending in an odd run of backslashes leaves a dangling line
+    // continuation; the `;` appended below would be escaped into a literal
+    // argument (`ls \` would run `ls ';'`). Close the continuation first so
+    // the terminator ends the user's own command (R6-8).
+    const trailingBackslashes = /\\+$/.exec(command)?.[0].length ?? 0;
+    if (trailingBackslashes % 2 === 1) {
+      command += '\n';
+    }
     if (!command.endsWith(';') && !command.endsWith('&')) {
       command += ';';
     }
