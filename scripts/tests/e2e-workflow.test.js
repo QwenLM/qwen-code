@@ -41,8 +41,11 @@ describe('e2e workflow', () => {
     );
 
     expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
-    expect(runStep.run.match(/--poolOptions\.forks\.maxForks=3/g)).toHaveLength(
-      2,
+    expect(runStep.run).toMatch(
+      /^\s*npx cross-env .*QWEN_SANDBOX=docker vitest run .*--poolOptions\.forks\.maxForks=3/m,
+    );
+    expect(runStep.run).toMatch(
+      /^\s*QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- .*--poolOptions\.forks\.maxForks=3/m,
     );
   });
 
