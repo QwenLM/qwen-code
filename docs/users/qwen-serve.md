@@ -99,6 +99,18 @@ curl http://127.0.0.1:4170/daemon/status
 The `workspaceCwd` field surfaces the primary compatibility workspace so clients can intentionally omit `cwd` on `POST /session`. Current clients should select a trusted entry from `workspaces[]` and send that entry's `cwd` when targeting a runtime explicitly.
 The `limits.maxPendingPromptsPerSession` field advertises the active per-session prompt admission cap; `null` means the cap is disabled. `limits.maxTotalSessions` advertises the optional daemon-wide fresh-session cap; `null` means unlimited.
 
+### Adjust session live-state polling
+
+Web Shell refreshes workspace session live-state every **5 seconds** by default. To use a different interval, set the daemon environment variable before starting it:
+
+```bash
+QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS=10000 qwen serve --web
+```
+
+The value is an integer in milliseconds, from `1000` to `2147483647`. Missing or invalid values fall back to `5000`. The interval applies to all workspaces served by that daemon; restart the daemon and reload any open Web Shell pages after changing it. Local session actions and returning to a visible tab can still refresh immediately. This only changes live-state polling, not full session-catalog polling.
+
+The daemon publishes the effective interval as `sessionLiveStatePollIntervalMs` in `/capabilities`. Web Shell uses that value and falls back to five seconds when connecting to an older daemon that omits it. SDK consumers can read the value when choosing their own polling schedule.
+
 ### Run channels from the daemon
 
 ```bash

@@ -58,6 +58,15 @@ export function registerCapabilitiesRoutes(
   app: Application,
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
+  const configuredPollIntervalMs = Number(
+    deps.daemonEnv['QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS'],
+  );
+  const sessionLiveStatePollIntervalMs =
+    Number.isSafeInteger(configuredPollIntervalMs) &&
+    configuredPollIntervalMs >= 1_000 &&
+    configuredPollIntervalMs <= 2_147_483_647
+      ? configuredPollIntervalMs
+      : 5_000;
   app.get('/capabilities', (_req, res) => {
     const entries = deps.workspaceRegistry
       .listAllEntries()
@@ -80,6 +89,7 @@ export function registerCapabilitiesRoutes(
         : {}),
       mode: deps.mode,
       features,
+      sessionLiveStatePollIntervalMs,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.
