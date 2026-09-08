@@ -469,7 +469,11 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expandAll.click();
     expect(await expandAll.isDisabled()).toBe(true);
     await themeToggle.click();
-    expect(await page.locator('html').getAttribute('class')).toContain('light');
+    // `document-main.tsx` toggles `dark` and `light` on <html> mutually
+    // exclusively, so the attribute is exactly one of them.
+    await expect
+      .poll(() => page.locator('html').getAttribute('class'))
+      .toBe('light');
     // Since #11091 a document does not render diagrams: mermaid is stubbed out
     // of this bundle, and the fence degrades to its own source in a plain <pre>
     // so it stays readable, selectable and findable. Math is deliberately kept,
