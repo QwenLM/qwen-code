@@ -5016,6 +5016,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 assertCanMutate: assertGenerationOpen,
+                runtimeWorkspaceCwd: this.boundWorkspace,
                 onError: ({ phase, sessionId, error }) => {
                   const safeSessionId = logSafe(sessionId.slice(0, 8));
                   const safeMessage = logSafe(error);

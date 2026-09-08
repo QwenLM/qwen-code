@@ -4,6 +4,7 @@
   "description": "Native macOS audio and global-shortcut host for Qwen Code Live Voice",
   "main": "dist/main.cjs",
   "private": true,
+  "workspaces": [],
   "type": "module",
   "engines": {
     "node": ">=22.0.0"

@@ -66,20 +66,21 @@ export function GlobalTurnNavigation({
     return () => observer.disconnect();
   }, []);
 
-  const initialized = useRef<string | undefined>(undefined);
+  const [initializedSession, setInitializedSession] = useState<string>();
   useLayoutEffect(() => {
-    if (!count || initialized.current === state.sessionId) return;
-    initialized.current = state.sessionId;
+    if (!count || initializedSession === state.sessionId) return;
     const element = viewport.current;
     if (!element) return;
     element.scrollTop = Math.max(0, count * ROW_HEIGHT - height);
     setTop(element.scrollTop);
     setFocus(count - 1);
-  }, [count, state.sessionId, height]);
+    setInitializedSession(state.sessionId);
+  }, [count, state.sessionId, height, initializedSession]);
 
   const missing = new Set<number>();
   for (
     let ordinal = start;
+    initializedSession === state.sessionId &&
     ordinal < Math.min(end, state.totalTurns);
     ordinal++
   ) {

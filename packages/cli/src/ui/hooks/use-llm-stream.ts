@@ -5498,13 +5498,14 @@ export const useLlmStream = (
             if (
               status === 'complete' ||
               status === 'blocked' ||
+              status === 'paused' ||
               status === 'usage_limited'
             ) {
               addItem(
                 {
                   type: 'goal_state',
                   snapshot,
-                  cause: status,
+                  cause: status === 'paused' ? 'pause' : status,
                 },
                 Date.now(),
               );
