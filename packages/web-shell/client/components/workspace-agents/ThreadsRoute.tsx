@@ -123,9 +123,16 @@ export interface ThreadsRouteProps {
   /** Switches the shell to an agent's own session. Absent when embedded
    * somewhere with no session view to switch to. */
   onOpenAgentSession?: (sessionId: string) => void;
+  agentDefinitions?: readonly string[];
+  onCreateAgentDefinition?: () => void;
 }
 
-export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
+export function ThreadsRoute({
+  api,
+  onOpenAgentSession,
+  agentDefinitions,
+  onCreateAgentDefinition,
+}: ThreadsRouteProps) {
   const workspace = useWorkspace();
   const connection = useConnection();
   const workspaceCwd =
@@ -359,6 +366,8 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
           void mutate(() => client.updateAgent(id, patch))
         }
         {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+        {...(agentDefinitions ? { agentDefinitions } : {})}
+        {...(onCreateAgentDefinition ? { onCreateAgentDefinition } : {})}
         {...(capabilities ? { capabilities } : {})}
         onCreateThread={(input) =>
           void mutate(async () => {

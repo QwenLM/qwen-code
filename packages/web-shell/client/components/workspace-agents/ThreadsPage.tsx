@@ -47,6 +47,8 @@ export interface ThreadsPageProps {
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
   onOpenAgentSession?: (sessionId: string) => void;
+  agentDefinitions?: readonly string[];
+  onCreateAgentDefinition?: () => void;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => void;
   onPreviewThread?: (assignee?: string) => void;
@@ -179,6 +181,8 @@ export function ThreadsPage({
   onSetAgentEnabled,
   onUpdateAgent,
   onOpenAgentSession,
+  agentDefinitions = [],
+  onCreateAgentDefinition,
   capabilities,
   onCreateThread,
   onPreviewThread,
@@ -301,11 +305,30 @@ export function ThreadsPage({
               rows={4}
               placeholder="How this agent should work"
             />
-            <input
-              className={styles.field}
-              name="agentType"
-              placeholder="Agent definition template (optional)"
-            />
+            <label className={styles.configLabel}>
+              Agent definition
+              <select
+                className={styles.field}
+                name="agentType"
+                defaultValue=""
+              >
+                <option value="">Workspace default</option>
+                {agentDefinitions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {onCreateAgentDefinition ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onCreateAgentDefinition}
+              >
+                Create or generate a definition with Qwen
+              </Button>
+            ) : null}
             <input
               className={styles.field}
               name="model"

@@ -153,6 +153,8 @@ export function AgentsManagerPage({
   const [createOpen, setCreateOpen] = useState(() =>
     Boolean(initialCreateScope),
   );
+  const [createReturnsToSharedThreads, setCreateReturnsToSharedThreads] =
+    useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [listNotice, setListNotice] = useState<string | null>(null);
@@ -326,7 +328,15 @@ export function AgentsManagerPage({
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
-        <ThreadsRoute {...(onOpenAgentSession ? { onOpenAgentSession } : {})} />
+        <ThreadsRoute
+          {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+          agentDefinitions={agents.map((agent) => agent.name)}
+          onCreateAgentDefinition={() => {
+            setCreateReturnsToSharedThreads(true);
+            setAgentsOpen(false);
+            setCreateOpen(true);
+          }}
+        />
       </div>
     );
   }
@@ -338,10 +348,22 @@ export function AgentsManagerPage({
         {navigation}
         <AgentCreatePage
           initialScope={initialCreateScope ?? 'global'}
-          onCancel={returnToList}
+          onCancel={() => {
+            if (!createReturnsToSharedThreads) {
+              returnToList();
+              return;
+            }
+            setCreateOpen(false);
+            setCreateReturnsToSharedThreads(false);
+            setAgentsOpen(true);
+          }}
           onCreated={(name) => {
             setCreateOpen(false);
             setListNotice(t('agent.created', { name }));
+            if (createReturnsToSharedThreads) {
+              setCreateReturnsToSharedThreads(false);
+              setAgentsOpen(true);
+            }
             void reload();
           }}
         />

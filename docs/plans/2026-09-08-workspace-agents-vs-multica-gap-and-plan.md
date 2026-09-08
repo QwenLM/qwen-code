@@ -547,8 +547,10 @@ in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
 The creation endpoint now accepts those effective identity fields in its first
 atomic roster write, and the list reports status from the live bridge session.
-This makes the current manual flow honest; it does not yet merge the reusable
-definition builder and persistent-roster step into Multica's single studio.
+The form selects from Qwen Code's existing definitions and can hand off to the
+existing manual/model-assisted builder, returning to shared threads on cancel
+or completion. This reuses the builder but remains a two-step definition plus
+roster flow rather than Multica's single studio.
 
 ### How this branch was verified
 
