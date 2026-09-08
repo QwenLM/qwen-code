@@ -624,13 +624,47 @@ transcript ownership, reconnect/replay contract, and whether a remote Host may
 invoke only `thread_*` on the primary or a wider tool surface. Implementing a
 Host card or picker before those decisions would be a false capability.
 
-After that gate, the first implementation slice is: a second daemon registers
-a stable Host id and provider set; its heartbeat drives online/offline; an
-Agent can be bound to it; only it can claim the Agent's queued task; daemon
-restart preserves the binding; the run's thread mutations remain authoritative
-on the primary; and the ordinary conversation view can open the remote task
-session. Cloud scheduling, autoscaling and one permanent process per Agent are
-not part of that slice.
+The existing code already supplies part of the transport, and should be reused:
+
+- `@qwen-code/sdk/daemon` has a network `DaemonClient` and
+  `DaemonSessionClient` for capability discovery, workspace selection,
+  create/resume, prompt, event streaming and cancellation.
+- `bearerAuth` protects a non-loopback `qwen serve`, and the capabilities plus
+  workspace-qualified routes already fail when a requested workspace is absent
+  or untrusted.
+- `agentThreadSessionId` and `sourceType: agent` already define the stable
+  `(agent, thread)` session identity.
+
+Those pieces do not provide a Host credential. The server bearer token grants
+the whole daemon and is too broad; the channel worker's prompt authorization is
+a local child-process sentinel, not a remote enrollment credential. Nor do they
+make current `thread_*` tools remote: every mutation currently opens the local
+JSON store and proves the ambient run there. A remote Host therefore needs a
+scoped run credential and a primary-side tool endpoint that repeats the same
+live-run check inside the authoritative transaction. This should be a direct
+built-in transport, not MCP: enabling arbitrary MCP would silently widen the
+read-only capability ceiling.
+
+Implementation has three separately accepted slices:
+
+1. **H1 — Host registry and heartbeat.** A one-time enrollment credential is
+   exchanged for a stable Host id and scoped secret; a second daemon advertises
+   its provider set and workspace mapping; heartbeat drives online/offline and
+   survives primary restart; the Runtime page shows only these stored/live
+   facts. No Agent can bind to the Host yet.
+2. **H2 — Bound remote run.** An Agent binds to one online Host; only that Host
+   may claim its run; the claim carries an immutable persona/tool snapshot and
+   attempt-scoped credential; remote `thread_*` calls execute on the primary
+   and recheck the run before writing; disconnect leaves unconsumed work
+   replayable rather than terminally failed.
+3. **H3 — Conversation continuity.** The primary session catalog records the
+   remote session owner and proxies its events/transcript/cancel surface, so the
+   existing Agents conversation list opens the same `(agent, thread)` history
+   before and after either daemon restarts.
+
+The registered-Host capability is accepted only after H1-H3 pass together.
+Cloud scheduling, autoscaling and one permanent process per Agent remain out of
+scope.
 
 A later source audit found that sessionization alone had not delivered the
 claimed persona: persona fields were assigned after `Config.initialize()` had
