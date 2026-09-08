@@ -228,7 +228,7 @@ export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
 
 export interface WebShellAssistantTurnSettledEvent {
   sessionId: string;
-  /** Daemon-assigned prompt identifier and stable host idempotency key. */
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
   promptId: string;
   outcome: WebShellAssistantTurnOutcome;
   /** Daemon terminal reason. Present for completed and cancelled turns. */

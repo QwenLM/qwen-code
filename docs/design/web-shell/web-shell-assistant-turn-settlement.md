@@ -21,13 +21,13 @@ The stable host idempotency key is `(sessionId, promptId)`. Existing
 
 ## Delivery
 
-Each mounted `DaemonSessionProvider` publishes a terminal for a prompt it
-locally bound, after the terminal transcript projection is committed. That
-happens on the live SSE stream, and also on a reconnect whose replay snapshot
-carries the terminal — the snapshot is released once injected and SSE resumes
-from `lastEventId`, so a replayed terminal is never re-delivered live. Ordinary
-persisted-history loading does not publish: the gate is a locally bound prompt,
-not the event type, so a first attach to a long-finished session stays silent.
+Each mounted `DaemonSessionProvider` publishes every prompt terminal observed
+on its live SSE stream after the terminal transcript projection is committed.
+Hosts that need submitter ownership correlate the prompt id with their submit
+result. On reconnect, a terminal carried only by the replay snapshot publishes
+when this provider previously admitted that prompt. That admission gate keeps
+ordinary persisted-history loading silent while surviving session switches and
+epoch-reset reloads that discard the active request controller.
 
 The provider suppresses duplicate terminals for its mounted lifetime. A host
 can mount the same session in more than one provider, such as the main chat and

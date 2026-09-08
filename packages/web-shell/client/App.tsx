@@ -1278,7 +1278,10 @@ export interface WebShellProps {
   composerInputVersion?: number;
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
-  /** Called after a live daemon prompt reaches an authoritative terminal. */
+  /**
+   * Called for authoritative terminals observed live, or replayed for a prompt
+   * this provider admitted.
+   */
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Prepare the immutable payload for a daemon submission. Called once for a

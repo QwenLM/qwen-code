@@ -1061,6 +1061,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
+  const locallyBoundPromptKeysRef = useRef(new Set<string>());
   const promptSettlementListenersRef = useRef<Set<DaemonPromptSettledListener>>(
     new Set(),
   );
@@ -1073,6 +1074,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const publishPromptSettlement = useCallback(
     (event: DaemonPromptSettledEvent) => {
       const key = getPromptSettledKey(event.sessionId, event.promptId);
+      locallyBoundPromptKeysRef.current.delete(key);
       if (publishedPromptSettlementsRef.current.has(key)) return;
       publishedPromptSettlementsRef.current.add(key);
       const listeners = [...promptSettlementListenersRef.current];
@@ -2795,7 +2797,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               });
             }
             for (const replayEvent of replayEvents) {
-              const settledBoundPrompt = settleActivePromptFromTurnEvent(
+              settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
                 activeSession.sessionId,
@@ -2805,20 +2807,28 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
-              if (!settledBoundPrompt) continue;
               // A terminal that arrives through replay is never re-delivered
               // live: the snapshot is released below and SSE resumes from
               // `lastEventId`. Publish here or a host keyed on
               // `onAssistantTurnSettled` waits forever for a turn it can
-              // already see finished. The bound-prompt gate — not the event
-              // type — keeps ordinary history loading silent, because a first
-              // attach (or a turn-navigation rebuild) has no local
-              // `ActivePrompt` to match.
+              // already see finished. The admission key survives active
+              // controller cleanup during reconnect and session switches,
+              // while keeping ordinary history loading silent.
               const replaySettlement = promptSettledFromTurnEvent(
                 activeSession.sessionId,
                 replayEvent,
               );
-              if (replaySettlement) publishPromptSettlement(replaySettlement);
+              if (
+                replaySettlement &&
+                locallyBoundPromptKeysRef.current.has(
+                  getPromptSettledKey(
+                    replaySettlement.sessionId,
+                    replaySettlement.promptId,
+                  ),
+                )
+              ) {
+                publishPromptSettlement(replaySettlement);
+              }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
             // Release the raw snapshot only after the injection above
@@ -4427,6 +4437,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onPromptAdmitted: (owner, admission) => {
+          locallyBoundPromptKeysRef.current.add(
+            getPromptSettledKey(owner.sessionId, admission.promptId),
+          );
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
@@ -4435,6 +4448,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         },
         onPromptRemoved: (owner, promptId) => {
+          locallyBoundPromptKeysRef.current.delete(
+            getPromptSettledKey(owner.sessionId, promptId),
+          );
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
