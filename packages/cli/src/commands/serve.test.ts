@@ -627,6 +627,9 @@ describe('serve rate limit env parsing', () => {
     await startServeHandlerWithArgs(
       '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
     );
+    // Wait out the fire-and-forget handler's pairing phase so it cannot
+    // consume the one-shot QR mock the next test installs.
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).toEqual(
