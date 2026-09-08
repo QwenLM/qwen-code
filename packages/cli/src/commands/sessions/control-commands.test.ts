@@ -22,7 +22,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderr.push(line),
 }));
 
-const { answerCommand, peekCommand } = await import('./control-commands.js');
+const { answerCommand, peekCommand, insertAnswerTextSeparator } = await import(
+  './control-commands.js'
+);
 
 const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
 
@@ -80,8 +82,12 @@ async function withRawArgs<T>(
 async function parseWithRootOptions(
   argv: string[],
 ): Promise<Record<string, unknown>> {
+  // `config.ts` inserts `--` after the session token so yargs never sees
+  // the answer as flags; mirror that here (process.argv stays unseparated,
+  // which is what the handler's raw tail reads).
+  const parseArgv = insertAnswerTextSeparator([...argv]);
   return (await withRawArgs(argv, () =>
-    yargs(argv)
+    yargs(parseArgv)
       .option('debug', { type: 'boolean', alias: 'd', default: false })
       .option('proxy', { type: 'string' })
       .version('x')
@@ -249,17 +255,42 @@ describe('answer command parsing with the root options registered', () => {
   it('keeps the version alias in the answer text', async () => {
     // `.version(false)` up the chain deletes `version` from the key/type
     // groups but leaves the alias entry `v: ['version']` behind, which
-    // keeps `-v` known unless forgetInheritedOptions forgets it too.
+    // keeps `-v` known unless forgetInheritedOptions forgets it too. This
+    // only reaches the parser because cli.ts exempts the `sessions answer`
+    // chain from its entry version intercept (see cli.test.ts).
     const answer = mockDelivered();
     await parse(['sessions', 'answer', SESSION, 'rerun', '-v', 'now']);
     expect(answer).toHaveBeenCalledWith(SESSION, 'rerun -v now');
   });
 
   it('delivers an answer that is only --version', async () => {
+    // The entry version intercept exempts `sessions answer`, so a bare
+    // `--version` is the answer text, not a version request.
     const answer = mockDelivered();
     await parse(['sessions', 'answer', SESSION, '--version']);
     expect(answer).toHaveBeenCalledWith(SESSION, '--version');
     expect(stderr).toEqual([]);
+  });
+
+  it('delivers an answer with --help in the middle', async () => {
+    // config.ts inserts `--` after the session token, so a `--help` that is
+    // not the whole answer is delivered instead of showing help and
+    // dropping the reply.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'please', '--help', 'me']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'please --help me');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('delivers an answer whose last token is the bare word help', async () => {
+    // The root instance's help command pops a trailing bare `help`, so it
+    // too must be shielded by the inserted `--`.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', SESSION, 'yes', 'please', 'help']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'yes please help');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it('still shows help for a bare --help', async () => {

@@ -234,7 +234,8 @@ function hasFlag(
   return false;
 }
 
-// True when argv carries a `-v`/`--version` token before any `--`.
+// True when argv carries a `-v`/`--version` token that should be
+// intercepted — one that is NOT part of a `sessions answer` free-text tail.
 // Mirrors the pre-PR hasFlag scan exactly: the token
 // following one of the base's hardcoded value-taking flags
 // (BASE_VALUE_FLAGS) is skipped unconditionally (even when it starts with
@@ -245,7 +246,19 @@ function hasFlag(
 // scan, which counted a version token in their value slot (`qwen --proxy
 // -v ...` printed the version), so this scan must count it too. Tokens
 // after `--` are positional data and never count.
+//
+// `sessions answer <id> [text..]` takes the rest of the line as free text,
+// so a `-v`/`--version` after the two command tokens is the reply and must
+// reach the answer parser (where `forgetInheritedOptions` keeps it in the
+// text). The scan therefore stops counting once the `sessions answer` chain
+// has started: a version token before it still prints the version, and
+// every other command chain — `mcp remove victim -v help` in particular —
+// keeps the fail-closed intercept (demoting to the full parser EXECUTES
+// subcommands).
 function hasVersionToken(argv: readonly string[]): boolean {
+  let positionals = 0;
+  let firstPositional = '';
+  let inSessionsAnswerTail = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
@@ -255,8 +268,21 @@ function hasVersionToken(argv: readonly string[]): boolean {
       i++; // skip the value slot; the loop increment consumes the token
       continue;
     }
+    if (!arg.startsWith('-')) {
+      positionals++;
+      if (positionals === 1) {
+        firstPositional = arg;
+      } else if (
+        positionals === 2 &&
+        firstPositional === 'sessions' &&
+        arg === 'answer'
+      ) {
+        inSessionsAnswerTail = true;
+      }
+      continue;
+    }
     if (arg === '--version' || arg === '-v') {
-      return true;
+      if (!inSessionsAnswerTail) return true;
     }
   }
   return false;

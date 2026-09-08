@@ -96,7 +96,9 @@ function forgetInheritedOptions(built: Argv): Argv {
   // Derive the inherited set from every group, not just `table.key`:
   // `.version(false)` up the chain deletes `version` from the key/type
   // groups but leaves the alias entry `v: ['version']` behind, which is
-  // enough for yargs-parser to keep `-v`/`--version` known.
+  // enough for yargs-parser to keep `-v`/`--version` known. `cli.ts`
+  // exempts the `sessions answer` chain from its entry version intercept,
+  // so these tokens reach this scrub and stay in the answer text.
   const candidates = new Set<string>();
   for (const group of Object.values(table)) {
     if (Array.isArray(group)) {
@@ -183,6 +185,37 @@ function findRun(haystack: string[], needle: string[]): number {
     }
   }
   return -1;
+}
+
+/**
+ * Insert `--` after the session token of a `sessions answer <id>` argv so
+ * yargs treats the rest of the line as positional text instead of parsing
+ * flags out of the answer.
+ *
+ * Called by `config.ts` on the raw argv before the yargs tree is built:
+ * `help`/`h` must stay known options so a bare `--help` still shows help,
+ * but that same registration otherwise consumes an unquoted `--help`/`-h`
+ * (or a trailing bare `help`, via the root instance's help command) from
+ * the answer before the handler runs, and the reply is silently dropped.
+ */
+export function insertAnswerTextSeparator(argv: string[]): string[] {
+  if (argv[0] !== 'sessions' || argv[1] !== 'answer') return argv;
+  const session = argv[2];
+  // A missing session (`sessions answer --help`) or one that is itself a
+  // flag must fall through to yargs (help / demandOption), not be shielded.
+  if (session === undefined || session.startsWith('-')) return argv;
+  const tail = argv.slice(3);
+  // Already verbatim (`answer <id> -- ...`): do not double the separator.
+  if (tail[0] === '--') return argv;
+  // The documented carve-out: a bare `--help`/`-h` shows help instead of
+  // being delivered as the answer.
+  if (tail.length === 1 && (tail[0] === '--help' || tail[0] === '-h')) {
+    return argv;
+  }
+  // No answer text yet: let the empty-answer refusal happen without a
+  // separator.
+  if (tail.length === 0) return argv;
+  return [...argv.slice(0, 3), '--', ...tail];
 }
 
 export const peekCommand: CommandModule<unknown, SessionIdArgs> = {
