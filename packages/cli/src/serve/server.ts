@@ -779,6 +779,7 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (opts.apiProfile === 'minimal') opts = { ...opts, serveWebShell: false };
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -973,7 +974,8 @@ export function createServeApp(
     webTerminalRegistry.dispose();
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
-  const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const acpHttpEnabledAtBoot =
+    opts.apiProfile !== 'minimal' && resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   const liveVoiceSurfaceAvailable =
     runtimePlatform === 'darwin' &&
@@ -2018,6 +2020,10 @@ export function createServeApp(
   // to join their log lines (and 404s) with the caller's trace.
   app.use(daemonInboundTraceIdCaptureMiddleware);
 
+  // Cover pre-auth assets and webhooks as well as normal REST routes.
+  const profileGate = apiProfileGate(opts.apiProfile);
+  if (profileGate) app.use(authenticate, profileGate);
+
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
@@ -2105,22 +2111,6 @@ export function createServeApp(
   // webhook routes which use their own shared-secret auth before bearerAuth.
   if (rateLimiter) {
     app.use(rateLimiter.middleware);
-  }
-
-  // API profile gate (`--api-profile=minimal`): 404 everything outside the
-  // partner-facing REST subset. One middleware instead of a conditional on
-  // each of the ~65 route registrations below — the goal is narrowing the
-  // authorization and contract surface, not saving startup work, so the routes
-  // are still registered and simply become unreachable.
-  //
-  // Placed AFTER `authenticate` so unauthenticated callers get a uniform 401
-  // and cannot enumerate the enabled surface by diffing 401 against 404, and
-  // BEFORE the post-auth `/health` registration so a non-loopback (or
-  // `--require-auth`) deployment gates that behind the profile too. `full`
-  // installs nothing.
-  const apiProfileMiddleware = apiProfileGate(opts.apiProfile);
-  if (apiProfileMiddleware) {
-    app.use(apiProfileMiddleware);
   }
 
   if (!healthRoutes.exposeHealthPreAuth) {

@@ -21,7 +21,6 @@ export default {
   'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
   'qwen-serve-protocol': 'qwen serve HTTP protocol',
-  'rest-api-integration': 'REST API integration guide',
   daemon: 'Daemon Mode (Developer Deep Dive)',
 
   examples: {

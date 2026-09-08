@@ -2,8 +2,6 @@
 
 Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/issues/3803). All routes live under the daemon's base URL (default `http://127.0.0.1:4170`).
 
-> **Building an external integration?** Start with the [REST API integration guide](./rest-api-integration.md) and the machine-readable [`qwen-serve-openapi.yaml`](./qwen-serve-openapi.yaml). This document covers the **whole** surface, most of which exists to drive the Web Shell and carries no stability promise for outside callers. See [API profiles](#api-profiles) below.
-
 ## Authentication
 
 When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every normal API route except `/health` on ordinary loopback binds** must carry:
@@ -52,22 +50,20 @@ Loopback self-origin requests (e.g. the Web Shell calling the daemon at the same
 
 ## API profiles
 
-`--api-profile` selects how much of the surface below actually exists:
+`qwen serve --api-profile=minimal` exposes session REST/SSE and read-only file routes. It automatically disables Web Shell assets and ACP/WebSocket transports. `--api-profile=full` is the default and preserves the existing daemon surface. `--no-web` alone only disables Web Shell assets.
 
-| Profile          | Surface                                                                                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `full` (default) | Every route in this document. Byte-identical to the behavior before the flag existed — no gate is installed at all.                                                             |
-| `minimal`        | Only the partner-facing subset in [`qwen-serve-openapi.yaml`](./qwen-serve-openapi.yaml): session lifecycle, prompting, SSE, permission responses, read-only workspace context. |
+The minimal profile allows these paths, with their existing methods and request/response contracts:
 
-Under `minimal`, everything else answers `404 {"error":"Not found","code":"api_profile_disabled","apiProfile":"minimal"}`.
+- `/health`, `/capabilities`, `/session`, `/session/:id`.
+- `/session/:id/{prompt,cancel,events,status,transcript,context,export,pending-prompts,heartbeat,metadata,model,load,resume}`.
+- `/session/:id/permission/:requestId`, `/permission/:requestId`.
+- `/workspace/tools`, `/file`, `/file/bytes`, `/stat`, `/list`, `/glob`.
 
-The gate runs **after** the `authenticate` middleware, so an unauthenticated caller still gets the uniform `401` and cannot map which routes a deployment enabled by diffing 401 against 404. On a plain loopback bind `/health` is registered ahead of authentication and so bypasses the gate; it is in the minimal subset anyway, so the reachable set is the same either way.
+Other HTTP paths, including channel webhooks, return `403 {code: "api_profile_disabled", apiProfile: "minimal", ...}` after bearer authentication. Unauthenticated requests retain their existing 401 response; the ordinary loopback health exemption and CORS preflight behavior are unchanged. WebSocket connections cannot upgrade. Browser launch and Local Control options require the full profile.
 
-Matching is by path, not by method: `/file` and `/file/write` are already distinct paths, so path granularity expresses "read-only file access" without a method × path matrix. A path whose GET is safe but whose PATCH is not (`/workspace/settings`) is excluded wholesale.
+`GET /capabilities` reports `apiProfile` during both startup and normal operation, and its `features` list includes only supported capabilities available through the selected profile. This profile targets direct REST integrations; the full Web Shell and general-purpose SDK methods need routes it excludes.
 
-`GET /capabilities` reports the active profile as `apiProfile`. Note the invariant carve-out in [capabilities versioning](./daemon/11-capabilities-versioning.md): under `minimal`, `features` over-reports what is routable.
-
-The route list and the OpenAPI spec are kept in lockstep by a drift guard (`packages/cli/src/serve/api-profile.test.ts`) that fails if either side gains a path the other lacks.
+This narrows direct HTTP and WebSocket entry points, not agent authority: prompts and permission approvals can still run tools that modify files or execute commands. Use the existing trust, approval, and deployment isolation controls for that boundary.
 
 ## Common error shape
 
@@ -3576,7 +3572,6 @@ The connection then closes.
 | `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
 | `packages/cli/src/serve/api-profile.ts`              | `--api-profile` surface gate + the `minimal` path allowlist                                                |
-| `docs/developers/qwen-serve-openapi.yaml`            | OpenAPI 3.1 contract for the `minimal` profile                                                             |
 | `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
 | `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
 | `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |

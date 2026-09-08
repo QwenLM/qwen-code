@@ -3125,6 +3125,91 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it('enforces the minimal API profile across HTTP, assets, webhooks and WebSockets', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(
+      { ...baseOpts, token: 'secret', apiProfile: 'minimal' },
+      undefined,
+      {
+        bridge,
+        webShellDir: '/unused-minimal-profile-assets',
+        enqueueChannelWebhookTask: vi.fn(),
+      },
+    );
+    const host = `127.0.0.1:${baseOpts.port}`;
+    for (const path of [
+      '/',
+      '/workspace/trust',
+      '/channels/test/webhooks/test',
+      '/acp',
+      '/file/write',
+    ]) {
+      await request(app).post(path).set('Host', host).expect(401);
+      const response = await request(app)
+        .post(path)
+        .set('Host', host)
+        .set('Authorization', 'Bearer secret')
+        .expect(403);
+      expect(response.body.code).toBe('api_profile_disabled');
+    }
+    const caps = await request(app)
+      .get('/capabilities')
+      .set('Host', host)
+      .set('Authorization', 'Bearer secret')
+      .expect(200);
+    expect(caps.body.apiProfile).toBe('minimal');
+    expect(caps.body.features).toContain('session_prompt');
+    expect(caps.body.features).not.toContain('workspace_settings');
+    expect(caps.body.features).not.toContain('acp_http');
+    await request(app).get('/health').set('Host', host).expect(200);
+    await request(app)
+      .post('/session/session-A/prompt')
+      .set('Host', host)
+      .set('Authorization', 'Bearer secret')
+      .send({ prompt: [{ type: 'text', text: 'hi' }] })
+      .expect(202);
+    await vi.waitFor(() => expect(bridge.promptCalls).toHaveLength(1));
+    await request(app)
+      .post('/session/session-A/cancel')
+      .set('Host', host)
+      .set('Authorization', 'Bearer secret')
+      .expect(204);
+
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const handle = app.locals['acpHandle'] as AcpHttpHandle | undefined;
+    handle?.attachServer(server);
+    expect(handle).toBeUndefined();
+    const port = (server.address() as AddressInfo).port;
+    try {
+      for (const path of [
+        '/acp',
+        '/voice/stream',
+        '/terminal',
+        '/live/host',
+        '/cdp',
+        '/workspaces/test/acp',
+      ]) {
+        await new Promise<void>((resolve, reject) => {
+          const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+            headers: { Host: host, Authorization: 'Bearer secret' },
+            handshakeTimeout: 1000,
+          });
+          ws.on('open', () => {
+            ws.terminate();
+            reject(new Error('Unexpected WebSocket upgrade'));
+          });
+          ws.on('error', (error) => {
+            if (error.message.includes('timeout')) reject(error);
+            else resolve();
+          });
+        });
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {

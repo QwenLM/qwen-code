@@ -54,6 +54,19 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('parses API profiles and rejects incompatible browser modes', () => {
+    expect(buildParser().parseSync('')['api-profile']).toBe('full');
+    expect(
+      buildParser().parseSync('--api-profile=minimal')['api-profile'],
+    ).toBe('minimal');
+    expect(() => buildParser().parseSync('--api-profile=unknown')).toThrow();
+    for (const flag of ['--open', '--open-with-auth', '--local-control']) {
+      expect(() =>
+        buildParser().parseSync(`--api-profile=minimal ${flag}`),
+      ).toThrow(/require --api-profile=full/);
+    }
+  });
+
   it('documents the complete IPv4 loopback range', async () => {
     // Remove whitespace before checking so a long option name forcing yargs
     // to wrap the description does not split the CIDR literal across lines.
@@ -713,6 +726,17 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+    );
+  });
+
+  it('forwards the minimal API profile to the daemon', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+    await startServeHandlerWithArgs('--api-profile=minimal');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ apiProfile: 'minimal' }),
     );
   });
 

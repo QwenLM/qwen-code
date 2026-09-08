@@ -217,12 +217,7 @@ export interface ServeOptions {
    * Web Shell assets aren't present in the build.
    */
   serveWebShell?: boolean;
-  /**
-   * How much of the HTTP surface to expose (the CLI's `--api-profile`).
-   * `full` (default) keeps every route; `minimal` serves only the
-   * partner-facing REST subset in `docs/developers/qwen-serve-openapi.yaml`
-   * and answers 404 everywhere else. See `serve/api-profile.ts`.
-   */
+  /** API route profile; defaults to full. Minimal also disables Web Shell. */
   apiProfile?: ApiProfile;
   /**
    * Cap on live MCP clients spawned inside the
@@ -424,17 +419,7 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
-  /**
-   * How much of the HTTP surface this daemon exposes. Optional because this is
-   * additive to v=1; older v=1 daemons omit it (read an absent value as
-   * `'full'`).
-   *
-   * **Under `'minimal'` the "tag present means behavior present" invariant in
-   * `docs/developers/daemon/11-capabilities-versioning.md` does not hold** —
-   * `features` still lists every tag the build supports, but routes outside
-   * the minimal subset answer 404. `docs/developers/qwen-serve-openapi.yaml`
-   * is the authority on what is reachable.
-   */
+  /** Active API route profile; omitted by older daemons (equivalent to full). */
   apiProfile?: ApiProfile;
   /**
    * Configured model services advertised over HTTP. **Stage 1 always

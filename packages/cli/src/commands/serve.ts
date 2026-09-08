@@ -5,9 +5,6 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-// Value import, unlike the deferred serve module below: `api-profile.ts`
-// compiles to a module with no imports of its own (its express references are
-// type-only), so it costs nothing on the non-serve startup paths.
 import { API_PROFILES, type ApiProfile } from '../serve/api-profile.js';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -386,9 +383,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: API_PROFILES,
         default: 'full' as const,
         description:
-          'HTTP surface to expose. `full` serves every route (what the Web Shell drives). ' +
-          '`minimal` serves only the partner-facing REST subset documented in ' +
-          'docs/developers/qwen-serve-openapi.yaml and answers 404 elsewhere.',
+          'API surface: full (default), or minimal (session REST/SSE and file reads; disables Web Shell, webhooks, and WebSockets).',
       })
       .option('open', {
         type: 'boolean',
@@ -414,6 +409,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
+        if (
+          argv['api-profile'] === 'minimal' &&
+          (argv['local-control'] || argv['open'] || argv['open-with-auth'])
+        ) {
+          throw new Error(
+            'Browser launch and Local Control require --api-profile=full.',
+          );
+        }
         // A wildcard or LAN primary bind already owns the port Local Control
         // needs on its selected address. Token and Origin settings remain
         // independent because the second listener owns those.
