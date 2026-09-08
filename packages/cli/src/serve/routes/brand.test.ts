@@ -31,11 +31,20 @@ function stubSettings(scopes: {
   systemDefaults?: Record<string, unknown>;
   user?: Record<string, unknown>;
 }): void {
+  // The resolver reads the pre-substitution snapshot, so the stub must carry
+  // every field a real SettingsFile has — omitting `originalSettings` hid
+  // that dependency behind the `as never` until the placeholder guard moved
+  // the read.
+  const file = (settings: Record<string, unknown>) => ({
+    settings,
+    originalSettings: structuredClone(settings),
+    path: '/stub/settings.json',
+  });
   vi.mocked(loadSettings).mockReturnValue({
-    system: { settings: scopes.system ?? {} },
-    systemDefaults: { settings: scopes.systemDefaults ?? {} },
-    user: { settings: scopes.user ?? {} },
-    workspace: { settings: {} },
+    system: file(scopes.system ?? {}),
+    systemDefaults: file(scopes.systemDefaults ?? {}),
+    user: file(scopes.user ?? {}),
+    workspace: file({}),
   } as never);
 }
 

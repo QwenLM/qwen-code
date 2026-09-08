@@ -220,15 +220,24 @@ export function DaemonWorkspaceProvider({
   // cached branding mid-load), but they must learn about the
   // settled-with-no-brand outcome: it is the only way to clear branding
   // cached from an earlier daemon.
-  useEffect(() => {
-    if (!client) return undefined;
-    let disposed = false;
+  //
+  // The fetch runs once per client, but NOT once per page: `refreshBrand`
+  // re-issues it for the recovery path (a retryable failure would otherwise
+  // leave the brand unsettled for the page's lifetime). The generation
+  // counter replaces the single-effect disposed flag so both entry points
+  // share one staleness rule — a superseded client's late answer, or a
+  // superseded fetch's, can neither write a brand nor settle the current one.
+  const brandGenerationRef = useRef(0);
+  const brandInFlightRef = useRef(false);
+  const fetchBrand = useCallback((brandClient: DaemonClient) => {
+    const generation = ++brandGenerationRef.current;
+    brandInFlightRef.current = true;
     setBrand(undefined);
     setBrandSettled(false);
     void Promise.resolve()
-      .then(() => client.brand())
+      .then(() => brandClient.brand())
       .then((resolved) => {
-        if (!disposed) {
+        if (brandGenerationRef.current === generation) {
           setBrand(resolved);
           setBrandSettled(true);
         }
@@ -240,19 +249,44 @@ export function DaemonWorkspaceProvider({
         // runtime is still starting, a 429 from the rate limiter, a transport
         // failure, an old SDK with no `brand()` — is unknown, not absent:
         // settling would report an authoritative empty brand and clear cached
-        // chrome over a retryable blip, and nothing ever retries.
+        // chrome over a retryable blip.
         if (
-          !disposed &&
+          brandGenerationRef.current === generation &&
           error instanceof DaemonHttpError &&
           error.status === 404
         ) {
           setBrandSettled(true);
         }
+      })
+      .finally(() => {
+        if (brandGenerationRef.current === generation) {
+          brandInFlightRef.current = false;
+        }
       });
-    return () => {
-      disposed = true;
-    };
-  }, [client]);
+  }, []);
+  // Invalidates any in-flight fetch without touching state — stable so the
+  // effect cleanup can call it without capturing a ref's `.current`.
+  const invalidateBrandFetch = useCallback(() => {
+    brandGenerationRef.current++;
+    brandInFlightRef.current = false;
+  }, []);
+  useEffect(() => {
+    if (!client) return undefined;
+    fetchBrand(client);
+    return () => invalidateBrandFetch();
+  }, [client, fetchBrand, invalidateBrandFetch]);
+  // Retry entry point for the recovery path. Gated to the genuinely-missing
+  // state: re-running on an already-resolved brand would blank the shell's
+  // chrome mid-session for no reason, re-running on a settled-with-no-brand
+  // one would turn a definitive answer back into "loading", and re-running
+  // while a fetch is in flight would just supersede it.
+  const refreshBrand = useCallback(() => {
+    if (clientRef.current === undefined) return;
+    if (brand !== undefined || brandSettled || brandInFlightRef.current) {
+      return;
+    }
+    fetchBrand(clientRef.current);
+  }, [brand, brandSettled, fetchBrand]);
 
   resolvedCwdRef.current = capabilities?.workspaceCwd ?? workspaceCwd;
 
@@ -281,6 +315,7 @@ export function DaemonWorkspaceProvider({
       brandSettled,
       getCapabilities,
       refreshCapabilities,
+      refreshBrand,
       actions: workspaceActions,
     };
   }, [
@@ -295,6 +330,7 @@ export function DaemonWorkspaceProvider({
     brandSettled,
     getCapabilities,
     refreshCapabilities,
+    refreshBrand,
     workspaceActions,
   ]);
 

@@ -72,6 +72,16 @@ would turn the shell into a rendering surface for repository-controlled
 content. `general.voice.keytermsFile` already excludes the workspace layer for
 the same reason, and brand follows that precedent.
 
+The same boundary closes the placeholder side door. `loadSettings` substitutes
+`$VAR`/`${VAR}` placeholders from the process-wide environment, which
+`loadEnvironment` populates workspace-first at boot — so an operator-layer
+`${BRAND_NAME}` would resolve to whatever a repository's `.qwen/.env` or `env`
+block supplied. Brand keys therefore read each layer's pre-substitution
+snapshot (`originalSettings`), and a value that still contains a placeholder
+is ignored with a warning rather than resolved. Every other string leaf keeps
+the documented substitution behavior; brand is the exception because the
+exclusion is its whole point.
+
 This is also why the merged settings value is not used: the merged value is
 exactly the thing that would reintroduce the excluded layer.
 
@@ -118,15 +128,18 @@ following symlinks and re-verify its stat identity before the bytes are read.
 The content is capped at 32 KiB — a logo is a handful of paths, and the cap
 keeps the resulting data URI well inside both a JSON payload and a localStorage
 write. The parsed document's root element must be an `<svg>` that declares the
-SVG namespace (`xmlns="http://www.w3.org/2000/svg"`) — without it the browser
-does not render the document as an image, so this is a renderability check,
-not a sanitizer — tolerating a BOM, an XML declaration, comments, and a
-DOCTYPE with or without an internal subset before it. A root with no
-`viewBox` or explicit width/height is accepted with an advisory on the
-daemon's stderr, because the browser cannot scale such artwork into the
-fixed sidebar box and may render it blank. A rejection yields a warning and
-no logo, so a bad path degrades to the built-in mark instead of failing the
-request.
+SVG namespace — the default `xmlns="http://www.w3.org/2000/svg"`, or an
+`xmlns:svg` binding on a prefix-bound `<svg:svg>` root, which is equally
+renderable — tolerating a BOM, an XML declaration, comments, and a DOCTYPE
+with or without an internal subset before it. This is a renderability check,
+not a sanitizer. The check is quote-aware, so `>`, `[` and `]` inside quoted
+literals do not confuse it, and a namespace-shaped substring inside another
+attribute's value does not satisfy it. A root with no non-empty `viewBox`
+and no explicit positive, non-percentage width/height is accepted with an
+advisory on the daemon's stderr, because the browser cannot scale such
+artwork into the fixed sidebar box and may render it blank. A rejection
+yields a warning and no logo, so a bad path degrades to the built-in mark
+instead of failing the request.
 
 The resolved SVG is percent-encoded into a `data:image/svg+xml` URI on the
 server. A data URI rather than a served file because the shell's Content
@@ -340,21 +353,27 @@ override without this feature.
 
 The resolver gets the bulk of the unit coverage, because it is the part that
 touches the filesystem: layer precedence in both directions, workspace-layer
-exclusion for the name and the logo, name sanitization and the length cap,
-tilde expansion, relative resolution against the declaring file and the
-soft-fail when there is none, missing file, symlink, directory, oversize
-content in both the pre-read and post-decode caps, the fd identity re-check
-and both fs soft-fail branches, non-SVG content, an `xmlns`-less root, an
-`xmlns`-shaped substring hidden in another attribute's value, a prefix-only
-namespace binding, whitespace around the attribute `=`, a quoted `>` or
-bracket inside DOCTYPE literals and the root tag, and the scaling-geometry
-advisory for a root with no `viewBox` or dimensions. One case asserts that an
-SVG containing script is _accepted_ — the resolver is meant to pass bytes
-through. The alarm for a renderer that inlines those bytes lives on the other
-side of the package boundary, in the sidebar test: it renders a script-bearing
-logo and asserts the payload reaches the document only as an `img` `src` with
-zero script nodes present. A future change that inlines the logo fails that
-test, not the resolver's.
+exclusion for the name and the logo, placeholder rejection from the
+pre-substitution snapshot (with a literal higher layer still overriding a
+placeholder below), name sanitization and the length cap, tilde expansion,
+relative resolution against the declaring file and the soft-fail when there
+is none, missing file, symlink, directory, a FIFO swapped in past the
+pre-open guards, oversize content in both the pre-read and post-decode caps,
+the fd identity re-check and both fs soft-fail branches, non-SVG content, an
+`xmlns`-less root, an `xmlns`-shaped substring hidden in another attribute's
+value (immediately after the quote, and whitespace-prefixed inside the
+value — the shape that pins the blanking), a prefix-only namespace binding, a
+prefix-bound `<svg:svg>` root accepted with its binding and refused without
+it, an `<svgfoo>` near-miss refused, an astral character before the xmlns,
+whitespace around the attribute `=`, a quoted `>` or bracket inside DOCTYPE
+literals and the root tag, and the scaling-geometry advisory for a root with
+no usable geometry — absent, empty, zero or percentage. One case asserts
+that an SVG containing script is _accepted_ — the resolver is meant to pass
+bytes through. The alarm for a renderer that inlines those bytes lives on
+the other side of the package boundary, in the sidebar test: it renders a
+script-bearing logo and asserts the payload reaches the document only as an
+`img` `src` with zero script nodes present. A future change that inlines the
+logo fails that test, not the resolver's.
 
 The route test asserts the response shape, that `skipWorkspaceSettings` is
 passed, that a rejected logo still answers 200 with the name and reports the
@@ -365,9 +384,11 @@ nor writable through it.
 
 On the client, the provider test asserts the brand and the settled flag reach
 the context on success, that a definitive 404 settles with no brand while a
-retryable 503 stays unsettled (unknown, not absent), that a superseded client
-can neither write its brand into nor settle the new connection, and that a
-re-point resets the previous brand before the new fetch. The app test asserts
+retryable 503 stays unsettled (unknown, not absent), that `refreshBrand`
+re-issues the fetch with the same settle rule and is a no-op on an
+already-resolved or settled brand, that a superseded client can neither
+write its brand into nor settle the new connection, and that a re-point
+resets the previous brand before the new fetch. The app test asserts
 prop-wins-over-fetched precedence (including against a daemon brand that
 carries a logo — the takeover is whole-object, not field-merge), in-flight
 silence for both an absent and a nullish host prop, the unsettled-to-settled
@@ -378,14 +399,18 @@ and no re-firing for a fresh-but-equal inline prop and handler. The sidebar
 test asserts the built-in rendering is untouched — the inline mark is asserted
 present, not merely no image asserted absent — the name and tooltip follow the
 brand, the logo renders as an image with no script node in the document, an
-undecodable logo falls back to the built-in mark on `error`, a replacement URI
-after such a failure gets a fresh mount, a falsy host logo falls back too, a
-host logo node renders as given and never beside the built-in mark, and the
-existing branding render override still wins. A server-level test asserts the
-route answers JSON on the real app for a browser-like `Accept` with the SPA
-fallback mounted, and that it sits behind bearer authentication when a token
-is configured; the System settings layer is pinned to empty files there so a
-maintainer's machine-wide brand cannot leak into the assertions. The boot
+undecodable logo falls back to the built-in mark on `error` with a
+`console.warn` (the one logo failure the daemon cannot see), a replacement
+URI after such a failure gets a fresh mount, a falsy host logo falls back
+too, a host logo node renders as given and never beside the built-in mark,
+and the existing branding render override still wins. A server-level test
+asserts the route answers JSON on the real app for a browser-like `Accept`
+with the SPA fallback mounted, that it sits behind bearer authentication when
+a token is configured, that the read-tier limiter can 429 it, and that a
+draining daemon does not reject it; the System settings layer is pinned to
+empty files there so a maintainer's machine-wide brand cannot leak into the
+assertions, and the ordering test's body carries a fixture brand so the
+response cannot be confused with the route's error fallback. The boot
 watchdog test asserts a failing favicon neither proves boot impossible nor
 enters the panel's error list past the grace timer. The standalone entry test
 asserts the title, the favicon (untouched for a name-only brand), the cache

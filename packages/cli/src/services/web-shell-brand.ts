@@ -47,6 +47,14 @@ export interface ResolvedWebShellBrand {
  * connected browser. `general.voice.keytermsFile` excludes it for the same
  * reason.
  *
+ * For the same reason the brand leaves are read from each layer's
+ * pre-substitution snapshot (`originalSettings`), and a value containing an
+ * environment placeholder is ignored with a warning: `loadSettings`
+ * substitutes placeholders from the process-wide environment, which
+ * `loadEnvironment` populates workspace-first at boot — resolving a brand
+ * placeholder would let a repository supply the value, which is the workspace
+ * exclusion above through a side door.
+ *
  * The terminal banner's `ui.customBannerTitle` and `ui.customAsciiArt` are the
  * TUI equivalents; this resolver follows their sanitization and path-resolution
  * conventions so one deployment's branding reads the same on both surfaces.
@@ -55,22 +63,32 @@ export function resolveWebShellBrand(
   settings: LoadedSettings,
 ): ResolvedWebShellBrand {
   const brand: WebShellBrand = {};
+  const warnings: string[] = [];
 
   const name = readBrandLeaf(settings, 'name');
-  if (name) {
-    const sanitized = sanitizeBrandName(name.value);
+  if (name.warning) warnings.push(name.warning);
+  if (name.resolved) {
+    const sanitized = sanitizeBrandName(name.resolved.value);
     if (sanitized) brand.name = sanitized;
   }
 
   const logo = readBrandLeaf(settings, 'logoPath');
-  if (!logo) return { brand };
+  if (logo.warning) warnings.push(logo.warning);
+  if (!logo.resolved) {
+    return warnings.length > 0
+      ? { brand, warning: warnings.join('; ') }
+      : { brand };
+  }
 
-  const resolved = readBrandLogo(logo.value, logo.dir);
+  const resolved = readBrandLogo(logo.resolved.value, logo.resolved.dir);
+  if (resolved.warning) warnings.push(resolved.warning);
   if (resolved.dataUri === undefined) {
-    return { brand, warning: resolved.warning };
+    return { brand, warning: warnings.join('; ') };
   }
   brand.logoDataUri = resolved.dataUri;
-  return resolved.warning ? { brand, warning: resolved.warning } : { brand };
+  return warnings.length > 0
+    ? { brand, warning: warnings.join('; ') }
+    : { brand };
 }
 
 interface ScopedBrandValue {
@@ -83,18 +101,31 @@ interface ScopedBrandValue {
   dir: string;
 }
 
+/**
+ * Matches the placeholder syntax of `resolveEnvVarsInString` exactly
+ * (`$VAR_NAME` or `${VAR_NAME}`), so anything the substitution engine would
+ * have replaced — and only that — is treated as a placeholder here.
+ */
+const PLACEHOLDER_PATTERN = /\$(?:(\w+)|{([^}]+)})/;
+
 /** Last defined value wins, matching `mergeSettings` scalar precedence. */
 function readBrandLeaf(
   settings: LoadedSettings,
   key: 'name' | 'logoPath',
-): ScopedBrandValue | undefined {
+): { resolved?: ScopedBrandValue; warning?: string } {
   let resolved: ScopedBrandValue | undefined;
+  let warning: string | undefined;
   for (const file of [
     settings.systemDefaults,
     settings.user,
     settings.system,
   ]) {
-    const value = file.settings.ui?.brand?.[key];
+    // Read the pre-substitution snapshot, not `file.settings`: loadSettings
+    // substitutes placeholders from the process-wide environment, which a
+    // workspace's own `.qwen/.env` or `env` block populates first at boot —
+    // so the substituted text is workspace-influenced even though the layer
+    // that wrote it is not.
+    const value = file.originalSettings.ui?.brand?.[key];
     if (typeof value !== 'string') continue;
     const trimmed = value.trim();
     // A defined-but-empty string is an explicit "use the built-in brand", and
@@ -102,12 +133,27 @@ function readBrandLeaf(
     // defined value win. Skipping it instead would leave a managed
     // SystemDefaults brand impossible to opt out of from user settings, which
     // is what the schema description promises empty means.
-    resolved =
-      trimmed.length === 0
-        ? undefined
-        : { value: trimmed, dir: file.path ? path.dirname(file.path) : '' };
+    if (trimmed.length === 0) {
+      resolved = undefined;
+      warning = undefined;
+      continue;
+    }
+    if (PLACEHOLDER_PATTERN.test(trimmed)) {
+      // Ignored, not resolved: the substitution source is process-wide and a
+      // workspace can populate it, so resolving here would smuggle the
+      // workspace layer back in. The layer still wins over lower layers —
+      // the key is unset with a warning, not skipped.
+      resolved = undefined;
+      warning = `ui.brand.${key} uses an environment placeholder, which brand keys do not resolve — the substitution source is process-wide and a workspace can supply it. Set a literal value instead.`;
+      continue;
+    }
+    resolved = {
+      value: trimmed,
+      dir: file.path ? path.dirname(file.path) : '',
+    };
+    warning = undefined;
   }
-  return resolved;
+  return warning === undefined ? { resolved } : { resolved, warning };
 }
 
 /**
@@ -307,7 +353,12 @@ function parseSvgRootTag(content: string): string | undefined {
       continue;
     }
     if (!rest.startsWith('<svg')) return undefined;
-    const boundary = rest[4];
+    // A prefix-bound root (`<svg:svg>`, the Batik/XSL shape) is namespace-
+    // well-formed and renders as an image; it is accepted when it binds
+    // `xmlns:svg` to the SVG namespace. `<svg:svgfoo>` still falls out here,
+    // and an `<svgfoo>` root never reaches the namespace check either.
+    const prefixed = rest.startsWith(':svg', 4);
+    const boundary = rest[prefixed ? 8 : 4];
     if (
       boundary !== undefined &&
       boundary !== '>' &&
@@ -319,7 +370,7 @@ function parseSvgRootTag(content: string): string | undefined {
     const end = skipMarkupConstruct(rest);
     if (end === -1) return undefined;
     const tag = rest.slice(0, end);
-    return declaresSvgNamespace(tag) ? tag : undefined;
+    return declaresSvgNamespace(tag, prefixed) ? tag : undefined;
   }
 }
 
@@ -364,53 +415,85 @@ const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
  * contain their delimiter quote, so this is exact — and it lets attribute
  * tests run over text where the contents of foreign attribute values (which
  * may hold whitespace, `>`, or an `xmlns`-shaped substring) no longer confuse
- * the match.
+ * the match. The loop indexes UTF-16 code units rather than spreading code
+ * points: an astral character becomes TWO spaces, so indices in the blanked
+ * copy stay aligned with the original — attribute values are read back from
+ * the original text by index.
  */
 function blankQuotedSpans(text: string): string {
-  const chars = [...text];
   let quote: string | undefined;
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i]!;
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
     if (quote !== undefined) {
       if (ch === quote) {
         quote = undefined;
+        out += ch;
       } else {
-        chars[i] = ' ';
+        out += ' ';
       }
       continue;
     }
-    if (ch === '"' || ch === "'") quote = ch;
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    }
+    out += ch;
   }
-  return chars.join('');
+  return out;
 }
 
 /**
- * True when the root start tag declares the SVG default namespace. The match
- * runs over quote-blanked text, so an `xmlns`-shaped substring inside another
- * attribute's value does not count, and a prefix-only binding (`xmlns:svg`,
- * which Inkscape emits beside the real `xmlns`) still refuses. Whitespace
- * around `=` is allowed, as XML's grammar permits.
+ * Read one attribute's raw value from a start tag, or `undefined` when the
+ * attribute is absent. The match runs over quote-blanked text, so an
+ * attribute-shaped substring inside another attribute's value does not count;
+ * the value itself is sliced from the original text by index (the blanked
+ * copy is length-preserving).
  */
-function declaresSvgNamespace(tag: string): boolean {
+function readAttributeValue(tag: string, name: string): string | undefined {
   const blanked = blankQuotedSpans(tag);
-  const re = /(?:^|\s)xmlns\s*=\s*(["'])/g;
-  for (let match = re.exec(blanked); match !== null; match = re.exec(blanked)) {
-    const quoteChar = match[1]!;
-    const valueStart = match.index + match[0].length;
-    const valueEnd = tag.indexOf(quoteChar, valueStart);
-    if (valueEnd === -1) continue;
-    if (tag.slice(valueStart, valueEnd) === SVG_NAMESPACE) return true;
-  }
-  return false;
+  const re = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])`, 'g');
+  const match = re.exec(blanked);
+  if (match === null) return undefined;
+  const quoteChar = match[1]!;
+  const valueStart = match.index + match[0].length;
+  const valueEnd = tag.indexOf(quoteChar, valueStart);
+  if (valueEnd === -1) return undefined;
+  return tag.slice(valueStart, valueEnd);
+}
+
+/**
+ * True when the root start tag declares the SVG namespace for its own
+ * element name: the default `xmlns` for an unprefixed `<svg>`, or an
+ * `xmlns:svg` binding for a prefix-bound `<svg:svg>` (the shape XML
+ * toolchains like Batik emit, and browsers render). A prefix binding on an
+ * unprefixed root does not count — `xmlns:svg` alone leaves `<svg>` in no
+ * namespace, which is exactly the blank-render case the check exists for.
+ * Whitespace around `=` is allowed, as XML's grammar permits.
+ */
+function declaresSvgNamespace(tag: string, prefixed: boolean): boolean {
+  return (
+    readAttributeValue(tag, prefixed ? 'xmlns:svg' : 'xmlns') === SVG_NAMESPACE
+  );
 }
 
 /**
  * True when the root tag carries geometry the browser can scale into the
- * fixed sidebar logo box: a `viewBox`, or an explicit `width` and `height`.
+ * fixed sidebar logo box: a non-empty `viewBox`, or explicit `width` and
+ * `height` that are positive and not percentages. Name-presence alone is not
+ * enough — `viewBox=""` or `width="0"` paints nothing, and `width="100%"`
+ * ties the artwork to the viewport it never fills at 26px.
  */
 function hasScalingGeometry(rootTag: string): boolean {
-  const blanked = blankQuotedSpans(rootTag);
-  const has = (name: string) =>
-    new RegExp(`(?:^|\\s)${name}\\s*=\\s*["']`).test(blanked);
-  return has('viewBox') || (has('width') && has('height'));
+  const viewBox = readAttributeValue(rootTag, 'viewBox');
+  if (viewBox !== undefined && viewBox.trim() !== '') return true;
+  const width = readAttributeValue(rootTag, 'width');
+  const height = readAttributeValue(rootTag, 'height');
+  if (width === undefined || height === undefined) return false;
+  const usable = (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed === '' || trimmed.endsWith('%')) return false;
+    const numeric = parseFloat(trimmed);
+    return Number.isFinite(numeric) && numeric > 0;
+  };
+  return usable(width) && usable(height);
 }

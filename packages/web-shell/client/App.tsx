@@ -3273,6 +3273,7 @@ export function App({
     workspace.client,
   );
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
+  const refreshWorkspaceBrand = workspace.refreshBrand;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -12000,6 +12001,11 @@ export function App({
           }
           try {
             capabilities = await refreshWorkspaceCapabilities();
+            // The brand fetch fails independently of capabilities and is
+            // never retried on its own; the recovery path is the one place
+            // that can re-ask. Gated inside the provider to the genuinely-
+            // missing state, so an already-branded shell is unaffected.
+            refreshWorkspaceBrand?.();
           } catch (error) {
             reportError(error, t('session.capabilitiesFailed'));
             return false;
@@ -12097,6 +12103,7 @@ export function App({
       lockedWorkspaceCwd,
       pushToast,
       reportError,
+      refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
       reloadLoadedSkills,
       scheduleComposerFocus,

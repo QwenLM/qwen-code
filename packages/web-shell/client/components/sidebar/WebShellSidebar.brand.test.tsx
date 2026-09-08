@@ -239,12 +239,22 @@ describe('sidebar brand', () => {
 
     // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
     // fires `error` — the mark must come back rather than leaving a blank box.
-    act(() => {
-      img!.dispatchEvent(new Event('error'));
-    });
+    // And the swap must be audible: the daemon validates only the root tag,
+    // so this is the one logo failure with no other signal channel.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      act(() => {
+        img!.dispatchEvent(new Event('error'));
+      });
 
-    expect(brandLogoImage()).toBeNull();
-    expect(builtInMark()).not.toBeNull();
+      expect(brandLogoImage()).toBeNull();
+      expect(builtInMark()).not.toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('brand logo could not be rendered'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('gives a replacement logo a fresh mount after a decode failure', () => {

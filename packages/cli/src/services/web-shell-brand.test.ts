@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoadedSettings, type SettingsFile } from '../config/settings.js';
 import type { Settings } from '../config/settingsSchema.js';
@@ -17,20 +18,28 @@ const fsActual = vi.hoisted(
   () =>
     ({}) as {
       fstatSync: typeof import('node:fs').fstatSync;
+      lstatSync: typeof import('node:fs').lstatSync;
       realpathSync: typeof import('node:fs').realpathSync;
     },
 );
 
 // Pass-through by default: roughly every case in this file reads through the
 // real filesystem via the same namespace import, so a plain mock would strip
-// `fs` from all of them. Only the two functions the TOCTOU and resolvability
-// cases need to perturb are wrapped, and beforeEach re-attaches the real
-// implementations so a leaked once-implementation cannot reach the next test.
+// `fs` from all of them. Only the functions the TOCTOU, FIFO and
+// resolvability cases need to perturb are wrapped, and beforeEach re-attaches
+// the real implementations so a leaked once-implementation cannot reach the
+// next test.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsActual.fstatSync = actual.fstatSync;
+  fsActual.lstatSync = actual.lstatSync;
   fsActual.realpathSync = actual.realpathSync;
-  return { ...actual, fstatSync: vi.fn(), realpathSync: vi.fn() };
+  return {
+    ...actual,
+    fstatSync: vi.fn(),
+    lstatSync: vi.fn(),
+    realpathSync: vi.fn(),
+  };
 });
 
 const LOGO_SVG =
@@ -73,6 +82,7 @@ describe('resolveWebShellBrand', () => {
 
   beforeEach(() => {
     vi.mocked(fs.fstatSync).mockReset().mockImplementation(fsActual.fstatSync);
+    vi.mocked(fs.lstatSync).mockReset().mockImplementation(fsActual.lstatSync);
     vi.mocked(fs.realpathSync)
       .mockReset()
       .mockImplementation(fsActual.realpathSync);
@@ -344,19 +354,163 @@ describe('resolveWebShellBrand', () => {
       expect(brand.logoDataUri).toBeDefined();
     });
 
-    it("rejects an xmlns-shaped substring inside another attribute's value", () => {
-      // The document declares NO default namespace — the match sits inside
-      // `data-note`. Accepting it would ship a data URI that paints a blank
-      // mark with nothing on stderr, the failure the namespace rule exists to
-      // prevent.
-      const file = writeLogo(
+    it.each([
+      [
+        'immediately after the opening quote',
         '<svg viewBox="0 0 8 8" data-note=\'xmlns="http://www.w3.org/2000/svg"\'/>',
+      ],
+      [
+        'whitespace-prefixed inside the quoted value',
+        '<svg viewBox="0 0 8 8" data-note=\'see xmlns="http://www.w3.org/2000/svg"\'/>',
+      ],
+    ])(
+      "rejects an xmlns-shaped substring inside another attribute's value (%s)",
+      (_label, contents) => {
+        // The document declares NO default namespace — the match sits inside
+        // `data-note`. The second shape is what pins the quote-blanking guard:
+        // with whitespace before the substring, the regex's own `(?:^|\s)`
+        // boundary would match it if the value were not blanked first.
+        // Accepting either ships a data URI that paints a blank mark with
+        // nothing on stderr, the failure the namespace rule exists to prevent.
+        const file = writeLogo(contents);
+        const { brand, warning } = resolveWebShellBrand(
+          makeSettings({ user: brandSettings({ logoPath: file }) }),
+        );
+        expect(brand.logoDataUri).toBeUndefined();
+        expect(warning).toContain('namespaced <svg>');
+      },
+    );
+
+    it('rejects an element named like <svg> that is not the svg element', () => {
+      // `<svgfoo xmlns="…">` carries the namespace but is not an SVG document;
+      // the boundary check after `<svg` is the only guard, and deleting it
+      // would ship a broken-image data URI with no warning.
+      const file = writeLogo(
+        '<svgfoo xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
       );
       const { brand, warning } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: file }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
       expect(warning).toContain('namespaced <svg>');
+    });
+
+    it('accepts a prefix-bound root that binds svg to the SVG namespace', () => {
+      // XML toolchains (Batik, XSL pipelines) serialize the root as
+      // `<svg:svg xmlns:svg="…">`; that IS namespace-well-formed SVG and the
+      // browser renders it, so refusing it would be the same false diagnostic
+      // the namespace rule exists to avoid.
+      const file = writeLogo(
+        '<svg:svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><svg:circle cx="4" cy="4" r="4"/></svg:svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it('rejects a prefix-bound root without the svg prefix binding', () => {
+      const file = writeLogo(
+        '<svg:svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('namespaced <svg>');
+    });
+
+    it('accepts an astral character in an attribute before the xmlns', () => {
+      // Design-tool exports put xmlns last, and an emoji or CJK-ext character
+      // in a preceding attribute is a surrogate PAIR: a blanking pass that
+      // iterates code points collapses it to one space, every later index
+      // shifts, and a perfectly namespaced document is refused.
+      const file = writeLogo(
+        '<svg viewBox="0 0 8 8" aria-label="logo \u{1F680}\u{20000}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>',
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(warning).toBeUndefined();
+      expect(brand.logoDataUri).toBeDefined();
+    });
+
+    it.each([
+      ['a percentage width and height', 'width="100%" height="100%"'],
+      ['zero width and height', 'width="0" height="0"'],
+      ['an empty viewBox', 'viewBox=""'],
+      ['a whitespace-only viewBox', 'viewBox="  "'],
+    ])('warns but accepts with %s', (_label, geometry) => {
+      // Attribute NAME presence is not scaling geometry: each of these loads
+      // successfully (no error event, so the client fallback cannot fire) but
+      // cannot scale into the sidebar box, so the advisory must fire.
+      const file = writeLogo(
+        `<svg xmlns="http://www.w3.org/2000/svg" ${geometry}><circle cx="4" cy="4" r="4"/></svg>`,
+      );
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: file }) }),
+      );
+      expect(brand.logoDataUri).toBeDefined();
+      expect(warning).toContain('no viewBox or width/height');
+    });
+
+    it('ignores a placeholder logoPath rather than resolving it from a workspace-tainted environment', () => {
+      // loadSettings substitutes ${VAR} from the process-wide environment,
+      // which loadEnvironment populates workspace-first at boot — so the
+      // substituted value can come from a repository even though the
+      // operator's own layer wrote the placeholder. Brand keys therefore read
+      // the pre-substitution snapshot and refuse placeholders.
+      const logoPath = writeLogo(LOGO_SVG);
+      const user = settingsFile(
+        brandSettings({ logoPath }),
+        path.join(dir, 'settings.json'),
+      );
+      user.originalSettings = brandSettings({
+        logoPath: '${BRAND_DIR}/logo.svg',
+      });
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        settingsFile({}, '/system-defaults.json'),
+        user,
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
+      const { brand, warning } = resolveWebShellBrand(settings);
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('environment placeholder');
+    });
+
+    it('ignores a placeholder name for the same reason', () => {
+      const user = settingsFile(
+        brandSettings({ name: 'Repo Brand' }),
+        path.join(dir, 'settings.json'),
+      );
+      user.originalSettings = brandSettings({ name: '${PRODUCT_NAME}' });
+      const settings = new LoadedSettings(
+        settingsFile({}, '/system/settings.json'),
+        settingsFile({}, '/system-defaults.json'),
+        user,
+        settingsFile({}, '/workspace/.qwen/settings.json'),
+        true,
+        new Set(),
+      );
+      const { brand, warning } = resolveWebShellBrand(settings);
+      expect(brand.name).toBeUndefined();
+      expect(warning).toContain('environment placeholder');
+    });
+
+    it('lets a literal at a higher layer override a placeholder below it', () => {
+      // The placeholder layer wins by the same precedence a value wins by, so
+      // a higher-layer literal simply masks it — no warning, literal used.
+      const settings = makeSettings({
+        systemDefaults: brandSettings({ name: '${PRODUCT_NAME}' }),
+        user: brandSettings({ name: 'User Brand' }),
+      });
+      const { brand, warning } = resolveWebShellBrand(settings);
+      expect(brand).toEqual({ name: 'User Brand' });
+      expect(warning).toBeUndefined();
     });
 
     it('rejects a prefix-only xmlns binding with no default namespace', () => {
@@ -469,6 +623,32 @@ describe('resolveWebShellBrand', () => {
       }) as never);
       const { brand, warning } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath }) }),
+      );
+      expect(brand.logoDataUri).toBeUndefined();
+      expect(warning).toContain('changed while it was being read');
+    });
+
+    it('refuses a FIFO swapped in after the pre-open stat guards', (ctx) => {
+      // The route handler is fully synchronous on the daemon's single event
+      // loop, so an `open(2)` on a FIFO with no writer would block the whole
+      // daemon — O_NONBLOCK is what makes the open succeed and hands the
+      // refusal to the fd identity re-check. Without the flag this test
+      // exceeds the test timeout instead of passing.
+      const fifoPath = path.join(dir, 'fifo.svg');
+      try {
+        execFileSync('mkfifo', [fifoPath]);
+      } catch {
+        // No mkfifo (Windows, or a filesystem without FIFOs) — a skip, not a
+        // silent pass, same discipline as the link tests.
+        ctx.skip();
+        return;
+      }
+      // Drive the post-swap state: the pre-open lstat reports a regular file,
+      // so the guards pass and the open hits the FIFO.
+      const regular = fsActual.lstatSync(writeLogo(LOGO_SVG));
+      vi.mocked(fs.lstatSync).mockImplementationOnce((() => regular) as never);
+      const { brand, warning } = resolveWebShellBrand(
+        makeSettings({ user: brandSettings({ logoPath: fifoPath }) }),
       );
       expect(brand.logoDataUri).toBeUndefined();
       expect(warning).toContain('changed while it was being read');

@@ -657,12 +657,26 @@ function BrandLogoImage({ dataUri }: { dataUri: string }) {
   // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
   // fires `error` and otherwise leaves a blank 28x28 box where the product mark
   // was. Fall back to the built-in mark — the same outcome a daemon-rejected
-  // logo produces — instead of rendering nothing.
+  // logo produces — instead of rendering nothing. But warn first: this is the
+  // one failure the daemon's checks cannot see (it validates the root tag
+  // only, never parses the body), so without a signal the white-labeled shell
+  // silently shows the built-in mark beside the operator's own name forever.
   const [failed, setFailed] = useState(false);
   if (failed) {
     return <IconQwenLogo />;
   }
-  return <img src={dataUri} alt="" onError={() => setFailed(true)} />;
+  return (
+    <img
+      src={dataUri}
+      alt=""
+      onError={() => {
+        console.warn(
+          '[web-shell] brand logo could not be rendered; falling back to the built-in mark',
+        );
+        setFailed(true);
+      }}
+    />
+  );
 }
 
 function IconChevron({ expanded }: { expanded: boolean }) {

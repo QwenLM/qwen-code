@@ -4507,6 +4507,14 @@ describe('createServeApp', () => {
     });
 
     it('answers JSON on the real app, ahead of the SPA fallback', async () => {
+      // A fixture brand in the pinned System layer makes the body assertion
+      // discriminating: `{}` is also what the route's own catch produces, so
+      // an empty-body expectation cannot tell a resolved brand from a total
+      // resolution failure.
+      await fsp.writeFile(
+        path.join(brandSystemSettingsDir, 'settings.json'),
+        '{"ui":{"brand":{"name":"Fixture Brand"}}}',
+      );
       const app = createServeApp(baseOpts, undefined, {
         webShellDir: brandWebShellDir,
       });
@@ -4525,7 +4533,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(response.status).toBe(200);
         expect(response.headers['content-type']).toContain('application/json');
-        expect(response.body).toEqual({});
+        expect(response.body).toEqual({ name: 'Fixture Brand' });
         expect(response.text).not.toContain('<div id="root">');
       }
     });
@@ -4550,6 +4558,56 @@ describe('createServeApp', () => {
       expect(unauthenticated.status).toBe(401);
       expect(authenticated.status).toBe(200);
       expect(authenticated.body).toEqual({});
+    });
+
+    it('answers 429 when the read tier is exhausted', async () => {
+      // The published transport states include the optional rate limiter:
+      // registered after it, the route shares the read-tier bucket, so a
+      // reconnect storm can 429 the shell's one brand fetch.
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          rateLimit: true,
+          rateLimitRead: 1,
+          rateLimitWindowMs: 60_000,
+        },
+        undefined,
+        { webShellDir: brandWebShellDir },
+      );
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      const first = await request(app).get('/brand').set('Host', host);
+      const limited = await request(app).get('/brand').set('Host', host);
+
+      expect(first.status).toBe(200);
+      expect(limited.status).toBe(429);
+      expect(limited.body).toMatchObject({ tier: 'read' });
+    });
+
+    it('does not reject while draining', async () => {
+      // The protocol reference publishes this guarantee: the rate limiter is
+      // permissive while draining, so the handler keeps answering 200. A
+      // pre-route drain gate would instead 503 the one brand fetch the shell
+      // issues, and the provider treats 503 as retryable-never-settled.
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          rateLimit: true,
+          rateLimitRead: 1,
+          rateLimitWindowMs: 60_000,
+        },
+        undefined,
+        { webShellDir: brandWebShellDir },
+      );
+      getRateLimiter(app)!.setDraining(true);
+      const host = `127.0.0.1:${baseOpts.port}`;
+
+      // read.max is 1: without the drain-permissive short-circuit the second
+      // request would 429 (the case above), so three 200s witness the gate.
+      for (let i = 0; i < 3; i++) {
+        const response = await request(app).get('/brand').set('Host', host);
+        expect(response.status).toBe(200);
+      }
     });
   });
 

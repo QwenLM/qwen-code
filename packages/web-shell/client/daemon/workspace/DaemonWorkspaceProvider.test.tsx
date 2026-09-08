@@ -383,6 +383,99 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.error).toBeUndefined();
   });
 
+  it('re-issues the brand fetch on refreshBrand, keeping the 404-only settle rule', async () => {
+    // The retryable failure above leaves the brand unsettled for the page's
+    // lifetime without a re-ask. refreshBrand is that re-ask: it re-issues
+    // the fetch for the SAME client, and the retry applies the same settle
+    // rule — a 404 settles, another retryable failure stays unsettled.
+    sdkMocks.brand
+      .mockRejectedValueOnce(
+        new DaemonHttpError(503, undefined, 'runtime starting'),
+      )
+      .mockResolvedValueOnce({ name: 'QiuQiu Code' });
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+    expect(context?.brandSettled).toBe(false);
+
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
+    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+    expect(context?.brandSettled).toBe(true);
+  });
+
+  it('lets a retried 404 settle the brand as definitively absent', async () => {
+    sdkMocks.brand
+      .mockRejectedValueOnce(
+        new DaemonHttpError(503, undefined, 'runtime starting'),
+      )
+      .mockRejectedValueOnce(
+        new DaemonHttpError(404, undefined, '404 not found'),
+      );
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(context?.brandSettled).toBe(false);
+
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(2);
+    expect(context?.brand).toBeUndefined();
+    expect(context?.brandSettled).toBe(true);
+  });
+
+  it('does not re-issue the fetch when the brand is already resolved or settled', async () => {
+    // The gate protects the mid-session brand: an already-resolved brand must
+    // not be blanked by a recovery-path refresh, and a definitive 404 must
+    // not be turned back into "loading".
+    sdkMocks.brand.mockResolvedValue({ name: 'QiuQiu Code' });
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+
+    await act(async () => {
+      context?.refreshBrand?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.brand).toHaveBeenCalledTimes(1);
+    expect(context?.brand).toEqual({ name: 'QiuQiu Code' });
+    expect(context?.brandSettled).toBe(true);
+  });
+
   it('survives an SDK client that has no brand method at all', async () => {
     // `@qwen-code/sdk` is a peer dependency, so a host on an older SDK hands the
     // provider a client without `brand()`. Calling it throws a synchronous
