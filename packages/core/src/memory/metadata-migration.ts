@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { parseDocument } from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
@@ -123,7 +124,13 @@ function hash(value: string): string {
 
 function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
   const match = content.match(/^---(\r?\n)([\s\S]*?)(\r?\n---)([\s\S]*)$/);
-  if (match && parseAutoMemoryTopicDocument(filePath, content)) {
+  const document = match ? parseDocument(match[2], { schema: 'core' }) : null;
+  if (
+    match &&
+    (parseAutoMemoryTopicDocument(filePath, content) !== null ||
+      (document?.errors.length === 0 &&
+        Object.keys(parseYaml(match[2])).length > 0))
+  ) {
     return {
       frontmatter: match[2],
       suffix: match[4],

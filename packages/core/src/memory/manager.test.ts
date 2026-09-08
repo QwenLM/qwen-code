@@ -19,6 +19,7 @@ import {
   getAutoMemoryConsolidationLockPath,
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
 import type { Config } from '../config/config.js';
@@ -245,6 +246,37 @@ describe('MemoryManager', () => {
         }),
       ).resolves.toEqual({ status: 'skipped', skippedReason: 'complete' });
       expect(scan).not.toHaveBeenCalled();
+    });
+
+    it('scans team migration candidates in structured mode', async () => {
+      await writeLegacy(getTeamAutoMemoryRoot(projectRoot), 'team.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      });
+
+      const result = await new MemoryManager().scheduleMetadataMigration({
+        projectRoot,
+        scope: 'team',
+        config: makeMockConfig({
+          getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+        }),
+      });
+
+      expect(result.status).toBe('scheduled');
+      await result.promise;
     });
 
     it('claims a migration domain before scanning candidates', async () => {

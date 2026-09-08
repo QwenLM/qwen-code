@@ -14,7 +14,11 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 import { logMemoryDream, MemoryDreamEvent } from '../telemetry/index.js';
 import * as path from 'node:path';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import {
+  parseAutoMemoryTopicDocument,
+  validateStructuredAutoMemoryDocument,
+} from './scan.js';
+import { scanMemoryMetadataMigrationCandidates } from './metadata-migration.js';
 import {
   applyDreamOperations,
   type AppliedDreamOperations,
@@ -85,7 +89,7 @@ export async function snapshotDreamFiles(
         content,
         type: parsed?.type,
         keywordCount: parsed?.keywords.length ?? 0,
-        valid: parsed !== null,
+        valid: validateStructuredAutoMemoryDocument(content).valid,
       });
     }),
   );
@@ -143,10 +147,7 @@ export function validateDreamSnapshotChanges(
 ): void {
   for (const [relativePath, entry] of after) {
     const previous = before.get(relativePath);
-    if (
-      previous?.content !== entry.content &&
-      (!entry.valid || entry.keywordCount === 0)
-    ) {
+    if (previous?.content !== entry.content && !entry.valid) {
       throw new Error(
         `Dream produced an invalid memory document: ${relativePath}`,
       );
@@ -225,6 +226,28 @@ export async function runManagedAutoMemoryDream(
     throw new Error(
       'Managed auto-memory dream requires config for forked-agent execution.',
     );
+  }
+
+  if (
+    options.trigger === 'manual' &&
+    (
+      await scanMemoryMetadataMigrationCandidates(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+      )
+    ).length > 0
+  ) {
+    return {
+      touchedTopics: [],
+      createdEntries: 0,
+      updatedEntries: 0,
+      deletedEntries: 0,
+      dedupedEntries: 0,
+      splitEntries: 0,
+      keywordBackfilled: 0,
+      systemMessage:
+        'Managed auto-memory dream skipped: memory metadata migration is pending.',
+    };
   }
 
   const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {

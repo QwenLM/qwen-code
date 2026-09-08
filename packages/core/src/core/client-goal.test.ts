@@ -257,6 +257,7 @@ function setupGoalClient() {
     getManagedAutoMemoryEnabled: vi.fn(() => false),
     getMemoryManager: vi.fn(() => ({
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      reconcileMemoryBodiesPresentInHistory: vi.fn(),
       restoreMemoryBodiesPresentInHistory: vi.fn(),
     })),
     getAutoSkillEnabled: vi.fn(() => false),

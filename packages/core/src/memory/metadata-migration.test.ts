@@ -284,6 +284,24 @@ describe('memory metadata migration', () => {
     expect(updated.slice(updated.indexOf('\n---\n') + 5)).toBe(body);
   });
 
+  it('preserves the body when frontmatter has no valid type', async () => {
+    const body = 'Real body\n';
+    await write(
+      'project/legacy.md',
+      `---\nname: Old name\ndescription: Old description\n---\n${body}`,
+    );
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+
+    expect(
+      await commitMigratedMemoryMetadata(candidate!, metadata(candidate!)),
+    ).toBe('committed');
+    const updated = await fs.readFile(candidate!.filePath, 'utf-8');
+    expect(updated.slice(updated.indexOf('\n---\n') + 5)).toBe(body);
+  });
+
   it('adds frontmatter to a plain legacy file without changing its body', async () => {
     const body = 'Plain legacy body.\r\nSecond line.\r\n';
     await write('project/plain.md', body);

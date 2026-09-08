@@ -16,6 +16,7 @@ import {
 import {
   parseAutoMemoryTopicDocument,
   rereadAutoMemoryDocument,
+  sanitizeAutoMemoryPromptField,
   scanAllAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
@@ -42,6 +43,12 @@ describe('auto-memory topic scanning', () => {
       maxRetries: 3,
       retryDelay: 10,
     });
+  });
+
+  it('strips Unicode control and format characters from prompt fields', () => {
+    expect(
+      sanitizeAutoMemoryPromptField('a\u00adb\u2060c\u{e0061}', 100),
+    ).toBe('abc');
   });
 
   it('parses a CRLF (Windows checkout) topic document', () => {

@@ -753,7 +753,10 @@ export class MemoryManager {
         ...(existingId ? { taskId: existingId } : {}),
       };
     }
-    if (params.config.getMemoryRecallMode() === 'structured') {
+    if (
+      params.scope !== 'team' &&
+      params.config.getMemoryRecallMode() === 'structured'
+    ) {
       return { status: 'skipped', skippedReason: 'complete' };
     }
     activeMigrationDomains.add(domain);

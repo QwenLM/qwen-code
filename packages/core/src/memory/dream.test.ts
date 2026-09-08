@@ -65,13 +65,13 @@ describe('managed auto-memory dream', () => {
       async () => {
         await fs.writeFile(
           userFile,
-          '---\ntype: user\nname: Preferences\ndescription: Style\nkeywords:\n  - concise responses\n---\n\nBe concise.\n',
+          '---\ntype: user\nname: Preferences\ndescription: Style\ncategory: communication_preference\nkeywords:\n  - concise responses\n  - response style\nusage_scenarios:\n  - Writing responses\n---\n\nBe concise.\n',
         );
         const referenceFile = path.join(memoryRoot, 'reference', 'dash.md');
         await fs.mkdir(path.dirname(referenceFile), { recursive: true });
         await fs.writeFile(
           referenceFile,
-          '---\ntype: reference\nname: Dashboard\ndescription: Metrics\nkeywords:\n  - metrics dashboard\n---\n\nUse the metrics dashboard.\n',
+          '---\ntype: reference\nname: Dashboard\ndescription: Metrics\ncategory: tool_experience\nkeywords:\n  - metrics dashboard\n  - dashboard reference\nusage_scenarios:\n  - Checking metrics\n---\n\nUse the metrics dashboard.\n',
         );
         return {
           status: 'completed',
@@ -113,7 +113,7 @@ describe('managed auto-memory dream', () => {
       async () => {
         await fs.writeFile(
           canonicalFile,
-          '---\ntype: project\nname: Canonical\ndescription: Complete fact\nkeywords:\n  - canonical fact\n---\n\nSame fact with full context.\n',
+          '---\ntype: project\nname: Canonical\ndescription: Complete fact\ncategory: project_introduction\nkeywords:\n  - canonical fact\n  - complete context\nusage_scenarios:\n  - Recalling the fact\n---\n\nSame fact with full context.\n',
         );
         await fs.writeFile(
           path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
@@ -158,7 +158,7 @@ describe('managed auto-memory dream', () => {
     await fs.mkdir(path.dirname(memoryFile), { recursive: true });
     await fs.writeFile(
       memoryFile,
-      '---\ntype: project\nname: Keep\ndescription: Keep\nkeywords:\n  - keep memory\n---\n\nKeep this fact.\n',
+      '---\ntype: project\nname: Keep\ndescription: Keep\ncategory: project_introduction\nkeywords:\n  - keep memory\n  - retained fact\nusage_scenarios:\n  - Recalling the fact\n---\n\nKeep this fact.\n',
     );
     await fs.writeFile(
       path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
@@ -263,6 +263,60 @@ describe('managed auto-memory dream', () => {
         mockConfig,
       ),
     ).rejects.toThrow('invalid memory document');
+  });
+
+  it('rejects changed memories missing structured metadata', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const memoryFile = path.join(memoryRoot, 'project', 'decision.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(
+      memoryFile,
+      '---\ntype: project\nname: Decision\ndescription: Initial\n---\n\nInitial fact.\n',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.writeFile(
+          memoryFile,
+          '---\ntype: project\nname: Decision\ndescription: Updated\nkeywords:\n  - updated decision\n---\n\nUpdated fact.\n',
+        );
+        return {
+          status: 'completed',
+          filesTouched: [memoryFile],
+        };
+      },
+    );
+
+    await expect(
+      runManagedAutoMemoryDream(
+        projectRoot,
+        new Date('2026-04-02T00:00:00.000Z'),
+        mockConfig,
+      ),
+    ).rejects.toThrow('invalid memory document');
+  });
+
+  it('skips manual dream while metadata migration is pending', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const memoryFile = path.join(memoryRoot, 'project', 'legacy.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    const legacy = '---\ntype: project\n---\nLegacy fact.\n';
+    await fs.writeFile(memoryFile, legacy);
+
+    await expect(
+      runManagedAutoMemoryDream(
+        projectRoot,
+        new Date('2026-04-02T00:00:00.000Z'),
+        mockConfig,
+        undefined,
+        { trigger: 'manual', recordMetadata: true },
+      ),
+    ).resolves.toMatchObject({
+      touchedTopics: [],
+      dedupedEntries: 0,
+      systemMessage: expect.stringContaining('migration is pending'),
+    });
+    expect(planManagedAutoMemoryDreamByAgent).not.toHaveBeenCalled();
+    await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toBe(legacy);
   });
 
   it('propagates planner failures', async () => {

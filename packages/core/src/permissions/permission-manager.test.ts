@@ -2578,6 +2578,18 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
     });
 
+    it('coreTools allowlist gates managed memory tools', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+
+      expect(await pm.getToolRegistrationStatus('manage_memory')).toBe(
+        'disabled',
+      );
+      expect(await pm.getToolRegistrationStatus('search_memory')).toBe(
+        'disabled',
+      );
+    });
+
     it('coreTools with specifier: tool-level check strips specifier', async () => {
       // "Bash(ls -l)" should register run_shell_command (specifier only affects runtime)
       pm = new PermissionManager(makeConfig({ coreTools: ['Bash(ls -l)'] }));
