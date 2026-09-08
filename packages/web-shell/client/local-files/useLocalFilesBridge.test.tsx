@@ -784,6 +784,80 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('does not re-attach when a declined disconnect is followed by a swallowed connect', async () => {
+    const perms = { query: 'granted' as PermissionState };
+    const handle = fakeHandle('ai_coding', perms);
+    let releaseRequest!: (state: PermissionState) => void;
+    const requestGate = new Promise<PermissionState>((resolve) => {
+      releaseRequest = resolve;
+    });
+    vi.mocked(handle.requestPermission).mockImplementation(() => requestGate);
+    const store = fakeStore(handle);
+    const locks = exclusiveLocks();
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks,
+      delay: async () => {},
+    };
+    const hA = render({ ...common, sessionId: 'session-A' });
+    await hA.flush();
+    await hA.flush();
+    expect(hA.sockets).toHaveLength(1);
+
+    // B restores the same record into needs-gesture: its reconnect parks in
+    // the permission re-ask and keeps connectInFlightRef latched (the
+    // Chrome prompt does not block page input).
+    perms.query = 'prompt';
+    const hB = render({ ...common, sessionId: 'session-B' });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.get().status.phase).toBe('needs-gesture');
+
+    // The connect is not wrapped in act: its open scope would hold back
+    // this mount's own effects and status commits while it stays parked.
+    const parkedConnect = hB.get().connect();
+    await hB.flush();
+    // The owner holds the lock, so the arbitration declines and the record
+    // survives; the panel falls back to the named grant over idle.
+    await act(async () => {
+      await hB.get().disconnect();
+    });
+    expect(store.clears).toBe(0);
+    expect(hB.get().status).toEqual({
+      phase: 'idle',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+
+    // A second Connect click is swallowed by the one-picker guard while the
+    // first connect is still parked: it must not clear the detach latch.
+    await act(async () => {
+      await hB.get().connect();
+    });
+    hA.unmount();
+    await hB.flush();
+
+    // A blocker flip re-runs restore(): with the latch intact it must not
+    // re-attach a bridge from the surviving record behind the user's click.
+    hB.rerender({ withheldBlocker: 'workspace-resolving' });
+    await hB.flush();
+    perms.query = 'granted';
+    hB.rerender({ withheldBlocker: undefined });
+    await hB.flush();
+    await hB.flush();
+    expect(hB.sockets).toHaveLength(0);
+    expect(hB.get().status.phase).not.toBe('connecting');
+    expect(hB.get().status.phase).not.toBe('connected');
+
+    releaseRequest('prompt');
+    await act(async () => {
+      await parkedConnect;
+    });
+    hB.unmount();
+  });
+
   it('revokes once the owner that parked this tab is gone', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const store = fakeStore(handle);
@@ -1615,6 +1689,68 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it("keeps the connect's failure write when a deferred full revoke declines", async () => {
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const lock = { held: false, settling: 1 };
+    let releaseDelay!: () => void;
+    const delayGate = new Promise<void>((resolve) => {
+      releaseDelay = resolve;
+    });
+    let rejectPicker!: (reason: unknown) => void;
+    const pickerGate = new Promise<FileSystemDirectoryHandle>(
+      (_resolve, reject) => {
+        rejectPicker = reject;
+      },
+    );
+    const locks: LockManagerLike = settlingLocks(lock);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => pickerGate),
+      store,
+      locks,
+      delay: () => delayGate,
+    });
+    await h.flush();
+    await h.flush();
+    // needs-gesture: the stored grant is denied, so the panel names it; no
+    // run was ever owned, so the disconnect arbitrates.
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const disconnectPromise = h.get().disconnect();
+    await h.flush();
+    // Attempt 0 declined on the settling release; the user connects inside
+    // the inter-attempt delay and the denied grant falls through to the
+    // picker, so attempt 1 defers the FULL revoke to the connect's finally.
+    // Neither promise is wrapped in act: their open scopes would hold back
+    // this mount's own status commits.
+    const connectPromise = h.get().connect();
+    await h.flush();
+    releaseDelay();
+    await act(async () => {
+      await disconnectPromise;
+    });
+    // A peer takes the owner lock before the deferred re-arbitration, so it
+    // declines — and the picker rejects non-AbortError, a status the
+    // connect committed itself. The reconcile must not restore the
+    // pre-click panel over it.
+    lock.settling = 10;
+    rejectPicker(new DOMException('Blocked by policy', 'SecurityError'));
+    await act(async () => {
+      await connectPromise;
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(handle);
+    expect(h.get().status).toMatchObject({
+      phase: 'failed',
+      blocker: null,
+      rootName: 'ai_coding',
+    });
+    h.unmount();
+  });
+
   it('does not clear a grant a peer took over while the revoke was deferred', async () => {
     const perms = { query: 'denied' as PermissionState };
     const handle = fakeHandle('ai_coding', perms);
@@ -1729,6 +1865,62 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     expect(store.clears).toBe(0);
     expect(await store.load()).toBe(other);
+    // The surviving record is a peer's: this mount must stop naming it, or
+    // the panel offers a Disconnect that provably never clears anything.
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+    h.unmount();
+  });
+
+  it('does not name a record a peer renamed before a direct revoke', async () => {
+    // No deferral at all: the panel names the stored grant from the
+    // click-time snapshot, but the origin-global slot now holds a peer's
+    // different directory, so the revoke refuses it outright.
+    const handle = fakeHandle('ai_coding', { query: 'denied' });
+    const store = fakeStore(handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+      locks: null,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    const other = fakeHandle('peer_dir', { query: 'granted' });
+    await store.save(other);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(other);
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+
+    // The foreign fact survives into the next click: with no name of its
+    // own left, the guard would otherwise fall through and blind-clear the
+    // peer's directory.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(0);
+    expect(await store.load()).toBe(other);
+
+    // An explicit connect persists this mount's own grant: the latch must
+    // not veto revoking THAT record.
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    await h.flush();
+    expect(store.clears).toBe(1);
+    expect(await store.load()).toBeUndefined();
     h.unmount();
   });
 

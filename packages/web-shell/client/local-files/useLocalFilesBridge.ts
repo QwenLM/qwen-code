@@ -249,6 +249,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * record that deliberately survived a declined revoke.
    */
   const detachedRef = useRef(false);
+  /**
+   * Set when a revoke found the origin-global record holding a peer's grant
+   * instead of the one this mount named. The record stays foreign on later
+   * clicks too: once set, the revoke guard refuses even a name-less click,
+   * and the panel names nothing it cannot clear. Cleared when this mount's
+   * own connect() persists a grant.
+   */
+  const foreignRecordRef = useRef(false);
 
   const stopBridge = useCallback(() => {
     const bridge = bridgeRef.current;
@@ -487,11 +495,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       }));
       return;
     }
-    // An explicit reconnect always wins over the detach latch.
-    detachedRef.current = false;
     // One picker at a time: a double click would otherwise open two native
     // dialogs and race two bridges for the same grant.
     if (connectInFlightRef.current) return;
+    // An explicit reconnect always wins over the detach latch — a connect
+    // that proceeds, that is: a click the guard above swallowed opens no
+    // picker and writes no status, so it must leave the latch set.
+    detachedRef.current = false;
     connectInFlightRef.current = true;
     const generation = generationRef.current;
     connectGenerationRef.current = generation;
@@ -516,6 +526,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (stale()) return;
         if (permission.state === 'granted') {
           connectSavedRef.current = (await store?.save(stored)) ?? true;
+          if (connectSavedRef.current) foreignRecordRef.current = false;
           if (stale()) return;
           connectWroteStatusRef.current = true;
           startBridge(stored);
@@ -568,6 +579,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         return;
       }
       connectSavedRef.current = (await store?.save(result.handle)) ?? true;
+      if (connectSavedRef.current) foreignRecordRef.current = false;
       if (stale()) return;
       connectWroteStatusRef.current = true;
       startBridge(result.handle);
@@ -626,7 +638,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     // arbitration settled must not be re-asserted from this click's stale
     // snapshot. The parked arm keys on a genuinely declined arbitration: a
     // granted one whose delete merely failed soft has no peer to attribute
-    // the directory to.
+    // the directory to. A record the revoke refused as a peer's is named by
+    // no arm: the Disconnect a name would render could never clear it.
     const unclearedStatus = (declined: boolean): LocalFilesStatus => {
       const blocker = capabilityRef.current.blocker;
       return blocker !== null
@@ -635,11 +648,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
             blocker,
             ...(name === undefined ? {} : { rootName: name }),
           }
-        : parkedBeforeStop && declined && name !== undefined
-          ? { phase: 'held-elsewhere', blocker: null, rootName: name }
-          : name === undefined
-            ? IDLE
-            : { ...IDLE, rootName: name };
+        : foreignRecordRef.current
+          ? IDLE
+          : parkedBeforeStop && declined && name !== undefined
+            ? { phase: 'held-elsewhere', blocker: null, rootName: name }
+            : name === undefined
+              ? IDLE
+              : { ...IDLE, rootName: name };
     };
     const clearedStatus = (): LocalFilesStatus => {
       const blocker = capabilityRef.current.blocker;
@@ -670,7 +685,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
             // grant owns the status: it saved, it is still in flight so
             // this revoke re-deferred to it, or it parked a handle or a
             // live bridge in this mount — a soft-failed save still binds
-            // both, and only a bound connect's own writes are authoritative.
+            // both.
             if (
               connectGenerationRef.current >= generation &&
               (connectInFlightRef.current ||
@@ -678,6 +693,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
                 bridgeRef.current !== undefined ||
                 handleRef.current !== undefined)
             ) {
+              return clearedNow;
+            }
+            // An unbound connect can still have committed the authoritative
+            // status itself (needs-gesture/failed/unavailable); only a
+            // connect that wrote nothing gets the pre-click panel back.
+            if (!clearedNow && connectWroteStatusRef.current) {
               return clearedNow;
             }
             setStatus(
@@ -697,9 +718,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       const current = await store?.load();
       if (
         current !== undefined &&
-        name !== undefined &&
-        current.name !== name
+        (foreignRecordRef.current ||
+          (name !== undefined && current.name !== name))
       ) {
+        // Not the grant this mount named: remember that the record is
+        // foreign, so a later click with no name of its own cannot
+        // blind-clear a peer's directory either.
+        foreignRecordRef.current = true;
         return false;
       }
       return (await store?.clear()) ?? true;

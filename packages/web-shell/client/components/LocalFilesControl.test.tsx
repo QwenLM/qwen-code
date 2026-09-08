@@ -223,6 +223,17 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
           sessionId: 'session-1',
         }),
       ).toEqual({ kind: 'none' });
+      // No session yet: the shared resolver matched the primary by the cwd
+      // it derived itself, so keying the trust lookup on the undefined
+      // workspaceCwd would miss and fail open.
+      expect(
+        resolveLocalFilesWorkspaceRoute({
+          capabilities,
+          workspaces: [entry],
+          workspaceCwd: undefined,
+          sessionId: undefined,
+        }),
+      ).toEqual({ kind: 'none' });
     }
   });
 
@@ -371,6 +382,17 @@ describe('LocalFilesControl wiring', () => {
     expect((await renderCaptured(undefined)).withheldBlocker).toBe(
       'workspace-ineligible',
     );
+    // The same verdict with no session at all: the resolver matched the
+    // primary by its own derived cwd, so the trust lookup must not key on
+    // the undefined workspaceCwd either.
+    expect(
+      (
+        await renderCaptured(undefined, {
+          sessionId: undefined,
+          workspaceCwd: undefined,
+        })
+      ).withheldBlocker,
+    ).toBe('workspace-ineligible');
   });
 
   it('withholds when the daemon lacks the feature or the snapshot is pending', async () => {

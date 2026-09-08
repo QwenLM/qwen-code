@@ -231,9 +231,13 @@ export function resolveLocalFilesWorkspaceRoute(options: {
     // surface must withhold: the bare /acp mount performs no trust check at
     // registration, so an untrusted or live primary would receive the granted
     // directory - write tool included.
+    // The lookup keys on the target's cwd: with no session yet the shared
+    // resolver matched the primary by the cwd it derived itself, so keying
+    // on the undefined workspaceCwd would miss and fail open.
+    const entryCwd = target.cwd ?? options.workspaceCwd;
     const entry = (
       options.workspaces ?? options.capabilities?.workspaces
-    )?.find((w) => w.cwd === options.workspaceCwd);
+    )?.find((w) => w.cwd === entryCwd);
     // `trusted !== true`, not `=== false`: a field absent on the wire must
     // withhold like an explicit false, as session-context does for the same
     // field. This surface fails closed.
