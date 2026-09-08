@@ -2374,21 +2374,28 @@ function unquoteGitPath(token: string): string | null {
     '\\': 92,
   };
   const bytes: number[] = [];
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
+  // By CODE POINT, never by UTF-16 code unit: under `core.quotePath=false`
+  // git keeps non-ASCII bytes raw inside a quoted token, and an astral
+  // character (an emoji) is two code units — fed to `Buffer.from` one at
+  // a time each lone surrogate encodes to U+FFFD, and the decoded name
+  // matched nothing. Escapes are single ASCII characters, so the escape
+  // handling is unchanged.
+  const chars = Array.from(body);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
     if (ch === '"') return null;
     if (ch !== '\\') {
       bytes.push(...Buffer.from(ch, 'utf8'));
       continue;
     }
-    const next = body[i + 1];
+    const next = chars[i + 1];
     if (next === undefined) return null;
     if (next in simple) {
       bytes.push(simple[next]);
       i += 1;
       continue;
     }
-    const octal = body.slice(i + 1, i + 4);
+    const octal = chars.slice(i + 1, i + 4).join('');
     if (!/^[0-7]{3}$/.test(octal)) return null;
     bytes.push(parseInt(octal, 8));
     i += 3;
@@ -2444,6 +2451,9 @@ function diffGitTokens(rest: string): string[] {
  * tracking below keeps it against content lines that merely LOOK like
  * headers.
  */
+/** Any line git's diff writes a path on: the presence test behind the refusal. */
+const HUNK_HEADER_LINE = /^(?:diff --git |--- |\+\+\+ |rename (?:from|to) )/m;
+
 function hunkHeaderPaths(hunks: string): string[] {
   const paths = new Set<string>();
   const add = (path: string): void => {
@@ -2555,7 +2565,7 @@ function findingTouchesHunks(
  * `--fix` applied — rendered by the CLI from the outcome-bearing artifact and
  * the `fix-delta` diff, never assembled by the orchestrator.
  *
- * Five refusals, each a state where the audit could only return the
+ * Four refusals, each a state where the audit could only return the
  * all-clear and the all-clear would be a lie: an artifact whose outcomes were
  * never recorded (the audit cannot tell a fixed finding from a skipped one),
  * an artifact with no `fixed` finding AND no hunks (nothing was applied — the
@@ -2563,18 +2573,21 @@ function findingTouchesHunks(
  * artifact with no `fixed` finding BESIDE hunks that landed (the ledger and
  * the tree disagree: edits are on disk that no outcome owns, and asserting
  * "nothing was applied" over them would skip the audit of exactly the
- * assumption-introducing class this step exists to catch), a hunks file with
- * nothing in it beside a ledger that says something was fixed (a fix that
- * left no hunk in the tree is a claim, not an edit — the snapshot was taken
- * after the edits, or the edits never landed), and hunks in which NO `fixed`
- * finding's locations appear at all (the same claim-versus-edit lie, one
- * step short of the degenerate case).
+ * assumption-introducing class this step exists to catch), and a hunks file
+ * with nothing in it beside a ledger that says something was fixed (a fix
+ * that left no hunk in the tree is a claim, not an edit — the snapshot was
+ * taken after the edits, or the edits never landed). A non-empty hunks file
+ * with no header line at all is refused as not a patch — a header the
+ * decoder cannot read is still a header, and leaves its finding annotated.
  *
- * Between the last two lies the per-finding case, which is annotated rather
- * than refused: a fix can legitimately land in a file other than the one the
- * finding names — the brief's own `none` return shape is for a hunk that
- * closes no listed finding — so a single unmatched claim marks its entry and
- * the audit proceeds, and only a wholesale mismatch refuses.
+ * The claim-versus-edit case is annotated, never refused: a `fixed` finding
+ * no hunk corroborates is marked in its entry — a fix can legitimately land
+ * in a file other than the one the finding names, and a fix round with one
+ * finding can legitimately land entirely there (a test file the finding
+ * asked for, a caller of the declaration it named) — and the audit proceeds
+ * over the hunks that are here, with the auditor told to report the entry as
+ * unattested. The brief's own `none` return shape is for a hunk that closes
+ * no listed finding.
  */
 export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   const findings = validateFindings(artifact);
@@ -2649,15 +2662,28 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   // express "a listed finding is closed by no hunk", so without this the
   // claim rides through unexamined and is re-reported to the client as
   // closed.
+  // …and that annotation carries the all-unmatched case too. A fix can
+  // legitimately land ENTIRELY in files no finding names — the finding
+  // says "no test pins this guard" and the fix is a new test file, or
+  // names a declaration and the fix lands at the caller — and with one
+  // `fixed` finding that is every finding. Refusing there re-classified a
+  // state the previous paragraph concedes is legitimate as fatal, and
+  // routed the orchestrator to a diagnosis that is false in it (a snapshot
+  // taken after the edits, or a ledger to correct). Unattested is what
+  // the auditor is told, per entry; the one input still refused is hunks
+  // with no header LINE at all, which is not a patch.
   const unmatched = fixed.filter((f) => !findingTouchesHunks(f, hunkPaths));
-  if (unmatched.length === fixed.length) {
+  // Refused on the absence of any HEADER LINE, not on the absence of a
+  // decoded path: a header the decoder cannot read (an escape it does not
+  // know) contributes no path and leaves its finding annotated — that is
+  // the over-match-never-invent rule above — but it is a header, and the
+  // file is a patch.
+  if (!HUNK_HEADER_LINE.test(hunks)) {
     throw new Error(
-      `agent-prompt: --hunks carries no edit for any of the ${fixed.length} ` +
-        `finding(s) the ledger marks fixed (${ids(fixed)}): no hunk touches ` +
-        'any location they name. A fix that left no hunk where its finding ' +
-        'sits is a claim, not an edit — either the snapshot was taken after ' +
-        'the edits, or those outcomes are wrong and the ledger, not the ' +
-        'audit, is what to correct.',
+      'agent-prompt: --hunks names no path at all — its content carries ' +
+        'no `diff --git`, `---`/`+++` or `rename` header — so it is not a ' +
+        'patch `fix-delta --since` wrote. Pass the hunks file that command ' +
+        'produced.',
     );
   }
   const unmatchedIds = new Set(unmatched.map((f) => f.id));

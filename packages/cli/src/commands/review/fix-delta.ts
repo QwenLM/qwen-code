@@ -103,6 +103,15 @@ export interface FixSnapshot {
    * same raw-byte (latin1) identities as `dirtySubmodules`.
    */
   digests: Record<string, string>;
+  /**
+   * Paths the probe could NOT answer for at snapshot time — disclosure
+   * only, never a baseline: an unconfirmed state stamped pre-existing would
+   * filter a fix's real edit out of the warning. Persisted so that the
+   * comparison can see the one transition it otherwise could not: such a
+   * path GONE at `--since` time, which has no digest on either side and
+   * would drop out of every list.
+   */
+  unresolved: string[];
 }
 
 /**
@@ -746,7 +755,7 @@ function captureSteeringSurfaces(root: string): string[] {
   // `--get-regexp` prints `key\nvalue`, and a value may hold newlines, so
   // only the NUL boundary separates entries reliably. Exit 1 (no match)
   // arrives here as null.
-  const filters = gitOpt(
+  const filters = gitProbe(
     '-C',
     root,
     'config',
@@ -754,7 +763,14 @@ function captureSteeringSurfaces(root: string): string[] {
     '--get-regexp',
     '^filter\\..*\\.(clean|process)$',
   );
-  for (const entry of (filters ?? '').split('\0')) {
+  // Exit 1 is "no such key". Anything else that yields no output — a
+  // channel that overflowed, a config git could not parse — cannot rule a
+  // filter OUT, and the surface is named as unanswerable so the note
+  // prints and the capture ruling stays strict.
+  if (filters.out === null && filters.status !== 1) {
+    surfaces.push('filter.* (the enumeration could not be read)');
+  }
+  for (const entry of (filters.out ?? '').split('\0')) {
     if (entry === '') continue;
     const key = entry.split('\n')[0];
     if (key !== undefined && key !== '') surfaces.push(key);
@@ -853,6 +869,66 @@ function renderSteeringPaths(root: string, files: readonly Buffer[]): Buffer[] {
     if (value !== 'unspecified') steered.push(files[i]);
   }
   return steered;
+}
+
+/**
+ * The tracked family-named paths DELETED between two trees. The tracked
+ * half of a family match is recorded (see `snapshotWorkingTree`), but an
+ * ADDITION under a family name cannot be told from the flow's own
+ * bookkeeping and stays excluded — so a fix that renames a tracked
+ * family path, or moves a tracked path into a family name, lands in the
+ * hunks as a bare deletion with the new file in neither tree. Disclosed,
+ * because it cannot be captured without admitting the flow's side files.
+ */
+function deletedFamilyPaths(
+  root: string,
+  fromTree: string,
+  toTree: string,
+  sidePaths: readonly string[],
+): Buffer[] {
+  const raw = gitRaw(
+    '-C',
+    root,
+    ...probePins(root),
+    'diff-tree',
+    '-r',
+    '--name-status',
+    '-z',
+    '--diff-filter=D',
+    fromTree,
+    toTree,
+    '--',
+    ...literalPathspec(root, sidePaths),
+  );
+  // Records are `D NUL <path> NUL`.
+  const fields = splitNul(raw);
+  const deleted: Buffer[] = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    if (fields[i][0] === 0x44 /* D */ && inNameFamily(fields[i + 1])) {
+      deleted.push(fields[i + 1]);
+    }
+  }
+  return deleted;
+}
+
+/** True when `rel` carries one of the review's name families at any depth. */
+function inNameFamily(rel: Buffer): boolean {
+  const segments = decodePath(rel).split('/');
+  for (const family of FIX_DELTA_EXCLUDES) {
+    const parts = family.split('/');
+    const lead = parts.slice(0, -1);
+    const last = parts[parts.length - 1];
+    const prefix = last.endsWith('*') ? last.slice(0, -1) : last;
+    for (let i = 0; i + lead.length < segments.length; i++) {
+      if (
+        lead.every((seg, j) => segments[i + j] === seg) &&
+        segments[i + lead.length].startsWith(prefix)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -1071,6 +1147,17 @@ function capturePins(path: string): string[] {
 function probeNestedRepoState(absPath: Buffer): {
   state: 'clean' | 'dirty' | 'failed';
   digest?: string;
+  /**
+   * The directories the interior status collapses — ignored trees, and
+   * untracked directories git will not descend into (a nested repository
+   * is exactly that under `showUntrackedFiles=all`) — routed by the
+   * caller as the top level's are.
+   */
+  interiorDirs?: Buffer[];
+  /** Slashless interior entries: a file, or a link that may reach a repository. */
+  interiorLinks?: Buffer[];
+  /** Interior entries whose quoted name this decoder cannot read: unresolved. */
+  undecodable?: string[];
 } {
   // Spawn coerces every channel through UTF-8, so a name the bytes cannot
   // represent would reach the child mangled to U+FFFD — probing whatever
@@ -1079,6 +1166,93 @@ function probeNestedRepoState(absPath: Buffer): {
   // direction over-warns, it never silences a blind spot.
   const path = absPath.toString('utf8');
   if (!Buffer.from(path, 'utf8').equals(absPath)) return { state: 'failed' };
+  // A `.git` git itself rejects — an empty file, a gitfile pointing
+  // nowhere, a directory that is not a git dir — passes the `existsSync`
+  // gate every discovery route uses, and git's discovery then walks UP
+  // and answers with the SUPERPROJECT's status under this path's
+  // `--work-tree`: an answer about the wrong repository. The git dir git
+  // resolves from inside must be the one this path's own `.git` names.
+  const dotGit = join(path, '.git');
+  let expectedGitDir: string;
+  try {
+    // `statSync`, THROUGH a link: a `.git` symlink to a gitfile is a
+    // gitfile to git, and reading the link itself as the git dir refused
+    // such a repository on every run.
+    if (statSync(dotGit).isFile()) {
+      const pointer = /^gitdir:\s*(.+?)\s*$/.exec(
+        readFileSync(dotGit, 'utf8').split('\n')[0] ?? '',
+      );
+      if (pointer === null) return { state: 'failed' };
+      expectedGitDir = resolve(path, pointer[1]);
+    } else {
+      expectedGitDir = dotGit;
+    }
+  } catch {
+    return { state: 'failed' };
+  }
+  const discovered = gitOpt(
+    '-C',
+    path,
+    ...probePins(path),
+    'rev-parse',
+    '--absolute-git-dir',
+  );
+  if (discovered === null || !samePath(discovered, expectedGitDir)) {
+    return { state: 'failed' };
+  }
+  // The repository's OWN config steers the status it answers with: a
+  // repo-local `filter.<name>.clean`/`.process` canonicalises the worktree
+  // bytes status hashes, so a size-preserving interior edit can answer
+  // clean. No `-c` neutralises a filter wired by attributes, so a
+  // repository carrying one in its own config is not answered for at all —
+  // disclosed as unresolved, never certified clean. Repo-local only: the
+  // user's global keys (Git LFS installs `filter.lfs.*` globally) are the
+  // user's, not the tree's.
+  const filters = gitProbe(
+    '-C',
+    path,
+    ...probePins(path),
+    'config',
+    // The MERGED config with its scope column, never a single scope: a
+    // scope read on its own does not follow `include.path`/`includeIf`
+    // (git's documented default), so a filter pulled into the
+    // repository's own config by an include — or set in its per-worktree
+    // file — was enumerated nowhere while `status` honoured it. Every
+    // scope but the user's own (`global`, `system`) is the tree's.
+    '--includes',
+    '--show-scope',
+    // `-z`, so the scope is its own NUL-terminated field: the line form
+    // prints `<scope>\t<key>\n<value>`, and a value holding a newline
+    // (git accepts one) put its own second line where a scope belongs —
+    // read as an unknown scope, that made every nested repository
+    // unresolved for a key in the USER's global config.
+    '-z',
+    '--get-regexp',
+    '^filter\\..*\\.(clean|process)$',
+  );
+  if (filters.status !== 1) {
+    if (filters.status !== 0 || filters.out === null) {
+      return { state: 'failed' };
+    }
+    // `<scope>\0<key>\n<value>\0` per key: the scopes are alternate
+    // fields, and only the user's own two are not the tree's.
+    const fields = filters.out.split('\0');
+    if (fields[fields.length - 1] === '') fields.pop();
+    // A shape that does not pair off is an answer this ruling cannot
+    // read — a `-z` that did not take, a form some future git changes —
+    // and an unread answer rules nothing out: the repository is
+    // unresolved, never certified. Without this, a parse that found no
+    // scope field silently agreed that no filter was configured.
+    if (fields.length === 0 || fields.length % 2 !== 0) {
+      return { state: 'failed' };
+    }
+    for (let i = 0; i < fields.length; i += 2) {
+      const scope = fields[i];
+      if (scope !== 'global' && scope !== 'system') {
+        return { state: 'failed' };
+      }
+    }
+  }
   const inner = gitOpt(
     '-C',
     path,
@@ -1116,6 +1290,12 @@ function probeNestedRepoState(absPath: Buffer): {
     '--branch',
     '--show-stash',
     '--ignore-submodules=none',
+    // `--ignored=matching` so that a repository whose only uncommitted
+    // content matches its OWN ignore rules still moves the digest — but
+    // an ignored entry is not DIRT: `dist/`, `node_modules/` are the
+    // everyday shape of a repository git itself reports clean, and
+    // counting them stamped every such repository dirty at both moments,
+    // filing a real edit inside as pre-existing.
     '--ignored=matching',
   );
   // A probe that could not honour the pins answers 'failed', never 'clean'.
@@ -1132,10 +1312,37 @@ function probeNestedRepoState(absPath: Buffer): {
     .update(lines.join('\n'))
     .digest('hex')
     .slice(0, 32);
-  // Dirt is what is NOT a header: with `--branch` the output is never
-  // empty, so emptiness is no longer the clean test.
-  if (lines.some((line) => !line.startsWith('# '))) {
-    return { state: 'dirty', digest };
+  // The entries the interior status COLLAPSES, routed by the caller
+  // exactly as the top level's are — the level-1 digest carries only the
+  // `! vendor/` or `? lib/` line, unchanged by anything beneath it, so a
+  // repository under either is a working tree nested in this one that
+  // nobody has answered for. Names are C-quoted under the quotePath pin;
+  // one this decoder cannot read is disclosed, never walked as a guess.
+  const interiorDirs: Buffer[] = [];
+  const interiorLinks: Buffer[] = [];
+  const undecodable: string[] = [];
+  for (const line of lines) {
+    if (!line.startsWith('! ') && !line.startsWith('? ')) continue;
+    const name = cUnquote(line.slice(2));
+    if (name === null) {
+      undecodable.push(line.slice(2));
+    } else if (name[name.length - 1] === 0x2f /* / */) {
+      interiorDirs.push(name.subarray(0, name.length - 1));
+    } else {
+      interiorLinks.push(name);
+    }
+  }
+  // Dirt is what is NOT a header and NOT an ignored entry: with
+  // `--branch` the output is never empty, so emptiness is no longer the
+  // clean test, and `! ` lines ride the digest without counting.
+  if (lines.some((line) => !line.startsWith('# ') && !line.startsWith('! '))) {
+    return {
+      state: 'dirty',
+      digest,
+      interiorDirs,
+      interiorLinks,
+      undecodable,
+    };
   }
   // An EMPTY status is not yet a clean answer: assume-unchanged and
   // skip-worktree bits hide an entry from status itself — git's documented
@@ -1146,7 +1353,69 @@ function probeNestedRepoState(absPath: Buffer): {
   // over-warns, it never silences a blind spot.
   return indexBitsHideEntries(path)
     ? { state: 'failed' }
-    : { state: 'clean', digest };
+    : { state: 'clean', digest, interiorDirs, interiorLinks, undecodable };
+}
+
+/**
+ * Decode a `core.quotePath=true` status name to its bytes: an unquoted
+ * name is ASCII; a quoted one carries C escapes and three-digit octal
+ * bytes. Null for anything this decoder does not know — the caller
+ * discloses the entry rather than walking a guess.
+ */
+function cUnquote(token: string): Buffer | null {
+  if (!token.startsWith('"')) {
+    return /^[\x20-\x7e]*$/.test(token) ? Buffer.from(token, 'latin1') : null;
+  }
+  if (token.length < 2 || !token.endsWith('"')) return null;
+  const simple: Record<string, number> = {
+    a: 7,
+    b: 8,
+    t: 9,
+    n: 10,
+    v: 11,
+    f: 12,
+    r: 13,
+    '"': 34,
+    '\\': 92,
+  };
+  const bytes: number[] = [];
+  const body = token.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== '\\') {
+      const code = ch.charCodeAt(0);
+      if (code > 0x7e || code < 0x20) return null;
+      bytes.push(code);
+      continue;
+    }
+    const next = body[i + 1];
+    if (next !== undefined && next in simple) {
+      bytes.push(simple[next]);
+      i += 1;
+      continue;
+    }
+    const octal = body.slice(i + 1, i + 4);
+    if (!/^[0-7]{3}$/.test(octal)) return null;
+    bytes.push(parseInt(octal, 8));
+    i += 3;
+  }
+  return Buffer.from(bytes);
+}
+
+/** True when two paths resolve to the same place (or are equal unresolved). */
+function samePath(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
+}
+
+/** The `code` of a filesystem error, or '' when it carries none. */
+function errnoOf(err: unknown): string {
+  return typeof (err as { code?: unknown }).code === 'string'
+    ? (err as { code: string }).code
+    : '';
 }
 
 /**
@@ -1248,6 +1517,19 @@ function pathAfterSpaces(entry: Buffer, spaces: number): Buffer {
  * failure direction over-warns, it never silences a blind spot.
  */
 export const IGNORED_WALK_BUDGET = 100_000;
+/**
+ * The cap on directory entries ONE probe run visits across every walk it
+ * starts: the per-walk budget bounds one ignored tree, this bounds the run,
+ * so a repository with many ignored directories neither enumerates without
+ * limit nor starves every directory after a single large one — a
+ * `node_modules` past the per-walk budget is named alone, and `dist/`,
+ * `coverage/` beside it are still walked.
+ */
+export const IGNORED_WALK_RUN_CAP = 10 * IGNORED_WALK_BUDGET;
+// ONE budget per probe run, shared by every walk the run starts (the
+// collapsed ignored directories, link targets, named review worktrees): a
+// per-walk budget let a hundred ignored trees each spend a hundred thousand
+// entries, and the docblock's bound was not a bound.
 
 /**
  * What every discovery route needs to rule a discovered path in or out of
@@ -1289,7 +1571,12 @@ function exclusionContext(
   let rootIdentity: { dev: number; ino: number } | null = null;
   try {
     const st = statSync(root);
-    rootIdentity = { dev: st.dev, ino: st.ino };
+    // A filesystem that reports no inode (some FUSE, SMB and FAT mounts
+    // answer 0) gives root no identity to be recognised by: keeping the
+    // zero would make EVERY directory compare equal to root, and the link
+    // route would return from all of them. No identity means probe, never
+    // "that is root".
+    if (st.ino !== 0) rootIdentity = { dev: st.dev, ino: st.ino };
   } catch {
     // Unreadable: nothing can be recognised as root, and nothing is.
   }
@@ -1423,6 +1710,7 @@ function reposUnder(
   dirAbs: Buffer,
   dirRel: Buffer,
   ctx: ExclusionContext,
+  state: ProbeState,
 ): {
   repos: Array<{ abs: Buffer; rel: Buffer }>;
   unreadable: Buffer[];
@@ -1430,10 +1718,12 @@ function reposUnder(
 } {
   const repos: Array<{ abs: Buffer; rel: Buffer }> = [];
   const unreadable: Buffer[] = [];
-  let left = IGNORED_WALK_BUDGET;
-  const queue: Array<{ abs: Buffer; rel: Buffer }> = [
-    { abs: dirAbs, rel: dirRel },
-  ];
+  const queue: Array<{ abs: Buffer; rel: Buffer }> = [];
+  // The walk's own root is entered once too: a second route reaching the
+  // same physical directory (a named worktree found by status AND by the
+  // walk of the ignored `.qwen`) walks it once, under the first name.
+  if (markVisited(dirAbs, state)) queue.push({ abs: dirAbs, rel: dirRel });
+  let walked = 0;
   for (let qi = 0; qi < queue.length; qi++) {
     const cur = queue[qi];
     let entries: Array<Dirent<Buffer>>;
@@ -1450,19 +1740,37 @@ function reposUnder(
       continue;
     }
     for (const e of entries) {
-      if (left-- === 0) {
+      if (state.budget-- <= 0 || walked++ >= IGNORED_WALK_BUDGET) {
+        // What the queue still holds was marked visited at enqueue and
+        // nothing walked it: leaving the marks would silence a SECOND
+        // route to those directories (a named review worktree reached
+        // through a link inside this tree, then by its own name). The
+        // exhausted root's disclosure stands either way.
+        for (const pending of queue.slice(qi)) {
+          unmarkVisited(pending.abs, state);
+        }
         return { repos, unreadable, exhausted: true };
       }
       const name = e.name;
       const childAbs = joinBytes(cur.abs, name);
       const childRel = joinRel(cur.rel, name);
-      if (!e.isDirectory() && !e.isFile() && !e.isSymbolicLink()) {
+      if (
+        !e.isDirectory() &&
+        !e.isFile() &&
+        !e.isSymbolicLink() &&
+        !e.isFIFO() &&
+        !e.isSocket() &&
+        !e.isCharacterDevice() &&
+        !e.isBlockDevice()
+      ) {
         // DT_UNKNOWN — a filesystem that does not hand back d_type (NFS
         // without it, sshfs/FUSE): every predicate answers false, and
         // skipping the unclassifiable child degenerated the walk to
         // 'fully walked, nothing inside', indistinguishable from empty.
         // It rides `unreadable` instead: the failure direction
-        // over-warns, it never silences a blind spot.
+        // over-warns, it never silences a blind spot. A FIFO, a socket or
+        // a device is CLASSIFIED — not a directory, nothing to walk — and
+        // is skipped like a file.
         unreadable.push(childRel);
         continue;
       }
@@ -1470,7 +1778,11 @@ function reposUnder(
       if (e.isSymbolicLink()) {
         try {
           isDir = statSync(childAbs).isDirectory();
-        } catch {
+        } catch (err) {
+          // A dangling link reaches nothing. Anything else — a chain too
+          // long to follow (ELOOP), a target that cannot be read — is a
+          // path the walk could not answer for, and is disclosed.
+          if (errnoOf(err) !== 'ENOENT') unreadable.push(childRel);
           continue;
         }
         // The exclusion keys on the link's own NAME; its target is
@@ -1480,12 +1792,18 @@ function reposUnder(
           const target = linkTargetExcluded(childAbs, ctx);
           if (target === 'git-dir') continue;
           if (target === 'review-worktree') {
-            queue.push({ abs: childAbs, rel: childRel });
+            if (markVisited(childAbs, state)) {
+              queue.push({ abs: childAbs, rel: childRel });
+            }
             continue;
           }
         }
       }
       if (!isDir) continue;
+      // Identity, once: the audited root itself (seeded), a directory
+      // reached again through a link or a cycle — never queued or probed
+      // twice, whatever name reached it.
+      if (!markVisited(childAbs, state)) continue;
       const excluded = probeExcluded(childAbs, childRel, ctx);
       if (excluded === 'git-dir') continue;
       if (excluded === 'review-worktree') {
@@ -1494,10 +1812,6 @@ function reposUnder(
         continue;
       }
       if (existsSync(joinBytes(childAbs, DOT_GIT))) {
-        // The audited repository itself, re-entered through a link to an
-        // ancestor: its edits are exactly what the tree comparison sees,
-        // and probing it here reports them as invisible dirt.
-        if (isAuditedRoot(childAbs, ctx)) continue;
         repos.push({ abs: childAbs, rel: childRel });
       } else {
         queue.push({ abs: childAbs, rel: childRel });
@@ -1505,6 +1819,25 @@ function reposUnder(
     }
   }
   return { repos, unreadable, exhausted: false };
+}
+
+/**
+ * Record the directory at `abs` as walked; false when it already was (or
+ * is the audited root). A directory whose identity cannot be read is
+ * walked — over-warning is the direction — but never recorded.
+ */
+function markVisited(abs: Buffer, state: ProbeState): boolean {
+  const identity = identityOf(abs);
+  if (identity === null) return true;
+  if (state.visited.has(identity)) return false;
+  state.visited.add(identity);
+  return true;
+}
+
+/** Release a directory nothing walked, so a second route to it still can. */
+function unmarkVisited(abs: Buffer, state: ProbeState): void {
+  const identity = identityOf(abs);
+  if (identity !== null) state.visited.delete(identity);
 }
 
 /** True when `abs` IS the audited repository's own root (by identity). */
@@ -1525,9 +1858,42 @@ interface ProbeState {
   seen: Set<string>;
   /** Identity key -> digest of the state observed inside that path. */
   digests: Record<string, string>;
+  /**
+   * Filesystem identities (`dev:ino`) of every directory a walk has
+   * entered, seeded with the audited root: a link cycle inside an ignored
+   * directory (`ig/l1 -> .`, `ig/l2 -> .`) otherwise turns ONE physical
+   * repository into tens of thousands of distinct names, each probed with
+   * its own `git status` and each persisted into the baseline as its own
+   * identity. A physical directory is walked once, whatever it is named.
+   */
+  visited: Set<string>;
+  /** Filesystem identities of every repository already probed. */
+  probed: Set<string>;
+  /** The walk budget left for this probe run — see `IGNORED_WALK_BUDGET`. */
+  budget: number;
 }
 
-function probeNestedRepo(abs: Buffer, rel: Buffer, state: ProbeState): void {
+/** `dev:ino` of the directory at `abs` (through a link), or null. */
+function identityOf(abs: Buffer): string | null {
+  try {
+    const st = statSync(abs);
+    // A filesystem that reports no inode (some FUSE, SMB and FAT mounts
+    // answer 0) has no identity to key on: every directory would read as
+    // the first one, and the walk would drop everything after its root.
+    // No identity means walk, never "seen".
+    if (st.ino === 0) return null;
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+function probeNestedRepo(
+  abs: Buffer,
+  rel: Buffer,
+  ctx: ExclusionContext,
+  state: ProbeState,
+): void {
   // Identity keys on the RAW BYTES — latin1 is a byte<->char bijection —
   // never on the display decode: decodePath is not injective (UTF-8
   // `C3 A9` and the single invalid byte `E9` both render 'é'), and a
@@ -1538,10 +1904,71 @@ function probeNestedRepo(abs: Buffer, rel: Buffer, state: ProbeState): void {
   const key = rel.toString('latin1');
   if (state.seen.has(key)) return;
   state.seen.add(key);
+  // …and on the physical repository: two names for one directory (a link
+  // beside its target, a cycle's every spelling) are one probe and one
+  // baseline entry, under the first name that reached it.
+  const identity = identityOf(abs);
+  if (identity !== null) {
+    if (state.probed.has(identity)) return;
+    state.probed.add(identity);
+  }
   const result = probeNestedRepoState(abs);
   if (result.digest !== undefined) state.digests[key] = result.digest;
   if (result.state === 'dirty') state.dirty.add(key);
   else if (result.state === 'failed') state.unresolved.add(key);
+  probeNestedInterior(rel, result, ctx, state);
+}
+
+/**
+ * A nested repository's own collapsed entries take the top level's
+ * routing, entry for entry: a directory that IS a repository is probed
+ * (the everyday `.gitignore` names the vendored checkout itself —
+ * `third_party/llvm`, `deps/x`, `build` — so the collapsed entry is the
+ * repository), one that merely holds repositories is walked, a review
+ * worktree is walked and never probed, and a slashless entry may be a
+ * link reaching a repository. A level-2 repository under either kind of
+ * collapsed entry is a working tree nested in this one whose status the
+ * level-1 digest does not carry — the `! vendor/` line is the same
+ * whatever happens beneath it. An ignored FILE's bytes stay outside the
+ * model, at every level. An entry whose quoted name cannot be decoded is
+ * disclosed under its raw spelling.
+ */
+function probeNestedInterior(
+  rel: Buffer,
+  probe: {
+    interiorDirs?: Buffer[];
+    interiorLinks?: Buffer[];
+    undecodable?: string[];
+  },
+  ctx: ExclusionContext,
+  state: ProbeState,
+): void {
+  const key = rel.toString('latin1');
+  for (const name of probe.undecodable ?? []) {
+    state.unresolved.add(`${key}/${name}`);
+  }
+  // Joined against the audited ROOT: `rel` is root-relative (the name the
+  // first route reached this repository under, link spellings included),
+  // so the interior name keys and reports the same way every other
+  // discovery does.
+  const rootBuf = Buffer.from(ctx.root);
+  for (const dir of probe.interiorDirs ?? []) {
+    const dirRel = joinRel(rel, dir);
+    const dirAbs = joinBytes(rootBuf, dirRel);
+    const excluded = probeExcluded(dirAbs, dirRel, ctx);
+    if (excluded === 'git-dir') continue;
+    if (
+      excluded === 'review-worktree' ||
+      !existsSync(joinBytes(dirAbs, DOT_GIT))
+    ) {
+      walkAndProbe(dirAbs, dirRel, ctx, state);
+    } else {
+      probeNestedRepo(dirAbs, dirRel, ctx, state);
+    }
+  }
+  for (const name of probe.interiorLinks ?? []) {
+    probeLinkedRepo(rootBuf, joinRel(rel, name), ctx, state);
+  }
 }
 
 /**
@@ -1557,8 +1984,8 @@ function walkAndProbe(
   ctx: ExclusionContext,
   state: ProbeState,
 ): void {
-  const found = reposUnder(dirAbs, dirRel, ctx);
-  for (const r of found.repos) probeNestedRepo(r.abs, r.rel, state);
+  const found = reposUnder(dirAbs, dirRel, ctx, state);
+  for (const r of found.repos) probeNestedRepo(r.abs, r.rel, ctx, state);
   for (const u of found.unreadable) state.unresolved.add(u.toString('latin1'));
   if (found.exhausted) state.unresolved.add(dirRel.toString('latin1'));
 }
@@ -1581,10 +2008,14 @@ function probeLinkedRepo(
   state: ProbeState,
 ): void {
   const abs = joinBytes(rootBuf, rel);
+  const key = rel.toString('latin1');
   let isLink = false;
   try {
     isLink = lstatSync(abs).isSymbolicLink();
-  } catch {
+  } catch (err) {
+    // Gone is nothing to probe; anything else is a path the probe could
+    // not answer for, and is disclosed rather than skipped.
+    if (errnoOf(err) !== 'ENOENT') state.unresolved.add(key);
     return;
   }
   if (!isLink) return;
@@ -1592,7 +2023,11 @@ function probeLinkedRepo(
   if (own === 'git-dir') return;
   try {
     if (!statSync(abs).isDirectory()) return;
-  } catch {
+  } catch (err) {
+    // A dangling link reaches nothing. A chain too long to follow
+    // (ELOOP) or a target that cannot be read is a repository this probe
+    // cannot answer for — disclosed, never silently skipped.
+    if (errnoOf(err) !== 'ENOENT') state.unresolved.add(key);
     return;
   }
   if (isAuditedRoot(abs, ctx)) return;
@@ -1603,7 +2038,7 @@ function probeLinkedRepo(
     return;
   }
   if (existsSync(joinBytes(abs, DOT_GIT))) {
-    probeNestedRepo(abs, rel, state);
+    probeNestedRepo(abs, rel, ctx, state);
     return;
   }
   // The link reaches a directory that is not ITSELF a repository — and a
@@ -1731,7 +2166,20 @@ function probeBlindSpotState(
     string,
     string
   >;
-  const state: ProbeState = { dirty, unresolved, seen, digests };
+  const state: ProbeState = {
+    dirty,
+    unresolved,
+    seen,
+    digests,
+    visited: new Set<string>(),
+    probed: new Set<string>(),
+    budget: IGNORED_WALK_RUN_CAP,
+  };
+  // The audited root is the first directory every walk must never
+  // re-enter — through a link to itself, or to an ancestor.
+  if (ctx.rootIdentity !== null) {
+    state.visited.add(`${ctx.rootIdentity.dev}:${ctx.rootIdentity.ino}`);
+  }
   const entries = splitNul(raw);
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -1753,7 +2201,7 @@ function probeBlindSpotState(
           // is to walk it.
           walkAndProbe(dirAbs, dirRel, ctx, state);
         } else {
-          probeNestedRepo(dirAbs, dirRel, state);
+          probeNestedRepo(dirAbs, dirRel, ctx, state);
         }
         continue;
       }
@@ -1788,17 +2236,27 @@ function probeBlindSpotState(
       continue;
     }
     const key = relBytes.toString('latin1');
-    dirty.add(key);
     seen.add(key);
     // The outer flags CONFIRM the dirt; the state INSIDE is what the
     // comparison needs. Without it, "already dirty at snapshot time" is a
     // bare boolean, and every later edit inside such a path is filtered
     // into the pre-existing note — the entrance a level-2 submodule
     // reached by holding nothing but a moved inner gitlink at snapshot
-    // time. A probe that cannot answer leaves no digest, and the
-    // comparison over-warns on the missing one.
+    // time. A probe that cannot answer leaves no digest, and the path is
+    // UNRESOLVED, not dirty: the outer flag says something changed, the
+    // digest that would say what is missing, and "dirty with no digest"
+    // is a cell the comparison matrix does not have (it stamped fresh dirt
+    // on every run, whatever the interior did — and an interior whose own
+    // config steers its status was named dirty rather than named as a
+    // state this command could not answer for).
     const inner = probeNestedRepoState(joinBytes(rootBuf, relBytes));
+    if (inner.state === 'failed') {
+      unresolved.add(key);
+      continue;
+    }
+    dirty.add(key);
     if (inner.digest !== undefined) digests[key] = inner.digest;
+    probeNestedInterior(relBytes, inner, ctx, state);
   }
   // Status entries are not the whole of discovery: assume-unchanged /
   // skip-worktree bits on an interior file hide the dirt from the inner
@@ -1853,7 +2311,7 @@ function probeBlindSpotState(
       unresolved.add(rel.toString('latin1'));
       continue;
     }
-    probeNestedRepo(abs, rel, state);
+    probeNestedRepo(abs, rel, ctx, state);
   }
   return { dirty: [...dirty], unresolved: [...unresolved], digests };
 }
@@ -1885,8 +2343,9 @@ function unresolvedBlindSpot(paths: string[], hunksEmpty: boolean): string {
   return (
     `fix-delta: ${paths.join(', ')} ${one ? 'holds' : 'hold'} state this ` +
     `command cannot see — the probe could not resolve ${one ? 'it' : 'them'} ` +
-    '(a directory it cannot open, a repository it cannot run in, or an ' +
-    'ignored tree past the walk budget), so an edit inside would leave no ' +
+    '(a directory it cannot open, a repository it cannot run in or whose ' +
+    'own config steers its status, a link it cannot follow, or an ignored ' +
+    'tree past the walk budget), so an edit inside would leave no ' +
     'record in this model. ' +
     (hunksEmpty
       ? 'The hunks file stays empty; the audit cannot see the edit.'
@@ -1949,11 +2408,30 @@ function movedInsideNote(paths: string[]): string {
   const one = paths.length === 1;
   return (
     `fix-delta: ${paths.join(', ')} ${one ? 'has' : 'have'} had content ` +
-    `committed or stashed inside ${one ? 'it' : 'them'} since the snapshot ` +
-    `— the interior is clean at both moments, but ${one ? 'its' : 'their'} ` +
-    'HEAD or stash moved, and the superproject trees recorded nothing of ' +
-    'it. An edit committed inside a nested repository is as invisible to ' +
-    'this command as an uncommitted one; the hunks do not show it.'
+    `committed or stashed inside ${one ? 'it' : 'them'} — or an entry ` +
+    `${one ? 'its' : 'their'} own ignore rules cover appear or vanish — ` +
+    `since the snapshot: the interior is clean at both moments, but ` +
+    `${one ? 'its' : 'their'} HEAD, stash or ignored entries moved, and ` +
+    'the superproject trees recorded nothing of it. An edit committed, ' +
+    'stashed or ignored inside a nested repository is as invisible to ' +
+    'this command as an uncommitted one; the hunks do not show it. ' +
+    "(An ignored FILE's bytes are outside this model at every level — " +
+    'the entry is seen, its content is not; an ignored directory is ' +
+    'walked for repositories at every level.)'
+  );
+}
+
+/** A tracked family-named path deleted: its replacement, if any, is uncapturable. */
+function familyDeletionNote(paths: string[]): string {
+  const one = paths.length === 1;
+  return (
+    `fix-delta: ${paths.join(', ')} — tracked under the review's own name ` +
+    `${one ? 'family' : 'families'} — ${one ? 'was' : 'were'} deleted since ` +
+    'the snapshot. A file ADDED under those names cannot be told from the ' +
+    "review's own bookkeeping and is excluded from both trees, so a rename " +
+    'into a family name lands here as a bare deletion with the new content ' +
+    'in no hunk (a rename to any other name shows there as an addition). ' +
+    'Check the working tree for the replacement.'
   );
 }
 
@@ -1985,7 +2463,8 @@ function vanishedNote(paths: string[]): string {
   const one = paths.length === 1;
   return (
     `fix-delta: ${paths.join(', ')} held ${one ? 'a repository' : 'repositories'} ` +
-    'at snapshot time that the probe finds nothing to answer for now — ' +
+    '(or state the probe could not answer for) at snapshot time that the ' +
+    'probe finds nothing to answer for now — ' +
     `moved, renamed or deleted between the two states, and ${one ? 'its' : 'their'} ` +
     'content with it, invisible to this command.'
   );
@@ -2045,6 +2524,30 @@ function assertRootHoldsCwd(root: string): void {
         '(`git config --unset core.worktree`) and re-run.',
     );
   }
+  // Containment is not identity, and identity of the git dir is not
+  // identity of the tree. Config-blind, the honest working tree is the
+  // directory holding the first `.git` entry — a directory OR a gitfile,
+  // so linked worktrees and submodule checkouts keep passing — at or above
+  // the working directory: that is where discovery starts, and nothing a
+  // repository's config says can move it. A `core.worktree` that names a
+  // SUBTREE of it (containment holds trivially; the capture records the
+  // subtree alone and a fix outside it lands in no hunk) or an ANCESTOR
+  // holding a planted gitfile that points back at this repository (both
+  // git-dir readings resolve to the same honest dir) steers the derived
+  // root away from it — and both are refused here.
+  const honest = honestToplevel(cwd);
+  if (honest === null || !samePath(honest, top)) {
+    throw new Error(
+      `fix-delta: git reports ${root} as the working tree, but the ` +
+        `repository this command runs in is ${honest ?? `none — no \`.git\` above ${cwd}`}` +
+        ' (the first `.git` at or above the working directory). A ' +
+        'repo-local `core.worktree` names another directory — a subtree, ' +
+        'or an enclosing directory that holds a planted gitfile — and a ' +
+        'capture taken there would certify a tree the fix was never ' +
+        'applied in. Unset it (`git config --unset core.worktree`) and ' +
+        're-run.',
+    );
+  }
   // Containment is not identity: a `core.worktree` naming an ANCESTOR of
   // the cwd passes the test above, and when the audited repository sits
   // inside another repository's checkout the whole measurement then
@@ -2056,14 +2559,7 @@ function assertRootHoldsCwd(root: string): void {
   // must be the same repository.
   const fromCwd = git('rev-parse', '--absolute-git-dir');
   const fromRoot = git('-C', root, 'rev-parse', '--absolute-git-dir');
-  const same = (a: string, b: string): boolean => {
-    try {
-      return realpathSync(a) === realpathSync(b);
-    } catch {
-      return a === b;
-    }
-  };
-  if (!same(fromCwd, fromRoot)) {
+  if (!samePath(fromCwd, fromRoot)) {
     throw new Error(
       `fix-delta: the repository at ${fromCwd} names ${root} as its working ` +
         `tree, but that tree belongs to ${fromRoot} — a repo-local ` +
@@ -2072,6 +2568,44 @@ function assertRootHoldsCwd(root: string): void {
         'gitlink and the fix nowhere. Unset it (`git config --unset ' +
         'core.worktree`) and re-run.',
     );
+  }
+}
+
+/**
+ * The directory holding the first `.git` entry at or above `dir` — the
+ * working tree git's own discovery would find, with no config consulted.
+ * Null when nothing above `dir` is a repository at all.
+ */
+function honestToplevel(dir: string): string | null {
+  for (let cur = dir; ; cur = dirname(cur)) {
+    if (isGitEntry(join(cur, '.git'))) return cur;
+    if (dirname(cur) === cur) return null;
+  }
+}
+
+/**
+ * What git's own discovery accepts as a `.git` entry: a gitfile (any
+ * regular file — git reads it or dies on it, it never climbs past one),
+ * or a directory holding `HEAD`, `objects/` and `refs/`. An empty `.git`
+ * directory or a dangling `.git` link is climbed past, as git climbs past
+ * it — refusing there named a `core.worktree` that was never set.
+ */
+function isGitEntry(dotGit: string): boolean {
+  try {
+    const st = statSync(dotGit);
+    if (st.isFile()) return true;
+    if (!st.isDirectory()) return false;
+    // git validates the HEAD it finds (`validate_headref`) — a `.git`
+    // directory carrying an empty or garbage HEAD is climbed past, and
+    // stopping there named a `core.worktree` that was never set.
+    const head = readFileSync(join(dotGit, 'HEAD'), 'utf8');
+    return (
+      /^(ref:\s+refs\/|[0-9a-f]{40}|[0-9a-f]{64})/.test(head) &&
+      statSync(join(dotGit, 'objects')).isDirectory() &&
+      statSync(join(dotGit, 'refs')).isDirectory()
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -2175,6 +2709,8 @@ export function runFixDelta(args: FixDeltaArgs): void {
       // unconfirmed dirt cannot be blamed on "already there", or a fix's
       // real edit inside would filter into a false all-clear.
       dirtySubmodules: probe.dirty,
+      // Disclosure only, never a baseline (see `FixSnapshot.unresolved`).
+      unresolved: probe.unresolved,
       // …and a digest for every path the probe could ANSWER for, clean or
       // dirty: the dirty ones so that "pre-existing" is a checkable claim,
       // the clean ones so that content committed or stashed inside a clean
@@ -2223,6 +2759,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
       tree?: unknown;
       dirtySubmodules?: unknown;
       digests?: unknown;
+      unresolved?: unknown;
     };
     if (
       typeof raw.root !== 'string' ||
@@ -2235,6 +2772,9 @@ export function runFixDelta(args: FixDeltaArgs): void {
       tree: raw.tree as string,
       dirtySubmodules: Array.isArray(raw.dirtySubmodules)
         ? raw.dirtySubmodules.filter((p): p is string => typeof p === 'string')
+        : [],
+      unresolved: Array.isArray(raw.unresolved)
+        ? raw.unresolved.filter((p): p is string => typeof p === 'string')
         : [],
       // A record this run did not write — an older snapshot, a hand-edited
       // file — leaves every baseline path digest-less, and the comparison
@@ -2366,14 +2906,39 @@ export function runFixDelta(args: FixDeltaArgs): void {
       !unresolvedNow.includes(p) &&
       !recorded.has(p),
   );
-  const vanished = Object.keys(snapshot.digests).filter(
-    (p) =>
-      !snapshot.dirtySubmodules.includes(p) &&
-      probe.digests[p] === undefined &&
-      !dirtyNow.includes(p) &&
-      !unresolvedNow.includes(p) &&
-      !recorded.has(p),
-  );
+  // The comparison is a closed matrix over the baseline state × the state
+  // now, each answered for a path as DIRTY (a digest, and named dirty),
+  // CLEAN (a digest), UNRESOLVED (no digest, persisted as such) or ABSENT
+  // (nothing at all) — exactly one of the four: a status-discovered path
+  // whose interior probe fails is UNRESOLVED, never "dirty without a
+  // digest". Every cell routes to one list or to the all-clear:
+  //   D→D same digest: preExisting · D→D moved: freshDirt · D→C: cleaned
+  //   D→U: unresolved · D→A: cleaned
+  //   C→D: freshDirt · C→C same: (all-clear) · C→C moved: movedInside
+  //   C→U: unresolved · C→A: vanished
+  //   U→D: freshDirt · U→C: appeared · U→U: unresolved · U→A: vanished
+  //   A→D: freshDirt · A→C: appeared · A→U: unresolved · A→A: (all-clear)
+  // — with a path the tree diff itself lists (a moved or added gitlink)
+  // kept out of the disclosure lists, since the hunks show it. The
+  // baseline's UNRESOLVED paths are what makes U→A reachable: with no
+  // digest on either side, that path was in no list at all.
+  const vanished = [
+    ...Object.keys(snapshot.digests).filter(
+      (p) =>
+        !snapshot.dirtySubmodules.includes(p) &&
+        probe.digests[p] === undefined &&
+        !dirtyNow.includes(p) &&
+        !unresolvedNow.includes(p) &&
+        !recorded.has(p),
+    ),
+    ...snapshot.unresolved.filter(
+      (p) =>
+        probe.digests[p] === undefined &&
+        !dirtyNow.includes(p) &&
+        !unresolvedNow.includes(p) &&
+        !recorded.has(p),
+    ),
+  ];
   if (diff.length === 0) {
     if (preExisting.length > 0) {
       writeStderrLine(preExistingDirtNote(displayNames(preExisting)));
@@ -2432,6 +2997,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
     `fix-delta: ${names.length} file(s) changed since the snapshot — ${shown}` +
       (names.length > 8 ? `, and ${names.length - 8} more` : ''),
   );
+  const familyDeleted = deletedFamilyPaths(root, snapshot.tree, now, sidePaths);
+  if (familyDeleted.length > 0) {
+    writeStderrLine(
+      familyDeletionNote(familyDeleted.map((name) => decodePath(name))),
+    );
+  }
   if (preExisting.length > 0) {
     writeStderrLine(preExistingDirtNote(displayNames(preExisting)));
   }

@@ -7462,11 +7462,23 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     expect(() => render([finding('c1', 'src/qx.ts')], rename)).not.toThrow();
     // A decode the decoder cannot complete contributes NOTHING: the list
     // may over-match, never invent, so an unknown escape leaves the claim
-    // uncorroborated rather than corroborated by a garbled name.
+    // uncorroborated — annotated — rather than corroborated by a garbled
+    // name.
     const garbled =
       '--- "a/src/bad\\qx.ts"\n+++ "b/src/bad\\qx.ts"\n@@ -1 +1 @@\n-1\n+2\n';
-    expect(() => render([finding('c1', 'src/bad\\qx.ts')], garbled)).toThrow(
-      /carries no edit/,
+    expect(render([finding('c1', 'src/bad\\qx.ts')], garbled)).toContain(
+      "No hunk below touches this finding's location(s)",
+    );
+    // An astral character inside a quoted token: git keeps its bytes RAW
+    // under `core.quotePath=false`, and a decoder walking UTF-16 code
+    // units fed each lone surrogate to the encoder as U+FFFD — the decoded
+    // name matched nothing and the finding was annotated beside its own
+    // hunk.
+    const astral =
+      'diff --git "a/src/a\\tb🙂.ts" "b/src/a\\tb🙂.ts"\n' +
+      '--- "a/src/a\\tb🙂.ts"\n+++ "b/src/a\\tb🙂.ts"\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(render([finding('c1', 'src/a\tb🙂.ts')], astral)).not.toContain(
+      'No hunk below touches',
     );
   });
 
@@ -7504,9 +7516,10 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     expect(
       rendered.slice(rendered.indexOf('### f1'), rendered.indexOf('### f3')),
     ).not.toContain('No hunk below touches');
-    // …and f3 alone is the wholesale mismatch the forged line used to hide.
-    expect(() => render([finding('f3', 'src/f3.ts')], forged)).toThrow(
-      /carries no edit for any of the/,
+    // …and f3 alone is annotated the same way (a fix can land entirely in
+    // files no finding names, so that is not a refusal).
+    expect(render([finding('f3', 'src/f3.ts')], forged)).toContain(
+      "No hunk below touches this finding's location(s)",
     );
     // Header scanning resumes after the counted body: a second file's
     // genuine headers still corroborate.
@@ -7606,16 +7619,10 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       /records no `fixed` outcome, but --hunks carries edits \(1 path\(s\): src\/f1\.ts\)[\s\S]*ledger\/tree mismatch[\s\S]*Correct the ledger/,
     ],
     [
-      // Every `fixed` claim uncorroborated by any hunk: the degenerate
-      // empty-hunks refusal one step short of empty.
-      'hunks in which no fixed finding appears at all',
-      {
-        hunks:
-          'diff --git a/src/elsewhere.ts b/src/elsewhere.ts\n' +
-          '--- a/src/elsewhere.ts\n+++ b/src/elsewhere.ts\n@@ -1 +1 @@\n' +
-          '-const a = 1;\n+const a = 2;\n',
-      },
-      /carries no edit for any of the 2 finding\(s\) the ledger marks fixed \(f1, f3\)[\s\S]*a claim, not an edit/,
+      // Hunks that name no path at all are not a patch.
+      'a hunks file with content but no header',
+      { hunks: 'just some text\nwith no diff headers\n' },
+      /--hunks names no path at all/,
     ],
     [
       'an empty hunks file beside a ledger that says something was fixed',
@@ -7637,6 +7644,59 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('builds when no fixed finding is corroborated, annotating every entry', () => {
+    // A fix can land ENTIRELY in files no finding names — a test file the
+    // finding asked for, the caller of a declaration it named — and with
+    // one `fixed` finding that is every finding. Refusing there
+    // re-classified a legitimate state as fatal and routed the orchestrator
+    // to a diagnosis that is false in it; the annotation carries the case.
+    const { plan, findings, hunks, dir } = setup({
+      hunks:
+        'diff --git a/src/elsewhere.ts b/src/elsewhere.ts\n' +
+        '--- a/src/elsewhere.ts\n+++ b/src/elsewhere.ts\n@@ -1 +1 @@\n' +
+        '-const a = 1;\n+const a = 2;\n',
+    });
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      const list = readFileSync(m![1], 'utf8');
+      for (const id of ['f1', 'f3']) {
+        const entry = list.slice(list.indexOf(`### ${id}`));
+        expect(entry).toContain(
+          "No hunk below touches this finding's location(s)",
+        );
+      }
+      expect(list).toContain('+const a = 2;');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // The single-finding shape: one finding at `src/x.ts` whose fix is
+    // the new `src/x.test.ts`.
+    const render = renderFixAuditInput as (a: unknown, h: string) => string;
+    const rendered = render(
+      [
+        {
+          id: 'c1',
+          severity: 'Critical',
+          summary: 'no test pins this guard',
+          failureScenario: 'the guard is deleted and nothing goes red',
+          locations: [{ file: 'src/x.ts', line: 40 }],
+          outcome: 'fixed',
+        },
+      ],
+      'diff --git a/src/x.test.ts b/src/x.test.ts\nnew file mode 100644\n' +
+        '--- /dev/null\n+++ b/src/x.test.ts\n@@ -0,0 +1 @@\n+it("pins", () => {});\n',
+    );
+    expect(rendered).toContain(
+      "No hunk below touches this finding's location(s)",
+    );
+    expect(rendered).toContain('+it("pins", () => {});');
   });
 
   it('accepts the bare findings array as well as the wrapper', () => {

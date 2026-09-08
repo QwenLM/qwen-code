@@ -1138,7 +1138,7 @@ describe('bundled review skill', () => {
     // lines below a paragraph that already instructed following the
     // second, and never named the third at all.
     expect(step).toContain(
-      'The refusals that are NOT in this class are the three ledger/tree-mismatch refusals',
+      'The refusals that are NOT in this class are the two ledger/tree-mismatch refusals',
     );
     expect(step).toContain(
       'the empty-hunks refusal (`--hunks is empty, but the ledger marks … fixed`)',
@@ -1146,10 +1146,21 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'the no-`fixed`-beside-landed-hunks refusal (`the ledger records no `fixed` outcome, but --hunks carries edits`)',
     );
+    expect(step).toContain('Both take the same two-way ruling.');
+    // The claim-versus-edit case is an annotation, never a refusal — a fix
+    // can land entirely in files the findings do not name — and the
+    // annotation is relayed, not acted on.
     expect(step).toContain(
-      'the wholesale-mismatch refusal (`--hunks carries no edit for any of the … finding(s) the ledger marks fixed`)',
+      'A `fixed` finding that no hunk touches is NOT a refusal, even when that is every `fixed` finding',
     );
-    expect(step).toContain('All three take the same two-way ruling.');
+    expect(step).not.toContain('wholesale-mismatch refusal');
+    // Reach, stated exactly: Step 6B's audit runs on the local/file `--fix`
+    // path; the #9793 incident it is modelled on happened on the
+    // posted-comment path (#10153). A future edit must not re-widen it.
+    expect(step).toContain(
+      'this audit runs where Step 6B runs — the `local` and `file` `--fix` path, the one `fix.effective` admits',
+    );
+    expect(step).toContain('the path #10153 covers');
     expect(step).not.toContain('The one refusal that is NOT in this class');
     // The stderr relay: `fix-delta` prints its steering and blind-spot
     // qualifications on stderr and exits 0, and the terminal summary's
@@ -1160,6 +1171,10 @@ describe('bundled review skill', () => {
       'repeat every qualification `fix-delta` printed on stderr on the way',
     );
     expect(step).toContain('`committed or stashed inside`');
+    // The not-a-patch refusal is neither a carve-out nor an agent
+    // failure: it is disclosed as `not run` with the command's reason.
+    expect(step).toContain('--hunks names no path at all');
+    expect(step).toContain('Fix audit: not run — <what the command said>');
     expect(step).toContain(
       'never into `findings-in.json`, the census, or the verdict',
     );

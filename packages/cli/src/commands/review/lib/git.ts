@@ -35,6 +35,14 @@ export const GIT_TIMEOUT_MS = 120_000;
 function gitOpts() {
   return {
     timeout: GIT_TIMEOUT_MS,
+    // The house ceiling, on EVERY wrapper: the string forms used to inherit
+    // Node's 1 MiB default, so a `config --get-regexp` whose output an
+    // adversary padded past it threw ENOBUFS, `gitOpt` answered null, and
+    // the steering disclosure that names the planted filter never printed
+    // — while `hasFilter` flipped false and the capture ruling relaxed.
+    // Same ceiling as `gitRaw` below, so there is one constant to reason
+    // about.
+    maxBuffer: 512 * 1024 * 1024,
     // `sanitizedGitEnv`, not `process.env`: an exported `GIT_DIR` redirects
     // discovery for every command here at once — `releaseWorktree`'s
     // `worktree remove --force` included, which is a delete — and the
