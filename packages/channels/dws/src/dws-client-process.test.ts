@@ -110,8 +110,8 @@ describe('DWS command process', () => {
 
   it('prefers stderr details over stdout details', async () => {
     mockFailedDwsCommand({
-      stdout: 'detail on stdout',
-      stderr: 'detail on stderr',
+      stdout: 'stdout noise',
+      stderr: 'real error',
     });
 
     const error = await new DwsClient({ executable: '/opt/dws' })
@@ -119,10 +119,7 @@ describe('DWS command process', () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(DwsCommandError);
-    expect((error as Error).message).toContain(
-      'DWS command failed (1): detail on stderr',
-    );
-    expect((error as Error).message).not.toContain('detail on stdout');
+    expect((error as Error).message).toBe('DWS command failed (1): real error');
   });
 
   it('falls back to stdout when stderr sanitizes to empty', async () => {
