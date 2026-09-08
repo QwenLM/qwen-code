@@ -525,6 +525,47 @@ describe('PermissionController', () => {
     });
   });
 
+  it('reports an aborted turn without blaming host interaction support', async () => {
+    const context = {
+      ...createContext(),
+      abortSignal: AbortSignal.abort(),
+    };
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const sendControlRequest = vi.spyOn(controller, 'sendControlRequest');
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-question-aborted',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
+      });
+    });
+    expect(sendControlRequest).not.toHaveBeenCalled();
+  });
+
   it('uses SDK canUseTool timeout for outgoing permission requests', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(

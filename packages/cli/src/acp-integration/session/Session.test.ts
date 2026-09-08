@@ -34827,7 +34827,7 @@ describe('Session', () => {
 
       expect(result.stopAfterPermissionCancel).toBe(true);
       expect(result.parts[0]?.functionResponse?.response).toEqual({
-        error: 'Permission request was cancelled before the user answered.',
+        error: 'Permission request was cancelled.',
       });
       expect(execute).not.toHaveBeenCalled();
     });

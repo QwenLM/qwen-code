@@ -529,7 +529,8 @@ export class PermissionController extends BaseController {
           ToolConfirmationOutcome.Cancel,
           requiresUserInteraction
             ? {
-                cancelMessage: interactionUnavailableMessage,
+                cancelMessage:
+                  'The turn was cancelled before the approval could be answered.',
               }
             : undefined,
         );

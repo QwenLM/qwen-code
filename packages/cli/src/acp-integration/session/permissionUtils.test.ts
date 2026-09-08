@@ -367,10 +367,7 @@ describe('permissionUtils', () => {
       'session_closed',
       'Permission request was cancelled because the session closed before the user answered.',
     ],
-    [
-      'agent_cancelled',
-      'Permission request was cancelled before the user answered.',
-    ],
+    ['agent_cancelled', 'Permission request was cancelled.'],
   ] as const)(
     'maps daemon cancel reason %s to model-facing prose',
     (reason, expectedMessage) => {
