@@ -11,7 +11,7 @@ import {
 // The turn-navigation rail is an in-flow flex sibling of the transcript
 // scroller, so the margin-centered content column must compensate for it or
 // it drifts half a rail width off the axis the composer is centered on.
-test('transcript column stays on the composer axis while the turn rail is visible', async ({
+test('transcript column stays on the composer axis while the turn rail is visible @smoke', async ({
   page,
   baseURL,
 }, testInfo) => {
@@ -19,7 +19,13 @@ test('transcript column stays on the composer axis while the turn rail is visibl
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('What is the weather?', { id: 1 }),
-      assistantTextEvent('the weather report is ready', { id: 2 }),
+      assistantTextEvent(
+        `the weather report is ready\n\n${Array.from(
+          { length: 80 },
+          (_, index) => `Forecast detail ${index + 1}.`,
+        ).join('\n\n')}`,
+        { id: 2 },
+      ),
       turnCompleteEvent('prompt-alignment', { id: 3 }),
     ],
   });
@@ -62,11 +68,20 @@ test('transcript column stays on the composer axis while the turn rail is visibl
   const rail = page.locator('[data-global-turn-navigation]');
   await expect(rail).toBeVisible();
 
-  const message = page.getByText('the weather report is ready');
+  const messageList = page.locator('[data-web-shell-message-list]');
+  const message = messageList
+    .locator('[data-web-shell-message-row]')
+    .filter({ hasText: 'the weather report is ready' });
   await expect(message).toBeVisible();
   const composer = page.locator('[data-web-shell-composer]');
   await expect(composer).toBeVisible();
-
+  await expect
+    .poll(() =>
+      messageList.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(0);
   const messageBox = await message.boundingBox();
   const composerBox = await composer.boundingBox();
   expect(messageBox).not.toBeNull();
@@ -78,4 +93,20 @@ test('transcript column stays on the composer axis while the turn rail is visibl
       messageBox.x + messageBox.width - (composerBox.x + composerBox.width),
     ),
   ).toBeLessThanOrEqual(1);
+
+  await page.setViewportSize({ width: 599, height: 900 });
+  await expect(rail).toBeHidden();
+  await expect(messageList.locator('..')).toHaveCSS('padding-right', '0px');
+  await expect
+    .poll(async () => {
+      const narrowMessageBox = await message.boundingBox();
+      const narrowComposerBox = await composer.boundingBox();
+      if (!narrowMessageBox || !narrowComposerBox) return Infinity;
+      return Math.abs(
+        narrowMessageBox.x +
+          narrowMessageBox.width / 2 -
+          (narrowComposerBox.x + narrowComposerBox.width / 2),
+      );
+    })
+    .toBeLessThanOrEqual(1);
 });
