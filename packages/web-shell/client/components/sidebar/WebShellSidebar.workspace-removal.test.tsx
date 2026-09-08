@@ -4755,6 +4755,20 @@ describe('WebShellSidebar session source switch', () => {
     active.sessions = [{ ...scheduledRun, hasActivePrompt: true }];
     renderSidebar();
     await act(async () => Promise.resolve());
+    const runningRow = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    )
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
+      ?.closest('[role="button"]');
+    expect(
+      runningRow?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(
+      runningRow?.querySelector('[data-web-shell-session-running]'),
+    ).toBeTruthy();
+
     active.sessions = [{ ...scheduledRun, hasActivePrompt: false }];
     renderSidebar();
     await act(async () => Promise.resolve());
@@ -4772,6 +4786,39 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
     ).toBeTruthy();
+  });
+
+  it.each([
+    {
+      label: 'active work',
+      activeWorkState: 'active' as const,
+      selector: '[data-web-shell-session-active-work]',
+    },
+    {
+      label: 'unknown activity',
+      activeWorkState: 'unknown' as const,
+      selector: '[aria-label="Background activity unknown"]',
+    },
+  ])('keeps the scheduled-task marker with $label status', async (scenario) => {
+    active.sessions.push({
+      sessionId: `scheduled-${scenario.activeWorkState}`,
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      activeWorkState: scenario.activeWorkState,
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const row = container
+      .querySelector('[data-web-shell-session-title]')
+      ?.closest('[role="button"]');
+    expect(
+      row?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(row?.querySelector(scenario.selector)).toBeTruthy();
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
