@@ -63,6 +63,9 @@ export async function readArtifactSnapshot(
   }
   const handle = await fs.open(
     file,
+    // O_NOFOLLOW refuses a symlink swapped in after the realpath check, and
+    // O_NONBLOCK keeps a FIFO swapped into the same window from blocking the
+    // open: the path is only proven to be a regular file by the fstat below.
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
   try {
@@ -89,5 +92,39 @@ export async function readArtifactSnapshot(
     return content.toString('utf8');
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Best-effort reclamation for a snapshot whose owning record was removed or
+ * evicted. Only ever deletes the exact file the descriptor points at inside
+ * this runtime's snapshot root: a record restored from another runtime, or
+ * one whose url was rewritten, fails the same anchors the reader enforces
+ * and is left untouched. Anything already missing is as good as reclaimed.
+ */
+export async function deleteArtifactSnapshot(
+  artifact: ToolArtifact,
+): Promise<void> {
+  try {
+    const id = getWebPreviewSnapshotId(artifact);
+    if (!id) return;
+    const root = path.join(
+      Storage.getRuntimeBaseDir(),
+      'artifacts',
+      'snapshots',
+    );
+    const dir = path.join(root, id);
+    const file = path.join(dir, 'index.html');
+    if (artifact.url !== pathToFileURL(file).href) return;
+    const realRoot = await fs.realpath(root);
+    if ((await fs.realpath(dir)) !== path.join(realRoot, id)) return;
+    if ((await fs.realpath(file)) !== path.join(realRoot, id, 'index.html')) {
+      return;
+    }
+    await fs.unlink(file);
+    await fs.rmdir(dir);
+  } catch {
+    // Reclamation must never break record eviction: a missing or foreign
+    // snapshot is already as good as deleted.
   }
 }

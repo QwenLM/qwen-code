@@ -814,6 +814,38 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
   });
 
+  it('renders a saved webpage version without a workspace owner', async () => {
+    mockWorkspace.client.readSessionArtifactContent.mockResolvedValue(
+      '<h1>Saved version</h1>',
+    );
+    const artifact = {
+      ...linkArtifact(),
+      kind: 'html',
+      storage: 'published',
+      metadata: { artifactType: 'web_preview_snapshot' },
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    await act(async () => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-saved-preview]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
+    expect(
+      container
+        .querySelector('iframe[title="Saved webpage version"]')
+        ?.getAttribute('srcdoc'),
+    ).toContain('Saved version');
+  });
+
   it('fails closed when a file tab has no workspace owner', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

@@ -54,7 +54,7 @@ export function parseWebPreviewUrl(
   }
 }
 
-function escapeAttribute(value: string): string {
+export function escapeAttribute(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('"', '&quot;')

@@ -118,6 +118,8 @@ describe('SavedWebPreview', () => {
     );
     expect(container.querySelector('iframe')).toBeNull();
     expect(readContent).toHaveBeenCalledTimes(1);
+    // A terminal unavailable verdict must not offer another attempt.
+    expect(container.querySelector('button')).toBeNull();
   });
   it('uses the active session identity locally and memoizes unchanged HTML', async () => {
     container = document.createElement('div');

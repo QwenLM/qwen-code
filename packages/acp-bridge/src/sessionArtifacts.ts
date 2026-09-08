@@ -10,6 +10,7 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
   collectRecordableWorkspaceFiles,
+  deleteArtifactSnapshot,
   isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
@@ -540,6 +541,15 @@ export class SessionArtifactStore {
           ),
         );
         stripDurableTombstoneMarkers(changes);
+        await this.reclaimSnapshotFiles([
+          ...changes
+            .filter(
+              (change) =>
+                change.action === 'removed' && change.reason === 'eviction',
+            )
+            .map((change) => change.artifact),
+          ...overflowRemoved.droppedArtifacts,
+        ]);
       } catch (error) {
         if (
           validationStrict ||
@@ -682,6 +692,7 @@ export class SessionArtifactStore {
         ? []
         : await this.persistChanges(changes, false);
       stripDurableTombstoneMarkers(changes);
+      await this.reclaimSnapshotFiles([removeChange.artifact]);
       const warningDetails = detailsForPersistenceWarnings(
         warnings,
         changes,
@@ -858,6 +869,9 @@ export class SessionArtifactStore {
       if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
         warnings.push(...(await this.persistChanges(evicted.removed, false)));
+        await this.reclaimSnapshotFiles(
+          evicted.removed.map((change) => change.artifact),
+        );
       }
       this.setLastRestoreWarnings(warnings);
       return warnings;
@@ -1905,14 +1919,36 @@ export class SessionArtifactStore {
     }
   }
 
+  // Snapshot bytes are written before their descriptor is ingested, so
+  // they would otherwise outlive the records that reference them. Reclaim
+  // them once a removal is final; the deleter only touches the exact file a
+  // snapshot descriptor points at inside this runtime's snapshot root.
+  private async reclaimSnapshotFiles(
+    artifacts: ReadonlyArray<DaemonSessionArtifact | undefined>,
+  ): Promise<void> {
+    for (const artifact of artifacts) {
+      if (!artifact) continue;
+      try {
+        await deleteArtifactSnapshot(artifact);
+      } catch {
+        // Reclamation must never break the store's removal paths.
+      }
+    }
+  }
+
   private async evictOverflow(
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
     strict = false,
-  ): Promise<{ removed: SessionArtifactChange[]; droppedCreated: number }> {
+  ): Promise<{
+    removed: SessionArtifactChange[];
+    droppedCreated: number;
+    droppedArtifacts: DaemonSessionArtifact[];
+  }> {
     const removed: SessionArtifactChange[] = [];
+    const droppedArtifacts: DaemonSessionArtifact[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
-      return { removed, droppedCreated: 0 };
+      return { removed, droppedCreated: 0, droppedArtifacts };
     }
 
     const createdInThisBatch = new Set(createdIds);
@@ -1967,13 +2003,14 @@ export class SessionArtifactStore {
       }
       this.artifacts.delete(artifact.id);
       droppedCreated++;
+      droppedArtifacts.push(toPublicArtifact(artifact));
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
       removePriorChange(changes, artifact.id);
     }
 
-    return { removed, droppedCreated };
+    return { removed, droppedCreated, droppedArtifacts };
   }
 }
 

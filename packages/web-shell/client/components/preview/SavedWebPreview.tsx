@@ -87,19 +87,21 @@ export function SavedWebPreview({
             {new Date(artifact.createdAt).toLocaleString()}
           </time>
         </p>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            if (current?.html !== undefined) {
-              setFrameRevision((value) => value + 1);
-            } else {
-              setAttempt((value) => value + 1);
-            }
-          }}
-        >
-          {t(current?.failed ? 'common.retry' : 'webPreview.refresh')}
-        </Button>
+        {current?.failed !== 'unavailable' && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              if (current?.html !== undefined) {
+                setFrameRevision((value) => value + 1);
+              } else {
+                setAttempt((value) => value + 1);
+              }
+            }}
+          >
+            {t(current?.failed ? 'common.retry' : 'webPreview.refresh')}
+          </Button>
+        )}
       </div>
       {current?.failed ? (
         <p role="alert" className="text-sm text-destructive">

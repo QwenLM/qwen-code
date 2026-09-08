@@ -88,6 +88,10 @@ export function getArtifactsByTurn(
           artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
           artifact.storage !== 'published' ||
           !artifact.url ||
+          // Only a file:// publication is indistinguishable from its saved
+          // twin: the preview cannot frame it either way. A browser-openable
+          // live card opens the hosted page, so it is not a duplicate.
+          /^https?:/i.test(artifact.url) ||
           !savedUrls.has(artifact.url),
       ),
     );

@@ -7,9 +7,10 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  deleteArtifactSnapshot,
   readArtifactSnapshot,
   saveArtifactSnapshot,
 } from './artifact-snapshots.js';
@@ -104,5 +105,60 @@ describe('saved Artifact versions', () => {
     await fs.writeFile(path.join(otherDir, 'index.html'), 'original');
     await fs.symlink(otherDir, dir, 'dir');
     await expect(readArtifactSnapshot(snapshot, runtime)).rejects.toThrow();
+  });
+
+  it('reclaims an evicted snapshot while retained versions stay readable', async () => {
+    const first = await saveArtifactSnapshot(
+      '<h1>v1</h1>',
+      'Page',
+      'https://example.com/latest',
+    );
+    const second = await saveArtifactSnapshot(
+      '<h1>v2</h1>',
+      'Page',
+      'https://example.com/latest',
+    );
+    await deleteArtifactSnapshot(first);
+    await expect(readArtifactSnapshot(first, runtime)).rejects.toThrow();
+    await expect(readArtifactSnapshot(second, runtime)).resolves.toBe(
+      '<h1>v2</h1>',
+    );
+    // Reclaiming an already-reclaimed snapshot is a quiet no-op.
+    await expect(deleteArtifactSnapshot(first)).resolves.toBeUndefined();
+  });
+
+  it('never deletes outside the exact file the descriptor points at', async () => {
+    const snapshot = await saveArtifactSnapshot(
+      'original',
+      'Page',
+      'https://example.com/latest',
+    );
+    const id = snapshot.managedId!.slice('preview-'.length);
+    for (const override of [
+      // Classifier rejects: wrong suffix, wrong metadata, wrong source.
+      { url: 'file:///tmp/elsewhere.html' },
+      { managedId: '../outside' },
+      { metadata: { artifactType: 'web_preview_snapshot' } },
+      { source: 'client' as const },
+      // Classifier passes, but the url root is another runtime's tree:
+      // reclamation must not follow it anywhere.
+      {
+        url: pathToFileURL(
+          path.join(
+            runtime,
+            'foreign',
+            'artifacts',
+            'snapshots',
+            id,
+            'index.html',
+          ),
+        ).href,
+      },
+    ]) {
+      await deleteArtifactSnapshot({ ...snapshot, ...override });
+      await expect(readArtifactSnapshot(snapshot, runtime)).resolves.toBe(
+        'original',
+      );
+    }
   });
 });

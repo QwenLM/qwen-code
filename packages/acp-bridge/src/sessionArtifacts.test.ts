@@ -6296,6 +6296,159 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('reclaims saved webpage snapshot files when their records leave the store', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const snapshotArtifact = async (uuid: string, html: string) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          toolName: 'artifact',
+          toolCallId: `call-${uuid}`,
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+        };
+      };
+      const first = await snapshotArtifact(firstUuid, 'first');
+      const second = await snapshotArtifact(secondUuid, 'second');
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      await store.upsertMany([first], {
+        strict: true,
+        trustedPublisher: true,
+      });
+      await store.upsertMany([second], {
+        strict: true,
+        trustedPublisher: true,
+      });
+
+      const listed = await store.list();
+      expect(listed.artifacts).toHaveLength(1);
+      // The evicted record's snapshot bytes are reclaimed; the retained
+      // record's snapshot stays in place.
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+
+      await store.remove(listed.artifacts[0]!.id);
+      await expect(fs.stat(dirFor(secondUuid))).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims snapshot files for restored records pruned to the live limit', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const persistedSnapshot = async (
+        uuid: string,
+        html: string,
+        createdAt: string,
+      ) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          id: stableSessionArtifactId(
+            'snapshot-restore-reclaim',
+            `managed:preview-${uuid}`,
+          ),
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          status: 'available' as const,
+          toolName: 'artifact',
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+          retention: 'restorable' as const,
+          clientRetained: false,
+          createdAt,
+          updatedAt: createdAt,
+        };
+      };
+      const first = await persistedSnapshot(
+        firstUuid,
+        'first',
+        '2026-09-07T00:00:00.000Z',
+      );
+      const second = await persistedSnapshot(
+        secondUuid,
+        'second',
+        '2026-09-07T00:01:00.000Z',
+      );
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-restore-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      const warnings = await store.restore({
+        v: 2,
+        sessionId: 'snapshot-restore-reclaim',
+        sequence: 1,
+        artifacts: [first, second],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      });
+      expect(warnings).toContain('restored artifact list pruned to live limit');
+      expect((await store.list()).artifacts).toHaveLength(1);
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
   it('does not trust persisted published file urls during restore', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-restore-published-file',

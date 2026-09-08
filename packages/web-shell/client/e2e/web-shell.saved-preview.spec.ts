@@ -1,4 +1,9 @@
-import { expect, test } from '@playwright/test';
+import {
+  expect,
+  test,
+  type ConsoleMessage,
+  type Request,
+} from '@playwright/test';
 import { createServer } from 'node:http';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { artifactPreviewDocument } from '../components/artifacts/artifactUtils';
@@ -189,10 +194,42 @@ test('opens each saved delivery after closing and reloading, with inline interac
     );
     if (version === 2) {
       const readCount = reads.length;
+      const violations: string[] = [];
+      const navigations: string[] = [];
+      const recordViolation = (message: ConsoleMessage) => {
+        if (message.text().includes('Content Security Policy')) {
+          violations.push(message.text());
+        }
+      };
+      const recordNavigation = (request: Request) => {
+        if (request.url().startsWith('https://example.invalid/')) {
+          navigations.push(request.url());
+        }
+      };
+      page.on('console', recordViolation);
+      page.on('request', recordNavigation);
       await frame
         .getByRole('button', { name: 'Navigate', exact: true })
         .click();
-      await expect(frame.getByRole('heading')).toHaveCount(0);
+      try {
+        // The wrapper's frame-src 'none' is the containment: the attempt is
+        // reported and blocked before any request or frame commit, not
+        // inferred from the document disappearing into an error page.
+        await expect
+          .poll(() => violations.some((text) => text.includes('frame-src')))
+          .toBe(true);
+        expect(navigations).toEqual([]);
+        expect(
+          page
+            .frames()
+            .some((candidate) =>
+              candidate.url().startsWith('https://example.invalid/'),
+            ),
+        ).toBe(false);
+      } finally {
+        page.off('console', recordViolation);
+        page.off('request', recordNavigation);
+      }
       missing = true;
       await page
         .getByRole('button', { name: 'Refresh preview', exact: true })
