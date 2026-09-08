@@ -2,19 +2,27 @@
 
 ## Status
 
-Proposed for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810).
-Once accepted, this decision supersedes the process-global cross-daemon
+Accepted in [PR #10828](https://github.com/QwenLM/qwen-code/pull/10828) for
+[Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810).
+This decision supersedes the process-global cross-daemon
 ownership requirement in the [standalone daemon sessions
 contract](./standalone-daemon-sessions.md), which accompanies Issue #8908. All
-other isolation, persistence, and lifecycle requirements remain in force. The
-current implementation still enforces process-global Conversations ownership
-until the source changes in this design are delivered.
+other isolation, persistence, and lifecycle requirements remain in force. This
+change implements the cutover locally; release still requires coordinated
+backend/client delivery and the platform verification recorded below.
+
+The additive writer fences landed in
+[PR #10924](https://github.com/QwenLM/qwen-code/pull/10924). The
+cutover, client treatment, and verification are tracked in the
+[implementation plan](../plans/2026-09-06-conversations-ownership-cutover.md).
+That PR does not remove the process-global owner or enable cross-daemon
+standalone serving.
 
 This decision adopts Issue #10810's session-keyed concurrency boundary,
 identity-qualified stale-writer recovery, legacy-owner migration guard, and
 minimum Web Shell degradation. It corrects the issue's Live assumption: the
-locator record gates publication but not activation today, so the same release
-must add a Live-start publisher gate. Backend and Web Shell implementation may
+locator record previously gated publication but not activation, so this change
+adds a Live-start publisher gate. Backend and Web Shell implementation may
 land in separate pull requests, but both are required in the same release. A
 proactive `activeElsewhere` listing hint remains a follow-up.
 
@@ -430,6 +438,18 @@ only after verifying the transcript proof. A non-cooperative exit from a
 steady active state becomes recoverable on the next qualified local
 acquisition. Ambiguous transition and storage failures still require an
 authoritative external writer fence before manual cleanup.
+
+The first cutover release retains this recovery boundary. It must document
+that a Linux reboot or container PID-namespace change can leave an unsealed
+active record fenced indefinitely, and that `409 session_writer_conflict` does
+not prove its writer is still alive. Session-local guidance explains recovery;
+local operator diagnostics identify the affected lock without exposing owner
+tokens or internal paths through the public HTTP/ACP error contract. Manual
+recovery requires fencing all possible writers, including surviving ACP
+children, before touching an exact residual record. Lock age, a dead daemon
+parent, or a PID absent from a different namespace is insufficient proof.
+Automatic cross-boot recovery, a new machine-identity field, expiry-based
+takeover, and a public force-unlock API require a separate design decision.
 
 Forcing the lease also makes graceful managed shutdown seal and hash every
 active Conversations transcript. The implementation does not silently lengthen

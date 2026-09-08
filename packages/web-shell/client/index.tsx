@@ -230,6 +230,8 @@ export type {
   WebShellAssistantTurnOutcome,
   WebShellAssistantTurnSettledEvent,
   WebShellAssistantTurnFooterRenderInfo,
+  ArtifactImageRenderer,
+  WebShellArtifactCustomization,
   WebShellIconSource,
   WebShellTaskInfo,
   WebShellUserMessagePart,

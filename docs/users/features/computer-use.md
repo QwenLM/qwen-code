@@ -25,8 +25,8 @@ Node.js 22 or later and npm are required.
 When first used, the skill runs these commands itself:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.2
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.3
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.3
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.4
 ```
 
 Restart Qwen Code after the MCP server is first added. The skill then resumes
@@ -45,11 +45,13 @@ Ask Qwen Code to use `$computer-use` for the desktop task. After bootstrap, it
 follows the standard Computer Use workflow:
 
 1. discovers the exact application and window;
-2. observes full accessibility state;
-3. acts through current semantic element tokens when possible;
-4. fetches fresh state after every mutation;
-5. verifies the requested result; and
-6. closes the SDK client and resets the REPL.
+2. observes full accessibility state, then accumulates automatic incremental
+   updates into the current state;
+3. performs one or more actions through current semantic element tokens,
+   including unchanged tokens retained across compatible diffs;
+4. fetches the latest state before deciding what to do next; and
+5. closes the SDK client and resets the REPL only when no other persistent
+   state is needed.
 
 The driver is the only component that computes observation diffs. Model code
 uses the typed SDK methods and does not dispatch arbitrary driver tool names.
