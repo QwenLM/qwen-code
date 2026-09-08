@@ -105,8 +105,9 @@ fi
 # The docker leg runs vitest directly instead of through
 # test:integration:sandbox:docker: that script would rebuild the image
 # the step above just built.
-# Keep the long-lived serve daemon out of the three-fork batch so
-# sibling E2E processes cannot starve its local HTTP requests.
+# Keep suites that launch many real CLI/daemon subprocesses out of
+# the three-fork batch so they cannot starve each other's local control
+# and HTTP requests.
 run_vitest() {
   if [ "$sandbox" = 'sandbox:docker' ]; then
     npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests "$@" 9>&-
@@ -120,13 +121,14 @@ bulk_args=(
   --exclude '**/channel-plugin.test.ts'
   --exclude '**/chat-transcript-document.test.ts'
   --exclude '**/qwen-serve-routes.test.ts'
+  --exclude '**/sdk-typescript/**'
   --poolOptions.forks.maxForks=3
   --shard="$shard"
 )
 
 run_shard() {
   run_vitest "${bulk_args[@]}" &&
-    run_vitest cli/qwen-serve-routes.test.ts --poolOptions.forks.singleFork
+    run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1
 }
 
 if [ "$sandbox" = 'sandbox:docker' ]; then

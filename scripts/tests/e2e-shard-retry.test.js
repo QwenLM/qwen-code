@@ -111,7 +111,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
     expect(exitCode).toBe(0);
   });
 
-  it('retries when the isolated serve routes suite dies once', () => {
+  it('retries when the isolated suites die once', () => {
     const { exitCode, npmCalls, output } = runStepScript({
       failCalls: '2',
       elapsedSeconds: 1200,
@@ -132,7 +132,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
     expect(exitCode).not.toBe(0);
   });
 
-  it('keeps the step red when the serve routes suite fails both attempts', () => {
+  it('keeps the step red when the isolated suites fail both attempts', () => {
     const { exitCode, npmCalls } = runStepScript({
       failCalls: '2 4',
       elapsedSeconds: 1200,

@@ -35,7 +35,7 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
-  it('isolates the serve routes suite from the three parallel forks', () => {
+  it('isolates child-process-heavy suites from the three parallel forks', () => {
     const linuxJob = yml.jobs['e2e-test-linux'];
     const runStep = linuxJob.steps.find(
       (step) => step.name === 'Run E2E tests',
@@ -53,8 +53,12 @@ describe('e2e workflow', () => {
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(1);
     expect(
-      e2eRunScript.match(/--poolOptions\.forks\.singleFork/g),
+      e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
     ).toHaveLength(1);
+    expect(e2eRunScript).toContain(
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+    );
+    expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
   });
 
   describe('sandbox image preparation', () => {
