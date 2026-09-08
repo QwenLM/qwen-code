@@ -21,6 +21,7 @@ import {
   clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
+import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { ToolNames } from './tool-names.js';
@@ -1465,6 +1466,172 @@ describe('SkillTool', () => {
         );
       });
 
+      it('does not claim nothing was armed when the recorded body was truncated', async () => {
+        // `SkillTool` declares no `maxOutputChars`, so a skill body over the
+        // global truncation budgets is recorded as the wrapper, which starts
+        // with the truncation sentinel and carries the body's own prefix
+        // inside the preview. Classifying that as "not this skill's body"
+        // files it at `debug` under a sentence asserting no body was injected
+        // and nothing was armed — both false, since `execute()` applied the
+        // side effects before returning. The decline itself still stands: the
+        // record can no longer be compared against SKILL.md.
+        const truncated: Content[] = [
+          resumedHistory(gatedSkill)[0],
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'skill-call',
+                  name: ToolNames.SKILL,
+                  response: {
+                    output:
+                      `${TOOL_OUTPUT_TRUNCATED_PREFIX}.\nThe full output has ` +
+                      `been saved to: /tmp/x.output\n\n` +
+                      buildSkillLlmContent(
+                        path.dirname(gatedSkill.filePath),
+                        gatedSkill.body,
+                      ).slice(0, 200),
+                  },
+                },
+              },
+            ],
+          },
+        ];
+
+        await skillTool.restoreLoadedSkillsFromHistory(truncated);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('its recorded body was truncated'),
+        );
+        expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+          expect.stringContaining("is not this skill's body"),
+        );
+      });
+
+      it('keeps a body-shaped decline when a later refusal pair follows it', async () => {
+        // A skill invoked twice records a body and then the dedup message.
+        // When the body pair itself mismatches, the second pair must not
+        // overwrite it: `remedy: null` downgrades the warn to a debug line
+        // claiming nothing was ever armed, which is false for this history —
+        // the first pair did inject a body.
+        const [call] = resumedHistory(gatedSkill);
+        const staleThenDedup: Content[] = [
+          call,
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'skill-call',
+                  name: ToolNames.SKILL,
+                  response: {
+                    output: buildSkillLlmContent(
+                      '/somewhere/else/gated-skill',
+                      'A body that no longer matches.',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'skill-call-2',
+                  name: ToolNames.SKILL,
+                  args: { skill: gatedSkill.name },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'skill-call-2',
+                  name: ToolNames.SKILL,
+                  response: {
+                    output: `Skill "${gatedSkill.name}" is already loaded in context.`,
+                  },
+                },
+              },
+            ],
+          },
+        ];
+
+        await skillTool.restoreLoadedSkillsFromHistory(staleThenDedup);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('no longer matches SKILL.md on disk'),
+        );
+      });
+
+      it('names the route the block allows when a mismatch and a block co-occur', async () => {
+        // The two co-occur by construction: the compared string embeds the
+        // base directory, so a moved checkout mismatches every skill, and
+        // `paths:` activation is in-memory, so a conditional skill is
+        // inactive in every resumed process. "Re-invoke the skill" is then
+        // advice `validateToolParams` refuses.
+        vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(false);
+        const moved: Content[] = [
+          resumedHistory(gatedSkill)[0],
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'skill-call',
+                  name: ToolNames.SKILL,
+                  response: {
+                    output: buildSkillLlmContent(
+                      '/an/older/checkout/gated-skill',
+                      gatedSkill.body,
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+        ];
+
+        await skillTool.restoreLoadedSkillsFromHistory(moved);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('run /gated-skill'),
+        );
+        expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('re-invoke the skill'),
+        );
+      });
+
+      it('does not send the operator to a slash command a Skill declares away', async () => {
+        // `user-invocable: false` is dropped by every dispatch-facing
+        // accessor, so `/gated-skill` answers `Unknown command`. Naming it
+        // alongside "the model route is refused" would leave the operator
+        // with no route at all; the one that works for `inactive` needs no
+        // command.
+        vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(false);
+        const modelOnly: SkillConfig = { ...gatedSkill, userInvocable: false };
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+          modelOnly,
+        ]);
+
+        await skillTool.restoreLoadedSkillsFromHistory(
+          resumedHistory(modelOnly),
+        );
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('access a file matching its `paths:`'),
+        );
+        expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('run /gated-skill'),
+        );
+      });
+
       it('does not blame SKILL.md for a same-session re-invocation replayed in the history', async () => {
         // A skill invoked twice records the body once and the dedup message
         // ("already loaded in context") the second time. That second pair is
@@ -1543,10 +1710,12 @@ describe('SkillTool', () => {
       });
 
       it('warns, not debugs, when the Skill it declined to re-arm declares hooks', async () => {
-        // The level is the whole user-facing signal here: #11180 presented as
-        // a working setup precisely because the gate went missing in silence.
-        // Pin `warn` for a hook-declaring Skill so a future edit cannot
-        // collapse this to `debug` and stay green.
+        // Inside the debug log the level is what an operator greps first, and
+        // these declines previously logged nothing at any level. Pin `warn`
+        // for a hook-declaring Skill so a future edit cannot collapse this to
+        // `debug` and stay green. It is not operator visibility: `warn` and
+        // `debug` share one sink gated only on `QWEN_DEBUG_LOG_FILE`, so
+        // surfacing a missing gate without `--debug` is still open.
         vi.mocked(config.isSkillEnabled).mockReturnValue(false);
 
         await skillTool.restoreLoadedSkillsFromHistory(

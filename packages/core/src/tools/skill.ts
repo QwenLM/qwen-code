@@ -41,6 +41,7 @@ import {
   skillModelInvocationBlock,
   SKILL_LLM_CONTENT_PREFIX,
 } from './skill-utils.js';
+import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
 
 /**
  * Static description for the Skill tool. The live list of available skills is
@@ -81,19 +82,38 @@ Important:
 /**
  * The route that actually re-arms a skill resume declined, named per reason.
  * "Re-invoke the skill" is the wrong advice for most of them: the model route
- * is refused by the very condition that produced the decline, and because
- * bookkeeping is unconditional the dedup guard answers "already loaded in
- * context" on top of that. The slash command checks only enabledness, so it
- * still re-arms an inactive or model-hidden skill; for a disabled one it is
- * filtered out of the registry too, and no route exists until the skill is
- * re-enabled.
+ * is refused by the very condition that produced the decline. The slash
+ * command checks only enabledness, so it still re-arms an inactive or
+ * model-hidden skill; for a disabled one it is filtered out of the registry
+ * too, and no route exists until the skill is re-enabled.
+ *
+ * Each remedy takes the `SkillConfig`, not just the name, because
+ * `user-invocable: false` removes the slash route entirely: the command is
+ * registered with `userInvocable: false` and then dropped by every
+ * dispatch-facing accessor (`CommandService.getCommandsForMode`), the
+ * `/skills` picker included, so `Unknown command` is all the operator would
+ * get. Naming `/<skill-name>` there would leave them with nothing at all,
+ * since the same message says the model route is refused. The flag is tested
+ * with `=== false`, matching `SkillCommandLoader`'s `?? true` default: only
+ * an explicit `false` loses the route.
  */
 const SKILL_RESTORE_REMEDIES = {
   reinvoke: () => 're-invoke the skill to re-apply its hooks and allowedTools',
-  slash: (name: string) =>
-    `run /${name} to re-apply its hooks and allowedTools — re-invoking it as a tool is refused for the same reason, and the dedup guard answers "already loaded in context"`,
-  enable: (name: string) =>
-    `re-enable it via /skills (or remove it from skills.disabled) and then run /${name} to re-apply its hooks and allowedTools — while it is disabled no route re-arms it, the slash command included`,
+  // `paths:` activation is what the model route waits on, and it needs no
+  // slash command: touching a matching file fires it, after which a model
+  // re-invocation re-applies the side effects.
+  activate: (skill: SkillConfig) =>
+    skill.userInvocable === false
+      ? 'access a file matching its `paths:` so the activation fires and the model can invoke it again — it declares `user-invocable: false`, so there is no slash command for it'
+      : `run /${skill.name} to re-apply its hooks and allowedTools — re-invoking it as a tool is refused while the activation has not fired`,
+  unhide: (skill: SkillConfig) =>
+    skill.userInvocable === false
+      ? 'no route re-arms it while it declares both `disable-model-invocation` and `user-invocable: false` — remove one of them'
+      : `run /${skill.name} to re-apply its hooks and allowedTools — re-invoking it as a tool is refused while \`disable-model-invocation\` is set`,
+  enable: (skill: SkillConfig) =>
+    skill.userInvocable === false
+      ? 're-enable it via /skills (or remove it from skills.disabled) and then re-invoke it — while it is disabled no route re-arms it, and it declares `user-invocable: false`, so there is no slash command either'
+      : `re-enable it via /skills (or remove it from skills.disabled) and then run /${skill.name} to re-apply its hooks and allowedTools — while it is disabled no route re-arms it, the slash command included`,
 } as const;
 
 type SkillRestoreRemedy = keyof typeof SKILL_RESTORE_REMEDIES;
@@ -117,12 +137,12 @@ const SKILL_RESTORE_DECLINED_REASONS: Record<
   // session deactivated and `validateToolParams` refuses it in that state.
   inactive: {
     reason: 'its `paths:` activation has not fired',
-    remedy: 'slash',
+    remedy: 'activate',
   },
   // `disable-model-invocation: true`, which `execute` refuses outright
   // (`Skill "X" not found.`): re-arming it would grant a session what no tool
   // call can ask for.
-  hidden: { reason: 'it is hidden from model invocation', remedy: 'slash' },
+  hidden: { reason: 'it is hidden from model invocation', remedy: 'unhide' },
 };
 
 /**
@@ -515,25 +535,92 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
           // inside the sandbox and resumed on the host). The reason says so
           // rather than sending the operator to diff a file that never
           // changed.
-          declined.set(
-            skill.name,
-            output.startsWith(SKILL_LLM_CONTENT_PREFIX)
-              ? {
-                  skill: skill.config,
-                  reason:
-                    'its recorded body no longer matches SKILL.md on disk, ' +
-                    'or its skill directory now resolves to a different path',
-                  remedy: 'reinvoke',
-                }
-              : {
-                  skill: skill.config,
-                  reason: "the recorded tool response is not this skill's body",
-                  // A refusal, not a body: no body was ever injected for this
-                  // pair, so nothing this skill declares was armed in the
-                  // recorded session either and nothing has been lost.
-                  remedy: null,
-                },
+          //
+          // The remedy is not `reinvoke` unconditionally: a block condition
+          // can co-exist with a mismatch, and then re-invoking is refused by
+          // `validateToolParams` rather than by anything the mismatch caused.
+          // The co-occurrence is not exotic — the compared string embeds the
+          // base directory, so a moved checkout mismatches every skill, and
+          // `paths:` activation is in-memory, so a conditional skill is
+          // `inactive` by construction in a resumed process. Read live off
+          // `Config` / `SkillManager`, the same way `restoreSkillSideEffects`
+          // reads it, never off `SkillTool`'s async-committed snapshots.
+          const blocked = skillModelInvocationBlock(
+            this.config,
+            this.skillManager,
+            skill.config,
           );
+          const mismatchRemedy: SkillRestoreRemedy = blocked
+            ? SKILL_RESTORE_DECLINED_REASONS[blocked].remedy
+            : 'reinvoke';
+
+          let entry: {
+            skill: SkillConfig;
+            reason: string;
+            remedy: SkillRestoreRemedy | null;
+          };
+          if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
+            // A body that *was* injected, then truncated for the model on the
+            // way into the record: `SkillTool` declares no `maxOutputChars`,
+            // so a skill over the global budgets is recorded as the
+            // truncation wrapper, which carries the body's own prefix inside
+            // the preview rather than at position 0. Reading that as "not
+            // this skill's body" would file it at `debug` under a sentence
+            // asserting nothing was ever armed — false twice over, since
+            // `execute()` applied the side effects before returning.
+            //
+            // The side effects are still not re-applied. The record can no
+            // longer be byte-compared against SKILL.md, which is the whole
+            // check this branch performs, and re-arming from it would grant
+            // whatever the *current* frontmatter declares on the strength of
+            // a record that cannot corroborate it. So the decline stands and
+            // the reason says why, which is what makes the level `warn` for a
+            // skill that declares a side effect.
+            //
+            // `startsWith` at position 0, exactly as the idempotency guard in
+            // `truncation.ts` matches it, so a skill body that merely quotes
+            // the phrase is not mistaken for a truncated record. Both budgets
+            // are operator-overridable, so nothing here assumes a size.
+            entry = {
+              skill: skill.config,
+              reason:
+                'its recorded body was truncated for the model, so it ' +
+                'cannot be compared against SKILL.md on disk',
+              remedy: mismatchRemedy,
+            };
+          } else if (output.startsWith(SKILL_LLM_CONTENT_PREFIX)) {
+            entry = {
+              skill: skill.config,
+              reason:
+                'its recorded body no longer matches SKILL.md on disk, ' +
+                'or its skill directory now resolves to a different path',
+              remedy: mismatchRemedy,
+            };
+          } else {
+            entry = {
+              skill: skill.config,
+              reason: "the recorded tool response is not this skill's body",
+              // A refusal, not a body: no body was ever injected for this
+              // pair, so nothing this skill declares was armed in the
+              // recorded session either and nothing has been lost.
+              remedy: null,
+            };
+          }
+
+          // Rank, not last-write-wins. A skill invoked twice records a body
+          // and then the dedup message; if the body pair already mismatched,
+          // a later `remedy: null` pair would overwrite the one entry that
+          // reports a genuinely lost gate, downgrading its `warn` to `debug`
+          // and discarding the only actionable route. A refusal still wins
+          // when it is the only thing recorded for that skill.
+          const previous = declined.get(skill.name);
+          const outranked =
+            previous !== undefined &&
+            previous.remedy !== null &&
+            entry.remedy === null;
+          if (!outranked) {
+            declined.set(skill.name, entry);
+          }
           continue;
         }
 
@@ -625,8 +712,19 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * know while the skill's instructions are still in context. Both halves
    * count: nine bundled skills declare `allowedTools` and none declares
    * `hooks:`, so keying the level on hooks alone would leave every one of
-   * them declining at `debug`, invisible at default verbosity, under a
-   * message that says the lost half is "hooks and allowedTools".
+   * them declining at `debug`, under a message that says the lost half is
+   * "hooks and allowedTools".
+   *
+   * What the level buys is grep and triage *inside the debug log*, not
+   * operator visibility: `createDebugLogger`'s `warn` and `debug` share one
+   * sink with no level threshold — `writeLog` returns early unless
+   * `QWEN_DEBUG_LOG_FILE` is set (which `--debug` sets) and then appends
+   * whatever it is given — so at default verbosity neither level is written
+   * and with the file enabled both are. The improvement these lines make is
+   * that these paths previously logged nothing at any level; surfacing a
+   * missing gate to an operator who did not pass `--debug` is the part of
+   * #11180 still open, and promoting a message from `debug` to `warn` does
+   * not close it.
    *
    * A `null` remedy means the recorded response was not a body at all, so no
    * body was injected and nothing was ever armed. That is `debug` regardless
@@ -649,7 +747,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
     const message =
       `${head} Its instructions may still be in the replayed conversation; ` +
-      `${SKILL_RESTORE_REMEDIES[remedy](skill.name)}.`;
+      `${SKILL_RESTORE_REMEDIES[remedy](skill)}.`;
     // Emptiness, not truthiness, exactly as `applySkillHooks` tests it: `{}`
     // is truthy, and the parser assigns one for `hooks: {}` and for a block
     // whose event names are all unknown. Such a skill promised no gate, so a
