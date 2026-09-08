@@ -358,6 +358,7 @@ export function ThreadsRoute({ api, onOpenAgentSession }: ThreadsRouteProps) {
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
+        {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
         {...(capabilities ? { capabilities } : {})}
         onCreateThread={(input) =>
           void mutate(async () => {

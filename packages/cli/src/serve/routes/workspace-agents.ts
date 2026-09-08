@@ -64,6 +64,7 @@ import {
   deliverNotifications,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import type { ChannelDeliveryRequest } from '../../runtime/channel-delivery-ipc.js';
 import {
@@ -442,6 +443,7 @@ export function registerWorkspaceAgentRoutes(
         readWorkspaceAgents(root),
         listThreads(root),
       ]);
+      const sessions = runtime.bridge.listWorkspaceSessions(root);
       res.json({
         agents: agents.map((agent) => {
           const active = threads.find((thread) =>
@@ -462,6 +464,41 @@ export function registerWorkspaceAgentRoutes(
               ).length,
             0,
           );
+          const session = sessions.find(
+            (candidate) =>
+              candidate.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+              candidate.sourceId === agent.id,
+          );
+          const blocked = threads.some(
+            (thread) =>
+              resolve(thread, threads).status === 'blocked' &&
+              thread.runs.some(
+                (run) =>
+                  run.agentId === agent.id &&
+                  run.closeKind === 'blocked' &&
+                  run.closeAcknowledgedAtSequence === undefined,
+              ),
+          );
+          const failed = threads.some((thread) =>
+            thread.runs.some(
+              (run) =>
+                run.agentId === agent.id &&
+                run.status === 'failed' &&
+                run.closeAcknowledgedAtSequence === undefined,
+            ),
+          );
+          const status =
+            agent.retiredAt !== undefined
+              ? 'offline'
+              : active || session?.hasActivePrompt
+                ? 'working'
+                : blocked
+                  ? 'blocked'
+                  : failed || session?.hasTurnError
+                    ? 'error'
+                    : session
+                      ? 'idle'
+                      : 'offline';
           return {
             id: agent.id,
             name: agent.name,
@@ -472,6 +509,12 @@ export function registerWorkspaceAgentRoutes(
             ...(agent.instructions ? { instructions: agent.instructions } : {}),
             maxConcurrentRuns: maxConcurrentRunsFor(agent),
             enabled: agent.enabled !== false,
+            status,
+            runtime: {
+              kind: 'local',
+              label: 'Local daemon',
+              ...(session ? { sessionId: session.sessionId } : {}),
+            },
             // A retired agent is listed, not hidden. Its posts are still on
             // the threads, and a reader who meets its name needs somewhere to
             // look it up. `enabled` stays a separate answer: a retired agent
@@ -991,6 +1034,9 @@ export function registerWorkspaceAgentRoutes(
           description?: unknown;
           agentType?: unknown;
           color?: unknown;
+          model?: unknown;
+          instructions?: unknown;
+          maxConcurrentRuns?: unknown;
         };
         const name = String(payload.name ?? '').trim();
         if (!name) {
@@ -1002,6 +1048,11 @@ export function registerWorkspaceAgentRoutes(
             error:
               'Agent names must start with a letter or number and contain at most 48 letters, numbers, underscores, or hyphens.',
           });
+          return;
+        }
+        const config = readAgentConfigPatch(payload);
+        if (config.error) {
+          res.status(400).json({ error: config.error });
           return;
         }
         let created: WorkspaceAgent | undefined;
@@ -1019,20 +1070,11 @@ export function registerWorkspaceAgentRoutes(
             duplicateRetired = clash.retiredAt !== undefined;
             return agents;
           }
-          created = {
+          created = config.apply({
             id: generateAgentId(),
             name,
             createdAt: Date.now(),
-            ...(typeof payload.description === 'string'
-              ? { description: payload.description }
-              : {}),
-            ...(typeof payload.agentType === 'string'
-              ? { agentType: payload.agentType }
-              : {}),
-            ...(typeof payload.color === 'string'
-              ? { color: payload.color }
-              : {}),
-          };
+          });
           return [...agents, created];
         });
         if (duplicate) {

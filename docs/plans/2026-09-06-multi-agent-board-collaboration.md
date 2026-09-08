@@ -249,12 +249,12 @@ What changes is the runtime seam, and only it:
 
 | Concern                | Was                                                              | Becomes                                                                               |
 | ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| A body                 | background agent `workspace agents-<id>` inside the host session | a session process with `sourceType: 'agent'`, `sourceId: <id>`                        |
+| A body                 | background agent `workspace agents-<id>` inside the host session | a top-level ACP session with `sourceType: 'agent'`, `sourceId: <id>`                  |
 | Persona                | `convertToRuntimeConfig` into a subagent `toolConfig`            | the same conversion, applied by the child to its own session `Config` at `newSession` |
 | Start a turn           | `launchProgrammaticBackgroundAgent`                              | `bridge.spawnOrAttach` then a prompt into that session                                |
 | Inspect                | `registry.get('workspace agents-<id>')`                          | the bridge's live-session record for that agent                                       |
 | Mid-run steering       | `registry.queueExternalInput`                                    | the session's existing mid-prompt input path                                          |
-| Per-turn binding       | `AgentMeta.agentRun` read at the in-process turn seam            | the same record, read by the agent's own process                                      |
+| Per-turn binding       | `AgentMeta.agentRun` read at the in-process turn seam            | the same record, read at the agent session's turn seam                                |
 | Usage and drain events | `AgentEventEmitter` in the host process                          | the session's own event stream                                                        |
 
 `dispatch-port.ts` is the whole of it: the dispatcher, its rules, and every
@@ -264,18 +264,18 @@ that knew what a body is.
 The hidden host session stays, with a smaller job: it owns nothing but the
 dispatch loop. It no longer contains the agents.
 
-### 1.3 What isolation buys, and what it costs
+### 1.3 What session separation buys, and what it does not
 
-Buys: an agent that crashes takes down only itself and its current run, which
-the existing interrupted-run reconciliation already recovers; per-agent memory
-and model settings; a transcript per agent that is genuinely that agent's; and
-the honest version of the roster the UI already draws.
+Each agent gets its own identity, persona, model setting, context and transcript.
+That is enough for independent task orchestration and for opening the agent as a
+normal Qwen Code conversation. It is not crash isolation: the current ACP bridge
+multiplexes those sessions in one process, so a process failure affects every
+local agent session.
 
-Costs: N processes instead of one, each with a model client and its own
-context. The background-agent concurrency cap stops being the relevant limit and
-the machine's memory becomes it. A roster is small — two to five agents — so
-this is a real cost and not a prohibitive one, but it is the reason decision 4
-scopes agents to one workspace and the reason a roster limit belongs in the UI.
+The cost is N live session contexts and model clients inside that process. A
+roster is expected to stay small — two to five agents — and the machine's memory
+is the practical limit. Remote hosts, daemon heartbeats and per-agent process
+boundaries require a first-class runtime layer; this demo does not claim them.
 
 Everything the execution layer needs still exists:
 
@@ -311,7 +311,7 @@ read-only; a private server or trusted-looking name is not evidence.
 | #   | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Consequence                                                                                                                                                                                                                                                                                                       |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 9   | A message **may enter a running agent only on its bound thread**. Queue acceptance and correlated runtime consumption are recorded separately; undrained input is reconciled from durable triggers.                                                                                                                                                                                                                                                        | Mid-run steering is at-least-once, never a success-shaped prediction. Duplicate delivery is allowed; silent loss is not.                                                                                                                                                                                          |
-| 10  | An agent runs **up to `maxConcurrentRuns` threads at once** (default 1). Pending work is selected globally by lock-issued `(queueSequence, runId)` FIFO; a waiting thread names the agent's active threads. `queuedAt` is diagnostic only.                                                                                                                                                                                                                 | Multica's `max_concurrent_tasks`. Serial was chosen when an agent was a subagent sharing one process and one chat; with a process of its own the reason is gone, and one slow investigation no longer blocks every other thread that agent owns. The default stays 1 so nothing changes until a person raises it. |
+| 10  | An agent runs **up to `maxConcurrentRuns` threads at once** (default 1). Pending work is selected globally by lock-issued `(queueSequence, runId)` FIFO; a waiting thread names the agent's active threads. `queuedAt` is diagnostic only.                                                                                                                                                                                                                 | Multica's `max_concurrent_tasks`. Serial was chosen when an agent was a subagent owning one chat; a top-level session removes that chat constraint even though sessions still share one process. The default stays 1 so nothing changes until a person raises it. |
 | 11  | Each agent has a **bounded pending queue**; running work is not counted. Full queues and launch failures are explicit outcomes.                                                                                                                                                                                                                                                                                                                            | `queueLimit=5` means five waiting runs, not four plus the active one; failed launches cannot occupy a slot forever.                                                                                                                                                                                               |
 | 12  | Agents may **post, `@` any enabled workspace agent, change status, and create sub-threads**. They may not create agents.                                                                                                                                                                                                                                                                                                                                   | This is intentionally looser than Multica's per-agent invocation policy. Every agent action is stamped with its ambient run for provenance.                                                                                                                                                                       |
 | 13  | A sub-thread becoming quiescent writes a durable, system-authored **parent dependency event** attributed to the child transition. `in_review` carries the summary; aggregate blocked, terminal run failure/cancellation, or human-set done carries its state. It targets the parent assignee; with none, it remains visible and notifies the person.                                                                                                       | A waiting parent is always woken or visibly stranded, cross-file posting survives a crash, and the event cannot self-suppress when one agent owns parent and child.                                                                                                                                               |
@@ -458,8 +458,8 @@ is never presented as one run's log.
 `maxConcurrentRuns` bounds how many threads one agent works at once, and
 `queueLimit` bounds how much may wait behind it. They are different questions —
 throughput and backlog — and an earlier revision collapsed them because a
-subagent could only ever have one live run. With a process per agent that is a
-policy rather than a fact, so it is a field with a default of 1.
+subagent could only ever have one live run. With a top-level session per agent
+that is a policy rather than a fact, so it is a field with a default of 1.
 
 `rootThreadId` is inherited at creation rather than resolved by walking parents
 at spend time. Missing or invalid roots fail closed. A child inherits the
@@ -1042,29 +1042,13 @@ gap. Scheduled and external-event triggers are absent but the cron scheduler and
 channel workers already exist to carry them. Board views, labels, search and
 cross-issue references have no equivalent.
 
-| Capability                       | Target reach | Note                                                                                                                                    |
-| -------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Multi-agent collaboration itself | ~85%         | routing, hand-off, sub-thread reporting, concurrent runs, and accepted mid-run steering observed; forced delivery miss remains unproved |
-| Run records and observability    | ~80%         | shared transcript with per-run slices and tokens; retry and timeout are implemented but unverified                                      |
-| Skills                           | ~70%         | carried by the agent definition                                                                                                         |
-| Agent identity                   | ~50%         | identity, persona, enable/disable, workload — runtime binding is zero                                                                   |
-| Triggers                         | ~50%         | assignment and `@`; scheduled and external events unconnected                                                                           |
-| Work items                       | ~40%         | assignable item with conversation and status; no board, labels or search                                                                |
-| Notifications                    | ~40%         | four events to existing channels; no inbox                                                                                              |
-| Multiple surfaces                | ~30%         | Web Shell and desktop shell                                                                                                             |
-| Projects                         | ~15%         | a workspace is one cwd                                                                                                                  |
-| Multi-user, self-hosting         | ~5%          | single user, single machine                                                                                                             |
-| Producing code changes           | 0%           | decision 1                                                                                                                              |
-
-As a target product, roughly 35-40%. That number mixes two unlike things: Multica is a
-multi-user server product (Go, Postgres, tenancy, self-hosting) and this is a
-single-machine daemon over files. Most of the remaining 60% is that category
-difference, not a backlog.
-
-**Measured against multi-agent collaboration itself — hand-off, observability,
-steering, guardrails — the target reaches roughly 80%**, which is the part that
-was actually asked for. The implementation is at §5.2 step 3 and has still not
-launched or dispatched a workspace agent.
+Percentages were removed because they hid incompatible denominators. Current
+evidence supports a narrower statement: local persistent identities can be
+assigned work, collaborate through mentions and child threads, accept human
+input, and return work for review in the Web Shell. Runtime registration,
+remote hosts, process isolation, the full Multica agent builder, labels,
+projects, inbox and the complete failure-injection matrix are not complete.
+The product must not describe the former as percentage completion of the latter.
 
 ### 7.1 Relationship to the Agent Board (#9402)
 

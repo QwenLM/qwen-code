@@ -115,10 +115,9 @@ export interface WorkspaceAgent {
    * How many threads this agent may work at once. Absent means 1.
    *
    * Multica's `max_concurrent_tasks`. Serial was a consequence of an agent
-   * being a subagent that owned one chat inside a shared process; with a
-   * process of its own it is a policy. Distinct from {@link queueLimit}, which
-   * bounds how much may *wait* — throughput and backlog are different
-   * questions.
+   * being a subagent that owned one chat; with a top-level session of its own
+   * it is a policy. Distinct from {@link queueLimit}, which bounds how much may
+   * *wait* — throughput and backlog are different questions.
    */
   maxConcurrentRuns?: number;
   /**

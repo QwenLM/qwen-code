@@ -337,13 +337,16 @@ envelope; interrupted-run recovery; mid-run steering with rebook. None of this
 knows how a body is started. It addresses agents by id and threads by file, so
 it survives the change below.
 
-**Wrong, and being replaced.** The execution model. An agent is a background
-subagent inside one hidden host session, so N agents share one process, one
-memory space and one crash. There is no runtime concept at all.
+**Implemented, but narrower than Multica.** Each identity owns a top-level ACP
+session with its own persona, model setting and transcript. It is no longer a
+background subagent. The ACP bridge still multiplexes those sessions in one
+process, and there is no first-class runtime registry, host binding or heartbeat.
 
-**Missing entirely.** Runtime registry and binding; priority, labels, due date,
-acceptance criteria on the work item; agent configuration beyond a name and a
-definition reference; squads; inbox; projects; per-agent concurrency.
+**Missing entirely.** Runtime registry and binding; labels and due date on the
+work item; squads; inbox; projects. Priority, acceptance criteria, per-agent
+instructions/model/definition and concurrency have landed. Agent creation is
+still split between Qwen Code's definition builder and the persistent roster
+instead of presenting one Multica-shaped flow.
 
 ## 3. Why the percentages I gave were wrong
 
@@ -357,15 +360,17 @@ not eighty percent. I should not have used that number.
 
 Four stages. Each is usable on its own; none needs the next to be worth having.
 
-### Stage A — an agent is a process
+### Stage A — an agent is a top-level session
 
-Multica binds an agent to a runtime. Locally, the runtime is this machine's
-daemon and the process is one session per agent, so the binding degenerates to
-"which session is this agent" without losing the shape.
+Multica binds an agent to a runtime. This demo binds an identity to one
+top-level ACP session on the current local daemon. That preserves the agent's
+persona and conversation, but it is not Multica's registered runtime or an OS
+process boundary.
 
-- `WorkspaceAgent` gains `runtime: { mode: 'local'; sessionId?: string }`. The field
-  is a discriminated union from day one so `'cloud'` can be added without a
-  migration, matching `agent.runtime_mode`.
+- No durable runtime record is invented for the local-only demo. An agent's
+  deterministic session id and the bridge's live-session record are the source
+  of truth. A persisted binding belongs with a real runtime registry, not with
+  a label that always means "this daemon".
 - An agent session is spawned with `sourceType: 'agent'`,
   `sourceId: <agent id>`. The child recognises itself at `newSession`, reads the
   roster, and applies its own persona — `Config.systemPrompt` for the prompt
@@ -385,23 +390,25 @@ daemon and the process is one session per agent, so the binding degenerates to
   `launchProgrammaticBackgroundAgent`, no `BackgroundTaskRegistry`, no
   in-process `AgentEventEmitter`.
 
-Delivers: real isolation, an honest agent status, and a per-agent transcript
-that is that agent's session.
+Delivers: separate agent identity, persona and transcript. It does not deliver
+process crash isolation or remote runtime placement.
 
 ### Stage B — the conversation is Qwen Code's, not a second one
 
-I built a bespoke `ThreadView` with its own message rendering. That was a
-consequence of Stage A being wrong: a subagent has no session, so it had no UI,
-so I drew one. With agents as sessions it is redundant and it is a second place
-where "who said what" has to be got right.
+I built a bespoke `ThreadView` with its own message rendering. Some of that UI
+can reuse the existing conversation shell, but the shared thread itself cannot
+be replaced by one ordinary session: it spans several agent sessions and owns
+assignment, status, child work, routing outcomes and acceptance.
 
 - The thread page keeps what only it knows: the status sentence, the run rows
   with their close obligations, the budget line, assignment and status actions,
   and the composer with its routing preview.
-- Everything about _what an agent said_ links into that agent's existing session
-  view. One message renderer, one transcript, one place a person already knows.
+- Each run links into that agent's existing session view for the full model
+  transcript. Agent sessions remain visible in the normal conversation list.
 - Thread posts stay the durable coordination record — who was asked, who
-  answered, what was booked — not a duplicate of the model conversation.
+  answered, what was booked — because no individual session owns that shared
+  history. The remaining UI work is reuse of the existing list shell and
+  message primitives, not deletion of the thread model.
 
 ### Stage C — the work item catches up
 
@@ -422,11 +429,12 @@ bookkeeping, and our `open` covers both.
 ### Stage D — the agent is configurable
 
 Multica's agent detail page has instructions, env, MCP servers, custom args,
-integrations and activity. We have a name, a colour and a definition reference.
-Qwen Code already has agent definitions with prompts, tools and MCP, so the
-work is surfacing per-identity overrides on top of a definition rather than
-building a second configuration system: instructions, model, MCP servers, and
-the read-only ceiling shown as what it is.
+integrations and activity. Qwen Code already has a rich agent-definition editor
+with manual and model-assisted generation. The workspace identity adds only
+instructions, model, definition and concurrency overrides plus an explicit
+read-only ceiling. The product gap is joining those two concepts into one
+creation flow; a second prompt/tool editor should not be built beside the one
+Qwen Code already has.
 
 Squads, inbox and projects come after this, and only if you want them; none is
 load-bearing for two agents collaborating on one thread.
@@ -435,23 +443,23 @@ load-bearing for two agents collaborating on one thread.
 
 Stage A rewrites three files — `launcher.ts`, `dispatch-port.ts`,
 `runtime-bridge.ts` — and the `AgentMeta.agentRun` per-turn binding moves from an
-in-process AsyncLocalStorage frame in the host to the agent's own process. Every
-test that mocks `BackgroundTaskRegistry` for workspace agents goes with them. Nothing in the
-store, the rules, the tools or the REST surface changes.
+in-process AsyncLocalStorage frame in the host to the agent session's turn seam.
+Every test that mocks `BackgroundTaskRegistry` for workspace agents goes with
+them. Nothing in the store, the rules, the tools or the REST surface changes.
 
-N processes replace one. A roster is two to five agents, so this is a real cost
-and not a prohibitive one, but the background-agent concurrency cap stops being
-the limit and the machine's memory becomes it. A roster size limit belongs in
-the UI, and `max_concurrent_tasks` (Multica has it; we currently force serial)
-becomes a per-agent field rather than decision 10's blanket rule.
+N session contexts share one ACP process. A roster is two to five agents, so
+the machine's memory is still the practical limit. A roster size limit belongs
+in the UI, and `max_concurrent_tasks` is a per-agent field rather than a blanket
+rule. A later runtime layer may place those sessions on separate processes or
+hosts without changing the thread rules.
 
 ## 6. Decisions, made 2026-09-08
 
 1. **An agent may work several threads at once.** `WorkspaceAgent.maxConcurrentRuns`,
    default 1, mirroring Multica's `max_concurrent_tasks`. Decision 10 is
    rewritten: serial was a consequence of a subagent owning one chat inside a
-   shared process, and with a process per agent it is a policy rather than a
-   fact. The default keeps today's behaviour until someone raises it, and
+   shared chat, and with a top-level session per agent it is a policy rather
+   than a fact. The default keeps today's behaviour until someone raises it, and
    `queueLimit` stays a separate bound — throughput and backlog are different
    questions.
    _Where it lands:_ `selectCandidates` counts an agent's live runs against its
@@ -459,10 +467,10 @@ becomes a per-agent field rather than decision 10's blanket rule.
    already-live check does the same. Both are single conditions.
 
 2. **An agent's session appears in the normal session list.** A person opens
-   alice the way they open any other conversation. This is what makes Stage B
-   possible: with the session visible there is one message renderer and one
-   transcript, and the bespoke thread conversation I built can go. Only the
-   dispatch host stays hidden, because it is infrastructure with no
+   alice the way they open any other conversation. This reuses the existing
+   transcript and renderer for an agent's full work. The shared thread remains
+   the cross-agent coordination record because no one agent session owns it.
+   Only the dispatch host stays hidden, because it is infrastructure with no
    conversation of its own.
    _Where it lands:_ this subsystem-agent source type is excluded from the
    host-session filters in `session-list.ts` and `acpAgent.ts`, not added to
@@ -481,8 +489,8 @@ becomes a per-agent field rather than decision 10's blanket rule.
 
 In dependency order. Each item is small; the sequence is what matters.
 
-1. `WorkspaceAgent` gains `runtime: { mode: 'local'; sessionId?: string }`,
-   `maxConcurrentRuns`, and `status` derived from the session rather than stored.
+1. `WorkspaceAgent` gains `maxConcurrentRuns`; its local session and status are
+   derived from the bridge rather than duplicated in the roster.
 2. `workspace agents-agent` session source type, and persona resolution in the child at
    `newSession` — roster lookup, `Config.systemPrompt`, `deriveConfig` for tool
    registry, invocation guard and model.
@@ -492,7 +500,7 @@ In dependency order. Each item is small; the sequence is what matters.
 4. `launcher.ts` and `runtime-bridge.ts` deleted; their callers move to 3.
 5. `selectCandidates` and `claimRun` honour `maxConcurrentRuns`.
 6. The per-turn `(agent, run, thread)` binding moves from the host's
-   AsyncLocalStorage frame to the agent's own process, read at its turn seam.
+   AsyncLocalStorage frame to the agent session, read at its turn seam.
 
 The dispatcher's rules, the twelve admission outcomes, the store, the tools,
 the prompt envelope and the REST surface are not touched by any of this.
@@ -507,7 +515,7 @@ the changed surface and CI is the verification.
 | ------------ | -------------------------------------------------------------------- |
 | `2a8e23cb30` | Renamed the subsystem from mesh to workspace agents                  |
 | `77578abab7` | Repaired the import paths the rename broke; persona applied at spawn |
-| `cbc8958379` | Dispatch against one session process per agent                       |
+| `cbc8958379` | Dispatch against one top-level ACP session per agent                 |
 | `f663f779a1` | Token accounting from the session's own counter                      |
 | `39da00b8f6` | Removed the subagent execution path                                  |
 | `b4055c3690` | Agent sessions named after their agent; runs link to them            |
@@ -515,10 +523,11 @@ the changed surface and CI is the verification.
 | `8d6e199cc4` | Deleting an agent retires it instead of erasing it                   |
 | `59d326e422` | Agents are configurable; the capability ceiling is shown             |
 
-Stage A is complete: `launcher.ts`, `dispatch-port.ts` and `runtime-bridge.ts`
-are gone, along with `launchWorkspaceAgent`, `dispatchAgentRuns` and the two
-ACP control methods behind them. Dispatch runs in the daemon, where the
-sessions are.
+Stage A's sessionization is complete: `launcher.ts`, `dispatch-port.ts` and
+`runtime-bridge.ts` are gone, along with `launchWorkspaceAgent`,
+`dispatchAgentRuns` and the two ACP control methods behind them. Dispatch runs
+in the daemon, where the sessions are. Multica-style runtime registration and
+process isolation remain absent.
 
 Stage B turned out to be smaller than written. Agent sessions were already in
 the ordinary session list — only the hidden host type is filtered anywhere —
@@ -536,6 +545,10 @@ overrides, plus the capability ceiling as something a person can read. MCP
 servers were deliberately not added: `classifyAgentTool` denies every name not
 in its table and no MCP tool is in it, so the setting would do nothing.
 Reaching MCP means moving the read-only ceiling, which is a separate decision.
+The creation endpoint now accepts those effective identity fields in its first
+atomic roster write, and the list reports status from the live bridge session.
+This makes the current manual flow honest; it does not yet merge the reusable
+definition builder and persistent-roster step into Multica's single studio.
 
 ### How this branch was verified
 
@@ -611,11 +624,11 @@ question for whoever owns that surface.
 
 **Multica 实际是什么**：Linear 形态的 issue tracker，assignee 可以是 agent，外加一层 runtime 注册。`agent_runtime` 是独立实体（workspace + daemon_id + provider，带在线状态和心跳），agent 绑定到它上面；`agent_task_queue` 是 agent × issue 的派发队列；`issue` 有优先级、7 种状态、验收标准、截止日期、标签、项目；对话就是 issue 上的 comment。页面里有独立的 runtimes 和 runtimes/[id]。
 
-**我们的状态**：底层是扎实的——存储事务、准入十二种结局、预算闸门、状态聚合、run 两段收尾、outbox、六个工具、提示词、崩溃恢复、中途插话。这些只认 agent id 和文件，换执行模型后仍然成立。执行模型是错的：agent 是同一个宿主进程里的 subagent，没有 runtime 概念。完全没有的：runtime 注册与绑定、工作项的优先级/标签/验收标准/截止日期、agent 的可配置能力、squad、inbox、projects、按 agent 的并发。
+**我们的状态**：底层协作规则已经具备；每个 agent 也已经是独立的顶层 ACP session，不再是 background subagent。仍然缺的是 Multica 式一等 runtime：这些 session 共享一个 ACP 进程，没有 host 注册、心跳、远程放置或进程级故障隔离。工作项已有优先级和验收标准；标签、截止日期、project、squad、inbox 仍未实现。
 
 **之前那个七八成错在哪**：我拿自己那份设计文档当卷子打分，而文档 §1 就把执行模型定错了、§10 还把真正的进程隔离划到范围外。按你的目标看，runtime 这层是零。
 
-**方案四步**：A 让 agent 变成进程（一个 agent 一个 session，靠 sourceType 认领身份并加载人格——这个钩子本来就存在，当初说没有是错的；重写三个文件，规则层不动）；B 把对话交回 Qwen Code 已有的 session 界面，线程页只保留它独有的状态、run 行、预算和指派；C 工作项补上验收标准和优先级，标签和截止日期次之；D agent 变成可配置对象。squad/inbox/projects 排在最后，且不是两个 agent 协作的必要条件。
+**方案四步**：A 让 agent 变成顶层 session（靠 sourceType 认领身份并加载人格），但不谎称它已有独立进程；B agent 的完整执行记录复用 Qwen Code 原有会话，shared thread 继续保存跨 agent 的指派、状态、@ 与验收，再复用现有列表壳和消息组件；C 工作项补上验收标准和优先级，标签和截止日期次之；D agent 变成可配置对象，并把已有 definition builder 与 persistent roster 合成一条创建路径。squad/inbox/projects 排在最后，且不是两个 agent 协作的必要条件。
 
 **动手前需要你定三件事**：每个 agent 允不允许并发多任务；agent 的 session 要不要出现在普通会话列表里；删除 agent 时线程怎么处理。
 

@@ -46,6 +46,7 @@ export interface ThreadsPageProps {
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
+  onOpenAgentSession?: (sessionId: string) => void;
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => void;
   onPreviewThread?: (assignee?: string) => void;
@@ -66,6 +67,12 @@ export interface WorkspaceAgentSummaryView {
   instructions?: string;
   maxConcurrentRuns?: number;
   enabled: boolean;
+  status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
+  runtime: {
+    kind: 'local';
+    label: string;
+    sessionId?: string;
+  };
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
   workingOn?: {
@@ -80,6 +87,9 @@ export interface NewWorkspaceAgent {
   name: string;
   description?: string;
   agentType?: string;
+  model?: string;
+  instructions?: string;
+  maxConcurrentRuns?: number;
 }
 
 export type ThreadPriorityChoice = 'urgent' | 'high' | 'normal' | 'low';
@@ -168,6 +178,7 @@ export function ThreadsPage({
   onDeleteAgent,
   onSetAgentEnabled,
   onUpdateAgent,
+  onOpenAgentSession,
   capabilities,
   onCreateThread,
   onPreviewThread,
@@ -207,10 +218,16 @@ export function ThreadsPage({
     const data = new FormData(event.currentTarget);
     const description = String(data.get('description') ?? '').trim();
     const agentType = String(data.get('agentType') ?? '').trim();
+    const model = String(data.get('model') ?? '').trim();
+    const instructions = String(data.get('instructions') ?? '').trim();
+    const maxConcurrentRuns = Number(data.get('maxConcurrentRuns') ?? 1);
     onCreateAgent({
       name: String(data.get('name') ?? '').trim(),
       ...(description ? { description } : {}),
       ...(agentType ? { agentType } : {}),
+      ...(model ? { model } : {}),
+      ...(instructions ? { instructions } : {}),
+      maxConcurrentRuns,
     });
     setCreating(undefined);
   };
@@ -278,11 +295,41 @@ export function ThreadsPage({
               name="description"
               placeholder="Role or specialty"
             />
+            <textarea
+              className={styles.field}
+              name="instructions"
+              rows={4}
+              placeholder="How this agent should work"
+            />
             <input
               className={styles.field}
               name="agentType"
-              placeholder="Agent definition (optional)"
+              placeholder="Agent definition template (optional)"
             />
+            <input
+              className={styles.field}
+              name="model"
+              placeholder="Model (workspace default)"
+            />
+            <label className={styles.configLabel}>
+              Threads at once
+              <input
+                className={styles.field}
+                name="maxConcurrentRuns"
+                type="number"
+                min={1}
+                max={8}
+                defaultValue={1}
+              />
+            </label>
+            <p className={styles.configNote}>
+              Runtime: this local daemon · one persistent ACP session · not a
+              separate OS process
+            </p>
+            <p className={styles.configNote}>
+              Workspace agents are read-only. Definitions can narrow that
+              boundary, never widen it.
+            </p>
             <div className={styles.formActions}>
               <Button
                 type="button"
@@ -426,20 +473,31 @@ export function ThreadsPage({
                 />
                 <strong>{agent.name}</strong>
                 <span className={styles.agentDescription}>
-                  {agent.description || 'general agent'}
+                  {agent.description || 'general agent'} · {agent.runtime.label}
                 </span>
                 <span className={styles.agentActivity}>
                   {agent.retiredAt
                     ? 'retired'
                     : agent.workingOn
                       ? `${agent.workingOn.state} · ${agent.workingOn.title}`
-                      : 'idle'}
+                      : agent.status}
                 </span>
                 <span className={styles.agentWaiting}>
                   {agent.waiting ? `${agent.waiting} waiting` : '—'}
                 </span>
                 {agent.retiredAt ? null : (
                   <>
+                    {agent.runtime.sessionId && onOpenAgentSession ? (
+                      <button
+                        type="button"
+                        className={styles.agentAction}
+                        onClick={() =>
+                          onOpenAgentSession(agent.runtime.sessionId!)
+                        }
+                      >
+                        Open session
+                      </button>
+                    ) : null}
                     {onUpdateAgent ? (
                       <button
                         type="button"
