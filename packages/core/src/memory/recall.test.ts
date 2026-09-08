@@ -330,6 +330,27 @@ describe('auto-memory relevant recall', () => {
     ).toEqual([metadataOnlyDoc]);
   });
 
+  it('does not score a description twice through its legacy scenario fallback', () => {
+    const single = memoryDoc(
+      'single.md',
+      'reference',
+      'Operational note',
+      'shared match',
+      '',
+    );
+    const duplicated = {
+      ...single,
+      filename: 'duplicated.md',
+      filePath: '/tmp/duplicated.md',
+      relativePath: 'duplicated.md',
+      usageScenarios: ['shared match'],
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('shared match', [single, duplicated]),
+    ).toEqual([single, duplicated]);
+  });
+
   it('matches Chinese metadata in heuristic mode', () => {
     const chineseDoc: ScannedAutoMemoryDocument = {
       ...docs[1]!,

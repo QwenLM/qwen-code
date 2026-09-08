@@ -43,13 +43,15 @@ function doc(
 
 describe('auto memory tree rendering', () => {
   it('does not repeat a legacy description fallback as a usage scenario', () => {
+    const description = `Legacy description ${'detail '.repeat(20)}`;
     const memory = doc('project/legacy.md', {
-      description: 'Legacy description',
-      usageScenarios: ['Legacy description'],
+      description,
+      usageScenarios: [description],
     });
     const focused = renderAutoMemoryFocusedSubtree([memory]).prompt;
 
-    expect(focused.match(/Legacy description/gu)).toHaveLength(1);
+    expect(focused).toContain(description.trim());
+    expect(focused).not.toContain('适用：');
   });
 
   it('builds a two-level tree sorted by fixed category order', () => {

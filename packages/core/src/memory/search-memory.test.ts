@@ -10,7 +10,7 @@ import {
   type ExecuteSearchMemoryOptions,
   type SearchMemoryToolResult,
 } from './search-memory.js';
-import { rereadAutoMemoryDocument } from './scan.js';
+import { rereadAutoMemoryDocument, scanAutoMemorySnapshot } from './scan.js';
 import type {
   AutoMemoryScanSnapshot,
   ScannedAutoMemoryDocument,
@@ -23,6 +23,7 @@ vi.mock('./scan.js', async (importOriginal) => {
     rereadAutoMemoryDocument: vi.fn(
       async (doc: ScannedAutoMemoryDocument) => doc,
     ),
+    scanAutoMemorySnapshot: vi.fn(actual.scanAutoMemorySnapshot),
   };
 });
 
@@ -766,6 +767,55 @@ describe('executeSearchMemory', () => {
       );
       expect(result.results).toHaveLength(1);
     }
+  });
+
+  it.each([
+    ['api', 'rapid'],
+    ['kubernetes pod restart policy', 'pod'],
+  ])('does not match stored keyword %j by substring', async (stored, query) => {
+    const result = expectContentResult(
+      await executeSearchMemory(
+        { mode: 'search', keywords: [query] },
+        options([
+          doc('project/substrings.md', {
+            title: 'Operational note',
+            keywords: [stored],
+          }),
+        ]),
+      ),
+      'search',
+    );
+
+    expect(result.results).toEqual([]);
+  });
+
+  it('includes team memory in a trusted default scan', async () => {
+    const teamDoc = doc('shared.md', {
+      scope: 'team',
+      keywords: ['team marker'],
+    });
+    vi.mocked(scanAutoMemorySnapshot).mockResolvedValueOnce(
+      snapshot([teamDoc]),
+    );
+
+    const result = expectContentResult(
+      await executeSearchMemory(
+        { mode: 'search', keywords: ['team marker'] },
+        {
+          projectRoot: '/tmp/project',
+          teamMemoryEnabled: true,
+          trustedProject: true,
+        },
+      ),
+      'search',
+    );
+
+    expect(scanAutoMemorySnapshot).toHaveBeenCalledWith('/tmp/project', {
+      scopes: ['project', 'user', 'team'],
+      teamMemoryEnabled: true,
+      trustedProject: true,
+    });
+    expect(result.results.map((item) => item.ref)).toEqual(['team:shared.md']);
   });
 
   it('deduplicates requested scopes before filtering a snapshot', async () => {

@@ -126,16 +126,14 @@ export function sanitizeAutoMemoryPromptField(
   value: string,
   maxChars: number,
 ): string {
-  return (
-    value
-      .normalize('NFKC')
-      .replace(/\p{Cc}/gu, ' ')
-      .replace(/\p{Cf}/gu, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, maxChars)
-      .replace(/[\uD800-\uDBFF]$/, '')
-  );
+  return value
+    .normalize('NFKC')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/\p{Cf}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxChars)
+    .replace(/[\uD800-\uDBFF]$/, '');
 }
 
 function parseKeywords(value: unknown): string[] {
@@ -496,8 +494,8 @@ async function scanProjectAutoMemoryWithStatus(
       }),
     ),
   );
-  const allDocs = sortScannedDocuments(
-    dedupeScannedDocuments(results.flatMap((result) => result.docs)),
+  const allDocs = dedupeScannedDocuments(
+    sortScannedDocuments(results.flatMap((result) => result.docs)),
   );
   const docs = uncapped ? allDocs : allDocs.slice(0, MAX_SCANNED_MEMORY_FILES);
   const incompleteScopes = results.flatMap((result) => result.incompleteScopes);

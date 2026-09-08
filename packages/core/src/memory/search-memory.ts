@@ -448,7 +448,11 @@ async function getSnapshot(
     };
   }
   return scanAutoMemorySnapshot(options.projectRoot, {
-    scopes,
+    scopes:
+      scopes ??
+      (options.teamMemoryEnabled && options.trustedProject
+        ? SCOPE_ORDER
+        : undefined),
     teamMemoryEnabled: options.teamMemoryEnabled,
     trustedProject: options.trustedProject,
   });
@@ -460,7 +464,11 @@ function scopeIndex(scope: AutoMemoryScope): number {
 }
 
 function exactOrContains(a: string, b: string): boolean {
-  return a.includes(b) || b.includes(a);
+  const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`,
+    'u',
+  ).test(b);
 }
 
 interface SearchScore {

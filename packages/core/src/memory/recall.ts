@@ -244,7 +244,11 @@ function scoreDocument(
   const title = normalizeRecallText(doc.title);
   const description = normalizeRecallText(doc.description);
   const keywords = normalizeRecallText(doc.keywords.join(' '));
-  const usageScenarios = normalizeRecallText(doc.usageScenarios.join(' '));
+  const usageScenarios = normalizeRecallText(
+    doc.usageScenarios
+      .filter((scenario) => normalizeRecallText(scenario) !== description)
+      .join(' '),
+  );
   const body = normalizeRecallText(
     normalizeBody(doc.body).slice(0, MAX_DOC_BODY_CHARS),
   );

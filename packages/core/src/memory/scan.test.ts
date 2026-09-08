@@ -46,9 +46,9 @@ describe('auto-memory topic scanning', () => {
   });
 
   it('strips Unicode control and format characters from prompt fields', () => {
-    expect(
-      sanitizeAutoMemoryPromptField('a\u00adb\u2060c\u{e0061}', 100),
-    ).toBe('abc');
+    expect(sanitizeAutoMemoryPromptField('a\u00adb\u2060c\u{e0061}', 100)).toBe(
+      'abc',
+    );
   });
 
   it('parses a CRLF (Windows checkout) topic document', () => {
@@ -453,6 +453,65 @@ describe('auto-memory topic scanning', () => {
       } else {
         process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
       }
+    }
+  });
+
+  it('keeps the newest project document when memory roots collide', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const previousBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+    clearAutoMemoryRootCache();
+    try {
+      const runtimeFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'collision.md',
+      );
+      const localFile = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'project',
+        'collision.md',
+      );
+      const content = (name: string) =>
+        `---\ntype: project\nname: ${name}\ndescription: collision fixture\n---\nbody`;
+      await fs.mkdir(path.dirname(runtimeFile), { recursive: true });
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(runtimeFile, content('Older runtime'));
+      await fs.writeFile(localFile, content('Newer local'));
+      await fs.utimes(
+        runtimeFile,
+        new Date('2026-08-26T00:00:00.000Z'),
+        new Date('2026-08-26T00:00:00.000Z'),
+      );
+      await fs.utimes(
+        localFile,
+        new Date('2026-08-27T00:00:00.000Z'),
+        new Date('2026-08-27T00:00:00.000Z'),
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(
+        snapshot.docs.find((doc) => doc.relativePath === 'project/collision.md')
+          ?.title,
+      ).toBe('Newer local');
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBase;
+      }
+      clearAutoMemoryRootCache();
     }
   });
 

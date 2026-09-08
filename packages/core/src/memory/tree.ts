@@ -82,6 +82,10 @@ function toAutoMemoryTreeLeaf(
 ): AutoMemoryTreeLeaf {
   const ref = toAutoMemoryRef(doc);
   const description = sanitizeAutoMemoryPromptField(doc.description, 512);
+  const descriptionAsScenario = sanitizeAutoMemoryPromptField(
+    doc.description,
+    64,
+  ).toLocaleLowerCase('en-US');
   return {
     memoryRef: ref,
     scope: doc.scope,
@@ -92,8 +96,7 @@ function toAutoMemoryTreeLeaf(
     keywords: sanitizeList(doc.keywords, 64),
     usageScenarios: sanitizeList(doc.usageScenarios, 64).filter(
       (scenario) =>
-        scenario.toLocaleLowerCase('en-US') !==
-        description.toLocaleLowerCase('en-US'),
+        scenario.toLocaleLowerCase('en-US') !== descriptionAsScenario,
     ),
     mtimeMs: doc.mtimeMs,
   };
