@@ -361,6 +361,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -29803,6 +29808,12 @@ describe('sessionLanguage multi-session propagation', () => {
     // The full reconcile's most consequential leg: refreshTools reinitializes
     // MCP servers, LSP, subagents, hooks, and hierarchical memory.
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    // ...but never on the bootstrap config: it is initialized with
+    // skipMcpDiscovery and never joins the MCP transport pool, so
+    // refreshTools would spawn un-pooled subprocesses (W119). Its
+    // refreshCache leg still feeds the daemon's catalog read.
+    expect(bootstrapExtensionManager.refreshTools).not.toHaveBeenCalled();
+    expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledTimes(2);
 
     extensionManager.refreshTools.mockClear();
     await expect(

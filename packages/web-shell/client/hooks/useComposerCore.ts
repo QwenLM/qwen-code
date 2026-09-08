@@ -2013,6 +2013,7 @@ export function useComposerCore(
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
+        if (event.clipboardData.getData('text/plain')) return;
         if (enqueueImageTransfer(event.clipboardData, 'paste')) {
           event.preventDefault();
           event.stopPropagation();

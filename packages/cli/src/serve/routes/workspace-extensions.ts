@@ -734,14 +734,6 @@ export function registerWorkspaceExtensionRoutes(
           onRuntimeReconciled,
         }
       : {};
-  const workspaceReconciliationOptions = () =>
-    workspaceRegistry
-      ? {
-          refreshRuntimes: [workspaceRegistry.primary],
-          reserveRuntimeReconciliation,
-          onRuntimeReconciled,
-        }
-      : {};
   const mutationClientBridges = (
     runtimes?:
       | readonly WorkspaceRuntime[]
@@ -1577,9 +1569,7 @@ export function registerWorkspaceExtensionRoutes(
               return { status: 'enabled', name: extension.name };
             },
             {
-              ...(scope === SettingScope.User
-                ? globalReconciliationOptions()
-                : workspaceReconciliationOptions()),
+              skipRefresh: true,
             },
           );
         } catch (err) {
@@ -1630,9 +1620,7 @@ export function registerWorkspaceExtensionRoutes(
               return { status: 'disabled', name: extension.name };
             },
             {
-              ...(scope === SettingScope.User
-                ? globalReconciliationOptions()
-                : workspaceReconciliationOptions()),
+              skipRefresh: true,
             },
           );
         } catch (err) {
@@ -1866,6 +1854,8 @@ export function registerWorkspaceExtensionRoutes(
       operationId?: string,
     ) => Promise<ExtensionMutationEvent>,
     options: {
+      // Also selects the bridges the mutation client id is validated against,
+      // so it stays load-bearing on routes that pass `skipRefresh: true`.
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
         | (() => readonly WorkspaceRuntime[]);
@@ -2000,6 +1990,7 @@ export function registerWorkspaceExtensionRoutes(
         };
       },
       {
+        skipRefresh: true,
         ...(workspaceRegistry
           ? { refreshRuntimes: () => workspaceRegistry.listAll() }
           : {}),
@@ -2044,6 +2035,7 @@ export function registerWorkspaceExtensionRoutes(
           };
         },
         {
+          skipRefresh: true,
           ...(workspaceRegistry
             ? { refreshRuntimes: () => workspaceRegistry.listAll() }
             : {}),
@@ -2684,6 +2676,7 @@ export function registerWorkspaceExtensionRoutes(
             };
           },
           {
+            skipRefresh: true,
             refreshRuntimes: [runtime],
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           },
@@ -2732,6 +2725,7 @@ export function registerWorkspaceExtensionRoutes(
             };
           },
           {
+            skipRefresh: true,
             refreshRuntimes: [runtime],
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           },
@@ -2780,6 +2774,7 @@ export function registerWorkspaceExtensionRoutes(
             return { status: activation.effective, name: extension.name };
           },
           {
+            skipRefresh: true,
             refreshRuntimes: [runtime],
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           },

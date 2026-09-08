@@ -443,6 +443,10 @@ export function ExtensionsManagerPage({
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
+  const activationRequiresExplicitRefresh =
+    workspace.capabilities?.features.includes(
+      'extension_activation_explicit_refresh',
+    ) === true;
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
   // The split runtime routes are trust-gated per target. An untrusted
   // primary keeps the trust-free legacy read; an untrusted secondary stays
@@ -468,9 +472,9 @@ export function ExtensionsManagerPage({
     [targetWorkspaceCwd, workspace.client],
   );
   const loadRequestRef = useRef(0);
-  const loadRef = useRef<((preserveMessage?: boolean) => Promise<void>) | null>(
-    null,
-  );
+  const loadRef = useRef<
+    ((preserveMessage?: boolean) => Promise<unknown>) | null
+  >(null);
   const runtimeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -492,6 +496,11 @@ export function ExtensionsManagerPage({
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
   const [messageOwner, setMessageOwner] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [workspaceTrusted, setWorkspaceTrusted] = useState(true);
+  const [refreshError, setRefreshError] = useState<{
+    name: string;
+    text: string;
+  } | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -511,6 +520,7 @@ export function ExtensionsManagerPage({
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
   const [operationsRecovered, setOperationsRecovered] = useState(false);
   const mutationInFlightRef = useRef(false);
+  const refreshTokenRef = useRef(0);
   const uninstallInFlightNameRef = useRef<string | null>(null);
   const interactionOperationIdRef = useRef<string | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
@@ -585,6 +595,10 @@ export function ExtensionsManagerPage({
             : preserveSelectedExtensionName(name, nextExtensions),
         );
       };
+      // The trust this load observed, resolved per branch so awaiting
+      // callers decide on the fresh value, not the render-time state
+      // snapshot.
+      let observedTrusted: boolean | null = null;
       try {
         if (splitRuntimeAvailable) {
           if (!workspaceClient) throw new Error('Workspace is unavailable.');
@@ -661,6 +675,7 @@ export function ExtensionsManagerPage({
               );
             }
           }
+          observedTrusted = activation ? activation.trusted : null;
         } else {
           const projection = workspace.workspaceCwd
             ? workspace.client
@@ -685,7 +700,14 @@ export function ExtensionsManagerPage({
             setMessageTone(status.errors?.[0] ? 'error' : 'info');
             setMessage(status.errors?.[0]?.error ?? null);
           }
+          observedTrusted = activation ? activation.trusted : null;
         }
+        // Keep the last known trust when the projection fails: defaulting to
+        // trusted would re-arm a refresh the runtime must reject.
+        if (observedTrusted !== null) {
+          setWorkspaceTrusted(observedTrusted);
+        }
+        return observedTrusted;
       } catch (error) {
         if (requestId === loadRequestRef.current) {
           if (!preserveMessage) {
@@ -758,8 +780,12 @@ export function ExtensionsManagerPage({
               },
           );
         }
+        // `refresh` reconciles the runtime; adopting it would lock the page
+        // behind an action the user never started.
         const activeMutation = operations.find(
-          (operation) => operation.operation !== 'install',
+          (operation) =>
+            operation.operation !== 'install' &&
+            operation.operation !== 'refresh',
         );
         if (activeMutation) {
           mutationInFlightRef.current = true;
@@ -1020,7 +1046,12 @@ export function ExtensionsManagerPage({
               return next;
             });
           }
-          void load(true);
+          // Same owner release as the non-polling settle: after the reload.
+          void load(true).finally(() => {
+            setMessageOwner((owner) =>
+              owner === pendingMutation.name ? null : owner,
+            );
+          });
           return;
         }
         setMessageTone('progress');
@@ -1057,6 +1088,7 @@ export function ExtensionsManagerPage({
 
   const refreshList = useCallback(() => {
     loadNoticeRef.current = false;
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('info');
     setMessage(null);
@@ -1066,6 +1098,7 @@ export function ExtensionsManagerPage({
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('info');
       setMessage(null);
@@ -1133,6 +1166,7 @@ export function ExtensionsManagerPage({
       return;
     setInstalling(true);
     loadNoticeRef.current = false;
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
@@ -1200,6 +1234,7 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1242,7 +1277,12 @@ export function ExtensionsManagerPage({
             if (options.operation === 'uninstall') {
               uninstallInFlightNameRef.current = null;
             }
-            void load(true);
+            // Hold the notice owner across the mutation's own reload so a
+            // runtime error surfacing mid-flight cannot replace the result;
+            // release it afterwards or the error gate stays shut for good.
+            void load(true).finally(() => {
+              setMessageOwner((owner) => (owner === name ? null : owner));
+            });
           }
         });
       return true;
@@ -1280,6 +1320,7 @@ export function ExtensionsManagerPage({
           : activation === 'disabled'
             ? 'disable'
             : 'inherit';
+      setRefreshError(null);
       setBusyName(extension.name);
       setMessageOwner(extension.name);
       setMessageTone('progress');
@@ -1309,13 +1350,34 @@ export function ExtensionsManagerPage({
             completed.error ?? t('extensions.manage.operationFailed'),
           );
         }
-        await load(true);
+        const observedTrust = (await load(true)) ?? workspaceTrusted;
         setMessageTone('success');
         setMessage(
           operation === 'inherit'
             ? t('extensions.manage.inherited', { name: extension.name })
             : mutationSuccessMessage(operation, extension.name, t),
         );
+        // An untrusted runtime rejects this refresh; the reconciler is the
+        // only path that can serve it.
+        if (activationRequiresExplicitRefresh && observedTrust) {
+          // A rejection from a superseded refresh must not evict the banner
+          // of the refresh that is still current.
+          const refreshToken = ++refreshTokenRef.current;
+          void workspace.client
+            .workspaceByCwd(targetWorkspaceCwd)
+            .refreshExtensionRuntime()
+            .catch((error: unknown) => {
+              if (refreshToken !== refreshTokenRef.current) {
+                return;
+              }
+              setRefreshError({
+                name: extension.name,
+                text: t('extensions.manage.refreshFailed', {
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              });
+            });
+        }
       } catch (error) {
         setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
@@ -1324,6 +1386,7 @@ export function ExtensionsManagerPage({
       }
     },
     [
+      activationRequiresExplicitRefresh,
       busyName,
       checkingName,
       load,
@@ -1332,6 +1395,7 @@ export function ExtensionsManagerPage({
       t,
       targetWorkspaceCwd,
       workspace.client,
+      workspaceTrusted,
     ],
   );
 
@@ -1434,6 +1498,19 @@ export function ExtensionsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  // Hoisted so both views show it beside the activation success it qualifies.
+  const refreshNotice = refreshError ? (
+    <ManagementNotice
+      tone="error"
+      noticeKey={refreshError.text}
+      closeLabel={t('common.close')}
+      onDismiss={() => setRefreshError(null)}
+      className="break-words"
+    >
+      {refreshError.text}
+    </ManagementNotice>
+  ) : null;
 
   if (selectedExtension) {
     const details = selectedExtension.details;
@@ -1561,6 +1638,8 @@ export function ExtensionsManagerPage({
               {message}
             </ManagementNotice>
           ) : null}
+
+          {refreshError?.name === selectedExtension.name ? refreshNotice : null}
 
           {activationUnavailable ? (
             <Alert variant="destructive">
@@ -1883,6 +1962,8 @@ export function ExtensionsManagerPage({
             {(messageOwner === null ? message : null) ?? recoveryError}
           </ManagementNotice>
         ) : null}
+
+        {refreshNotice}
 
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
