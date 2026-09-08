@@ -13405,7 +13405,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('tells the model a queued sibling cancellation was user-directed', async () => {
+  it('tells the model a queued sibling was cancelled before execution', async () => {
     const abortController = new AbortController();
     const siblingExecute = vi.fn().mockResolvedValue({
       llmContent: 'unexpected',
@@ -13459,8 +13459,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(siblingExecute).not.toHaveBeenCalled();
     const responseText = JSON.stringify(queuedSibling?.response.responseParts);
     expect(responseText).toContain(
-      'User intentionally cancelled this tool call before it ran.',
+      'This tool call was cancelled before it ran.',
     );
+    expect(responseText).not.toContain('User intentionally cancelled');
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );
@@ -16301,8 +16302,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(toolSpan?.ended).toBe(true);
     const responseText = JSON.stringify(cancelledCall.response.responseParts);
     expect(responseText).toContain(
-      'User intentionally cancelled this tool call before it ran.',
+      'This tool call was cancelled before it ran.',
     );
+    expect(responseText).not.toContain('User intentionally cancelled');
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );
@@ -16448,8 +16450,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     const completedCall = completedCalls[0] as CompletedToolCall;
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain(
-      'User intentionally cancelled this tool call before it ran.',
+      'This tool call was cancelled before it ran.',
     );
+    expect(responseText).not.toContain('User intentionally cancelled');
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );

@@ -387,7 +387,7 @@ const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
 
 const TOOL_CANCELLATION_STOP_DIRECTIVE =
   'Stop and await further instructions; do not retry or work around it.';
-const TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE = `User intentionally cancelled this tool call before it ran. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+const TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE = `This tool call was cancelled before it ran. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
 
 // The cancellation notice handed to the model depends on whether the tool's
 // work actually finished. Claiming a tool "already completed" when it was
