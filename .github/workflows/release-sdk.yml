@@ -218,6 +218,10 @@ jobs:
           echo "CLI package contents:"
           ls -la "${CLI_TMP_DIR}/package/"
 
+      - name: 'Build CLI workspaces'
+        if: "steps.cli_source.outputs.mode == 'build_from_source'"
+        run: 'npm run build'
+
       - name: 'Build CLI from source'
         id: 'cli_build'
         if: "steps.cli_source.outputs.mode == 'build_from_source'"

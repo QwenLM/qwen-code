@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 // QWEN_SKIP_PREPARE=1 skips husky (prepare otherwise only runs husky + generate).
 // Set it when the job does an explicit build/bundle after npm ci; otherwise leave unset.
@@ -27,6 +28,15 @@ if (skipPrepare) {
 
 run('husky');
 run('npm', ['run', 'generate']);
+
+// For `npx https://github.com/QwenLM/qwen-code` (git install) the package is
+// cloned and `prepare` runs before packing; dist/ is gitignored so it is
+// absent there, while a registry install ships prebuilt dist/. Build on the
+// fly only when dist is missing.
+if (!existsSync('dist/cli.js')) {
+  run('npm', ['run', 'build']);
+  run('npm', ['run', 'bundle']);
+}
 
 function run(command, args = []) {
   const result = spawnSync(command, args, {

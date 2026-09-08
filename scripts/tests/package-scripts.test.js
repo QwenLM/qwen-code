@@ -726,6 +726,12 @@ describe('package scripts', () => {
   it('runs prepare steps in order when CI does not skip prepare', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
     const logFile = path.join(binDir, 'commands.log');
+    const distCli = path.join(root, 'dist/cli.js');
+    const hadDist = existsSync(distCli);
+    if (!hadDist) {
+      mkdirSync(path.dirname(distCli), { recursive: true });
+      writeFileSync(distCli, '');
+    }
 
     try {
       if (process.platform === 'win32') {
@@ -771,6 +777,7 @@ describe('package scripts', () => {
         'npm run generate',
       ]);
     } finally {
+      if (!hadDist) rmSync(distCli, { force: true });
       rmSync(binDir, { recursive: true, force: true });
     }
   });

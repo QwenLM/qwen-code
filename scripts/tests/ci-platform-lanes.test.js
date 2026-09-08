@@ -471,6 +471,7 @@ describe('post-merge push lane', () => {
     // the one most likely to breach the 500 KB workflow limit), and the
     // helper-checks step IS the github_ci_only fast path.
     const FULL_PAYLOAD = [
+      'Build core for schema checks',
       'Audit critical runtime dependencies',
       'Check lockfile',
       'Check desktop workspace isolation',
