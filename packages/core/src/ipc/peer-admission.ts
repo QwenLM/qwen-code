@@ -154,25 +154,25 @@ function hasToken(tokens: number): boolean {
  * "same or not". A digest collision would drop one message as a repeat,
  * and the sender is told; the memory is not worth the difference.
  */
+interface AdmittedBody {
+  messageId: string | undefined;
+  hash: string;
+  at: number;
+  atWall: number;
+}
+
 interface SenderMeter {
   tokens: number;
   lastRefill: number;
-  lastBodyHash: string | undefined;
-  lastBodyAt: number;
-  /** Wall-clock counterpart of `lastBodyAt`; see the repeat check. */
-  lastBodyAtWall: number;
   /**
-   * The record this one displaced.
+   * Bodies admitted inside the dedup window, in arrival order.
    *
-   * A message is recorded when it is admitted, but admission is not
-   * arrival: the gate can still turn it away afterwards. Rolling back has
-   * to restore what the admission overwrote, not clear the slot — erasing
-   * it would drop the protection of the body *before* the failed one, and
-   * that body may already be sitting in the receiving model's queue.
+   * The gate can roll back admitted messages in any order, so one previous
+   * slot is not enough. The latest record is the duplicate baseline; older
+   * records remain only long enough to become the baseline if a later
+   * undelivered message is removed.
    */
-  previousBodyHash: string | undefined;
-  previousBodyAt: number;
-  previousBodyAtWall: number;
+  bodies: AdmittedBody[];
 }
 
 export interface AdmissionRequest {
@@ -182,6 +182,8 @@ export interface AdmissionRequest {
    */
   senderKey: string;
   body: string;
+  /** Message identity used to roll back this exact admission. */
+  messageId?: string;
   /**
    * Skip the duplicate check. Set for this session's own processes and
    * for trusted controllers; the buckets still apply.
@@ -265,15 +267,17 @@ export class PeerAdmission {
 
     const meter = this.trackSender(request.senderKey, now);
 
+    meter.bodies = meter.bodies.filter(
+      (record) =>
+        Math.max(now - record.at, wallNow - record.atWall) <
+        this.limits.dedupWindowMs,
+    );
+
     const bodyHash = request.exemptFromDedup
       ? undefined
       : hashBody(request.body);
-    if (
-      bodyHash !== undefined &&
-      meter.lastBodyHash === bodyHash &&
-      Math.max(now - meter.lastBodyAt, wallNow - meter.lastBodyAtWall) <
-        this.limits.dedupWindowMs
-    ) {
+    const lastBody = meter.bodies.at(-1);
+    if (bodyHash !== undefined && lastBody?.hash === bodyHash) {
       debugLogger.debug(
         `dropping a peer message from ${request.senderKey}: identical to its previous message`,
       );
@@ -298,12 +302,12 @@ export class PeerAdmission {
     this.globalTokens -= 1;
     meter.tokens -= 1;
     if (bodyHash !== undefined) {
-      meter.previousBodyHash = meter.lastBodyHash;
-      meter.previousBodyAt = meter.lastBodyAt;
-      meter.previousBodyAtWall = meter.lastBodyAtWall;
-      meter.lastBodyHash = bodyHash;
-      meter.lastBodyAt = now;
-      meter.lastBodyAtWall = wallNow;
+      meter.bodies.push({
+        messageId: request.messageId,
+        hash: bodyHash,
+        at: now,
+        atWall: wallNow,
+      });
     }
     return { admitted: true };
   }
@@ -326,23 +330,27 @@ export class PeerAdmission {
    * retry then meets the repeat check it would have met had this message
    * never arrived.
    *
-   * Restores rather than clears, and only when the record is still this
-   * message's: a later send owns the slot if it has written one, and the
-   * body admitted *before* this one keeps the protection it earned.
+   * Removes only this message's record. A later admitted message remains
+   * the duplicate baseline, and the body admitted before this one keeps
+   * the protection it earned if it becomes the latest remaining record.
    *
    * The token stays spent. It is the only bound on how often a peer can
    * make the receiver attempt, and fail, a delivery.
    */
-  forgetBody(senderKey: string, body: string): void {
+  forgetBody(senderKey: string, body: string, messageId?: string): void {
     const meter = this.senders.get(senderKey);
     if (meter === undefined) return;
-    if (meter.lastBodyHash !== hashBody(body)) return;
-    meter.lastBodyHash = meter.previousBodyHash;
-    meter.lastBodyAt = meter.previousBodyAt;
-    meter.lastBodyAtWall = meter.previousBodyAtWall;
-    meter.previousBodyHash = undefined;
-    meter.previousBodyAt = 0;
-    meter.previousBodyAtWall = 0;
+    const bodyHash = hashBody(body);
+    for (let index = meter.bodies.length - 1; index >= 0; index -= 1) {
+      const record = meter.bodies[index];
+      if (
+        record?.hash === bodyHash &&
+        (messageId === undefined || record.messageId === messageId)
+      ) {
+        meter.bodies.splice(index, 1);
+        return;
+      }
+    }
   }
 
   /**
@@ -389,12 +397,7 @@ export class PeerAdmission {
     const fresh: SenderMeter = {
       tokens: this.limits.bucketCapacity,
       lastRefill: now,
-      lastBodyHash: undefined,
-      lastBodyAt: 0,
-      lastBodyAtWall: 0,
-      previousBodyHash: undefined,
-      previousBodyAt: 0,
-      previousBodyAtWall: 0,
+      bodies: [],
     };
     this.senders.set(key, fresh);
     return fresh;

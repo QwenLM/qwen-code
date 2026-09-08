@@ -23,7 +23,7 @@ import {
   MAX_DROPPED_MSG_IDS,
   type PeerUserFrame,
 } from './peer-frames.js';
-import type { PeerOrigin } from './inbound-gate.js';
+import { peerSenderKey, type PeerOrigin } from './inbound-gate.js';
 
 const PEER: PeerOrigin = { selfSent: false };
 
@@ -388,6 +388,24 @@ describe('DropReceiptCoalescer bounds', () => {
       coalescer.note(frameFrom(`/tmp/${prefix}-${index}.sock`), 'rate-limited');
     }
   }
+
+  it('coalesces addresses that differ only past the retained prefix', () => {
+    const sent: DroppedReceipt[] = [];
+    const coalescer = new DropReceiptCoalescer((receipt) => {
+      sent.push(receipt);
+    });
+    const prefix = peerSenderKey(frameFrom('x'.repeat(1000)), PEER).slice(
+      'peer:'.length,
+    );
+
+    for (let index = 0; index < MAX_DROP_REPORT_KEYS + 100; index++) {
+      coalescer.note(frameFrom(`${prefix}${index}`), 'rate-limited');
+    }
+
+    expect(sent[0]?.frame.from).toBe(prefix);
+    expect(vi.getTimerCount()).toBe(1);
+    coalescer.dispose();
+  });
 
   it('leaves no timer behind when a batch is evicted from the table', () => {
     // An evicted batch is no longer in the map `flush` and `dispose`

@@ -242,6 +242,12 @@ export const MAX_PACED_TARGETS = 256;
  * would have taken; when it turns out to have been optimistic, a
  * `rate-limited` receipt empties it (`drainSendPacer`).
  */
+interface PacedBody {
+  messageId: string;
+  hash: string;
+  at: number;
+}
+
 interface PacedTarget {
   tokens: number;
   lastRefill: number;
@@ -255,8 +261,7 @@ interface PacedTarget {
    * charge for one too; charging would drift the mirror below the real
    * bucket until it refuses sends the receiver would have taken.
    */
-  lastBodyHash: string | undefined;
-  lastBodyAt: number;
+  bodies: PacedBody[];
   /**
    * Bumped whenever the mirror's level is set by something other than
    * this session's own arithmetic — a drain, or a fresh entry. A refund
@@ -285,8 +290,7 @@ function pacedTargetFor(ipcPath: string, now: number): PacedTarget {
     lastRefill: now,
     sentInBurst: 0,
     burstStartedAt: now,
-    lastBodyHash: undefined,
-    lastBodyAt: 0,
+    bodies: [],
     generation: 0,
   };
   pacedTargets.set(ipcPath, fresh);
@@ -315,6 +319,7 @@ export function setSendPacerClockForTest(now?: () => number): void {
 function reservePacerToken(
   ipcPath: string,
   body: string,
+  messageId: string,
 ):
   | { ok: true; refund: () => void }
   | { ok: false; repeat: true }
@@ -336,11 +341,12 @@ function reservePacerToken(
     return { ok: false, sentInBurst: target.sentInBurst };
   }
 
+  target.bodies = target.bodies.filter(
+    (record) => now - record.at < PEER_ADMISSION_LIMITS.dedupWindowMs,
+  );
   const bodyHash = hashBody(body);
-  if (
-    target.lastBodyHash === bodyHash &&
-    now - target.lastBodyAt < PEER_ADMISSION_LIMITS.dedupWindowMs
-  ) {
+  const lastBody = target.bodies.at(-1);
+  if (lastBody?.hash === bodyHash) {
     // The receiver remembers this exact body and will turn it away before
     // policy, so writing it buys a connection there, a line in its drop
     // report and a receipt back — and the caller would be told "sent" for
@@ -363,19 +369,17 @@ function reservePacerToken(
     target.burstStartedAt = now;
   }
 
-  // Kept so a refund can restore what this reservation displaced. Erasing
-  // instead would leave the mirror with no record while the receiver
-  // still remembers the body before this one, and the next send of that
-  // body would be charged here and dropped free there — the mirror
-  // drifting below the real bucket, which is the direction it must never
-  // drift.
-  const previousHash = target.lastBodyHash;
-  const previousAt = target.lastBodyAt;
+  // Keep each reservation until delivery succeeds or the receiver confirms
+  // that exact message never reached its model. Refunds can then remove one
+  // failed write without erasing a later send or the body before it.
   const generation = target.generation;
 
   target.tokens -= 1;
-  target.lastBodyHash = bodyHash;
-  target.lastBodyAt = now;
+  target.bodies.push({
+    messageId: canonicalizeMsgId(messageId),
+    hash: bodyHash,
+    at: now,
+  });
   target.sentInBurst += 1;
 
   let refunded = false;
@@ -388,19 +392,14 @@ function reservePacerToken(
       // session what its level really is. Handing a token back now would
       // silently undo that and write the very message the drain exists to
       // hold back.
-      if (target.generation !== generation) return;
-      target.sentInBurst = Math.max(0, target.sentInBurst - 1);
-      target.tokens = Math.min(
-        PEER_ADMISSION_LIMITS.bucketCapacity,
-        target.tokens + 1,
-      );
-      // The receiver records a body only when it admits the message, and
-      // this frame never arrived — so the record rolls back to whatever
-      // it displaced, unless a later send already recorded one of its own.
-      if (target.lastBodyHash === bodyHash) {
-        target.lastBodyHash = previousHash;
-        target.lastBodyAt = previousAt;
+      if (target.generation === generation) {
+        target.sentInBurst = Math.max(0, target.sentInBurst - 1);
+        target.tokens = Math.min(
+          PEER_ADMISSION_LIMITS.bucketCapacity,
+          target.tokens + 1,
+        );
       }
+      forgetPacedBodies(target, [messageId]);
     },
   };
 }
@@ -431,6 +430,26 @@ export function drainSendPacer(ipcPath: string): void {
   // receipt would stop the window ever rolling, so the count a refusal
   // quotes as "in the last minute" would grow for the life of the
   // session.
+}
+
+/** Remove sends the receiver confirmed never reached its model. */
+export function forgetSendPacerMessages(
+  ipcPath: string,
+  messageIds: readonly string[],
+): void {
+  const target = pacedTargets.get(ipcPath);
+  if (target === undefined) return;
+  forgetPacedBodies(target, messageIds);
+}
+
+function forgetPacedBodies(
+  target: PacedTarget,
+  messageIds: readonly string[],
+): void {
+  const forgotten = new Set(messageIds.map(canonicalizeMsgId));
+  target.bodies = target.bodies.filter(
+    (record) => !forgotten.has(record.messageId),
+  );
 }
 
 /** Test-only: forget what every target has been sent. */
@@ -563,21 +582,6 @@ export async function sendToPeer(
   // connection and an answer that arrives too late for a model already
   // composing the next one. Failing now puts the reason where the caller
   // will read it: batch, or wait.
-  const reservation = reservePacerToken(peer.ipcPath, options.message);
-  if (!reservation.ok) {
-    return {
-      kind: 'failed',
-      peer,
-      address,
-      reason: reservation.repeat
-        ? 'that exact message went to that session within the last 30 seconds, and its ' +
-          'inbox turns away a repeat before anyone reads it, so this one was not sent. ' +
-          'Say something different, or wait for a reply rather than re-sending.'
-        : `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
-          'in the last minute and more would be dropped by its rate limit, so this one was ' +
-          'not sent. Batch what remains into one message, or wait a little before sending more.',
-    };
-  }
   const frame = buildUserFrame({
     content: options.message,
     from: self.ipcPath,
@@ -594,6 +598,25 @@ export async function sendToPeer(
       ? { fromMode: senderModeClass(options.approvalMode) }
       : {}),
   });
+  const reservation = reservePacerToken(
+    peer.ipcPath,
+    options.message,
+    frame.msgId,
+  );
+  if (!reservation.ok) {
+    return {
+      kind: 'failed',
+      peer,
+      address,
+      reason: reservation.repeat
+        ? 'that exact message went to that session within the last 30 seconds, and its ' +
+          'inbox turns away a repeat before anyone reads it, so this one was not sent. ' +
+          'Say something different, or wait for a reply rather than re-sending.'
+        : `too many messages to that session just now: ${reservation.sentInBurst} were sent ` +
+          'in the last minute and more would be dropped by its rate limit, so this one was ' +
+          'not sent. Batch what remains into one message, or wait a little before sending more.',
+    };
+  }
 
   // Tracked before the write, not after: a receiver whose loop is stalled
   // accepts the connection and lets the bytes sit in the kernel buffer,

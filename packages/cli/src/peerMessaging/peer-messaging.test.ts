@@ -105,11 +105,13 @@ let senderInbox: PeerInbox | null = null;
 let receipts: PeerFrame[];
 /** Addresses whose send-side mirror a receipt emptied. */
 let drained: string[];
+let forgotten: Array<{ ipcPath: string; messageIds: readonly string[] }>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
   drained = [];
+  forgotten = [];
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
@@ -214,6 +216,7 @@ async function start(
     admission?: PeerAdmission;
     dropReceiptTrailMs?: number;
     drainMirror?: (ipcPath: string) => void;
+    forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -232,6 +235,8 @@ async function start(
     // their own meter.
     admission: unmeteredAdmission(),
     drainMirror: (ipcPath: string) => drained.push(ipcPath),
+    forgetMirror: (ipcPath, messageIds) =>
+      forgotten.push({ ipcPath, messageIds }),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -317,6 +322,30 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
 
     expect(seen).toEqual([]);
+    expect(forgotten).toEqual([]);
+  });
+
+  it('forgets a sent body when a non-delivery receipt settles it', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        previous: 'pending',
+      }),
+    });
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'expired',
+        origMsgId: 'sent-0002',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(forgotten).toEqual([
+      { ipcPath: '/tmp/peer.sock', messageIds: ['sent-0002'] },
+    ]);
   });
 
   it('settles receipts through the real ledger when none is injected', async () => {
@@ -1048,6 +1077,56 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
     ).toHaveLength(heldCount);
+  });
+
+  it('does not let held expiry receipts crowd out backlog corrections', async () => {
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    let policy: InboundPolicy | undefined = 'hold';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      await send(
+        started.socketPath!,
+        peerFrame({ content: `held ${i}`, from: slow.socketPath }),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(started.getHeld()).toHaveLength(MAX_HELD_MESSAGES),
+    );
+
+    policy = undefined;
+    for (let i = 0; i < MAX_ACCEPTED_BACKLOG; i++) {
+      await send(
+        started.socketPath!,
+        peerFrame({ content: `buffered ${i}`, from: sender.socketPath }),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(
+        receipts.filter(
+          (frame) => frame.type === 'control' && frame.status === 'delivered',
+        ),
+      ).toHaveLength(MAX_ACCEPTED_BACKLOG),
+    );
+
+    await started.close();
+    messaging = null;
+
+    expect(
+      receipts.filter(
+        (frame) => frame.type === 'control' && frame.status === 'expired',
+      ),
+    ).toHaveLength(MAX_ACCEPTED_BACKLOG);
   });
 
   it('corrects the delivered receipt of a buffered message dropped at exit', async () => {
@@ -2059,11 +2138,15 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
       },
     ]);
     expect(drained).toEqual([receiverPath]);
+    expect(forgotten).toEqual([
+      { ipcPath: receiverPath, messageIds: ['sent-a', 'sent-b'] },
+    ]);
   });
 
-  it('does not drain the mirror for a drop that is not a rate limit', async () => {
+  it('corrects queue-full bodies but preserves a duplicate baseline', async () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT);
     trackSentPeerMessageForTest('sent-c', 'app-ab');
+    trackSentPeerMessageForTest('sent-d', 'app-ab');
     const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
 
     await send(
@@ -2072,14 +2155,27 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
         status: 'dropped',
         origMsgId: 'sent-c',
         from: receiverPath,
+        dropReason: 'queue-full',
+      }),
+    );
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-d',
+        from: receiverPath,
         dropReason: 'duplicate',
       }),
     );
     await settle();
 
-    // A repeat says nothing about the receiver's level, so the mirror is
-    // left alone.
+    // Neither reason says that the receiver's token level is exhausted.
+    // Queue-full did not retain the body; duplicate did retain an earlier
+    // equal body, so that mirror record remains the dedup baseline.
     expect(drained).toEqual([]);
+    expect(forgotten).toEqual([
+      { ipcPath: receiverPath, messageIds: ['sent-c'] },
+    ]);
   });
 
   it('ignores a dropped receipt for messages it never sent', async () => {

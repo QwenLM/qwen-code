@@ -131,10 +131,18 @@ interface ReceiptBatch {
   detached: boolean;
 }
 
-function receiptTargetOf(frame: PeerUserFrame): DropReceiptTarget {
+function replyAddressOf(frame: PeerUserFrame): string | undefined {
+  if (!frame.from) return undefined;
+  return peerSenderKey(frame, { selfSent: false }).slice('peer:'.length);
+}
+
+function receiptTargetOf(
+  frame: PeerUserFrame,
+  from: string,
+): DropReceiptTarget {
   return {
     msgId: frame.msgId,
-    ...(frame.from !== undefined ? { from: frame.from } : {}),
+    from,
     ...(frame.replyToken !== undefined ? { replyToken: frame.replyToken } : {}),
   };
 }
@@ -181,10 +189,11 @@ export class DropReceiptCoalescer {
     if (this.disposed) return;
     // No reply address, no receipt. Nothing is lost that could have been
     // delivered: a sender that gave no `from` cannot be told anything.
-    if (!frame.from) return;
+    const replyAddress = replyAddressOf(frame);
+    if (replyAddress === undefined) return;
 
     const now = this.now();
-    const batch = this.touch(`${frame.from}\u0000${reason}`);
+    const batch = this.touch(`${replyAddress}\u0000${reason}`);
 
     // The first drop in a window answers at once — a sender that has just
     // started overrunning should learn immediately, while it can still
@@ -202,7 +211,7 @@ export class DropReceiptCoalescer {
       batch.lastImmediateAt = now;
       ignore(
         this.dispatch({
-          frame: receiptTargetOf(frame),
+          frame: receiptTargetOf(frame, replyAddress),
           reason,
           droppedMsgIds: [],
         }),
@@ -212,7 +221,7 @@ export class DropReceiptCoalescer {
 
     batch.pending += 1;
     if (batch.frame === undefined) {
-      batch.frame = receiptTargetOf(frame);
+      batch.frame = receiptTargetOf(frame, replyAddress);
       batch.reason = reason;
       batch.firstNotedAt = now;
       this.arm(batch);

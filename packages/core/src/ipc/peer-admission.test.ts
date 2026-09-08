@@ -331,6 +331,39 @@ describe('PeerAdmission', () => {
       });
     });
 
+    it('removes multiple undelivered admissions in arrival order', () => {
+      const clock = stubClock();
+      const admission = new PeerAdmission({ now: clock.now });
+
+      admission.admit({ senderKey: 'peer', body: 'A', messageId: 'a' });
+      admission.admit({ senderKey: 'peer', body: 'B', messageId: 'b' });
+      admission.forgetBody('peer', 'A', 'a');
+      admission.forgetBody('peer', 'B', 'b');
+
+      expect(admission.admit({ senderKey: 'peer', body: 'A' })).toEqual({
+        admitted: true,
+      });
+    });
+
+    it('does not remove a later delivered copy with the same body', () => {
+      const clock = stubClock();
+      const admission = new PeerAdmission({
+        now: clock.now,
+        wallNow: clock.now,
+      });
+
+      admission.admit({ senderKey: 'peer', body: 'X', messageId: 'parked' });
+      clock.advance(PEER_ADMISSION_LIMITS.dedupWindowMs + 1000);
+      admission.admit({ senderKey: 'peer', body: 'X', messageId: 'delivered' });
+      admission.forgetBody('peer', 'X', 'parked');
+
+      clock.advance(500);
+      expect(admission.admit({ senderKey: 'peer', body: 'X' })).toEqual({
+        admitted: false,
+        reason: 'duplicate',
+      });
+    });
+
     it('leaves the bucket alone', () => {
       const clock = stubClock();
       const admission = new PeerAdmission({

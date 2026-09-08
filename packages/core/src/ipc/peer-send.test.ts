@@ -37,6 +37,7 @@ vi.mock('./peer-directory.js', async () => {
 const {
   describeSendFailure,
   drainSendPacer,
+  forgetSendPacerMessages,
   getOwnPeerIdentity,
   lookupSentPeerMessageForTest,
   MAX_TRACKED_SENDS,
@@ -1089,6 +1090,27 @@ describe('the mirror and the receiver disagreeing', () => {
       expect(retryA.kind === 'failed' && retryA.reason).toContain(
         'turns away a repeat',
       );
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('forgets a body the receiver reports as undelivered', async () => {
+    const clock = 0;
+    setSendPacerClockForTest(() => clock);
+    try {
+      expect((await send('A')).kind).toBe('sent');
+      expect((await send('B')).kind).toBe('sent');
+      const droppedId = sendPeerFrame.mock.calls[1]?.[1].msgId as string;
+
+      forgetSendPacerMessages(target.ipcPath, [droppedId]);
+
+      const repeatA = await send('A');
+      expect(repeatA.kind).toBe('failed');
+      expect(repeatA.kind === 'failed' && repeatA.reason).toContain(
+        'turns away a repeat',
+      );
+      expect((await send('B')).kind).toBe('sent');
     } finally {
       setSendPacerClockForTest();
     }

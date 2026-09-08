@@ -632,6 +632,7 @@ export class InboundGate {
     const verdict = this.admission.admit({
       senderKey: peerSenderKey(frame, origin),
       body: frame.message.content,
+      messageId: frame.msgId,
       // A hook reporting the same line twice, or a user repeating
       // themselves to a controller, is not the model-driven repetition
       // the duplicate check exists to stop. Both are still rate limited.
@@ -1003,6 +1004,7 @@ export class InboundGate {
     this.admission.forgetBody(
       peerSenderKey(frame, origin),
       frame.message.content,
+      frame.msgId,
     );
   }
 

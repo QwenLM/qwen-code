@@ -37,6 +37,7 @@ import {
   type DropNotice,
   DropNoticeThrottle,
   DropReceiptCoalescer,
+  forgetSendPacerMessages,
   formatPeerDisplay,
   formatPeerEnvelope,
   getPeerControllerRegistryPath,
@@ -200,6 +201,8 @@ export interface PeerMessagingOptions {
    * makes, and it should be observable without staging a real send.
    */
   drainMirror?: (ipcPath: string) => void;
+  /** Remove messages the receiver confirmed never reached its model. */
+  forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
@@ -222,6 +225,10 @@ export class PeerMessaging {
   ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
   private reassertSessionRecord: (() => Promise<void>) | null = null;
   private drainMirror: (ipcPath: string) => void = drainSendPacer;
+  private forgetMirror: (
+    ipcPath: string,
+    messageIds: readonly string[],
+  ) => void = forgetSendPacerMessages;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private readonly dropListeners = new Set<(notice: DropNotice) => void>();
   /** Notices raised before anything subscribed; see `onDropped`. */
@@ -334,6 +341,7 @@ export class PeerMessaging {
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
     messaging.drainMirror = options.drainMirror ?? drainSendPacer;
+    messaging.forgetMirror = options.forgetMirror ?? forgetSendPacerMessages;
 
     // Any pair still in the environment at this point was inherited from an
     // ancestor session, and every exit below this line other than a bound
@@ -629,10 +637,9 @@ export class PeerMessaging {
     // order is the decision, and it is made by what a lost receipt costs:
     //
     //  - `gate.shutdown()` tells senders their parked messages expired.
-    //    Started first so it has the whole slot to work in, but not
-    //    awaited here: it is unbounded, and awaiting it ahead of the rest
-    //    let it spend the entire budget and take everything below down
-    //    with it.
+    //    Its bounded burst is awaited before the corrective burst below,
+    //    so both get the whole outbound-send ceiling instead of racing for
+    //    the same slots.
     //  - the inbox closes next, so no new drop can be noted into a
     //    coalescer that is about to be flushed.
     //  - `settleUnconsumed()` corrects receipts this session already sent
@@ -648,13 +655,13 @@ export class PeerMessaging {
     // own connection, and `socketPath` survives `close()`.
     const shuttingDown = this.gate?.shutdown();
     await this.inbox?.close();
+    await shuttingDown;
     await this.settleUnconsumed();
     // Same pair, same removal as the startup scrub — one writer for it.
     clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
     await this.dropReceipts?.flush(CLOSE_DROP_FLUSH_BOUND_MS);
     this.dropReceipts?.dispose();
-    await shuttingDown;
   }
 
   /**
@@ -702,11 +709,13 @@ export class PeerMessaging {
     const ids = [frame.origMsgId, ...(frame.droppedMsgIds ?? [])];
     let first: SettledPeerReceipt | undefined;
     let settledCount = 0;
+    const settledIds: string[] = [];
     for (const id of ids) {
       const settled = this.settleSentMessage(id, 'dropped');
       if (!settled) continue;
       first ??= settled;
       settledCount += 1;
+      settledIds.push(id);
     }
     if (!first) {
       debugLogger.debug(
@@ -717,10 +726,18 @@ export class PeerMessaging {
     debugLogger.debug(
       `dropped receipt from ${first.address} (${frame.dropReason ?? 'unspecified'}) settled ${settledCount} message(s)`,
     );
-    // The mirror bucket said there was room and the receiver disagreed:
-    // empty it so the next send waits for the rate the receiver actually
-    // refills at rather than for the one this side guessed.
+    // The receiver never gave these bodies to its model, so its duplicate
+    // baseline no longer contains them and the sender's mirror must agree.
+    if (
+      frame.from &&
+      (frame.dropReason === 'rate-limited' || frame.dropReason === 'queue-full')
+    ) {
+      this.forgetMirror(frame.from, settledIds);
+    }
     if (frame.dropReason === 'rate-limited' && frame.from) {
+      // The mirror bucket also said there was room and the receiver
+      // disagreed: empty it so the next send waits for the rate the
+      // receiver actually refills at rather than for the one guessed here.
       // Keyed by the receipt's `from`, which is the receiver's own socket
       // path — the same string the mirror reserved against.
       this.drainMirror(frame.from);
@@ -763,6 +780,13 @@ export class PeerMessaging {
       debugLogger.debug(
         `delivery status from ${settled.address}: ${settled.previous} -> ${frame.status} for ${frame.origMsgId}`,
       );
+      if (
+        frame.from &&
+        frame.status !== 'held' &&
+        frame.status !== 'delivered'
+      ) {
+        this.forgetMirror(frame.from, [frame.origMsgId]);
+      }
       this.emitReceipt({
         status: frame.status,
         address: settled.address,
