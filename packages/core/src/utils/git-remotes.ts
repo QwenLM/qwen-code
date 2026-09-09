@@ -318,7 +318,15 @@ export async function fetchGitRemotes(
       fetchUrl,
       pushUrl: section.pushUrls[0] ?? fetchUrl,
       extraFetchUrls: Math.max(0, section.urls.length - 1),
-      extraPushUrls: Math.max(0, section.pushUrls.length - 1),
+      // With no pushurl key git pushes to EVERY url, so the push fan-out
+      // falls back to the url list — `git remote -v` reports all of
+      // them, and the badge must not under-report what a removal loses.
+      extraPushUrls: Math.max(
+        0,
+        (section.pushUrls.length > 0
+          ? section.pushUrls.length
+          : section.urls.length) - 1,
+      ),
       promisor: section.promisor,
       ...(section.partialCloneFilter === undefined
         ? {}
@@ -355,13 +363,14 @@ export async function gitRemoteAdd(
   // refusal (409) where git's canonical not-a-repository answer (404)
   // belongs — the same ordering fetchGitRemotes keeps with its probe.
   await runGit(cwd, ['rev-parse', '--git-dir'], env);
-  // git's remote family resolves only the repository scope (local,
-  // include-sourced, worktree), so the duplicate check is blind to an
-  // inherited section: the panel's own Add would silently create a
-  // same-name collision with one, and git then resolves fetch/push from
-  // records the panel does not show (a multi-valued url pushes to both).
-  // Refuse up front — a deliberate shadow belongs to the terminal, not to
-  // a 200 from here.
+  // git's remote family WRITES (the duplicate check, the section edit)
+  // only the repository scope (local, include-sourced, worktree), while
+  // fetch/push RESOLVE the name across every scope: the duplicate check
+  // is blind to an inherited section, and the panel's own Add would
+  // silently create a same-name collision with one, which git then
+  // resolves from records the panel does not show (a multi-valued url
+  // pushes to both). Refuse up front — a deliberate shadow belongs to
+  // the terminal, not to a 200 from here.
   const existing = await remoteSectionScopes(cwd, name, env);
   for (const scope of existing) {
     if (scope !== 'local' && scope !== 'worktree') {
@@ -420,9 +429,11 @@ export async function gitRemoteRemove(
         (await remoteSectionScopes(cwd, name, env)).size === 0
       ) {
         // The section is already gone — an earlier attempt died after
-        // removing it but before finishing the upstream cleanup, so a
-        // retry would otherwise dead-end here. Converge the cleanup, then
-        // surface git's answer.
+        // removing it but before finishing the cleanup, so a retry
+        // would otherwise dead-end here. Converge the cleanup (upstream
+        // keys AND the orphaned tracking refs a refspec-less removal
+        // leaves), then surface git's answer.
+        await deleteRemoteTrackingRefs(cwd, name, env);
         await unsetWorktreeUpstreamKeys(cwd, pointed, name, env);
         if ((await worktreeUpstreamKeys(cwd, pointed, name, env)).length > 0) {
           throw new Error('remote still configured after removal');
@@ -449,6 +460,18 @@ export async function gitRemoteRemove(
   // inherited scope, but git still resolves it — fetch/push keep reaching
   // the remote the panel just said was removed. Verify resolution too.
   if ((await remoteSectionScopes(cwd, name, env)).size > 0) {
+    throw new Error('remote still configured after removal');
+  }
+  // git's rm deletes the remote-tracking refs only through a fetch
+  // refspec it can parse: a refspec-less section (`git remote add
+  // --mirror=push`, or a hand-unset fetch key) exits 0 — or fails at the
+  // section write — leaving refs/remotes/<name>/* orphaned with no
+  // remote left to prune them, and the branch picker keeps listing the
+  // phantom group. Sweep the namespace now that the removal is
+  // certified, and re-verify — a surviving ref refuses rather than
+  // certifying the phantom group.
+  await deleteRemoteTrackingRefs(cwd, name, env);
+  if ((await remoteTrackingRefs(cwd, name, env)).length > 0) {
     throw new Error('remote still configured after removal');
   }
   // git's rm unsets the pointing branches' branch.<b>.remote/merge and
@@ -651,6 +674,53 @@ async function worktreeUpstreamKeys(
     keys.push({ key: 'remote.pushdefault', fixedValue: name });
   }
   return keys;
+}
+
+// The remote-tracking refs under refs/remotes/<name>/ — the trailing
+// slash keeps a dotted sibling's namespace (`refs/remotes/a.b/`) out of
+// a removal of `a`.
+async function remoteTrackingRefs(
+  cwd: string,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await runGit(
+      cwd,
+      ['for-each-ref', '--format=%(refname)', `refs/remotes/${name}/`],
+      env,
+    );
+  } catch (err) {
+    // for-each-ref exits 0 on empty, so any failure here must abort,
+    // not read as "no refs" — the caller's verification is fail-closed.
+    stripConfigDump(err);
+    throw err;
+  }
+  return raw.split('\n').filter((line) => line !== '');
+}
+
+// Delete every refs/remotes/<name>/* entry, best-effort per ref: the
+// caller's re-verification decides whether a survivor certifies or
+// refuses.
+async function deleteRemoteTrackingRefs(
+  cwd: string,
+  name: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  for (const ref of await remoteTrackingRefs(cwd, name, env)) {
+    try {
+      // --no-deref: a symbolic ref under the namespace is deleted as
+      // itself — dereferencing would delete its TARGET (a local branch
+      // the sweep must never touch), which is what git's own rm does
+      // with REF_NO_DEREF.
+      await runGit(cwd, ['update-ref', '--no-deref', '-d', ref], env);
+    } catch {
+      // Re-verified by the caller: a ref that survives (a killed delete,
+      // a concurrent fetch re-adding it) must not be certified as
+      // cleaned.
+    }
+  }
 }
 
 // Whether any upstream key still RESOLVES to the removed remote after

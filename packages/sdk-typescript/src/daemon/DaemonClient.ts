@@ -6872,6 +6872,7 @@ export class WorkspaceDaemonClient {
     name: string,
     url: string,
     cwd?: string,
+    timeoutMs?: number,
   ): Promise<DaemonGitRemoteMutationResult> {
     const suffix =
       cwd != null ? `/git/remote?cwd=${urlEncode(cwd)}` : '/git/remote';
@@ -6879,13 +6880,14 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/remote',
-      { method: 'POST', body: { name, url }, mode: 'rest' },
+      { method: 'POST', body: { name, url }, mode: 'rest', timeoutMs },
     );
   }
 
   workspaceGitRemoteRemove(
     name: string,
     cwd?: string,
+    timeoutMs?: number,
   ): Promise<DaemonGitRemoteMutationResult> {
     const suffix =
       cwd != null
@@ -6895,7 +6897,7 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/remote/remove',
-      { method: 'POST', body: { name }, mode: 'rest' },
+      { method: 'POST', body: { name }, mode: 'rest', timeoutMs },
     );
   }
 

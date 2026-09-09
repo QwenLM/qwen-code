@@ -39,6 +39,13 @@ const tmpRoots: string[] = [];
 let fixtureEnv: NodeJS.ProcessEnv;
 let tmpHome: string;
 
+// Save/restore: the GIT_CONFIG_COUNT family plant must not destroy a
+// host that genuinely presets it (the exact shape the plant simulates).
+const savedConfigCount = {
+  keys: ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'],
+  values: {} as Record<string, string | undefined>,
+};
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: fixtureEnv });
 }
@@ -82,6 +89,19 @@ afterEach(() => {
 const savedConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
 beforeAll(() => {
   process.env['GIT_CONFIG_GLOBAL'] = '/corp/shared.gitconfig';
+  for (const key of savedConfigCount.keys) {
+    savedConfigCount.values[key] = process.env[key];
+  }
+  process.env['GIT_CONFIG_COUNT'] = '1';
+  process.env['GIT_CONFIG_KEY_0'] = 'remote.planted.url';
+  process.env['GIT_CONFIG_VALUE_0'] = 'https://planted.example/x.git';
+});
+afterAll(() => {
+  for (const key of savedConfigCount.keys) {
+    const saved = savedConfigCount.values[key];
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
 });
 afterAll(() => {
   if (savedConfigGlobal === undefined) {
@@ -94,6 +114,27 @@ afterAll(() => {
 it('scrubs host config redirectors out of the fixture env', () => {
   expect(fixtureEnv['GIT_CONFIG_GLOBAL']).toBeUndefined();
   expect(fixtureEnv['GIT_CONFIG_COUNT']).toBeUndefined();
+});
+
+// The code under test spawns git through gitEnv, which strips
+// GIT_CONFIG_NOSYSTEM — so a host /etc/gitconfig remote section would
+// decide the inherited-scope assertions (fail loudly HERE, not as ten
+// unrelated red tests).
+beforeAll(() => {
+  let systemList = '';
+  try {
+    systemList = execFileSync('git', ['config', '--system', '--list'], {
+      encoding: 'utf8',
+      env: gitEnv({ ...process.env }),
+    });
+  } catch {
+    // No readable system config file: the hermetic precondition holds.
+  }
+  if (/^remote\./m.test(systemList)) {
+    throw new Error(
+      'host /etc/gitconfig defines a [remote] section — the inherited-scope assertions are not hermetic on this host',
+    );
+  }
 });
 
 describe('isValidRemoteName', () => {
@@ -162,6 +203,9 @@ describe('isValidRemoteUrl', () => {
     ['https://example.com/\u200b', false],
     ['https://example.com/\u2029evil', false],
     ['https://example.com/\u00adevil', false],
+    // A Tag-block code point: Default_Ignorable WITHOUT being Cc/Cf —
+    // the arm the property-derived class exists for.
+    ['https://example.com/\u{e0041}evil', false],
   ])('isValidRemoteUrl(%j) === %s', (url, expected) => {
     expect(isValidRemoteUrl(url)).toBe(expected);
   });
@@ -416,6 +460,11 @@ describe('fetchGitRemotes', () => {
         typeof e.message === 'string' ? e.message : ''
       }`,
     ).toMatch(/invalid refspec/i);
+    // The premise the refusal rests on: git died BEFORE mutating, so
+    // the section must still be there.
+    expect(git(dir, 'config', '--get', 'remote.bad.url')).toBe(
+      'https://example.com/b/r.git\n',
+    );
   });
 
   it('does not complete a worktree section over git’s invalid-refspec refusal', async () => {
@@ -503,6 +552,25 @@ describe('fetchGitRemotes', () => {
 });
 
 describe('gitRemoteAdd', () => {
+  it('refuses to add a name rendering identically to an existing remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A zero-width-space lookalike: the panel would show two
+    // indistinguishable rows, so the write gate refuses before git is
+    // even spawned.
+    await expect(
+      gitRemoteAdd(
+        dir,
+        'ori\u200bgin',
+        'https://example.com/e/r.git',
+        fixtureEnv,
+      ),
+    ).rejects.toThrow('invalid remote name');
+    expect(git(dir, 'config', '--get-all', 'remote.origin.url')).toBe(
+      'https://example.com/o/r.git\n',
+    );
+  });
+
   it('adds a remote and returns the fresh list', async () => {
     const dir = makeRepo();
     const remotes = await gitRemoteAdd(
@@ -692,8 +760,11 @@ describe('fetchGitRemotes config parsing', () => {
     ['no', false],
     ['off', false],
     ['false', false],
+    ['OFF', false],
     ['true', true],
     ['yes', true],
+    ['on', true],
+    ['ON', true],
     // git's integer grammar includes hex and k/m/g unit factors; `1e1`,
     // invalid octals and quoted trailing padding make git die at read
     // time, so the listing certifies neither. strtoimax skips LEADING
@@ -1001,6 +1072,28 @@ describe('fetchGitRemotes repository scope', () => {
     expect(config).toContain('branch.feat.remote');
   });
 
+  it('converges the tracking-ref sweep on a retry after a failed sweep', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', 'remote.nf.url', 'https://example.com/nf/r.git');
+    const head = git(dir, 'rev-parse', 'HEAD').trim();
+    git(dir, 'update-ref', 'refs/remotes/nf/main', head);
+    // The first attempt's sweep dies on a planted ref lock — the section
+    // is already gone, so the retry lands on the no-such-remote arm,
+    // which must converge the ref cleanup too (not dead-end on it).
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'nf', 'main.lock'),
+      '',
+    );
+    await expect(gitRemoteRemove(dir, 'nf', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    fs.rmSync(path.join(dir, '.git', 'refs', 'remotes', 'nf', 'main.lock'));
+    await expect(gitRemoteRemove(dir, 'nf', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+    expect(git(dir, 'for-each-ref', 'refs/remotes/nf/')).toBe('');
+  });
+
   it('converges the upstream cleanup on a retry after a failed cleanup', async () => {
     const dir = makeRepo();
     git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
@@ -1118,6 +1211,61 @@ describe('fetchGitRemotes repository scope', () => {
     expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
       'origin\n',
     );
+  });
+
+  it('sweeps orphaned tracking refs a refspec-less worktree removal leaves behind', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    // No fetch refspec (the --mirror=push / hand-unset shape): git's rm
+    // fails at the section write and deletes NO refs (probed), so the
+    // certification must sweep the orphaned namespace itself — and only
+    // that namespace.
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.nf.url',
+      'https://example.com/nf/r.git',
+    );
+    const head = git(dir, 'rev-parse', 'HEAD').trim();
+    git(wt, 'update-ref', 'refs/remotes/nf/main', head);
+    git(wt, 'update-ref', 'refs/remotes/nf.b/main', head);
+    const remotes = await gitRemoteRemove(wt, 'nf', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual([]);
+    expect(git(wt, 'for-each-ref', 'refs/remotes/nf/')).toBe('');
+    expect(git(wt, 'for-each-ref', 'refs/remotes/nf.b/')).toContain(
+      'refs/remotes/nf.b/main',
+    );
+  });
+
+  it('sweeps a symbolic ref without dereferencing it', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', 'remote.nf.url', 'https://example.com/nf/r.git');
+    const head = git(dir, 'rev-parse', 'HEAD').trim();
+    git(dir, 'update-ref', 'refs/remotes/nf/main', head);
+    // A symref planted under the remote's namespace (a clones-from-zip
+    // config can carry one): the sweep must delete the SYMREF, never
+    // its target — dereferencing would delete the user's own branch.
+    git(dir, 'symbolic-ref', 'refs/remotes/nf/HEAD', 'refs/heads/main');
+    const remotes = await gitRemoteRemove(dir, 'nf', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual([]);
+    expect(git(dir, 'for-each-ref', 'refs/remotes/nf/')).toBe('');
+    expect(git(dir, 'rev-parse', 'refs/heads/main')).toBe(`${head}\n`);
+  });
+
+  it('sweeps orphaned tracking refs a refspec-less local removal leaves behind', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', 'remote.nf.url', 'https://example.com/nf/r.git');
+    // git exits 0 over the local section and still deletes no refs
+    // without a parseable refspec (probed): the certification sweeps.
+    const head = git(dir, 'rev-parse', 'HEAD').trim();
+    git(dir, 'update-ref', 'refs/remotes/nf/main', head);
+    const remotes = await gitRemoteRemove(dir, 'nf', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual([]);
+    expect(git(dir, 'for-each-ref', 'refs/remotes/nf/')).toBe('');
   });
 
   it('refuses when git rm unmasks a same-valued inherited upstream key', async () => {
@@ -1266,11 +1414,35 @@ describe('fetchGitRemotes repository scope', () => {
         typeof e.message === 'string' ? e.message : ''
       }`,
     ).toMatch(/could not remove config section/i);
-    expect(git(wt, 'config', '--list')).toContain('remote.dup.url');
+    // Scoped at the file the assertion means: an all-scope --list reads
+    // the planted global section too, which satisfies a bare
+    // remote.dup.url match whether or not the worktree half survived.
+    expect(git(wt, 'config', '--worktree', '--list')).toContain(
+      'remote.dup.url',
+    );
     expect(fs.readFileSync(path.join(tmpHome, '.gitconfig'), 'utf8')).toContain(
       'remote "dup"',
     );
   });
+});
+
+it('counts every url as a push destination when no pushurl is configured', async () => {
+  const dir = makeRepo();
+  git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+  git(
+    dir,
+    'remote',
+    'set-url',
+    '--add',
+    'origin',
+    'https://example.com/o2/r.git',
+  );
+  // No pushurl: git pushes to EVERY url, so the push fan-out falls
+  // back to the url list (`git remote -v` reports both destinations).
+  const [origin] = await fetchGitRemotes(dir, fixtureEnv);
+  expect(origin?.pushUrl).toBe('https://example.com/o/r.git');
+  expect(origin?.extraFetchUrls).toBe(1);
+  expect(origin?.extraPushUrls).toBe(1);
 });
 
 describe('gitRemoteAdd predicate-legal round trip', () => {

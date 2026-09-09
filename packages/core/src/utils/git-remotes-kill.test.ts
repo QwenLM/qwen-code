@@ -176,15 +176,18 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
 
   it('strips the dump from a killed branch-key read after removal', async () => {
     // snapshot finds one pointing branch → remove ok → probe ok →
-    // listing empty → all-scope verification empty → the branch-key read
-    // is killed mid-dump: reject stripped, never certify past the guard.
+    // listing empty → all-scope verification empty → tracking-refs read
+    // empty → re-verify empty → the branch-key sweep read is killed
+    // mid-dump: reject stripped, never certify past the guard.
     runGit
       .mockResolvedValueOnce('worktree\u0000branch.feat.remote\norigin\u0000')
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
-      .mockRejectedValueOnce(killedDumpError()); // branch-key read
+      .mockResolvedValueOnce('') // tracking-refs read (empty)
+      .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
+      .mockRejectedValueOnce(killedDumpError()); // branch-key sweep read
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );
@@ -197,18 +200,104 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
 
   it('strips the dump from a killed upstream-survivor read after cleanup', async () => {
     // snapshot (no branch keys) → remove ok → probe ok → listing empty →
-    // all-scope verification empty → worktree sweep read → worktree
-    // re-verify → the upstream-survivor read is killed mid-dump: reject
-    // stripped, never certify past the guard.
+    // all-scope verification empty → tracking-refs read empty →
+    // re-verify empty → worktree sweep read → worktree re-verify → the
+    // upstream-survivor read is killed mid-dump: reject stripped, never
+    // certify past the guard.
     runGit
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockResolvedValueOnce('') // tracking-refs read (empty)
+      .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree sweep read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // worktree re-verify
       .mockRejectedValueOnce(killedDumpError()); // upstream-survivor read
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('does not read exit 1 with output on stdout as a no-match', async () => {
+    // The empty-stdout arm is the deciding one here: a genuine git
+    // failure carrying ANY output must surface, never answer [] .
+    runGit
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exit 1'), {
+          stdout: 'unexpected output on stdout\n',
+          stderr: '',
+          code: 1,
+        }),
+      );
+    await expect(fetchGitRemotes('/repo')).rejects.toMatchObject({
+      code: 1,
+    });
+  });
+
+  it('strips the dump from a killed read whose stderr is empty too', async () => {
+    // The real timeout-kill shape has stderr: '' — the strip must still
+    // leave nothing but the error itself (no dump, no diagnostics).
+    runGit
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockRejectedValueOnce(
+        Object.assign(new Error('spawn git SIGTERM'), {
+          stdout:
+            'global\u0000remote.leak.url\nhttps://global.example/x.git\u0000',
+          stderr: '',
+          code: null,
+          signal: 'SIGTERM',
+          killed: true,
+        }),
+      );
+    const err = await fetchGitRemotes('/repo').catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe('');
+  });
+
+  it('strips the dump from a killed tracking-refs read', async () => {
+    // snapshot (no branch keys) → remove ok → probe ok → listing empty →
+    // all-scope verification empty → the tracking-refs read is killed
+    // mid-dump: reject stripped — "no refs" is not an answer a killed
+    // read may produce.
+    runGit
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockRejectedValueOnce(killedDumpError()); // tracking-refs read
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+  });
+
+  it('strips the dump from a killed tracking-refs re-verification', async () => {
+    // … tracking-refs read finds ONE ref → the delete runs → the
+    // re-verify read is killed mid-dump: reject stripped, never certify
+    // the phantom group as cleaned.
+    runGit
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockResolvedValueOnce('refs/remotes/origin/main\n') // refs read
+      .mockResolvedValueOnce('') // update-ref -d
+      .mockRejectedValueOnce(killedDumpError()); // re-verify
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );

@@ -35,7 +35,7 @@ function remoteRequests(daemon: MockDaemonController, suffix: string) {
   );
 }
 
-test('sidebar git picker manages remotes: list, add, remove', async ({
+test('sidebar git picker manages remotes: list, add, remove @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();

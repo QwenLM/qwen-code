@@ -10,7 +10,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { gitEnv } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
@@ -35,6 +43,45 @@ const tmpRoots: string[] = [];
 // remotes out of the read-side assertions.
 let fixtureEnv: NodeJS.ProcessEnv;
 let tmpHome: string;
+
+// gitEnv strips GIT_CONFIG_NOSYSTEM before the code under test spawns
+// git, so a host /etc/gitconfig remote section would decide the
+// inherited-scope assertions — fail loudly HERE, not as unrelated red
+// tests elsewhere in the file.
+beforeAll(() => {
+  let systemList = '';
+  try {
+    systemList = execFileSync('git', ['config', '--system', '--list'], {
+      encoding: 'utf8',
+      env: gitEnv({ ...process.env }),
+    });
+  } catch {
+    // No readable system config file: the hermetic precondition holds.
+  }
+  if (/^remote\./m.test(systemList)) {
+    throw new Error(
+      'host /etc/gitconfig defines a [remote] section — the inherited-scope assertions are not hermetic on this host',
+    );
+  }
+  // The env-passthrough witness seeds the shadow at the fixture's global
+  // scope and drops to ambient env when the passthrough is broken — an
+  // ambient remote.origin.* would answer 409 either way, so the witness
+  // would silently stop discriminating. Fail loudly instead.
+  let ambientGlobal = '';
+  try {
+    ambientGlobal = execFileSync('git', ['config', '--global', '--list'], {
+      encoding: 'utf8',
+      env: gitEnv({ ...process.env }),
+    });
+  } catch {
+    // No readable global config: the discrimination premise holds.
+  }
+  if (/^remote\./m.test(ambientGlobal)) {
+    throw new Error(
+      'host ~/.gitconfig defines a [remote] section — the env-passthrough witness is not discriminating on this host',
+    );
+  }
+});
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: fixtureEnv });
@@ -173,6 +220,56 @@ describe('workspace qualified Git remotes routes (guards)', () => {
       expect(res.status).toBe(503);
       expect(res.body.code).toBe('workspace_runtime_unavailable');
     }
+  });
+
+  it('requests strict mutation gating on both mutating routes', () => {
+    const mutate = vi.fn(
+      (_opts?: { strict?: boolean }) =>
+        ((_req: unknown, _res: unknown, next: () => void) => next()) as never,
+    );
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitRemotesRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([
+        trustedRuntime('/work/main'),
+      ]),
+      sendBridgeError,
+      mutate,
+    });
+    // Per call, not any-call: each POST registers its own strict gate
+    // (the GET registers none), so one missing gate cannot hide behind
+    // the other.
+    expect(mutate).toHaveBeenNthCalledWith(1, { strict: true });
+    expect(mutate).toHaveBeenNthCalledWith(2, { strict: true });
+    // And no third registration (the GET stays ungated).
+    expect(mutate).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers 503 when the generation closes mid-listing', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The handler asserts the generation before AND after the git
+    // listing: the post-await assert is what turns a mid-flight close
+    // into 503 instead of a 200 attributed to a dead generation.
+    const assertOpen = vi
+      .fn()
+      .mockImplementationOnce(() => {})
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('generation closed'), {
+          code: 'workspace_generation_closed',
+        });
+      });
+    const guarded = {
+      ...trustedRuntime(dir),
+      generationGuard: { assertOpen },
+    } as unknown as WorkspaceRuntime;
+    const app = appFor(createWorkspaceRegistry([guarded]));
+
+    const response = await request(app).get('/workspaces/primary/git/remotes');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(response.body.remotes).toBeUndefined();
   });
 });
 
@@ -334,6 +431,29 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('threads the resolved runtime env into the git subprocesses', async () => {
+    const dir = makeRepo();
+    // A same-name section at GLOBAL scope of the fixture env (HOME =
+    // tmpHome): the add pre-flight sees it only when the runtime's
+    // effectiveEnv — not the ambient process.env — reaches the git
+    // subprocess. Dropping the env passthrough turns this into a 200.
+    git(
+      dir,
+      'config',
+      '--global',
+      'remote.origin.url',
+      'https://global.example/o.git',
+    );
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote')
+      .send({ name: 'origin', url: 'https://example.com/o/r.git' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('remote_shadows_inherited');
+  });
+
   it('removes a remote and answers with the fresh list', async () => {
     const dir = makeRepo();
     git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
@@ -378,6 +498,32 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
     expect(
       git(dir, 'config', '--local', '--get', 'remote.dirty-cache.url').trim(),
     ).toBe('https://example.com/d/r.git');
+  });
+
+  it('classifies the lock contention a tracking branch produces', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'dirty-cache', 'https://example.com/d/r.git');
+    // The ordinary case — removing a remote the user has branches from:
+    // git dies unsetting the branch key first, and its two-line chain
+    // ends in `could not unset 'branch.` instead of `could not remove
+    // config section` (probed on git 2.43).
+    git(dir, 'config', 'branch.main.remote', 'dirty-cache');
+    git(dir, 'config', 'branch.main.merge', 'refs/heads/main');
+    fs.writeFileSync(path.join(dir, '.git', 'config.lock'), '');
+    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/remote/remove')
+      .send({ name: 'dirty-cache' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('git_config_write_failed');
+    expect(
+      git(dir, 'config', '--local', '--get', 'remote.dirty-cache.url').trim(),
+    ).toBe('https://example.com/d/r.git');
+    expect(
+      git(dir, 'config', '--local', '--get', 'branch.main.remote').trim(),
+    ).toBe('dirty-cache');
   });
 
   it('classifies removing a remote named like an earlier branch as no_such_remote', async () => {
@@ -453,7 +599,24 @@ describe('workspace qualified Git remotes routes against a real repo', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-notrepo-route-')),
     );
     tmpRoots.push(dir);
-    const app = appFor(createWorkspaceRegistry([trustedRuntime(dir)]));
+    // rev-parse walks ancestors: stop the walk at the fixture root, or a
+    // TMPDIR inside a git checkout makes this "not a repo" a real one
+    // (GIT_CEILING_DIRECTORIES survives gitEnv's re-scrub).
+    const app = appFor(
+      createWorkspaceRegistry([
+        {
+          ...trustedRuntime(dir),
+          env: {
+            mode: 'parent-process',
+            overlayKeys: [],
+            effectiveEnv: {
+              ...fixtureEnv,
+              GIT_CEILING_DIRECTORIES: path.dirname(dir),
+            },
+          },
+        } as unknown as WorkspaceRuntime,
+      ]),
+    );
 
     const response = await request(app).get('/workspaces/primary/git/remotes');
 

@@ -21,7 +21,11 @@ vi.mock('./ui/popover', async () => {
   const { createElement, createContext, forwardRef, useContext } = await import(
     'react'
   );
-  const OpenContext = createContext(true);
+  interface PopoverOpenState {
+    open: boolean;
+    onOpenChange?: (open: boolean) => void;
+  }
+  const OpenContext = createContext<PopoverOpenState>({ open: true });
   const PopoverContent = forwardRef<
     HTMLDivElement,
     {
@@ -30,14 +34,20 @@ vi.mock('./ui/popover', async () => {
     }
   >(({ children, onEscapeKeyDown }, ref) => {
     // Like Radix, the content unmounts when the popover closes.
-    if (!useContext(OpenContext)) return null;
+    const openContext = useContext(OpenContext);
+    if (!openContext.open) return null;
     return createElement(
       'div',
       {
         'data-test-popover-content': '',
         ref,
         onKeyDown: (e: KeyboardEvent) => {
-          if (e.key === 'Escape') onEscapeKeyDown?.(e);
+          if (e.key === 'Escape') {
+            onEscapeKeyDown?.(e);
+            // Like Radix's DismissableLayer: an un-prevented Escape
+            // dismisses the popover.
+            if (!e.defaultPrevented) openContext.onOpenChange?.(false);
+          }
         },
       },
       children,
@@ -45,8 +55,20 @@ vi.mock('./ui/popover', async () => {
   });
   PopoverContent.displayName = 'PopoverContent';
   return {
-    Popover: ({ children, open }: { children?: unknown; open?: boolean }) =>
-      createElement(OpenContext.Provider, { value: open ?? true }, children),
+    Popover: ({
+      children,
+      open,
+      onOpenChange,
+    }: {
+      children?: unknown;
+      open?: boolean;
+      onOpenChange?: (open: boolean) => void;
+    }) =>
+      createElement(
+        OpenContext.Provider,
+        { value: { open: open ?? true, onOpenChange } },
+        children,
+      ),
     PopoverTrigger: ({ children }: { children?: unknown }) =>
       createElement('div', null, children),
     // Forward onEscapeKeyDown the way Radix's DismissableLayer does, so the
@@ -121,8 +143,12 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
 
 const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
 const { I18nProvider } = await import('../i18n');
-const { BranchPickerPopover, deriveActionHints, listingContradictsStatus } =
-  await import('./BranchPickerPopover');
+const {
+  BranchPickerPopover,
+  deriveActionHints,
+  listingContradictsStatus,
+  GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+} = await import('./BranchPickerPopover');
 
 // A branch with an upstream it is behind on, so the Update Project row is
 // enabled (the action hints disable it without an upstream). Annotated with
@@ -188,11 +214,12 @@ function mount(
     onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
     gitCwd: string;
+    language: 'en' | 'zh-CN';
   }> = {},
 ): void {
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={overrides.language ?? 'en'}>
         <BranchPickerPopover
           open={overrides.open ?? true}
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
@@ -1802,6 +1829,7 @@ describe('BranchPickerPopover remotes view', () => {
       'fork',
       'https://example.com/f/r.git',
       undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
     );
     const content = document.body.querySelector('[data-test-popover-content]');
     expect(content?.textContent).toContain('fork');
@@ -1871,7 +1899,11 @@ describe('BranchPickerPopover remotes view', () => {
     clickTestId('remote-remove-origin');
     await flush();
 
-    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith('origin', undefined);
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'origin',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
     const content = document.body.querySelector('[data-test-popover-content]');
     expect(content?.textContent).toContain('No remotes configured');
     expect(footerText()).toContain('Removed remote origin');
@@ -2353,6 +2385,7 @@ describe('BranchPickerPopover remotes view', () => {
     expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
       'or\u202eigin',
       undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
     );
     // The footer renders the success message verbatim too, so it carries
     // the stripped name, not the raw override.
@@ -2847,6 +2880,7 @@ describe('BranchPickerPopover remotes view', () => {
     expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
       'ori\u200bgin',
       undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
     );
   });
 
@@ -3008,7 +3042,11 @@ describe('BranchPickerPopover remotes view', () => {
     clickTestId('remote-remove-origin ');
     clickTestId('remote-remove-origin ');
     await flush();
-    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith('origin ', undefined);
+    expect(workspaceGitRemoteRemove).toHaveBeenCalledWith(
+      'origin ',
+      undefined,
+      GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+    );
   });
 
   it('refreshes the branch list when a remove fails on the config write', async () => {
@@ -3087,7 +3125,8 @@ describe('BranchPickerPopover remotes view', () => {
     workspaceGitRemoteRemove.mockImplementation(
       () => new Promise((resolve) => (release = resolve)),
     );
-    mountWithBranches(undefined, { gitCwd: '/repo' });
+    const onBranchChanged = vi.fn();
+    mountWithBranches(undefined, { gitCwd: '/repo', onBranchChanged });
     await flush();
     clickTestId('branch-picker-manage-remotes');
     await flush();
@@ -3114,6 +3153,11 @@ describe('BranchPickerPopover remotes view', () => {
     ).toBeNull();
     const active = document.activeElement as HTMLElement | null;
     expect(active?.dataset.testid).not.toBe('remote-remove-origin');
+    // The cross-workspace staleness guard is what drops the late
+    // response: workspace A's success must never reach workspace B's
+    // footer, branches, or callback.
+    expect(footerText()).not.toContain('Removed remote origin');
+    expect(onBranchChanged).not.toHaveBeenCalled();
   });
 
   it('refreshes the branch list when the removal verification survives', async () => {
@@ -3163,15 +3207,26 @@ describe('BranchPickerPopover remotes view', () => {
         'GET /workspaces/:workspace/git/remotes: workspace_runtime_unavailable',
       ),
     );
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
     clickTestId('remote-remove-origin');
     clickTestId('remote-remove-origin');
     await flush();
     expect(
       document.body.querySelector('[data-testid="remote-remove-origin"]'),
     ).toBeTruthy();
+    // The typed draft survives the failed silent re-read (not just the
+    // form's existence).
     expect(
-      document.body.querySelector('input[data-testid="remote-add-name"]'),
-    ).toBeTruthy();
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.value,
+    ).toBe('fork');
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-url"]',
+      )?.value,
+    ).toBe('https://example.com/f/r.git');
     expect(document.body.textContent).not.toContain('runtime unavailable');
   });
 
@@ -3503,6 +3558,407 @@ describe('BranchPickerPopover remotes view', () => {
       document.body.querySelector(
         'input[placeholder="Search for branches and actions"]',
       ),
+    );
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+  });
+
+  it('disarms the armed confirm when its row leaves the filtered list', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        defaultRemotesResult().remotes[0]!,
+        {
+          name: 'upstream',
+          fetchUrl: 'https://example.com/u/r.git',
+          pushUrl: 'https://example.com/u/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    clickTestId('remote-remove-upstream');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    // Filter the armed row out: the arm must not survive as a pre-armed
+    // trap for the next single click.
+    setInput('remotes-search', 'origin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]'),
+    ).toBeNull();
+    setInput('remotes-search', '');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-upstream"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+  });
+
+  it('shows the loading state on the first non-silent remotes read', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemotes.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    mountWithBranches();
+    await flush();
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    expect(content?.textContent).toContain('Loading remotes');
+    expect(content?.textContent).not.toContain('No remotes configured');
+    expect(
+      document.body.querySelector('input[data-testid="remote-add-name"]'),
+    ).toBeNull();
+    await act(async () => {
+      release?.(defaultRemotesResult());
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+  });
+
+  it('scopes the remotes read to the workspace cwd', async () => {
+    await openRemotesView({ gitCwd: '/repo/wt' });
+    expect(workspaceGitRemotes).toHaveBeenCalledWith('/repo/wt');
+  });
+
+  it('clears a standing pull-resolution panel when entering the view', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    clickTestId('branch-picker-manage-remotes');
+    await flush();
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+  });
+
+  it('disarms a pending remove confirm when an add is submitted', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue(defaultRemotesResult());
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+  });
+
+  it('sanitizes config-sourced git error text before the footer', async () => {
+    workspaceGitRemoteAdd.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'remote_already_exists',
+          message: 'error: remote ori\u200bgin already exists.',
+        },
+        'POST /workspaces/:workspace/git/remote: remote_already_exists',
+      ),
+    );
+    await openRemotesView();
+    setInput('remote-add-name', 'ori\u200bgin');
+    setInput('remote-add-url', 'https://example.com/o/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(footerText()).toContain('already exists');
+    expect(footerText()).not.toContain('ori\u200bgin');
+  });
+
+  it('releases the remove buttons without awaiting the branch refresh', async () => {
+    workspaceGitRemoteRemove.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [],
+    });
+    await openRemotesView();
+    // Installed AFTER the mount's seeding: mountWithBranches re-seeds
+    // workspaceGitBranches via mockResolvedValue (which REPLACES the
+    // implementation), so the never-resolving listing must be the LAST
+    // word before the removal's background refresh picks it up.
+    workspaceGitBranches.mockImplementation(() => new Promise(() => {}));
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // The branch-listing round trip must not hold the remotes view
+    // hostage: busy clears as soon as the removal lands.
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-testid="remotes-back"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[data-testid="remote-add-name"]',
+      )?.disabled,
+    ).toBe(false);
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('clears the search filter after a successful add', async () => {
+    workspaceGitRemoteAdd.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      remotes: [
+        {
+          name: 'fork',
+          fetchUrl: 'https://example.com/f/r.git',
+          pushUrl: 'https://example.com/f/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'upstream');
+    await flush();
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    clickTestId('remote-add-submit');
+    await flush();
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Search remotes"]',
+      )?.value,
+    ).toBe('');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-fork"]'),
+    ).toBeTruthy();
+  });
+
+  it('sanitizes the search needle the way the rows are sanitized', async () => {
+    await openRemotesView();
+    setInput('remotes-search', 'ori\u200bgin');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+  });
+
+  it('matches the search against the extras badge text', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+          partialCloneFilter: 'blob:none',
+        },
+      ],
+    });
+    await openRemotesView();
+    setInput('remotes-search', 'blob:none');
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]'),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain('No remotes match');
+  });
+
+  it('disarms the confirm with Escape before leaving the view', async () => {
+    const onOpenChange = vi.fn();
+    await openRemotesView({ onOpenChange });
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).toContain('Confirm');
+    const content = document.body.querySelector('[data-test-popover-content]');
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    // The armed tier consumed the cancelable Escape: no dismissal fired.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // The universal cancel disarms the destructive confirm instead of
+    // throwing the user out of the view.
+    expect(
+      document.body.querySelector('[data-testid="remote-remove-origin"]')
+        ?.textContent,
+    ).not.toContain('Confirm');
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    // The next Escape takes the view tier.
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    // The view tier prevented it too: still no popover dismissal.
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('dismisses the popover on an un-prevented Escape from the branches view', async () => {
+    const onOpenChange = vi.fn();
+    mountWithBranches(BRANCHES, { onOpenChange });
+    await flush();
+    const content = document.body.querySelector('[data-test-popover-content]');
+    act(() => {
+      content?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('focuses the back button on view entry', async () => {
+    await openRemotesView();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
+  });
+
+  it('tooltips both URLs when the push URL differs', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    const url = document.body
+      .querySelector('[data-testid="remote-remove-origin"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(url?.getAttribute('title')).toBe(
+      'fetch: https://example.com/o/r.git\npush: https://example.com/push/r.git',
+    );
+  });
+
+  it('localizes the push/fetch tooltip labels', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/push/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: false,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView({ language: 'zh-CN' });
+    const url = document.body
+      .querySelector('[data-testid="remote-remove-origin"]')
+      ?.parentElement?.querySelector('[class*="remoteUrl"]');
+    expect(url?.getAttribute('title')).toBe(
+      '拉取: https://example.com/o/r.git\n推送: https://example.com/push/r.git',
+    );
+  });
+
+  it('names the removal consequence in the armed confirm aria-label', async () => {
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [
+        {
+          name: 'origin',
+          fetchUrl: 'https://example.com/o/r.git',
+          pushUrl: 'https://example.com/o/r.git',
+          extraFetchUrls: 0,
+          extraPushUrls: 0,
+          promisor: true,
+          customRefspec: false,
+          otherSettings: 0,
+        },
+      ],
+    });
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-origin"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Confirm removing origin (partial clone)');
+  });
+
+  it('shows an in-flight spinner on the removing row', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    const button = document.body.querySelector(
+      '[data-testid="remote-remove-origin"]',
+    );
+    expect(button?.querySelector('svg')?.getAttribute('class')).toContain(
+      'spin',
     );
     await act(async () => {
       release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });

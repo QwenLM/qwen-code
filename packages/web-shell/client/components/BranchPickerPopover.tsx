@@ -45,6 +45,12 @@ import styles from './BranchPickerPopover.module.css';
 // still restoring the repository.
 const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
 
+// A remote mutation chains git's add/rm plus the verification and
+// upstream-cleanup spawns (each with its own 30s budget — the add chain
+// is 5 of them), so size the client fetch timeout above the chain,
+// mirroring the pull flow.
+export const GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS = 600_000;
+
 function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
   if (!(err instanceof DaemonHttpError)) return undefined;
   const body = err.body;
@@ -416,6 +422,9 @@ export function BranchPickerPopover({
   const [remoteUrl, setRemoteUrl] = useState('');
   // The two-click remove confirm: holds the armed remote's name, or null.
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  // The row whose removal is in flight: busyAction only says a removal is
+  // running, not which row, and the row needs that to show its spinner.
+  const [removingName, setRemovingName] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // Focus target when leaving the remotes view, so the view switch does not
@@ -946,7 +955,12 @@ export function BranchPickerPopover({
         : null;
     setBusyAction('remoteAdd');
     try {
-      const result = await ws.workspaceGitRemoteAdd(name, url, gitCwd);
+      const result = await ws.workspaceGitRemoteAdd(
+        name,
+        url,
+        gitCwd,
+        GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+      );
       if (requestId !== remotesRequestIdRef.current) return;
       setRemotes(result.remotes);
       // A silent re-read issued before this mutation must not overwrite
@@ -954,6 +968,9 @@ export function BranchPickerPopover({
       remotesRequestIdRef.current++;
       setRemoteName('');
       setRemoteUrl('');
+      // A standing filter could hide the row the success footer just
+      // named.
+      setSearch('');
       addFocusRestoreRef.current = 'remote-add-name';
       showStatus(
         t('branchPicker.remotes.added', {
@@ -1001,8 +1018,13 @@ export function BranchPickerPopover({
           ? name
           : null;
       setBusyAction('remoteRemove');
+      setRemovingName(name);
       try {
-        const result = await ws.workspaceGitRemoteRemove(name, gitCwd);
+        const result = await ws.workspaceGitRemoteRemove(
+          name,
+          gitCwd,
+          GIT_REMOTE_MUTATION_FETCH_TIMEOUT_MS,
+        );
         if (requestId !== remotesRequestIdRef.current) return;
         setRemotes(result.remotes);
         // A silent re-read issued before this mutation must not overwrite
@@ -1016,8 +1038,11 @@ export function BranchPickerPopover({
         );
         // Removal deletes refs/remotes/<name>/* and the tracking config of
         // any branch that pointed at it, so both the branch listing and the
-        // chip's upstream state are stale now.
-        await fetchBranches(true);
+        // chip's upstream state are stale now — refreshed in the
+        // background: holding busyAction for a whole listing round trip
+        // the remotes view never renders would leave focus parked on
+        // document.body the entire time.
+        void fetchBranches(true);
         void fetchStatus();
         onBranchChanged?.();
       } catch (err) {
@@ -1047,6 +1072,7 @@ export function BranchPickerPopover({
         }
       } finally {
         setBusyAction(null);
+        setRemovingName(null);
       }
     },
     [
@@ -1127,9 +1153,23 @@ export function BranchPickerPopover({
           .includes(needle) ||
         collapse(sanitizeRemoteDisplay(r.pushUrl))
           .toLowerCase()
+          .includes(needle) ||
+        collapse(sanitizeRemoteDisplay(remoteExtras(r, t)))
+          .toLowerCase()
           .includes(needle),
     );
-  }, [remotes, q]);
+  }, [remotes, q, t]);
+
+  // An armed confirm whose row left the rendered list (a search filter
+  // hiding it) must not stay pre-armed for the next single click.
+  useEffect(() => {
+    if (
+      confirmRemove !== null &&
+      !filteredRemotes.some((r) => r.name === confirmRemove)
+    ) {
+      setConfirmRemove(null);
+    }
+  }, [filteredRemotes, confirmRemove]);
 
   const hints = useMemo(
     () => deriveActionHints(t, data, effectiveStatus),
@@ -1182,11 +1222,15 @@ export function BranchPickerPopover({
         }}
         // Escape leaves the nested remotes view first; only a second Escape
         // (from the branches view) dismisses the whole popover, so the typed
-        // add draft is not destroyed by the key that means "go back".
+        // add draft is not destroyed by the key that means "go back". An
+        // armed remove confirm gets its own tier first: the universal
+        // cancel disarms the destructive confirm instead of throwing the
+        // user out of the view.
         onEscapeKeyDown={(e) => {
           if (view === 'remotes') {
             e.preventDefault();
-            closeRemotes();
+            if (confirmRemove !== null) setConfirmRemove(null);
+            else closeRemotes();
           }
         }}
       >
@@ -1202,6 +1246,7 @@ export function BranchPickerPopover({
             }
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            data-testid={view === 'remotes' ? 'remotes-search' : undefined}
           />
         </div>
 
@@ -1213,6 +1258,7 @@ export function BranchPickerPopover({
               loading={remotesLoading}
               error={remotesError}
               busyAction={busyAction}
+              removingName={removingName}
               confirmRemove={confirmRemove}
               onConfirmRemove={setConfirmRemove}
               onRemove={(name) => void handleRemoteRemove(name)}
@@ -1707,6 +1753,7 @@ function RemotesView({
   loading,
   error,
   busyAction,
+  removingName,
   confirmRemove,
   onConfirmRemove,
   onRemove,
@@ -1724,6 +1771,7 @@ function RemotesView({
   loading: boolean;
   error: string | null;
   busyAction: string | null;
+  removingName: string | null;
   confirmRemove: string | null;
   onConfirmRemove: (name: string) => void;
   onRemove: (name: string) => void;
@@ -1837,7 +1885,7 @@ function RemotesView({
                     className={styles.remoteUrl}
                     title={
                       r.pushUrl !== r.fetchUrl
-                        ? `fetch: ${fetchTitle}\npush: ${pushTitle}`
+                        ? `${t('branchPicker.remotes.urlTooltipFetch', { url: fetchTitle })}\n${t('branchPicker.remotes.urlTooltipPush', { url: pushTitle })}`
                         : fetchTitle
                     }
                   >
@@ -1858,6 +1906,7 @@ function RemotesView({
                       confirmRemove === r.name
                         ? t('branchPicker.remotes.removeConfirmFor', {
                             name: ariaName,
+                            extras,
                           })
                         : t('branchPicker.remotes.remove', {
                             name: ariaName,
@@ -1865,7 +1914,10 @@ function RemotesView({
                     }
                     data-testid={`remote-remove-${r.name}`}
                   >
-                    {confirmRemove === r.name ? (
+                    {busyAction === 'remoteRemove' &&
+                    removingName === r.name ? (
+                      <Loader2Icon size={13} className={styles.spin} />
+                    ) : confirmRemove === r.name ? (
                       t('branchPicker.remotes.removeConfirm')
                     ) : (
                       <Trash2Icon size={13} />
