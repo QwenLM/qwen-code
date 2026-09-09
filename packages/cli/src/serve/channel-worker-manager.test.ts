@@ -132,6 +132,41 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('preserves committed workers when disabling cannot resolve a remaining channel', async () => {
+    const group = fakeGroup({
+      snapshots: () => [
+        workerSnapshot({
+          channels: ['telegram', 'other'],
+          requestedChannels: ['telegram', 'other'],
+        }),
+      ],
+    });
+    const test = setup(group);
+    await test.manager.startInitial({
+      mode: 'names',
+      names: ['telegram', 'other'],
+    });
+    test.resolveGroups.mockRejectedValueOnce(
+      new Error('remaining channel config is missing'),
+    );
+
+    await expect(
+      test.manager.setChannelEnabled(
+        { name: 'telegram', workspaceCwd: PRIMARY },
+        false,
+      ),
+    ).rejects.toThrow('remaining channel config is missing');
+
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['other'] },
+      'set',
+    );
+    expect(test.manager.committedChannelNames()).toEqual(['telegram', 'other']);
+    expect(group.stop).not.toHaveBeenCalled();
+    expect(group.reconcile).not.toHaveBeenCalled();
+    expect(test.releaseLease).not.toHaveBeenCalled();
+  });
+
   it('exposes committed channel names in selection order', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
