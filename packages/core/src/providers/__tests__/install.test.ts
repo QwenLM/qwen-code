@@ -63,6 +63,51 @@ describe('applyProviderInstallPlan', () => {
   });
 
   it.each(['image', 'voice'] as const)(
+    'rejects a slash-varied %s reconnect before it can overwrite conversation credentials',
+    async (purpose) => {
+      const baseUrl = 'https://media.example/v1';
+      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+      const serviceKey = `${chatKey}_${purpose.toUpperCase()}`;
+      const models = [
+        { id: 'chat', baseUrl, envKey: chatKey },
+        {
+          id: 'service',
+          baseUrl: `${baseUrl}/`,
+          envKey: serviceKey,
+          ...(purpose === 'image' ? { imageOnly: true } : { voiceOnly: true }),
+          generationConfig: { contextWindowSize: 65536 },
+        },
+      ];
+      const adapter = createAdapter({ openai: models });
+      vi.stubEnv(chatKey, 'chat-old');
+      vi.stubEnv(serviceKey, 'service-old');
+      try {
+        await expect(
+          (async () => {
+            const plan = buildInstallPlan(
+              customProvider,
+              {
+                protocol: AuthType.USE_OPENAI,
+                baseUrl,
+                apiKey: 'service-new',
+                modelIds: ['service'],
+              },
+              models,
+            );
+            await applyProviderInstallPlan(plan, { settings: adapter });
+          })(),
+        ).rejects.toMatchObject({ step: 'modelPurpose' });
+        expect(adapter.setValue).not.toHaveBeenCalled();
+        expect(process.env[chatKey]).toBe('chat-old');
+        expect(process.env[serviceKey]).toBe('service-old');
+        expect(adapter.getModelProviders()).toEqual({ openai: models });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each(['image', 'voice'] as const)(
     'installs %s models without changing conversation selection',
     async (purpose) => {
       const adapter = createAdapter({ anthropic: [{ id: 'main' }] });

@@ -69,7 +69,10 @@ export interface WorkspaceModelsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  syncModelProvidersRuntime?: () => Promise<ServeModelProviderRuntimeSyncResult>;
+  syncModelProvidersRuntime?: (
+    writeScope: SettingScope,
+    method: 'PATCH' | 'DELETE',
+  ) => Promise<ServeModelProviderRuntimeSyncResult>;
 }
 
 function parseTarget(
@@ -207,7 +210,10 @@ export function registerWorkspaceModelsRoutes(
       }
       let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
       try {
-        runtimeSync = await deps.syncModelProvidersRuntime?.();
+        runtimeSync = await deps.syncModelProvidersRuntime?.(
+          scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+          'PATCH',
+        );
       } catch (error) {
         if (sendGenerationClosedError(res, error)) return;
         runtimeSync = { status: 'failed' };
@@ -396,7 +402,11 @@ export function registerWorkspaceModelsRoutes(
         const stillConfigured = remaining.length > 0;
         for (const selectionScope of getWritableScopes(loaded)) {
           const settings = loaded.forScope(selectionScope).settings;
-          if (settings.voiceModel === removedModelId && !stillConfigured) {
+          if (
+            typeof settings.voiceModel === 'string' &&
+            settings.voiceModel.trim() === removedModelId &&
+            !stillConfigured
+          ) {
             writes.push({
               scope: selectionScope,
               key: 'voiceModel',
@@ -504,14 +514,15 @@ export function registerWorkspaceModelsRoutes(
         // On a partial persist, tell the caller which keys committed so it can
         // reconcile (e.g. modelProviders removed but model.name not cleared).
         if (err instanceof WorkspaceSettingsPartialPersistError) {
-          if (
-            err.committedWrites.some(
-              (write) => write.key === 'modelProviders',
-            ) &&
-            deps.syncModelProvidersRuntime
-          ) {
+          const providerWrite = err.committedWrites.find(
+            (write) => write.key === 'modelProviders',
+          );
+          if (providerWrite && deps.syncModelProvidersRuntime) {
             try {
-              await deps.syncModelProvidersRuntime();
+              await deps.syncModelProvidersRuntime(
+                providerWrite.scope,
+                'DELETE',
+              );
             } catch (syncError) {
               if (sendGenerationClosedError(res, syncError)) return;
               writeStderrLine(
@@ -549,7 +560,10 @@ export function registerWorkspaceModelsRoutes(
       let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
       if (deps.syncModelProvidersRuntime) {
         try {
-          runtimeSync = await deps.syncModelProvidersRuntime();
+          runtimeSync = await deps.syncModelProvidersRuntime(
+            writes[0]!.scope,
+            'DELETE',
+          );
         } catch (err) {
           if (sendGenerationClosedError(res, err)) return;
           writeStderrLine(

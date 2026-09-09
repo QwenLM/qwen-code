@@ -2848,8 +2848,8 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      syncModelProvidersRuntime: () =>
-        syncModelProvidersRuntime('DELETE /workspace/models'),
+      syncModelProvidersRuntime: (writeScope, method) =>
+        syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
     });
   }
 

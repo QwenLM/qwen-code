@@ -138,7 +138,8 @@ export function listModelConfigurations(loaded: LoadedSettings) {
         !model.fastOnly &&
         !model.voiceOnly &&
         model.baseUrl &&
-        model.envKey
+        typeof model.envKey === 'string' &&
+        model.envKey.trim()
       ) {
         try {
           const url = new URL(model.baseUrl);
@@ -163,7 +164,7 @@ export function listModelConfigurations(loaded: LoadedSettings) {
         baseUrl: model.baseUrl
           ? publicProviderBaseUrl(model.baseUrl)
           : undefined,
-        envKey: model.envKey,
+        envKey: typeof model.envKey === 'string' ? model.envKey : undefined,
         contextWindowSize: model.generationConfig?.contextWindowSize,
         purpose:
           model.imageOnly === true

@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { ProviderInstallError } from './install.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -273,6 +274,25 @@ export function buildInstallPlan(
   let envKey = resolveEnvKey(config, inputs);
   const providerOwns = resolveOwnsModel(config);
   let models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const providerState = resolveProviderState(config, inputs.baseUrl, models);
+  if (
+    config.id === 'custom-openai-compatible' &&
+    existingModels?.some(
+      (entry) =>
+        providerOwns?.(entry) &&
+        (entry.imageOnly || entry.voiceOnly) &&
+        models.some((model) => model.id === entry.id) &&
+        typeof entry.baseUrl === 'string' &&
+        entry.baseUrl !== inputs.baseUrl &&
+        resolveEnvKey(config, { ...inputs, baseUrl: entry.baseUrl }) === envKey,
+    )
+  ) {
+    throw new ProviderInstallError(
+      'A service model already uses this credential endpoint. Reconnect using its exact saved base URL.',
+      'modelPurpose',
+      protocol,
+    );
+  }
   if (existingModels?.length && !inputs.advancedConfig?.purpose) {
     models = models.map((model) => {
       const existing = existingModels.find(
@@ -287,6 +307,13 @@ export function buildInstallPlan(
           ? {
               ...existing?.generationConfig,
               ...model.generationConfig,
+              ...(existing.generationConfig?.contextWindowSize !== undefined &&
+              inputs.advancedConfig?.contextWindowSize === undefined
+                ? {
+                    contextWindowSize:
+                      existing.generationConfig.contextWindowSize,
+                  }
+                : {}),
               ...(existing?.generationConfig?.samplingParams ||
               model.generationConfig?.samplingParams
                 ? {
@@ -370,7 +397,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState,
   };
 }
 

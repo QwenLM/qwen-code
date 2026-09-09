@@ -7643,8 +7643,14 @@ async function runQwenServeImpl(
               getDefaultModelIds: core.getDefaultModelIds,
               resolveBaseUrl: core.resolveBaseUrl,
             });
-            const plan = core.buildInstallPlan(provider, inputs);
             const fresh = loadSettingsForPersistence(boundWorkspace);
+            const plan = core.buildInstallPlan(
+              provider,
+              inputs,
+              fresh.merged.modelProviders?.[
+                inputs.protocol ?? provider.protocol
+              ],
+            );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
@@ -7672,7 +7678,11 @@ async function runQwenServeImpl(
               authType: plan.authType,
               ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
               ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
-              message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+              message: !plan.modelSelection
+                ? adapter.getValue('security.auth.selectedType')
+                  ? 'Service models saved.'
+                  : 'Service models saved. Configure a conversation model to start chatting.'
+                : `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
           },
         ),

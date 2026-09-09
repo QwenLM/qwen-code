@@ -13,7 +13,7 @@ import request from 'supertest';
 import type { WorkspaceSettingsWrite } from '../workspace-service/types.js';
 import { registerWorkspaceModelsRoutes } from './workspace-models.js';
 import { updateModelContextWindow } from '../model-configuration.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import * as jsoncEditor from '../../utils/jsonc-editor.js';
@@ -410,6 +410,10 @@ describe('DELETE /workspace/models', () => {
       runtimeSync: { status: 'failed' },
     });
     expect(syncModelProvidersRuntime).toHaveBeenCalledOnce();
+    expect(syncModelProvidersRuntime).toHaveBeenCalledWith(
+      SettingScope.User,
+      'DELETE',
+    );
     expect(modelProvidersAtSync).toEqual({ openai: [] });
     expect(broadcastSettingsChanged.mock.invocationCallOrder[0]).toBeLessThan(
       syncModelProvidersRuntime.mock.invocationCallOrder[0]!,
@@ -629,7 +633,10 @@ describe('DELETE /workspace/models', () => {
       'user',
       undefined,
     );
-    expect(syncModelProvidersRuntime).toHaveBeenCalledOnce();
+    expect(syncModelProvidersRuntime).toHaveBeenCalledExactlyOnceWith(
+      SettingScope.User,
+      'DELETE',
+    );
   });
 
   it('trims whitespace-padded fields before matching', async () => {
@@ -785,6 +792,67 @@ describe('DELETE /workspace/models', () => {
 });
 
 describe('model configuration routes', () => {
+  it.each(['patch', 'delete'] as const)(
+    'forwards the user write scope for %s beside an unrelated workspace bucket',
+    async (method) => {
+      writeUserSettings({ modelProviders: { openai: [{ id: 'user' }] } });
+      writeWorkspaceSettings({
+        modelProviders: { gemini: [{ id: 'workspace' }] },
+      });
+      const sync = vi.fn(async () => ({ status: 'applied' as const }));
+      const { app } = makeApp({ syncModelProvidersRuntime: sync });
+      const listed = await request(app).get('/workspace/models');
+      const target = listed.body.models.find(
+        (model: { modelId: string }) => model.modelId === 'user',
+      );
+      const response = await request(app)
+        [method]('/workspace/models')
+        .send({
+          ...target,
+          contextWindowSize: 65536,
+        });
+      expect(response.status).toBe(200);
+      expect(sync).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.User,
+        method.toUpperCase(),
+      );
+      expect(readWorkspaceSettings()['modelProviders']).toEqual({
+        gemini: [{ id: 'workspace' }],
+      });
+    },
+  );
+
+  it.each([
+    { voiceModel: ' qwen3-asr-flash ', expected: '' },
+    { voiceModel: 'qwen3-asr-flash\n', expected: '' },
+    { voiceModel: 5, expected: 5 },
+    { voiceModel: false, expected: false },
+  ])(
+    'removes a model using voice runtime parsing ($voiceModel)',
+    async ({ voiceModel, expected }) => {
+      writeUserSettings({
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3-asr-flash',
+              baseUrl: 'https://voice.example/v1',
+              envKey: 'VOICE_KEY',
+              voiceOnly: true,
+            },
+          ],
+        },
+        voiceModel,
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const response = await request(app)
+        .delete('/workspace/models')
+        .send(listed.body.models[0]);
+      expect(response.status).toBe(200);
+      expect(readUserSettings()['voiceModel']).toBe(expected);
+    },
+  );
+
   it('persists a workspace-owned window and reports runtime sync failure without touching user settings', async () => {
     writeUserSettings({
       $version: 4,
@@ -815,6 +883,7 @@ describe('model configuration routes', () => {
       runtimeSync: { status: 'failed' },
     });
     expect(sync).toHaveBeenCalledOnce();
+    expect(sync).toHaveBeenCalledWith(SettingScope.Workspace, 'PATCH');
     expect(readWorkspaceSettings()).toMatchObject({
       modelProviders: {
         openai: [

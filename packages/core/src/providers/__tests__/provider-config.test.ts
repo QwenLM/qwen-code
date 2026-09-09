@@ -90,6 +90,24 @@ describe('buildInstallPlan', () => {
     );
   });
 
+  it('keeps an edited window when reconnecting a model with a preset default', () => {
+    const config = makeConfig();
+    const inputs = {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'test',
+      modelIds: ['model-a'],
+    };
+    const initial = buildInstallPlan(config, inputs);
+    const original = initial.modelProviders![0]!.models;
+    original[0]!.generationConfig = { contextWindowSize: 65536 };
+    const reconnected = buildInstallPlan(config, inputs, original);
+    expect(reconnected.providerState).toEqual(initial.providerState);
+    expect(
+      reconnected.modelProviders![0]!.models[0]!.generationConfig
+        ?.contextWindowSize,
+    ).toBe(65536);
+  });
+
   it('applies advancedConfig to editable unknown model IDs only', () => {
     const config = makeConfig({ modelsEditable: true });
     const plan = buildInstallPlan(config, {

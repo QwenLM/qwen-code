@@ -82,13 +82,18 @@ describe('persisted model configuration', () => {
             { ...image, id: 'fast', fastOnly: true },
             { ...image, id: 'voice', voiceOnly: true },
             { ...image, id: 'no-key', envKey: undefined },
+            { ...image, id: 'blank-key', envKey: ' ' },
+            { ...image, id: 'numeric-key', envKey: 5 },
           ],
           gateway: [image],
         },
       }),
     );
     const configs = listModelConfigurations(load());
-    expect(configs).toHaveLength(5);
+    expect(configs).toHaveLength(7);
+    expect(
+      configs.find((config) => config.modelId === 'numeric-key')?.envKey,
+    ).toBeUndefined();
     expect(configs.every((config) => config.imageModel === undefined)).toBe(
       true,
     );

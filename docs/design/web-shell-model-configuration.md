@@ -55,6 +55,11 @@ endpoint and credential key; omitted credentials cannot reuse a service key for
 new conversation IDs. Image and voice groups with independent keys must reconnect
 separately. Installs reject new ambiguity for existing voice-only or selected voice
 IDs before writing. Other preset setup behavior stays unchanged.
+An edited context window survives a preset reconnect or template update instead
+of being replaced by the catalog default. A service reconnect with a differently
+spelled URL in the same credential bucket is rejected before writing; the user
+must use the saved raw endpoint so exact role selections remain valid. Saving
+only service models does not complete first-time conversation authentication.
 Reject service-only installs that would overwrite an existing conversation model
 through either identity replacement or preset ownership before any settings or
 environment write. Changing an existing identity to another purpose is rejected.
@@ -65,7 +70,7 @@ including service-only models and the explicit context-window override. PATCH on
 that route accepts an opaque model key and a context size (1–10,000,000), or null
 to restore model-ID inference. DELETE accepts the same opaque key for exact
 persisted targeting even when displayed URLs are redacted. The key includes scope, storage provider, model
-ID, and endpoint; missing or ambiguous targets fail without a fallback. A locked
+ID, and endpoint; missing or ambiguous storage targets fail without a fallback. A locked
 fresh read/modify/write preserves credentials and unrelated generation settings.
 PATCH writes the unresolved settings copy so environment placeholders remain
 placeholders on disk. DELETE checks its raw scope snapshots inside the writer
@@ -84,6 +89,11 @@ semantics. Configuration keys follow each provider bucket’s actual writable
 scope, including user buckets inherited alongside unrelated workspace providers.
 Route uniqueness also includes read-only System and SystemDefaults buckets, so
 an alias cannot attach a writable key or role choice to a read-only model.
+An independently stored writable alias retains its own editor and delete action;
+changing that row does not claim to replace the read-only runtime winner.
+PATCH and DELETE pass the actual provider write scope to runtime synchronization,
+including partial persistence: user writes refresh registered sibling runtimes,
+while workspace writes stay in the primary runtime.
 Voice continues to use the resolved selected runtime without falling
 back to primary. Image configuration must reach live runtime configuration through
 the existing settings/model-provider refresh path. Disabling image generation
