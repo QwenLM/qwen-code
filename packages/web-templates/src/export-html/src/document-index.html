@@ -16,6 +16,23 @@
     <style nonce="__EXPORT_NONCE__">
       __DOCUMENT_INLINE_CSS__
     </style>
+    <!--
+      Latches a stylesheet failure before the <link> is parsed: Chromium
+      parser-blocks the body script on a pending stylesheet, so a CSS failure
+      that settles first would otherwise reach no listener. Records only —
+      document.body does not exist yet here, so the body script acts on it.
+    -->
+    <script nonce="__EXPORT_NONCE__">
+      window.addEventListener(
+        'error',
+        function (event) {
+          if (event.target && event.target.id === 'transcript-stylesheet') {
+            window.__transcriptStyleFailed = true;
+          }
+        },
+        true,
+      );
+    </script>
     <link
       rel="stylesheet"
       nonce="__EXPORT_NONCE__"
@@ -65,6 +82,12 @@
           true,
         );
         window.addEventListener('unhandledrejection', showLoadError);
+        // A stylesheet failure that settles while the parser is still blocked on
+        // the <link> is dispatched before the listener above exists, so the
+        // <head> latch is the only record of it.
+        if (window.__transcriptStyleFailed) {
+          showLoadError();
+        }
       })();
     </script>
     <script
