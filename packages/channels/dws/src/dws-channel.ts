@@ -39,6 +39,7 @@ const MAX_DOCUMENT_CONTEXT_CHARS = 12_000;
 const MAX_TODO_CONTEXT_CHARS = 12_000;
 const MAX_COMMENT_CHARS = 4_000;
 const MAX_PROCESSED_ITEMS = 5_000;
+const DOCUMENT_NOTIFICATION_KEY_PREFIX = 'document-notification\0';
 const MAX_REPLAY_CONVERSATIONS = 16;
 /**
  * How many times one inbound message may fail its turn before it is dropped.
@@ -114,6 +115,8 @@ interface DwsCursor {
   documentIds?: string[];
   notificationWatermark?: number;
   mentionWatermark?: number;
+  notificationHistoryFloor?: number;
+  mentionHistoryFloor?: number;
   groupMessagesEnabled?: boolean;
   directMessagesEnabled?: boolean;
   notificationCheckpoint?: PersistedNotificationCheckpoint;
@@ -279,7 +282,18 @@ function messageKey(
 function documentNotificationKey(
   notification: DwsDocumentMentionNotification,
 ): string {
-  return `document-notification\0${notification.documentId}\0${notification.commentKey}`;
+  return `${DOCUMENT_NOTIFICATION_KEY_PREFIX}${notification.documentId}\0${notification.commentKey}`;
+}
+
+function isDocumentNotificationKey(key: string): boolean {
+  return key.startsWith(DOCUMENT_NOTIFICATION_KEY_PREFIX);
+}
+
+function documentIdFromNotificationKey(key: string): string | undefined {
+  if (!isDocumentNotificationKey(key)) return undefined;
+  const separator = key.indexOf('\0', DOCUMENT_NOTIFICATION_KEY_PREFIX.length);
+  if (separator < 0) return undefined;
+  return key.slice(DOCUMENT_NOTIFICATION_KEY_PREFIX.length, separator);
 }
 
 function todoChatId(taskId: string): string {
@@ -709,6 +723,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         (typeof cursor.mentionWatermark !== 'number' ||
           !Number.isSafeInteger(cursor.mentionWatermark) ||
           cursor.mentionWatermark < 0)) ||
+      (cursor.notificationHistoryFloor !== undefined &&
+        (typeof cursor.notificationHistoryFloor !== 'number' ||
+          !Number.isSafeInteger(cursor.notificationHistoryFloor) ||
+          cursor.notificationHistoryFloor < 0)) ||
+      (cursor.mentionHistoryFloor !== undefined &&
+        (typeof cursor.mentionHistoryFloor !== 'number' ||
+          !Number.isSafeInteger(cursor.mentionHistoryFloor) ||
+          cursor.mentionHistoryFloor < 0)) ||
       (cursor.groupMessagesEnabled !== undefined &&
         typeof cursor.groupMessagesEnabled !== 'boolean') ||
       (cursor.directMessagesEnabled !== undefined &&
@@ -756,6 +778,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       ),
       notificationWatermark: cursor.notificationWatermark,
       mentionWatermark: cursor.mentionWatermark,
+      notificationHistoryFloor: cursor.notificationHistoryFloor,
+      mentionHistoryFloor: cursor.mentionHistoryFloor,
       groupMessagesEnabled: cursor.groupMessagesEnabled,
       directMessagesEnabled: cursor.directMessagesEnabled,
       notificationCheckpoint: cursor.notificationCheckpoint,
@@ -820,6 +844,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.inboundFailures = [];
       this.cursor.notificationWatermark = undefined;
       this.cursor.mentionWatermark = undefined;
+      this.cursor.notificationHistoryFloor = undefined;
+      this.cursor.mentionHistoryFloor = undefined;
       this.cursor.groupMessagesEnabled = undefined;
       this.cursor.directMessagesEnabled = undefined;
       this.cursor.notificationCheckpoint = undefined;
@@ -830,7 +856,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.rememberDocumentId(documentId);
     }
     for (const key of this.cursor.processedMessages) {
-      const documentId = key.match(/^document-notification\0([^\0]+)\0/u)?.[1];
+      const documentId = documentIdFromNotificationKey(key);
       if (documentId && /^[\p{L}\p{N}_~-]+$/u.test(documentId)) {
         this.rememberDocumentId(documentId);
       }
@@ -1238,7 +1264,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
       const inboundFailures = this.cursor.inboundFailures ?? [];
       const remainingFailures = inboundFailures.filter(
-        ({ key }) => !key.startsWith('document-notification\0'),
+        ({ key }) => !isDocumentNotificationKey(key),
       );
       if (remainingFailures.length !== inboundFailures.length) {
         this.cursor.inboundFailures = remainingFailures;
@@ -1271,9 +1297,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       try {
         const mentionCheckpoint = this.cursor.mentionCheckpoint ?? {
           startTime: Math.max(
-            0,
-            (this.cursor.mentionWatermark ?? endTime) -
-              NOTIFICATION_HISTORY_OVERLAP_MS,
+            this.cursor.mentionHistoryFloor ?? 0,
+            Math.max(
+              0,
+              (this.cursor.mentionWatermark ?? endTime) -
+                NOTIFICATION_HISTORY_OVERLAP_MS,
+            ),
           ),
           endTime,
           cursor: '0',
@@ -1316,9 +1345,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       try {
         const checkpoint = this.cursor.notificationCheckpoint ?? {
           startTime: Math.max(
-            0,
-            (this.cursor.notificationWatermark ?? endTime) -
-              NOTIFICATION_HISTORY_OVERLAP_MS,
+            this.cursor.notificationHistoryFloor ?? 0,
+            Math.max(
+              0,
+              (this.cursor.notificationWatermark ?? endTime) -
+                NOTIFICATION_HISTORY_OVERLAP_MS,
+            ),
           ),
           endTime,
           cursor: '0',
@@ -1686,12 +1718,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.mentionCheckpoint = undefined;
       this.cursor.mentionWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
+      this.cursor.mentionHistoryFloor = referenceTime;
       changed = true;
     }
     if (this.cursor.directMessagesEnabled === false && directMessagesEnabled) {
+      if (this.notificationWatermarkPulledBack) {
+        process.stderr.write(
+          `[Channel:${this.name}] excluding a stale direct message parked during re-enable: history starts at ${referenceTime}, not the pulled-back watermark ${this.cursor.notificationWatermark}\n`,
+        );
+      }
       this.cursor.notificationCheckpoint = undefined;
       this.cursor.notificationWatermark =
         referenceTime + NOTIFICATION_HISTORY_OVERLAP_MS;
+      this.cursor.notificationHistoryFloor = referenceTime;
       this.notificationWatermarkPulledBack = false;
       changed = true;
     }
@@ -1841,19 +1880,34 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   }
 
   private parkStaleDirectMessage(message: DwsImMessage): void {
+    const historyFloor = this.cursor.notificationHistoryFloor;
+    if (historyFloor !== undefined && message.eventTime! < historyFloor) {
+      const key = messageKey(message);
+      this.markProcessedMessage(key);
+      this.clearInboundFailure(key);
+      this.removePendingMessage(key);
+      process.stderr.write(
+        `[Channel:${this.name}] discarded a stale direct message from before direct-message access was re-enabled at ${historyFloor}: ${sanitizeLogText(message.messageId, 120)}\n`,
+      );
+      this.saveCursor();
+      return;
+    }
     // A replayed direct message is left UNMARKED on purpose, for history
     // polling to pick up. Pull the watermark back because the normal window
     // starts after this message and only moves forward.
-    this.cursor.notificationWatermark = Math.min(
-      this.cursor.notificationWatermark ?? this.connectionStartedAt,
-      message.eventTime!,
+    this.cursor.notificationWatermark = Math.max(
+      this.cursor.notificationHistoryFloor ?? 0,
+      Math.min(
+        this.cursor.notificationWatermark ?? this.connectionStartedAt,
+        message.eventTime!,
+      ),
     );
     this.notificationWatermarkPulledBack = true;
     // R6-1: also drop a persisted multi-page checkpoint so a replay that
     // arrives between polls cannot be skipped when that checkpoint resumes.
     this.cursor.notificationCheckpoint = undefined;
     process.stderr.write(
-      `[Channel:${this.name}] parked a stale direct message for history polling and pulled the watermark back to ${message.eventTime}: ${sanitizeLogText(message.messageId, 120)}\n`,
+      `[Channel:${this.name}] parked a stale direct message for history polling and pulled the watermark back to ${this.cursor.notificationWatermark}: ${sanitizeLogText(message.messageId, 120)}\n`,
     );
     this.saveCursor();
   }
@@ -2580,10 +2634,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       (item) => !this.isImSourceEnabled(item.source),
     );
     if (disabled.length === 0) return false;
+    const processed = new Set(this.cursor.processedMessages);
+    const availableSlots = Math.max(
+      0,
+      MAX_PROCESSED_ITEMS - this.cursor.processedMessages.length,
+    );
+    const keysToMark: string[] = [];
+    for (let index = disabled.length - 1; index >= 0; index -= 1) {
+      const key = messageKey(disabled[index]!.message);
+      if (processed.has(key)) continue;
+      if (keysToMark.length >= availableSlots) break;
+      processed.add(key);
+      keysToMark.push(key);
+    }
+    this.cursor.processedMessages.push(...keysToMark.reverse());
     for (const item of disabled) {
-      const key = messageKey(item.message);
-      this.markProcessedMessage(key);
-      this.clearInboundFailure(key);
+      this.clearInboundFailure(messageKey(item.message));
     }
     this.cursor.pendingMessages = pending.filter((item) =>
       this.isImSourceEnabled(item.source),
