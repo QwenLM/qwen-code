@@ -45,7 +45,7 @@
 
 ### P1 — 冻结最小外部契约，不造第二套通用协议
 
-选择 A2A 的具体版本、一个 transport binding 与匹配 SDK/schema；只采用真实消费者需要的可选能力。列出 required 操作、发现/认证、Message 与 Task 返回分支、task/context/原生 session 映射及幂等重试语义，以及远端用量是否随 Task/Message 回报、是否必需，和外部任务到本地 run 帧的映射通道（不经 `_meta`）。不能把普通 REST 路由改名就标 A2A-compatible。
+选择 A2A 的具体版本、一个 transport binding 与匹配 SDK/schema；只采用真实消费者需要的可选能力。列出 required 操作、发现/认证、Message 与 Task 返回分支、task/context/原生 session 映射及幂等重试语义，以及远端用量是否随 Task/Message 回报、是否必需，和外部任务到本地 run 帧的映射通道（不经 `_meta`），以及按认证调用方与目标作用域的幂等键——现有存储只有 outbox 按事件 id 去重，没有任何调用方侧的键；这是 §2 所说“第一条外部路径落实时再增加”的字段之一，且必须在接单持久化之前写入，否则 §3.1 的“同键不同内容明确拒绝”无从判断。不能把普通 REST 路由改名就标 A2A-compatible。
 
 定义 Agent 调用授权与 Host 执行授权的不同范围；模型不持凭证。明确第一项外部工作的数据输入、环境与审批人。
 
@@ -80,7 +80,7 @@ Qwen ↔ Codex 的第一轮先证明“能接活”。主动调用其他 Agent �
 
 ### P4 — 受管内网 Host 出站取件
 
-参考 CoCo 调研的出站长轮询，复用已有 Host enrollment/heartbeat；协调端必须实际可达，不自动搭建云中继。它是另一种执行接入，不替代 P2/P3 的外部服务方式。
+参考 CoCo 调研的出站长轮询，复用已有 Host enrollment/heartbeat；协调端必须实际可达，不自动搭建云中继。它是另一种执行接入，不替代 P2/P3 的外部服务方式。“复用已有”只覆盖注册：当前 `routes/agent-hosts.ts` 仅有 `POST /agent-hosts/enroll`，没有任何领取、租约、回传端点，取件长轮询、租约/attempt 握手与结果回传三者全部是新建，不应按“大部分已存在”估算。
 
 门槛：执行机器无新增入站监听，仍能领取指定任务；Host 凭证不能领取他人的任务；重连与租约/attempt 核对阻止旧 worker 改写新执行。任务持久化后才确认，结果持久化后重试发送。断网显示失联或状态未知，不未经核对在另一台机器重跑有副作用工作。
 
