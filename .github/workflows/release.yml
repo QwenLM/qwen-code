@@ -687,7 +687,8 @@ jobs:
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
-          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+          # bun/OpenTUI preview archives ship by default; set the repo var to 'false' to opt out.
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED != 'false' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh build-archives'
 
       - *reset_release_workflow_scripts
@@ -707,7 +708,7 @@ jobs:
 
       - name: 'Verify Standalone Archives'
         env:
-          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED != 'false' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh verify-archives'
 
       - *reset_release_workflow_scripts

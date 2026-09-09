@@ -75,10 +75,11 @@ jobs:
 
       - name: 'Verify Downloaded Release Assets'
         env:
-          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+          # bun/OpenTUI preview archives ship by default; set the repo var to 'false' to opt out.
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED != 'false' }}"
         run: |-
           PREVIEW_ARGS=""
-          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" != "false" ]]; then
             PREVIEW_ARGS="--include-opentui-preview"
           fi
           npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
@@ -141,12 +142,12 @@ jobs:
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
-          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED != 'false' }}"
         run: |-
           set -euo pipefail
 
           PREVIEW_ARGS=""
-          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" != "false" ]]; then
             PREVIEW_ARGS="--include-opentui-preview"
           fi
           mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths ${PREVIEW_ARGS})
@@ -160,12 +161,12 @@ jobs:
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
-          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED != 'false' }}"
         run: |-
           set -euo pipefail
 
           PREVIEW_ARGS=""
-          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" != "false" ]]; then
             PREVIEW_ARGS="--include-opentui-preview"
           fi
           npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}" ${PREVIEW_ARGS}

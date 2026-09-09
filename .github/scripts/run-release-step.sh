@@ -173,8 +173,10 @@ case "${step}" in
     ;;
 
   build-archives)
+    # bun/OpenTUI preview archives ship by default; OPENTUI_PREVIEW_RELEASE_ENABLED
+    # is an opt-out kill switch — only the literal 'false' disables the flavor.
     preview_args=""
-    if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+    if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" != "false" ]]; then
       preview_args="--include-opentui-preview"
     fi
     npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone ${preview_args}
@@ -204,7 +206,7 @@ case "${step}" in
 
   verify-archives)
     preview_args=""
-    if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+    if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" != "false" ]]; then
       preview_args="--include-opentui-preview"
     fi
     npm run verify:installation-release -- --dir dist/standalone ${preview_args}
