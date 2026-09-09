@@ -6,6 +6,8 @@
 
 import {
   AuthType,
+  type ChatRecord,
+  computeInitialTurnFromHistory,
   type Config,
   InputFormat,
   isDebugLogFileEnabled,
@@ -1419,7 +1421,10 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = createNonInteractivePromptId(config.getSessionId());
+    const prompt_id = createNonInteractivePromptId(
+      config.getSessionId(),
+      config.getResumedSessionData?.()?.conversation.messages,
+    );
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -1493,8 +1498,24 @@ export async function main() {
   }
 }
 
-export function createNonInteractivePromptId(sessionId: string): string {
-  return `${sessionId}########0`;
+/**
+ * Mints the single promptId a headless `-p` run uses for its one turn.
+ *
+ * A fresh session keeps the historical `########0`. A resumed one
+ * (`--resume` / `--continue`) must continue past the turns the transcript
+ * already claims: every process would otherwise mint `########0` again, and
+ * `SessionService.loadSession` keeps only the LAST file-history snapshot per
+ * promptId, so a repeated headless run silently drops the previous run's
+ * `/rewind` target for that turn.
+ */
+export function createNonInteractivePromptId(
+  sessionId: string,
+  resumedRecords?: readonly ChatRecord[],
+): string {
+  const lastTurn = resumedRecords?.length
+    ? computeInitialTurnFromHistory(resumedRecords, sessionId)
+    : 0;
+  return `${sessionId}########${lastTurn > 0 ? lastTurn + 1 : 0}`;
 }
 
 /**

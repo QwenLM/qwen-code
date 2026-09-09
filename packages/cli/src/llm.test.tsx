@@ -22,6 +22,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ChatRecord } from '@qwen-code/qwen-code-core';
 import {
   createNonInteractivePromptId,
   main,
@@ -1733,6 +1734,39 @@ describe('llm.tsx main function', () => {
   it('creates non-interactive prompt ids that preserve session correlation', () => {
     expect(createNonInteractivePromptId('test-session-id')).toBe(
       'test-session-id########0',
+    );
+  });
+
+  it('continues the prompt id chain when the -p run resumes a session', () => {
+    // Every headless `-p` process would otherwise mint `########0` again, and
+    // loadSession keeps only the last file-history snapshot per promptId, so
+    // the earlier run's /rewind target for turn 0 would be dropped.
+    const records = [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/tmp',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'first turn' }] },
+      },
+      {
+        uuid: 'u2',
+        parentUuid: 'u1',
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: { uiEvent: { prompt_id: 'test-session-id########3' } },
+      },
+    ] as unknown as ChatRecord[];
+
+    expect(createNonInteractivePromptId('test-session-id', records)).toBe(
+      'test-session-id########4',
     );
   });
 

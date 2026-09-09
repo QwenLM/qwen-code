@@ -11,6 +11,7 @@ import type {
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
@@ -77,7 +78,7 @@ class Session {
   private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
-  private promptIdCounter: number = 0;
+  private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
   private controlContext: ControlContext | null = null;
@@ -142,7 +143,31 @@ class Session {
     });
   }
 
+  /**
+   * Mints the next promptId for this process.
+   *
+   * The counter is seeded from the resumed transcript on first use. Without
+   * that seed a `--resume`/`--continue` chain restarts at 1 every process and
+   * re-mints promptIds the previous run already persisted, which is not just a
+   * cosmetic collision: `SessionService.loadSession` keeps only the LAST
+   * file-history snapshot per promptId, so the earlier run's snapshot for that
+   * turn is dropped and `/rewind` restores the wrong workspace state. Rewind's
+   * prompt-identity mapping also fails closed to a positional walk when ids
+   * repeat. Interactive mode seeds the same way (`seedPromptCount` in
+   * AppContainer), and ACP via `computeInitialTurnFromHistory`.
+   *
+   * Seeding is lazy because resumed data only becomes authoritative after
+   * `config.initialize()` re-reads the session file, which this class defers
+   * until the first control request.
+   */
   private getNextPromptId(): string {
+    if (this.promptIdCounter === null) {
+      const records = this.config.getResumedSessionData?.()?.conversation
+        .messages;
+      this.promptIdCounter = records
+        ? computeInitialTurnFromHistory(records, this.sessionId)
+        : 0;
+    }
     this.promptIdCounter++;
     return `${this.sessionId}########${this.promptIdCounter}`;
   }
