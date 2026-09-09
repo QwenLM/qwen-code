@@ -303,6 +303,17 @@ export class ToolCallTool extends BaseDeclarativeTool<
       return { name: targetName };
     }
 
+    // A nested tool_call envelope resolves back to this wrapper (the
+    // case-insensitive lookup above admits case variants too), and
+    // unwrapping it would recurse without a depth bound.
+    // resolveDeferredToolCall refuses to execute that nesting and the
+    // sibling fallback in classifier-transcript.ts stops at one bridge
+    // layer, so the projection must agree: name-only, under the resolved
+    // registered name.
+    if (target.name === ToolNames.TOOL_CALL) {
+      return { name: target.name };
+    }
+
     try {
       const projected = target.toAutoClassifierInput(
         structuredClone(params.arguments) as never,
