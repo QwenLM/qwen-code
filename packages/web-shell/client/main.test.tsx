@@ -16,6 +16,8 @@ interface CapturedWorkspaceSessionProps {
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
   throwOnRender: false,
+  tokenSurvivesReload: true,
+  renderCount: 0,
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -27,6 +29,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
+    testState.renderCount += 1;
     if (testState.throwOnRender) {
       throw new Error('render boom');
     }
@@ -37,6 +40,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getDaemonToken: () => 'token',
+  hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
   removeDaemonTokenFromUrl: vi.fn(),
   waitForDaemonTokenMessage: vi.fn(),
 }));
@@ -50,6 +54,8 @@ describe('StandaloneApp', () => {
   beforeEach(() => {
     testState.props = undefined;
     testState.throwOnRender = false;
+    testState.tokenSurvivesReload = true;
+    testState.renderCount = 0;
     window.history.replaceState(null, '', '/');
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -75,13 +81,40 @@ describe('StandaloneApp', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     const retry = container.querySelector('button');
-    expect(retry?.textContent).toBe('Try again');
+    expect(retry?.textContent).toBe('Reload page');
+    expect(reload).not.toHaveBeenCalled();
 
     act(() => {
       retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to an in-place reset when the token cannot survive a reload', () => {
+    testState.throwOnRender = true;
+    testState.tokenSurvivesReload = false;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const retry = container.querySelector('button');
+    expect(retry?.textContent).toBe('Try again');
+    // React replays a throwing render before the boundary catches it, so pin
+    // the delta across the retry, not an absolute render count.
+    const rendersBeforeRetry = testState.renderCount;
+
+    // The transient cause is gone by the time the user retries.
+    testState.throwOnRender = false;
+    act(() => {
+      retry?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(testState.renderCount).toBeGreaterThan(rendersBeforeRetry);
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {

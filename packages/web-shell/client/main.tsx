@@ -11,6 +11,7 @@ import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider'
 import {
   getDaemonBaseUrl,
   getDaemonToken,
+  hasReloadSurvivableDaemonToken,
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
@@ -195,17 +196,22 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   return (
     <ErrorBoundary
       label="web-shell-root"
-      fallback={(error) => (
-        <RootErrorFallback
-          error={error}
-          // An in-place boundary retry re-mounts the same module graph, so a
-          // crash rooted in page-level module state (e.g. a duplicated
-          // context module in dev) would throw again. Only a full reload
-          // rebuilds the graph.
-          onRetry={() => window.location.reload()}
-          language={language}
-        />
-      )}
+      fallback={(error, reset) => {
+        // A reload rebuilds the module graph — the only recovery for a crash
+        // rooted in page-level module state (e.g. a duplicated context module
+        // in dev). It is only safe when the daemon token survives the reload;
+        // otherwise fall back to an in-place reset, which keeps the in-memory
+        // token.
+        const canReload = hasReloadSurvivableDaemonToken();
+        return (
+          <RootErrorFallback
+            error={error}
+            onRetry={() => (canReload ? window.location.reload() : reset())}
+            retryMode={canReload ? 'reload' : 'reset'}
+            language={language}
+          />
+        );
+      }}
     >
       <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
         <WorkspaceSessionProvider

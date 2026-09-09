@@ -53,6 +53,24 @@ function persistDaemonToken(token: string): void {
   }
 }
 
+/**
+ * Whether a fresh load of this page could still authenticate: a token in the
+ * URL or in the per-tab persisted copy survives a reload. Retry affordances
+ * that reload the page must check this first — when the token lives only in
+ * this module's memory (URL stripped at boot, persist threw), a reload
+ * strands the shell unauthenticated. Must not consult `getDaemonToken()`:
+ * its in-memory cache always reports a token after boot.
+ */
+export function hasReloadSurvivableDaemonToken(): boolean {
+  if (typeof window === 'undefined') return false;
+  const fromHash = new URLSearchParams(
+    window.location.hash.replace(/^#/, ''),
+  ).get('token');
+  if (fromHash) return true;
+  if (new URLSearchParams(window.location.search).get('token')) return true;
+  return readStoredDaemonToken() !== undefined;
+}
+
 export function getDaemonToken(): string | undefined {
   if (cachedDaemonToken) return cachedDaemonToken;
   if (typeof window === 'undefined') {

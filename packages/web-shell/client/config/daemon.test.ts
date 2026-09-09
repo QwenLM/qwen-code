@@ -187,6 +187,54 @@ describe('getDaemonToken', () => {
       });
     }
   });
+
+  describe('hasReloadSurvivableDaemonToken', () => {
+    it('is true when the URL fragment carries a token', async () => {
+      setupToken('', '#token=frag-secret');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is true when the query parameter carries a token', async () => {
+      setupToken('?token=query-secret', '');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is true when a per-tab persisted token exists', async () => {
+      window.sessionStorage.setItem('qwen-daemon-token', 'stored-secret');
+      setupToken('', '#/chat');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(true);
+    });
+
+    it('is false when neither the URL nor storage has a token', async () => {
+      setupToken('', '#/chat');
+      const mod = await import('./daemon');
+      expect(mod.hasReloadSurvivableDaemonToken()).toBe(false);
+    });
+
+    it('is false when storage is unavailable and the URL has no token', async () => {
+      const original = window.sessionStorage;
+      Object.defineProperty(window, 'sessionStorage', {
+        get() {
+          throw new Error('storage disabled');
+        },
+        configurable: true,
+      });
+      try {
+        setupToken('', '#/chat');
+        const mod = await import('./daemon');
+        expect(mod.hasReloadSurvivableDaemonToken()).toBe(false);
+      } finally {
+        Object.defineProperty(window, 'sessionStorage', {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+  });
 });
 
 describe('waitForDaemonTokenMessage', () => {

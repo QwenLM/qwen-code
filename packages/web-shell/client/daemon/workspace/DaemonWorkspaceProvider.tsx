@@ -29,20 +29,48 @@ const DaemonWorkspaceContext = createContext<
 
 // Module-copy marker for diagnosing "must be used within" failures. When the
 // page ends up with two copies of this module (a Vite dev module-graph hiccup,
-// a stale chunk next to a rebuilt one), each copy has its own
+// a host bundling both web-shell entries), each copy has its own
 // DaemonWorkspaceContext, so a consumer resolved to one copy reads no provider
 // even though a provider from the other copy is mounted. The registry records
-// which module copies have rendered a provider so the strict hook's error can
-// say which case it hit. Diagnostic only — the context itself is never shared.
-const moduleInstanceId = Math.random().toString(36).slice(2, 8);
+// which module copies rendered a provider — and whether they produced a
+// context value — so the strict hook's error can say which case it hit. The
+// id carries the module URL so the message points at the offending chunk.
+// Diagnostic only — the context itself is never shared.
+const moduleInstanceId = `${import.meta.url}#${Math.random().toString(36).slice(2, 8)}`;
+
+type ProviderCopyState =
+  // Rendered, but never produced a context value (e.g. autoConnect={false}).
+  | 'rendered'
+  // Produced a context value at least once. Terminal state for the copy: a
+  // discarded or unmounted render keeps it, and the guard's wording hedges.
+  | 'provided';
 
 const PROVIDER_REGISTRY_KEY = '__qwenWebShellDaemonWorkspaceProviderCopies';
+// Hot re-evaluation mints a fresh id per save; cap so a long dev session
+// cannot grow the breadcrumb (or the error message) without bound.
+const MAX_TRACKED_PROVIDER_COPIES = 8;
 
-function renderedProviderCopies(): string[] {
+function providerCopyRegistry(): Map<string, ProviderCopyState> {
   const scope = globalThis as typeof globalThis & {
-    [PROVIDER_REGISTRY_KEY]?: string[];
+    [PROVIDER_REGISTRY_KEY]?: Map<string, ProviderCopyState>;
   };
-  return (scope[PROVIDER_REGISTRY_KEY] ??= []);
+  return (scope[PROVIDER_REGISTRY_KEY] ??= new Map());
+}
+
+function recordProviderCopy(id: string, provided: boolean): void {
+  const registry = providerCopyRegistry();
+  const next: ProviderCopyState =
+    provided || registry.get(id) === 'provided' ? 'provided' : 'rendered';
+  // Re-insert at the end so the cap below evicts stale copies (e.g. from
+  // hot re-evaluations whose provider is gone), never a live one — a live
+  // provider re-records on every render.
+  registry.delete(id);
+  registry.set(id, next);
+  while (registry.size > MAX_TRACKED_PROVIDER_COPIES) {
+    const oldest = registry.keys().next().value;
+    if (oldest === undefined) break;
+    registry.delete(oldest);
+  }
 }
 
 // Module-level sentinel for deferred-disposal StrictMode guard.
@@ -63,6 +91,9 @@ export function DaemonWorkspaceProvider({
   transport,
   children,
 }: DaemonWorkspaceProviderProps) {
+  // Render-phase so the breadcrumb exists before any child can throw, and
+  // recorded even when no client is built (autoConnect={false}).
+  recordProviderCopy(moduleInstanceId, false);
   const client = useMemo(
     () =>
       autoConnect ? new DaemonClient({ baseUrl, token, transport }) : undefined,
@@ -235,10 +266,7 @@ export function DaemonWorkspaceProvider({
 
   const contextValue = useMemo<DaemonWorkspaceContextValue | undefined>(() => {
     if (!client) return undefined;
-    const copies = renderedProviderCopies();
-    if (!copies.includes(moduleInstanceId)) {
-      copies.push(moduleInstanceId);
-    }
+    recordProviderCopy(moduleInstanceId, true);
     return {
       client,
       token,
@@ -274,16 +302,26 @@ export function DaemonWorkspaceProvider({
 export function useDaemonWorkspace(): DaemonWorkspaceContextValue {
   const context = useContext(DaemonWorkspaceContext);
   if (!context) {
-    const copies = renderedProviderCopies();
-    const detail = copies.includes(moduleInstanceId)
-      ? 'a DaemonWorkspaceProvider from this module copy rendered, so ' +
-        'this consumer is outside its subtree'
-      : copies.length > 0
+    const registry = providerCopyRegistry();
+    const ownState = registry.get(moduleInstanceId);
+    const foreignIds = [...registry.keys()].filter(
+      (id) => id !== moduleInstanceId,
+    );
+    const detail =
+      foreignIds.length > 0
         ? `a DaemonWorkspaceProvider rendered from module copy ` +
-          `${copies.join(', ')}, but this hook resolved module copy ` +
+          `${foreignIds.join(', ')}, but this hook resolved module copy ` +
           `${moduleInstanceId} — the page holds duplicate copies of the ` +
           `DaemonWorkspaceProvider module`
-        : 'no DaemonWorkspaceProvider has rendered in this page';
+        : ownState === 'provided'
+          ? 'a DaemonWorkspaceProvider from this module copy has rendered, ' +
+            'so this consumer is outside its live subtree (or it has ' +
+            'unmounted)'
+          : ownState === 'rendered'
+            ? 'a DaemonWorkspaceProvider from this module copy has rendered ' +
+              'without an active client (e.g. autoConnect is false), so it ' +
+              'provides no workspace context'
+            : 'no DaemonWorkspaceProvider has rendered in this page';
     throw new Error(
       `useDaemonWorkspace must be used within DaemonWorkspaceProvider ` +
         `(${detail})`,
