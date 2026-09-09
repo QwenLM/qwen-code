@@ -37,7 +37,7 @@ describe('splitTextByUrls', () => {
     }
   });
 
-  it.each([',', '.', '!', '?', ';', ':', '"', "'", '`'])(
+  it.each([',', '.', '!', '?', ';', ':', "'"])(
     'trims trailing ASCII punctuation %s',
     (punct) => {
       const text = `go https://example.com/foo${punct} end`;
@@ -48,6 +48,17 @@ describe('splitTextByUrls', () => {
       ]);
     },
   );
+
+  // `"` and the backtick are outside the allowlist, so the match terminates
+  // before them — these cases pin the termination, not the trimmer.
+  it.each(['"', '`'])('terminates the match at markup delimiter %s', (d) => {
+    const text = `go https://example.com/foo${d} end`;
+    expect(splitTextByUrls(text)).toEqual([
+      { type: 'text', value: 'go ' },
+      { type: 'url', value: 'https://example.com/foo' },
+      { type: 'text', value: `${d} end` },
+    ]);
+  });
 
   it.each([']', '}'])('trims an unmatched trailing bracket %s', (closer) => {
     const text = `(see https://example.com/foo${closer}`;
