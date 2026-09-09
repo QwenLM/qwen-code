@@ -46,12 +46,17 @@ function getLoopDetectionToolCall<T extends { name: string; args: object }>(
   return {
     ...toolCall,
     name: targetName,
+    // A non-object payload (e.g. a JSON-string `arguments` a later repair
+    // pass would normalize) cannot be unwrapped, but dropping it would
+    // collapse every bridged call to the target onto one repeat key; keep
+    // the envelope itself as the key material so distinct payloads stay
+    // distinct.
     args:
       typeof targetArgs === 'object' &&
       targetArgs !== null &&
       !Array.isArray(targetArgs)
         ? (targetArgs as Record<string, unknown>)
-        : {},
+        : toolCall.args,
   } as T;
 }
 

@@ -2162,6 +2162,26 @@ describe('LoopDetectionService', () => {
       ).toBe(true);
       expect(service.getLastLoopType()).toBe(LoopType.ACTION_STAGNATION);
     });
+
+    it('does not collapse bridged calls with stringified arguments onto one repeat key', () => {
+      service.reset('');
+
+      // A model can emit the bridge envelope with `arguments` as a JSON
+      // string (the malformation SchemaValidator repairs before execution),
+      // so the loop detector must keep that payload as key material instead
+      // of collapsing every such call onto `{}`.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent(ToolNames.TOOL_CALL, {
+              name: 'read_file',
+              arguments: JSON.stringify({ file_path: `/file-${i}` }),
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
   });
 
   describe('Turn Tool Call Cap', () => {

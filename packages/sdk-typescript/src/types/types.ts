@@ -426,8 +426,8 @@ export interface QueryOptions {
    * `tools.visible`, which
    * are declared upfront, and sessions whose live history contains a
    * direct call to a still-hidden demoted tool, which any tool-set
-   * refresh (resume, MCP discovery, plan-mode entry, subagent
-   * completion) re-declares.
+   * refresh (resume, MCP discovery, the first plan-mode entry in a
+   * session, a subagent definition change) re-declares.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -491,8 +491,8 @@ export interface QueryOptions {
    *   `tools.visible`,
    *   which are declared upfront, and sessions whose live history
    *   contains a direct call to a still-hidden demoted tool, which any
-   *   tool-set refresh (resume, MCP discovery, plan-mode entry,
-   *   subagent completion) re-declares (#9827)
+   *   tool-set refresh (resume, MCP discovery, the first plan-mode
+   *   entry in a session, a subagent definition change) re-declares (#9827)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
