@@ -1875,41 +1875,39 @@ describe('FeishuChannel', () => {
 
     it('hydrates label caches from persisted observations after a restart', async () => {
       const observe = vi.fn();
-      const list = vi.fn(
-        (): ObservedChannelContactGraph => ({
-          users: [],
-          groups: [
-            {
-              channelName: 'test',
-              id: 'oc_group',
-              label: 'Project Group',
-              lastObservedAt: '2026-01-01T00:00:00.000Z',
-              users: [
-                {
-                  id: 'ou_user',
-                  label: 'Alice',
-                  lastObservedAt: '2026-01-01T00:00:00.000Z',
-                },
-              ],
-              topics: [],
-            },
-            {
-              channelName: 'other',
-              id: 'oc_foreign',
-              label: 'Foreign Group',
-              lastObservedAt: '2026-01-01T00:00:00.000Z',
-              users: [
-                {
-                  id: 'ou_foreign',
-                  label: 'Foreign User',
-                  lastObservedAt: '2026-01-01T00:00:00.000Z',
-                },
-              ],
-              topics: [],
-            },
-          ],
-        }),
-      );
+      const list = vi.fn((): ObservedChannelContactGraph => ({
+        users: [],
+        groups: [
+          {
+            channelName: 'test',
+            id: 'oc_group',
+            label: 'Project Group',
+            lastObservedAt: '2026-01-01T00:00:00.000Z',
+            users: [
+              {
+                id: 'ou_user',
+                label: 'Alice',
+                lastObservedAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+            topics: [],
+          },
+          {
+            channelName: 'other',
+            id: 'oc_foreign',
+            label: 'Foreign Group',
+            lastObservedAt: '2026-01-01T00:00:00.000Z',
+            users: [
+              {
+                id: 'ou_foreign',
+                label: 'Foreign User',
+                lastObservedAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+            topics: [],
+          },
+        ],
+      }));
       const { channel, bridge } = createObservedContactChannel(observe, list);
       const fetchSpy = vi
         .spyOn(global, 'fetch')
@@ -2139,34 +2137,32 @@ describe('FeishuChannel', () => {
 
     it('prefers the newest persisted label when hydrating overlapping contacts', async () => {
       const observe = vi.fn();
-      const list = vi.fn(
-        (): ObservedChannelContactGraph => ({
-          users: [
-            {
-              channelName: 'test',
-              id: 'ou_user',
-              label: 'New Name',
-              lastObservedAt: '2026-02-01T00:00:00.000Z',
-            },
-          ],
-          groups: [
-            {
-              channelName: 'test',
-              id: 'oc_group',
-              label: 'Project Group',
-              lastObservedAt: '2026-01-01T00:00:00.000Z',
-              users: [
-                {
-                  id: 'ou_user',
-                  label: 'Old Name',
-                  lastObservedAt: '2026-01-01T00:00:00.000Z',
-                },
-              ],
-              topics: [],
-            },
-          ],
-        }),
-      );
+      const list = vi.fn((): ObservedChannelContactGraph => ({
+        users: [
+          {
+            channelName: 'test',
+            id: 'ou_user',
+            label: 'New Name',
+            lastObservedAt: '2026-02-01T00:00:00.000Z',
+          },
+        ],
+        groups: [
+          {
+            channelName: 'test',
+            id: 'oc_group',
+            label: 'Project Group',
+            lastObservedAt: '2026-01-01T00:00:00.000Z',
+            users: [
+              {
+                id: 'ou_user',
+                label: 'Old Name',
+                lastObservedAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+            topics: [],
+          },
+        ],
+      }));
       const { channel, bridge } = createObservedContactChannel(observe, list);
       const fetchSpy = vi
         .spyOn(global, 'fetch')
@@ -2220,19 +2216,17 @@ describe('FeishuChannel', () => {
 
     it('re-hydrates persisted labels after in-lifetime cache eviction', async () => {
       const observe = vi.fn();
-      const list = vi.fn(
-        (): ObservedChannelContactGraph => ({
-          users: [
-            {
-              channelName: 'test',
-              id: 'ou_user',
-              label: 'Alice',
-              lastObservedAt: '2026-01-01T00:00:00.000Z',
-            },
-          ],
-          groups: [],
-        }),
-      );
+      const list = vi.fn((): ObservedChannelContactGraph => ({
+        users: [
+          {
+            channelName: 'test',
+            id: 'ou_user',
+            label: 'Alice',
+            lastObservedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        groups: [],
+      }));
       const { channel, bridge } = createObservedContactChannel(observe, list);
       const fetchSpy = vi
         .spyOn(global, 'fetch')
@@ -2808,7 +2802,7 @@ describe('FeishuChannel', () => {
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'first visible answer',
@@ -2924,7 +2918,7 @@ describe('FeishuChannel', () => {
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'after answer',
@@ -3252,8 +3246,7 @@ describe('FeishuChannel', () => {
       });
 
       const state = cardSessions.get('inbound_1') as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
       // cancelling is set synchronously (stopped is deferred until cancellation resolves)
       expect(state?.['cancelling']).toBe(true);
 
@@ -3369,8 +3362,7 @@ describe('FeishuChannel', () => {
 
       expect(result).toBe(false);
       const state = cardSessions.get('inbound_1') as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
       expect(state?.['stopped']).toBe(false);
     });
 
@@ -3815,7 +3807,7 @@ describe('FeishuChannel', () => {
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           ' more',
@@ -5128,8 +5120,7 @@ describe('FeishuChannel', () => {
     it('finalizes creating cards as failed instead of stopped after prompt end', async () => {
       const channel = createChannel();
       let resolveCreateCard:
-        | ((value: { success: boolean; messageId: string }) => void)
-        | undefined;
+        ((value: { success: boolean; messageId: string }) => void) | undefined;
       const createCardPromise = new Promise<{
         success: boolean;
         messageId: string;
@@ -5173,7 +5164,7 @@ describe('FeishuChannel', () => {
 
       getPrivateMethod<
         (chatId: string, chunk: string, sessionId: string) => void
-      >(channel, 'onResponseChunk').call(
+      >(channel, 'updateResponseCard').call(
         channel,
         'oc_chat_id',
         'partial answer',
@@ -5220,8 +5211,7 @@ describe('FeishuChannel', () => {
     it('finalizes creating cards as cancelled instead of stopped after prompt end', async () => {
       const channel = createChannel();
       let resolveCreateCard:
-        | ((value: { success: boolean; messageId: string }) => void)
-        | undefined;
+        ((value: { success: boolean; messageId: string }) => void) | undefined;
       const createCardPromise = new Promise<{
         success: boolean;
         messageId: string;
@@ -5265,7 +5255,7 @@ describe('FeishuChannel', () => {
 
       getPrivateMethod<
         (chatId: string, chunk: string, sessionId: string) => void
-      >(channel, 'onResponseChunk').call(
+      >(channel, 'updateResponseCard').call(
         channel,
         'oc_chat_id',
         'partial answer',
@@ -5311,8 +5301,7 @@ describe('FeishuChannel', () => {
     it('finalizes creating cards as completed after non-empty successful responses', async () => {
       const channel = createChannel();
       let resolveCreateCard:
-        | ((value: { success: boolean; messageId: string }) => void)
-        | undefined;
+        ((value: { success: boolean; messageId: string }) => void) | undefined;
       const createCardPromise = new Promise<{
         success: boolean;
         messageId: string;
@@ -5356,7 +5345,7 @@ describe('FeishuChannel', () => {
 
       getPrivateMethod<
         (chatId: string, chunk: string, sessionId: string) => void
-      >(channel, 'onResponseChunk').call(
+      >(channel, 'updateResponseCard').call(
         channel,
         'oc_chat_id',
         'partial answer',
@@ -5513,7 +5502,7 @@ describe('FeishuChannel', () => {
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           ' more',
@@ -5579,7 +5568,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'first chunk',
@@ -5920,7 +5909,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'pre-question text',
@@ -6125,7 +6114,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'pre-question text',
@@ -6194,7 +6183,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'pre-question text',
@@ -6233,7 +6222,7 @@ describe('FeishuChannel', () => {
         vi.advanceTimersByTime(90_000);
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'post-answer text',
@@ -6272,10 +6261,10 @@ describe('FeishuChannel', () => {
           'sessionToInboundMsg',
         ).set('session_1', 'inbound_1');
 
-        // onResponseChunk arms the throttled streaming update timer.
+        // updateResponseCard arms the throttled streaming update timer.
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           ' more',
@@ -6345,7 +6334,7 @@ describe('FeishuChannel', () => {
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           ' more',
@@ -6753,7 +6742,7 @@ describe('FeishuChannel', () => {
 
         const chunk = getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk');
+        >(channel, 'updateResponseCard');
         chunk.call(channel, 'oc_chat_id', 'chunk-1', 'session_1');
         // Fire the throttled callback; its PATCH stalls in flight.
         await vi.advanceTimersByTimeAsync(1_500);
@@ -6812,7 +6801,7 @@ describe('FeishuChannel', () => {
 
         const chunk = getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk');
+        >(channel, 'updateResponseCard');
         chunk.call(channel, 'oc_chat_id', 'chunk-1', 'session_1');
         // Fire the throttled callback; its PATCH stalls in flight.
         await vi.advanceTimersByTimeAsync(1_500);
@@ -6982,7 +6971,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'pre-question text',
@@ -7077,7 +7066,7 @@ describe('FeishuChannel', () => {
         );
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
-        >(channel, 'onResponseChunk').call(
+        >(channel, 'updateResponseCard').call(
           channel,
           'oc_chat_id',
           'pre-question text',

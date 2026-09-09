@@ -28,6 +28,7 @@ import type {
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   Envelope,
+  ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -87,6 +88,17 @@ interface QQReplyContext {
   timestamp: number;
 }
 
+interface QQProgressState {
+  chatId: string;
+  segmentId?: string;
+  rawText: string;
+  buffer: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  delivery: Promise<void>;
+  replyContext?: QQReplyContext;
+  sourceLabel?: string;
+}
+
 /** Validate chatId to prevent SSRF when constructing URLs. */
 export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
@@ -143,6 +155,7 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
+  private static readonly IDLE_FLUSH_MS = 2000;
   /** Max buffer length before forcing an immediate flush. */
   private static readonly MAX_BUFFER_LENGTH = 4096;
 
@@ -184,6 +197,7 @@ export class QQChannel extends ChannelBase {
       Using a counter instead of a boolean supports concurrent cron flows. */
   private _inCronFlow: number = 0;
   private cronTextHandlerAttached: boolean = false;
+  private readonly progressStates = new Map<string, QQProgressState>();
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
 
   private _reconnectId: number = 0;
@@ -1011,6 +1025,10 @@ export class QQChannel extends ChannelBase {
       );
     }
     this._inCronFlow = 0;
+    for (const state of this.progressStates.values()) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.progressStates.clear();
     this.activePromptSessions.clear();
   }
 
@@ -1035,16 +1053,91 @@ export class QQChannel extends ChannelBase {
     _messageId?: string,
   ): void {
     this.activePromptSessions.delete(sessionId);
+    const state = this.progressStates.get(sessionId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.progressStates.delete(sessionId);
   }
 
-  // ── Complete request responses ───────────────────────────────
+  protected override onResponseProgress(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ): void {
+    let state = this.progressStates.get(sessionId);
+    if (!state) {
+      const messageId =
+        segment?.messageId ?? this.getResponseMessageId(sessionId);
+      const replyContext = messageId
+        ? this.replyContextByMessageId.get(messageId)
+        : undefined;
+      state = {
+        chatId,
+        segmentId: segment?.segmentId,
+        rawText: '',
+        buffer: '',
+        timer: null,
+        delivery: Promise.resolve(),
+        ...(replyContext ? { replyContext } : {}),
+        ...(segment?.sourceLabel ? { sourceLabel: segment.sourceLabel } : {}),
+      };
+      this.progressStates.set(sessionId, state);
+    }
+    if (state.segmentId !== segment?.segmentId) {
+      this.flushProgress(sessionId, state);
+      state.segmentId = segment?.segmentId;
+      state.rawText = '';
+    }
+    const delta = text.startsWith(state.rawText)
+      ? text.slice(state.rawText.length)
+      : text;
+    state.rawText = text;
+    state.buffer += delta;
+    state.sourceLabel ??= segment?.sourceLabel;
+    if (state.timer) clearTimeout(state.timer);
+    if (
+      state.buffer.length >=
+      (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
+    ) {
+      this.flushProgress(sessionId, state);
+      return;
+    }
+    state.timer = setTimeout(
+      () => this.flushProgress(sessionId, state),
+      QQChannel.IDLE_FLUSH_MS,
+    );
+    state.timer.unref?.();
+  }
 
-  protected override onResponseChunk(
-    _chatId: string,
-    _chunk: string,
-    _sessionId: string,
-    _segment?: ChannelOutputSegmentContext,
-  ): void {}
+  private flushProgress(sessionId: string, state: QQProgressState): void {
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = null;
+    const text = state.buffer;
+    if (!text) return;
+    state.buffer = '';
+    state.delivery = state.delivery
+      .then(() =>
+        this.sendMessageWithReplyContext(
+          state.chatId,
+          text,
+          state.replyContext,
+          state.sourceLabel,
+        ),
+      )
+      .catch((error: unknown) => {
+        if (this.progressStates.get(sessionId) === state) {
+          state.buffer = text + state.buffer;
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] progress delivery failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
+        );
+      });
+  }
+
+  override onToolCall(_chatId: string, event: ToolCallEvent): void {
+    const state = this.progressStates.get(event.sessionId);
+    if (state) this.flushProgress(event.sessionId, state);
+  }
 
   protected override async onResponseComplete(
     chatId: string,
@@ -1052,6 +1145,23 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const state = this.progressStates.get(sessionId);
+    if (state) {
+      this.onResponseProgress(chatId, fullText, sessionId, segment);
+      this.flushProgress(sessionId, state);
+      await state.delivery;
+      const remaining = state.buffer;
+      this.progressStates.delete(sessionId);
+      if (remaining) {
+        await this.sendMessageWithReplyContext(
+          state.chatId,
+          remaining,
+          state.replyContext,
+          segment?.sourceLabel ?? state.sourceLabel,
+        );
+      }
+      return;
+    }
     if (!fullText.trim()) return;
     await this.sendResponseMessage(
       chatId,
@@ -1062,6 +1172,9 @@ export class QQChannel extends ChannelBase {
   }
 
   override onSessionDied(sessionId: string): void {
+    const state = this.progressStates.get(sessionId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.progressStates.delete(sessionId);
     this.activePromptSessions.delete(sessionId);
     super.onSessionDied(sessionId);
   }
@@ -2654,9 +2767,21 @@ export class QQChannel extends ChannelBase {
         cleanedCron++;
       }
     }
+    let cleanedProgress = 0;
+    for (const [sessionId, state] of this.progressStates) {
+      if (state.chatId !== groupId) continue;
+      if (state.timer) clearTimeout(state.timer);
+      if (this.config.sessionScope === 'single') {
+        this.progressStates.delete(sessionId);
+        this.activePromptSessions.delete(sessionId);
+      } else {
+        this.onSessionDied(sessionId);
+      }
+      cleanedProgress++;
+    }
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedCron} cron buffer(s)\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedCron} cron buffer(s) and ${cleanedProgress} progress buffer(s)\n`,
     );
   }
 

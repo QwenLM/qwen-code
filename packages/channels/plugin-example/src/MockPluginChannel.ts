@@ -24,6 +24,7 @@ export class MockPluginChannel extends ChannelBase {
   private serverWsUrl: string;
   private inboundMessage = new AsyncLocalStorage<{ messageId?: string }>();
   private attributedSegments = new Set<string>();
+  private progressBySegment = new Map<string, string>();
 
   constructor(
     name: string,
@@ -84,21 +85,27 @@ export class MockPluginChannel extends ChannelBase {
     });
   }
 
-  protected override onResponseChunk(
+  protected override onResponseProgress(
     chatId: string,
-    chunk: string,
+    progress: string,
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-    let text = chunk;
+    const key = segment?.segmentId ?? sessionId;
+    const previous = this.progressBySegment.get(key) ?? '';
+    let text = progress.startsWith(previous)
+      ? progress.slice(previous.length)
+      : progress;
+    this.progressBySegment.set(key, progress);
+    if (!text) return;
     if (
       segment?.sourceLabel &&
       !this.attributedSegments.has(segment.segmentId)
     ) {
-      const attributed = this.formatAttributedText(chunk, segment.sourceLabel);
-      if (attributed !== chunk) {
+      const attributed = this.formatAttributedText(text, segment.sourceLabel);
+      if (attributed !== text) {
         text = attributed;
         this.attributedSegments.add(segment.segmentId);
       }
@@ -121,6 +128,7 @@ export class MockPluginChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
     this.attributedSegments.delete(segment.segmentId);
+    this.progressBySegment.delete(segment.segmentId);
     return super.onOutputSegmentEnd(chatId, sessionId, segment, reason);
   }
 
@@ -142,6 +150,7 @@ export class MockPluginChannel extends ChannelBase {
       if (segment?.sourceLabel) {
         this.attributedSegments.delete(segment.segmentId);
       }
+      this.progressBySegment.delete(segment?.segmentId ?? sessionId);
     }
   }
 

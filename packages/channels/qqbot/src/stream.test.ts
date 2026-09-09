@@ -141,15 +141,27 @@ function makeChannel(overrides: Record<string, unknown> = {}): QQChannelClass {
   return ch;
 }
 
-function onResponseChunk(
+function onResponseProgress(
   ch: QQChannelClass,
   chatId: string,
   text: string,
   sessionId: string,
+  segment?: { messageId?: string; segmentId?: string; sourceLabel?: string },
 ): void {
   (
-    ch as unknown as { onResponseChunk(c: string, t: string, s: string): void }
-  ).onResponseChunk(chatId, text, sessionId);
+    ch as unknown as {
+      onResponseProgress(
+        c: string,
+        t: string,
+        s: string,
+        segment?: {
+          messageId?: string;
+          segmentId?: string;
+          sourceLabel?: string;
+        },
+      ): void;
+    }
+  ).onResponseProgress(chatId, text, sessionId, segment);
 }
 function onResponseComplete(
   ch: QQChannelClass,
@@ -157,6 +169,7 @@ function onResponseComplete(
   text: string,
   sessionId: string,
   sourceLabel?: string,
+  segmentId?: string,
 ): Promise<void> {
   return (
     ch as unknown as {
@@ -164,14 +177,19 @@ function onResponseComplete(
         c: string,
         t: string,
         s: string,
-        segment?: { sourceLabel: string },
+        segment?: { sourceLabel?: string; segmentId?: string },
       ): Promise<void>;
     }
   ).onResponseComplete(
     chatId,
     text,
     sessionId,
-    sourceLabel ? { sourceLabel } : undefined,
+    sourceLabel || segmentId
+      ? {
+          ...(sourceLabel ? { sourceLabel } : {}),
+          ...(segmentId ? { segmentId } : {}),
+        }
+      : undefined,
   );
 }
 
@@ -183,37 +201,33 @@ describe('complete request responses', () => {
   });
   afterEach(() => vi.useRealTimers());
   it.each([false, true])(
-    'does not send partial chunks in detailed=%s mode',
+    'flushes cumulative progress without replaying it in detailed=%s mode',
     async (detailed) => {
       const channel = makeChannel({
         outputMode: detailed ? 'process_and_result' : 'final_only',
       });
-      onResponseChunk(channel, 'test-chat', 'Partial output', 's-1');
-      onResponseChunk(channel, 'test-chat', 'x'.repeat(5000), 's-1');
+      const complete = `Partial output${'x'.repeat(5000)}`;
+      onResponseProgress(channel, 'test-chat', 'Partial output', 's-1');
+      onResponseProgress(channel, 'test-chat', complete, 's-1');
       await vi.advanceTimersByTimeAsync(5000);
-      expect(mockSendQQMessage).not.toHaveBeenCalled();
-      await onResponseComplete(
-        channel,
-        'test-chat',
-        'Complete answer with all evidence',
-        's-1',
-      );
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+      await onResponseComplete(channel, 'test-chat', complete, 's-1');
       expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
       expect(mockSendQQMessage.mock.calls[0][3].markdown.content).toBe(
-        'Complete answer with all evidence',
+        complete,
       );
     },
   );
   it('sends each complete detailed response once without replaying chunks', async () => {
     const channel = makeChannel({ outputMode: 'process_and_result' });
-    onResponseChunk(channel, 'test-chat', 'first draft', 's-1');
+    onResponseProgress(channel, 'test-chat', 'First complete answer', 's-1');
     await onResponseComplete(
       channel,
       'test-chat',
       'First complete answer',
       's-1',
     );
-    onResponseChunk(channel, 'test-chat', 'second draft', 's-1');
+    onResponseProgress(channel, 'test-chat', 'Second complete answer', 's-1');
     await onResponseComplete(
       channel,
       'test-chat',
@@ -223,6 +237,43 @@ describe('complete request responses', () => {
     expect(
       mockSendQQMessage.mock.calls.map((call) => call[3].markdown.content),
     ).toEqual(['First complete answer', 'Second complete answer']);
+  });
+  it('delivers progress before its passive reply context expires', async () => {
+    const channel = makeChannel({ bufferFlushLength: 4096 });
+    const internals = channel as unknown as {
+      replyContextByMessageId: Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      groupActiveMsgEnabled: Map<string, boolean>;
+    };
+    internals.replyContextByMessageId.set('message-1', {
+      chatId: 'test-chat',
+      msgId: 'message-1',
+      timestamp: Date.now(),
+    });
+    internals.groupActiveMsgEnabled.set('test-chat', false);
+
+    onResponseProgress(channel, 'test-chat', 'early answer', 's-1', {
+      messageId: 'message-1',
+      segmentId: 'segment-1',
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(300_001);
+    await onResponseComplete(
+      channel,
+      'test-chat',
+      'early answer',
+      's-1',
+      undefined,
+      'segment-1',
+    );
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage.mock.calls[0][3]).toMatchObject({
+      msg_id: 'message-1',
+      markdown: { content: 'early answer' },
+    });
   });
   it('does not add an empty final response', async () => {
     const channel = makeChannel();

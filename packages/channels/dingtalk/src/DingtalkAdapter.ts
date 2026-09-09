@@ -951,7 +951,13 @@ export class DingtalkChannel extends ChannelBase {
   // state must survive it, or a marker split across the reset leaks.
   private readonly fileProjectors = new Map<
     string,
-    { sessionId: string; projector: OutboundFileProjector }
+    {
+      sessionId: string;
+      projector: OutboundFileProjector;
+      segmentId: string;
+      rawText: string;
+      safeText: string;
+    }
   >();
   constructor(
     name: string,
@@ -2671,10 +2677,36 @@ export class DingtalkChannel extends ChannelBase {
     _chatId: string,
     text: string,
     _sessionId: string,
-    segment: ChannelOutputSegmentContext,
+    segment?: ChannelOutputSegmentContext,
   ): void {
-    const safe = new OutboundFileProjector().append(text);
-    this.interactionPresenter?.replaceOutput(segment, safe);
+    if (!segment) return;
+    let state = this.fileProjectors.get(segment.runId);
+    if (!state) {
+      state = {
+        sessionId: segment.sessionId,
+        projector: new OutboundFileProjector(),
+        segmentId: segment.segmentId,
+        rawText: '',
+        safeText: '',
+      };
+      this.fileProjectors.set(segment.runId, state);
+    }
+    if (state.segmentId !== segment.segmentId) {
+      state.segmentId = segment.segmentId;
+      state.rawText = '';
+      state.safeText = '';
+    }
+    if (!text.startsWith(state.rawText)) {
+      state.projector = new OutboundFileProjector();
+      state.rawText = text;
+      state.safeText = state.projector.append(text);
+    } else {
+      state.safeText += state.projector.append(
+        text.slice(state.rawText.length),
+      );
+      state.rawText = text;
+    }
+    this.interactionPresenter?.replaceOutput(segment, state.safeText);
   }
 
   protected override async onResponseComplete(
@@ -2726,25 +2758,6 @@ export class DingtalkChannel extends ChannelBase {
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
       .then(() => undefined);
-  }
-
-  protected override onResponseChunk(
-    _chatId: string,
-    chunk: string,
-    _sessionId: string,
-    segment?: ChannelOutputSegmentContext,
-  ): void {
-    if (!segment) return;
-    let state = this.fileProjectors.get(segment.runId);
-    if (!state) {
-      state = {
-        sessionId: segment.sessionId,
-        projector: new OutboundFileProjector(),
-      };
-      this.fileProjectors.set(segment.runId, state);
-    }
-    const safe = state.projector.append(chunk);
-    if (safe) this.interactionPresenter?.appendOutput(segment, safe);
   }
 
   private deleteFileProjectorsForRun(runId: string): void {

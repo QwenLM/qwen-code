@@ -452,8 +452,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private handleSessionUpdate(params: SessionNotification): void {
     const { sessionId } = params;
     const update = (params as unknown as Record<string, unknown>)['update'] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (!update) return;
 
     const type = update['sessionUpdate'] as string;
@@ -468,8 +467,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           const context = parseBackgroundResponseContext(
             meta['backgroundTask'],
           );
-          if (context?.executionId) {
-            this.notificationExecutions.set(sessionId, context.executionId);
+          const notificationId = context?.executionId ?? context?.taskId;
+          if (notificationId) {
+            this.notificationExecutions.set(sessionId, notificationId);
           }
         }
         if (meta?.['source'] === 'channel_background_task') {
@@ -481,8 +481,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           break;
         }
         const content = update['content'] as
-          | { type?: string; text?: string }
-          | undefined;
+          { type?: string; text?: string } | undefined;
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
@@ -491,9 +490,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],
             );
+            const notificationId = context?.executionId ?? context?.taskId;
             if (
               context?.notificationComplete &&
-              context.executionId === this.notificationExecutions.get(sessionId)
+              notificationId === this.notificationExecutions.get(sessionId)
             ) {
               this.notificationExecutions.delete(sessionId);
             }

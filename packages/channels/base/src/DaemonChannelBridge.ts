@@ -285,8 +285,7 @@ function isPermissionRequestData(
 }
 
 type DaemonPermissionOutcome =
-  | { outcome: 'cancelled' }
-  | { outcome: 'selected'; optionId: string };
+  { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string };
 
 function parsePermissionOutcome(
   value: unknown,
@@ -1067,8 +1066,9 @@ export class DaemonChannelBridge
           const context = parseBackgroundResponseContext(
             meta['backgroundTask'],
           );
-          if (context?.executionId) {
-            this.notificationExecutions.set(sessionId, context.executionId);
+          const notificationId = context?.executionId ?? context?.taskId;
+          if (notificationId) {
+            this.notificationExecutions.set(sessionId, notificationId);
           }
         }
         if (meta?.['source'] === 'channel_background_task') {
@@ -1088,9 +1088,10 @@ export class DaemonChannelBridge
             const context = parseBackgroundResponseContext(
               meta['backgroundTask'],
             );
+            const notificationId = context?.executionId ?? context?.taskId;
             if (
               context?.notificationComplete &&
-              context.executionId === this.notificationExecutions.get(sessionId)
+              notificationId === this.notificationExecutions.get(sessionId)
             ) {
               this.notificationExecutions.delete(sessionId);
             }

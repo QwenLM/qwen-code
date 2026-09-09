@@ -126,7 +126,7 @@ describe('MockPluginChannel message correlation', () => {
   it('uses output segment message IDs for chunks and final responses', async () => {
     const { channel, send } = createChannel();
     const output = channel as unknown as {
-      onResponseChunk: (
+      onResponseProgress: (
         chatId: string,
         chunk: string,
         sessionId: string,
@@ -140,7 +140,7 @@ describe('MockPluginChannel message correlation', () => {
       ) => Promise<void>;
     };
 
-    output.onResponseChunk('shared-chat', 'chunk-a', 'session-a', {
+    output.onResponseProgress('shared-chat', 'chunk-a', 'session-a', {
       messageId: 'msg-a',
     });
     await output.onResponseComplete('shared-chat', 'final-b', 'session-b', {
@@ -168,7 +168,7 @@ describe('MockPluginChannel message correlation', () => {
   it('attributes the first chunk and the final response for a segment', async () => {
     const { channel, send } = createChannel();
     const output = channel as unknown as {
-      onResponseChunk: (
+      onResponseProgress: (
         chatId: string,
         chunk: string,
         sessionId: string,
@@ -187,8 +187,13 @@ describe('MockPluginChannel message correlation', () => {
       sourceLabel: '[review]',
     };
 
-    output.onResponseChunk('shared-chat', 'first', 'session-a', segment);
-    output.onResponseChunk('shared-chat', 'second', 'session-a', segment);
+    output.onResponseProgress('shared-chat', 'first', 'session-a', segment);
+    output.onResponseProgress(
+      'shared-chat',
+      'firstsecond',
+      'session-a',
+      segment,
+    );
     await output.onResponseComplete(
       'shared-chat',
       'complete',
@@ -218,7 +223,7 @@ describe('MockPluginChannel message correlation', () => {
   it('waits for non-whitespace content before marking a segment attributed', () => {
     const { channel, send } = createChannel();
     const output = channel as unknown as {
-      onResponseChunk: (
+      onResponseProgress: (
         chatId: string,
         chunk: string,
         sessionId: string,
@@ -231,8 +236,8 @@ describe('MockPluginChannel message correlation', () => {
       sourceLabel: '[review]',
     };
 
-    output.onResponseChunk('shared-chat', '   ', 'session-a', segment);
-    output.onResponseChunk('shared-chat', 'body', 'session-a', segment);
+    output.onResponseProgress('shared-chat', '   ', 'session-a', segment);
+    output.onResponseProgress('shared-chat', '   body', 'session-a', segment);
 
     expect(send.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toEqual(
       [

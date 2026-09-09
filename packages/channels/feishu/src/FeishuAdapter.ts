@@ -85,7 +85,7 @@ interface CardSessionState {
   finalizing?: boolean;
   /** Set when card creation has permanently failed to prevent retry spiral. */
   cardCreationFailed?: boolean;
-  /** Timer for fallback card creation in onResponseChunk — cleared by cleanupCard. */
+  /** Timer for fallback card creation during response progress — cleared by cleanupCard. */
   creationTimer?: ReturnType<typeof setTimeout>;
   /** Set when busy-wait timeout abandons in-flight card creation. */
   abandoned?: boolean;
@@ -332,8 +332,7 @@ export class FeishuChannel extends ChannelBase {
     const feishuConfig = this.config as unknown as Record<string, unknown>;
     const webhookPort = feishuConfig['webhookPort'] as number | undefined;
     const verificationToken = feishuConfig['verificationToken'] as
-      | string
-      | undefined;
+      string | undefined;
     const encryptKey = feishuConfig['encryptKey'] as string | undefined;
 
     if (webhookPort) {
@@ -675,8 +674,7 @@ export class FeishuChannel extends ChannelBase {
 
     // Try v2 format: { body: { elements: [...] } }
     const body = card['body'] as
-      | { elements?: Array<Record<string, unknown>> }
-      | undefined;
+      { elements?: Array<Record<string, unknown>> } | undefined;
     if (body?.elements) {
       for (const element of body.elements) {
         if (
@@ -686,8 +684,7 @@ export class FeishuChannel extends ChannelBase {
           lines.push(element['content']);
         } else if (element['tag'] === 'collapsible_panel') {
           const nested = element['elements'] as
-            | Array<Record<string, unknown>>
-            | undefined;
+            Array<Record<string, unknown>> | undefined;
           if (nested) {
             for (const el of nested) {
               if (
@@ -1454,7 +1451,7 @@ export class FeishuChannel extends ChannelBase {
     if (!state || state.stopped || state.cancelling) return;
     state.completed = false;
     state.pendingOutput = true;
-    this.onResponseChunk(chatId, '', sessionId, segment);
+    this.updateResponseCard(chatId, '', sessionId, segment);
   }
 
   protected override onResponseProgress(
@@ -1468,10 +1465,10 @@ export class FeishuChannel extends ChannelBase {
       ? this.cardSessions.get(inboundMsgId)
       : undefined;
     if (cardState && !cardState.stopped) cardState.accumulatedText = '';
-    this.onResponseChunk(chatId, text, sessionId, segment);
+    this.updateResponseCard(chatId, text, sessionId, segment);
   }
 
-  protected override onResponseChunk(
+  private updateResponseCard(
     chatId: string,
     chunk: string,
     sessionId: string,
@@ -1480,7 +1477,7 @@ export class FeishuChannel extends ChannelBase {
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
-        `[Feishu:${this.name}] onResponseChunk: no inboundMsgId for session ${sessionId}\n`,
+        `[Feishu:${this.name}] response progress has no inboundMsgId for session ${sessionId}\n`,
       );
       return;
     }
@@ -2376,11 +2373,9 @@ export class FeishuChannel extends ChannelBase {
     try {
       // Extract action value and message context
       const action = data['action'] as
-        | { value?: { action?: string } }
-        | undefined;
+        { value?: { action?: string } } | undefined;
       const context = data['context'] as
-        | { open_message_id?: string; open_chat_id?: string }
-        | undefined;
+        { open_message_id?: string; open_chat_id?: string } | undefined;
       const messageId =
         context?.open_message_id || (data['open_message_id'] as string);
       const chatId = context?.open_chat_id;
@@ -2420,7 +2415,7 @@ export class FeishuChannel extends ChannelBase {
 
       // Preserve the @sender prefix before cleanupCard can delete msgToSenderName
       cardState.atPrefix = this.msgToSenderName.get(targetInboundMsgId) || '';
-      // Set cancelling synchronously so .then() callbacks (onPromptStart, onResponseChunk)
+      // Set cancelling synchronously so progress callbacks cannot race cleanup.
       // can detect the stop intent even before cancelSession resolves.
       // This replaces the old stopped=true which caused chunk loss on cancel failure.
       cardState.cancelling = true;

@@ -117,6 +117,7 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+const BACKGROUND_CONTINUATION_WAIT_MS = 5 * 60_000;
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
 const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
@@ -745,7 +746,7 @@ export abstract class ChannelBase {
     for (const task of group.tasks.values()) {
       const key = JSON.stringify([group.sessionId, task.executionId]);
       this.backgroundExecutions.delete(key);
-      if (!task.notificationComplete) this.retireBackgroundExecution(key);
+      this.retireBackgroundExecution(key);
     }
   }
 
@@ -847,38 +848,33 @@ export abstract class ChannelBase {
       this.queueRequestOutput(sessionId, prompt, output);
     prompt.deferredOutputs = undefined;
     if (prompt.backgroundGroup) {
-      this.settleBackgroundRequest(prompt.backgroundGroup);
-      if (
-        [...prompt.backgroundGroup.tasks.values()].some(
-          (task) => !task.notificationComplete,
-        )
-      )
+      const group = prompt.backgroundGroup;
+      this.settleBackgroundRequest(group);
+      if ([...group.tasks.values()].some((task) => !task.notificationComplete))
         this.queueRequestContinuation(sessionId, prompt);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          prompt.backgroundGroup.done,
-          new Promise<never>((_, reject) => {
-            if (prompt.deadline === undefined) return;
-            timer = setTimeout(
-              () => reject(new Error(LOOP_TIMED_OUT_MESSAGE)),
-              Math.max(0, prompt.deadline - Date.now()),
-            );
-            timer.unref?.();
-          }),
-        ]);
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message === LOOP_TIMED_OUT_MESSAGE
-        ) {
-          prompt.cancelled = true;
-          await prompt.cancelTimedOut?.();
-          this.emitTaskCancellation(prompt, sessionId, 'timeout');
-        }
-        throw error;
-      } finally {
-        clearTimeout(timer);
+      let waitExpired = false;
+      const waitMs = Math.max(
+        0,
+        Math.min(
+          BACKGROUND_CONTINUATION_WAIT_MS,
+          prompt.deadline === undefined
+            ? BACKGROUND_CONTINUATION_WAIT_MS
+            : prompt.deadline - Date.now(),
+        ),
+      );
+      const timer = setTimeout(() => {
+        waitExpired = true;
+        group.resolve();
+      }, waitMs);
+      timer.unref?.();
+      await group.done;
+      clearTimeout(timer);
+      if (waitExpired) {
+        process.stderr.write(
+          `[${this.name}] background continuation wait expired for session ${sanitizeLogText(sessionId, 128)}; delivering the latest completed output\n`,
+        );
+        this.forgetBackgroundGroup(group);
+        prompt.backgroundGroup = undefined;
       }
     }
     await prompt.outputDelivery;
@@ -3377,18 +3373,6 @@ export abstract class ChannelBase {
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
-  ): void {}
-
-  /**
-   * Called for each text chunk as the agent streams its response.
-   * Override to implement progressive display (e.g., updating an AI card in-place).
-   * Default: no-op (chunks are collected internally and delivered via onResponseComplete).
-   */
-  protected onResponseChunk(
-    _chatId: string,
-    _chunk: string,
-    _sessionId: string,
-    _segment?: ChannelOutputSegmentContext,
   ): void {}
 
   protected onOutputSegmentEnd(

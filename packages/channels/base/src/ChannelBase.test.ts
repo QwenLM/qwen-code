@@ -75,12 +75,6 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     messageIds: string[];
   }> = [];
-  responseChunks: Array<{
-    chatId: string;
-    chunk: string;
-    sessionId: string;
-    segment?: unknown;
-  }> = [];
   responseBoundaries: Array<{
     chatId: string;
     sessionId: string;
@@ -314,15 +308,6 @@ class TestChannel extends ChannelBase {
     segment?: ChannelOutputSegmentContext,
   ): void {
     this.responseProgress.push({ chatId, text, sessionId, segment });
-  }
-
-  protected override onResponseChunk(
-    chatId: string,
-    chunk: string,
-    sessionId: string,
-    segment?: unknown,
-  ): void {
-    this.responseChunks.push({ chatId, chunk, sessionId, segment });
   }
 
   protected override onResponseBoundary(
@@ -952,6 +937,59 @@ describe('ChannelBase', () => {
       });
       await run.turn;
       expect(output(ch)).toEqual(['CHILD_FINAL']);
+    });
+    it('does not rebind a retired execution to a later prompt', async () => {
+      const ch = createChannel();
+      const first = await begin(ch);
+      ch.dispatchBackgroundTask(task('a'));
+      first.finish('FIRST');
+      await ch.dispatchBackgroundResponse('s-1', 'A_FINAL', context('a'));
+      await ch.dispatchBackgroundResponse('s-1', '', {
+        ...context('a'),
+        notificationComplete: true,
+      });
+      await first.turn;
+
+      vi.mocked(bridge.prompt).mockClear();
+      const second = await begin(ch);
+      ch.dispatchBackgroundTask(task('a'));
+      second.finish('SECOND');
+      await second.turn;
+
+      expect(output(ch)).toEqual(['A_FINAL', 'SECOND']);
+    });
+    it('bounds background waiting and finishes an in-flight delivery before settling', async () => {
+      const ch = createChannel({ outputMode: 'process_and_result' });
+      const run = await begin(ch);
+      ch.dispatchBackgroundTask(task('a'));
+      let releaseDelivery!: () => void;
+      ch.responseCompleteGate = new Promise<void>((resolve) => {
+        releaseDelivery = resolve;
+      });
+      vi.useFakeTimers();
+      try {
+        run.finish('LATEST_COMPLETED_OUTPUT');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(run.settled()).toBe(false);
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        expect(run.settled()).toBe(false);
+        expect(ch.responseCompletions.map(({ text }) => text)).toEqual([
+          'LATEST_COMPLETED_OUTPUT',
+        ]);
+        expect(ch.taskEvents.some((event) => event.type === 'cancelled')).toBe(
+          false,
+        );
+        releaseDelivery();
+        await run.turn;
+        expect(output(ch)).toEqual(['LATEST_COMPLETED_OUTPUT']);
+        expect(
+          ch.taskEvents.filter((event) =>
+            ['cancelled', 'completed', 'failed'].includes(event.type),
+          ),
+        ).toEqual([expect.objectContaining({ type: 'completed' })]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
     it.each([false, true])(
       'never sends raw status events or chunk-sized cards (detailed %s)',
@@ -2531,7 +2569,7 @@ describe('ChannelBase', () => {
       emitUserQuestion(active.sessionId, 'req-direct-question');
 
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress).toEqual([]);
       expect(ch.responseBoundaries).toEqual([]);
       expect(
         (
@@ -12385,7 +12423,7 @@ describe('ChannelBase', () => {
         'late chunk',
       );
 
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress.map(({ text }) => text)).toEqual(['done']);
     });
 
     it('/status in a shared group is restricted to authorized senders', async () => {
@@ -15925,7 +15963,6 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ messageId: 'segment-message' }));
         expect(ch.taskEvents[0]).toMatchObject({ type: 'started' });
         expect(ch.taskEvents[0]).not.toHaveProperty('segmentId');
-        expect(ch.responseChunks).toEqual([]);
         expect(ch.responseBoundaries).toEqual([]);
         if (detailed) {
           expect(ch.responseProgress.map(({ text }) => text)).toEqual([
@@ -16354,7 +16391,7 @@ describe('ChannelBase', () => {
       const eventTypes = ch.taskEvents.map((event) => event.type);
       expect(eventTypes).not.toContain('text_chunk');
       expect(eventTypes).not.toContain('completed');
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress).toEqual([]);
       resolveCancel();
       await Promise.all([prompt, cancel]);
 
@@ -16644,7 +16681,7 @@ describe('ChannelBase', () => {
         status: 'running',
       });
 
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress).toEqual([]);
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
           type: 'started',
@@ -17126,7 +17163,10 @@ describe('ChannelBase', () => {
           sessionId: 's-1',
         }),
       );
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress.map(({ text }) => text)).toEqual([
+        'held while cancel pending',
+        'final response',
+      ]);
     });
 
     it('does not emit buffered stream text after cancellation', async () => {
@@ -17338,7 +17378,7 @@ describe('ChannelBase', () => {
       expect(
         ch.taskEvents.filter((event) => event.type === 'text_chunk'),
       ).toEqual([]);
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress).toEqual([]);
     });
   });
 
@@ -20878,7 +20918,7 @@ describe('ChannelBase', () => {
         }
       });
 
-      it('applies the webhook deadline while waiting for background notification completion', async () => {
+      it('bounds background notification waiting without abandoning final delivery', async () => {
         vi.useFakeTimers();
         try {
           const ch = createChannel({ approvalMode: 'yolo', webhooks });
@@ -20891,37 +20931,29 @@ describe('ChannelBase', () => {
               description: 'Still working',
               status: 'running',
             });
-            return 'INTERIM_MUST_NOT_SEND';
+            return 'LATEST_COMPLETED_OUTPUT';
           });
           const run = ch.runWebhookTask(webhookTask, { timeoutMs: 1000 });
-          let failure: unknown;
           let settled = false;
-          void run.then(
-            () => {
-              settled = true;
-            },
-            (error) => {
-              settled = true;
-              failure = error;
-            },
-          );
+          void run.finally(() => {
+            settled = true;
+          });
           await vi.advanceTimersByTimeAsync(0);
           expect(bridge.prompt).toHaveBeenCalledOnce();
           expect(settled).toBe(false);
           expect(ch.proactive).toEqual([]);
           await vi.advanceTimersByTimeAsync(1000);
           expect(settled).toBe(true);
-          expect(failure).toBeInstanceOf(Error);
-          expect((failure as Error).message).toContain('loop timed out');
-          expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
-          expect(ch.proactive).toEqual([]);
+          await expect(run).resolves.toBe('LATEST_COMPLETED_OUTPUT');
+          expect(bridge.cancelSession).not.toHaveBeenCalled();
+          expect(ch.proactive.map(({ text }) => text)).toEqual([
+            'LATEST_COMPLETED_OUTPUT',
+          ]);
           expect(
             ch.taskEvents.filter((event) =>
               ['cancelled', 'completed', 'failed'].includes(event.type),
             ),
-          ).toEqual([
-            expect.objectContaining({ type: 'cancelled', reason: 'timeout' }),
-          ]);
+          ).toEqual([expect.objectContaining({ type: 'completed' })]);
           await ch.dispatchBackgroundResponse('s-1', 'LATE_MUST_NOT_SEND', {
             kind: 'agent',
             taskId: 'waiting-agent',
@@ -20935,7 +20967,9 @@ describe('ChannelBase', () => {
             status: 'completed',
             notificationComplete: true,
           });
-          expect(ch.proactive).toEqual([]);
+          expect(ch.proactive.map(({ text }) => text)).toEqual([
+            'LATEST_COMPLETED_OUTPUT',
+          ]);
         } finally {
           vi.useRealTimers();
         }
@@ -20975,7 +21009,6 @@ describe('ChannelBase', () => {
             sessionId: 's-1',
           }),
         );
-        expect(ch.responseChunks).toEqual([]);
         const events = ch.taskEvents as Array<
           ChannelTaskLifecycleEvent & {
             runId?: string;
@@ -22360,7 +22393,7 @@ describe('ChannelBase', () => {
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started', messageId: 'job-1' }),
       ]);
-      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseProgress).toEqual([]);
       resolveCancel();
       await cancel;
       resolvePrompt('loop response');

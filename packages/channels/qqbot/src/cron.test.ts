@@ -684,16 +684,18 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
     promptHooks(ch).onPromptStart('test-chat', 'sess-leak');
     (
       ch as unknown as {
-        onResponseChunk: (
+        onResponseProgress: (
           chatId: string,
           chunk: string,
           sessionId: string,
         ) => void;
       }
-    ).onResponseChunk('test-chat', 'partial answer', 'sess-leak');
+    ).onResponseProgress('test-chat', 'partial answer', 'sess-leak');
     promptHooks(ch).onPromptEnd('test-chat', 'sess-leak');
 
-    expect(pvt['streamState']).toBeUndefined();
+    expect(
+      (pvt['progressStates'] as Map<string, unknown>).has('sess-leak'),
+    ).toBe(false);
 
     // A cron flow now emits output for the same session.
     pvt['_inCronFlow'] = 1;
@@ -705,7 +707,7 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
 
     await vi.advanceTimersByTimeAsync(2000);
 
-    // The cron text must be delivered despite the lingering streamState.
+    // The cron text must be delivered after prompt-progress cleanup.
     const sentBodies = mockSendQQMessage.mock.calls.map(
       (call) => call[3] as { markdown?: { content?: string } },
     );

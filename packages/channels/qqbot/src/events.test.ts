@@ -1556,6 +1556,38 @@ describe('群管理事件', () => {
       expect(spy).toHaveBeenCalledTimes(2);
       spy.mockRestore();
     });
+
+    it('retires prompt progress sessions for the removed group', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const onSessionDied = vi.spyOn(ch, 'onSessionDied');
+      (
+        ch as unknown as {
+          onResponseProgress(
+            chatId: string,
+            text: string,
+            sessionId: string,
+            segment: { messageId: string; segmentId: string },
+          ): void;
+        }
+      ).onResponseProgress('group-progress', 'partial', 'session-progress', {
+        messageId: 'message-progress',
+        segmentId: 'segment-progress',
+      });
+
+      pvt['handleGroupDelRobot']({
+        group_openid: 'group-progress',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      } satisfies GroupDelRobotEvent);
+
+      expect(onSessionDied).toHaveBeenCalledWith('session-progress');
+      expect(
+        (
+          ch as unknown as { progressStates: Map<string, unknown> }
+        ).progressStates.has('session-progress'),
+      ).toBe(false);
+    });
   });
 
   describe('handleGroupMsgToggle', () => {

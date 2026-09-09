@@ -1203,19 +1203,19 @@ function getOutputSegmentEndHook(
   return fn.bind(channel);
 }
 
-function getChunkHook(
+function getProgressHook(
   channel: DingtalkChannelInstance,
 ): (
   chatId: string,
-  chunk: string,
+  text: string,
   sessionId: string,
   segment?: ChannelOutputSegmentContext,
 ) => void {
   const fn = (channel as unknown as Record<string, unknown>)[
-    'onResponseChunk'
+    'onResponseProgress'
   ] as (
     chatId: string,
-    chunk: string,
+    text: string,
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ) => void;
@@ -3403,12 +3403,12 @@ describe('DingtalkChannel status cards', () => {
 
   it('routes the first visible chunk with its exact segment context', () => {
     const channel = createChannel();
-    const appendOutput = vi.fn();
+    const replaceOutput = vi.fn();
     (
       channel as unknown as {
-        interactionPresenter: { appendOutput: typeof appendOutput };
+        interactionPresenter: { replaceOutput: typeof replaceOutput };
       }
-    ).interactionPresenter = { appendOutput };
+    ).interactionPresenter = { replaceOutput };
     const segment = {
       channelName: 'dingtalk',
       sessionId: 'session-1',
@@ -3423,9 +3423,24 @@ describe('DingtalkChannel status cards', () => {
       },
     } as ChannelOutputSegmentContext;
 
-    getChunkHook(channel)('cid-1', 'first', 'session-1', segment);
+    getProgressHook(channel)('cid-1', 'first', 'session-1', segment);
 
-    expect(appendOutput).toHaveBeenCalledWith(segment, 'first');
+    expect(replaceOutput).toHaveBeenCalledWith(segment, 'first');
+  });
+
+  it('ignores unattended progress that has no output segment', () => {
+    const channel = createChannel();
+    const replaceOutput = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: { replaceOutput: typeof replaceOutput };
+      }
+    ).interactionPresenter = { replaceOutput };
+
+    expect(() =>
+      getProgressHook(channel)('cid-1', 'progress', 'session-1'),
+    ).not.toThrow();
+    expect(replaceOutput).not.toHaveBeenCalled();
   });
 
   it('uses the awaited status finalization or falls back to Markdown', async () => {
@@ -3491,7 +3506,7 @@ describe('DingtalkChannel status cards', () => {
       },
     } as ChannelOutputSegmentContext;
 
-    getChunkHook(channel)(
+    getProgressHook(channel)(
       'cid-1',
       '[FILE: /workspace/a.txt]\npartial answer',
       'session-1',
@@ -3523,15 +3538,15 @@ describe('DingtalkChannel status cards', () => {
         order.push('finalize');
         return true;
       });
-      const appendOutput = vi.fn();
+      const replaceOutput = vi.fn();
       (
         channel as unknown as {
           interactionPresenter: {
-            appendOutput: typeof appendOutput;
+            replaceOutput: typeof replaceOutput;
             closeOutput: typeof closeOutput;
           };
         }
-      ).interactionPresenter = { appendOutput, closeOutput };
+      ).interactionPresenter = { replaceOutput, closeOutput };
       const context = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -3571,10 +3586,10 @@ describe('DingtalkChannel status cards', () => {
       });
       const response = `before\n[FILE: ${file.path}]\nafter`;
 
-      getChunkHook(channel)('cid-1', response, 'session-1', context);
+      getProgressHook(channel)('cid-1', response, 'session-1', context);
       await getCompleteHook(channel)('cid-1', response, 'session-1', context);
 
-      expect(appendOutput).toHaveBeenCalledWith(context, 'before\n\nafter');
+      expect(replaceOutput).toHaveBeenCalledWith(context, 'before\n\nafter');
       expect(closeOutput.mock.calls[0]?.[1]).toBe('before\n\nafter');
       expect(order).toEqual(['file', 'finalize']);
     } finally {
@@ -7774,7 +7789,7 @@ describe('DingtalkChannel reply mentions', () => {
         isGroup: true,
       },
     } as ChannelOutputSegmentContext;
-    getChunkHook(channel)(
+    getProgressHook(channel)(
       'cid-1',
       'intermediate result',
       'session-1',
@@ -8669,18 +8684,20 @@ describe('DingtalkChannel outbound file delivery', () => {
     (
       channel as unknown as {
         interactionPresenter: {
-          appendOutput: (_segment: unknown, chunk: string) => void;
+          replaceOutput: (_segment: unknown, text: string) => void;
           closeOutput: typeof closeOutput;
         };
       }
     ).interactionPresenter = {
-      appendOutput: (_segment, chunk) => projected.push(chunk),
+      replaceOutput: (_segment, text) => projected.push(text),
       closeOutput,
     };
     const context = segment();
     const chunks = ['before\n[FI', 'LE: /workspace/report.txt]', '\nafter'];
+    let progress = '';
     for (const chunk of chunks) {
-      getChunkHook(channel)('cid123', chunk, 'session-1', context);
+      progress += chunk;
+      getProgressHook(channel)('cid123', progress, 'session-1', context);
     }
     await getCompleteHook(channel)(
       'cid123',
@@ -8689,7 +8706,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       context,
     );
 
-    expect(projected.join('')).toBe('before\n\nafter');
+    expect(projected.at(-1)).toBe('before\n\nafter');
     expect(closeOutput.mock.calls[0]?.[1]).toBe(
       'before\n\nafter\n[File delivery failed: report.txt]',
     );
@@ -8708,13 +8725,13 @@ describe('DingtalkChannel outbound file delivery', () => {
     (
       channel as unknown as {
         interactionPresenter: {
-          appendOutput: () => void;
+          replaceOutput: () => void;
           closeOutput: typeof closeOutput;
         };
       }
-    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    ).interactionPresenter = { replaceOutput: () => {}, closeOutput };
     const first = segment('segment-1');
-    getChunkHook(channel)(
+    getProgressHook(channel)(
       'cid123',
       'Sure, let me check that.',
       'session-1',
@@ -8727,7 +8744,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       'response_boundary',
     );
     const next = { ...first, segmentId: 'segment-2' };
-    getChunkHook(channel)('cid123', 'The answer is 42.', 'session-1', next);
+    getProgressHook(channel)('cid123', 'The answer is 42.', 'session-1', next);
     await getCompleteHook(channel)(
       'cid123',
       'The answer is 42.',
@@ -8744,13 +8761,13 @@ describe('DingtalkChannel outbound file delivery', () => {
     (
       channel as unknown as {
         interactionPresenter: {
-          appendOutput: () => void;
+          replaceOutput: () => void;
           closeOutput: typeof closeOutput;
         };
       }
-    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    ).interactionPresenter = { replaceOutput: () => {}, closeOutput };
     const context = segment();
-    getChunkHook(channel)(
+    getProgressHook(channel)(
       'cid123',
       '[FILE: /workspace/a.txt]\nstreamed text',
       'session-1',
@@ -8776,7 +8793,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       ['cancelled', 'failed'] as const
     ).entries()) {
       const ended = segment(`segment-${index + 1}`);
-      getChunkHook(channel)(
+      getProgressHook(channel)(
         'cid123',
         '[FILE: /workspace/a.txt]',
         'session-1',
@@ -8802,17 +8819,17 @@ describe('DingtalkChannel outbound file delivery', () => {
     (
       channel as unknown as {
         interactionPresenter: {
-          appendOutput: (_segment: unknown, chunk: string) => void;
+          replaceOutput: (_segment: unknown, text: string) => void;
           closeOutput: typeof closeOutput;
         };
       }
     ).interactionPresenter = {
-      appendOutput: (_segment, chunk) => projected.push(chunk),
+      replaceOutput: (_segment, text) => projected.push(text),
       closeOutput,
     };
     const first = segment('segment-1');
 
-    getChunkHook(channel)('cid123', 'before\n[FI', 'session-1', first);
+    getProgressHook(channel)('cid123', 'before\n[FI', 'session-1', first);
     await getOutputSegmentEndHook(channel)(
       'cid123',
       'session-1',
@@ -8822,7 +8839,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     // The base mints a fresh segment UUID after closeOutputSegment, but the
     // same run continues.
     const next = { ...first, segmentId: 'segment-2' };
-    getChunkHook(channel)(
+    getProgressHook(channel)(
       'cid123',
       'LE: /workspace/secret.txt]\nafter',
       'session-1',
@@ -8841,8 +8858,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       sessionId: 'session-2',
       runId: 'run-2',
     };
-    getChunkHook(channel)('cid123', 'chunk a', 'session-1', sessionOne);
-    getChunkHook(channel)('cid123', 'chunk b', 'session-2', sessionTwo);
+    getProgressHook(channel)('cid123', 'chunk a', 'session-1', sessionOne);
+    getProgressHook(channel)('cid123', 'chunk b', 'session-2', sessionTwo);
     const projectors = (
       channel as unknown as {
         fileProjectors: Map<string, { sessionId: string }>;
@@ -8857,7 +8874,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
   it('drops the status projector on the terminal lifecycle event', () => {
     const channel = createChannel();
-    getChunkHook(channel)('cid123', 'streamed', 'session-1', segment());
+    getProgressHook(channel)('cid123', 'streamed', 'session-1', segment());
     const projectors = (
       channel as unknown as { fileProjectors: Map<string, unknown> }
     ).fileProjectors;

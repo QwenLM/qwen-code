@@ -1888,94 +1888,96 @@ describe('AcpBridge', () => {
 });
 
 describe('channel background lifecycle contract', () => {
-  it('preserves the main answer when notification tools run before prompt resolves', async () => {
-    const bridge = new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' });
-    const internal = bridge as unknown as {
-      handleSessionUpdate: (params: unknown) => void;
-    };
-    const send = (update: Record<string, unknown>) =>
-      internal.handleSessionUpdate({ sessionId: 's-1', update });
-    const context = {
-      taskId: 'agent-1',
-      executionId: 'execution-1',
-      kind: 'agent',
-      status: 'completed',
-    };
-    const discrete = (
-      source: string,
-      text: string,
-      extra: Record<string, unknown> = {},
-    ) =>
-      send({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text },
-        _meta: {
-          source,
-          qwenDiscreteMessage: true,
-          backgroundTask: { ...context, ...extra },
-        },
+  it.each(['monitor', 'workflow'] as const)(
+    'preserves the main answer when a %s notification runs tools before prompt resolution',
+    async (kind) => {
+      const bridge = new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' });
+      const internal = bridge as unknown as {
+        handleSessionUpdate: (params: unknown) => void;
+      };
+      const send = (update: Record<string, unknown>) =>
+        internal.handleSessionUpdate({ sessionId: 's-1', update });
+      const context = {
+        taskId: `${kind}-1`,
+        kind,
+        status: 'completed',
+      };
+      const discrete = (
+        source: string,
+        text: string,
+        extra: Record<string, unknown> = {},
+      ) =>
+        send({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+          _meta: {
+            source,
+            qwenDiscreteMessage: true,
+            backgroundTask: { ...context, ...extra },
+          },
+        });
+      const tool = () =>
+        send({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-1',
+          kind: 'read',
+          title: 'Read',
+          status: 'pending',
+        });
+      const boundary = vi.fn();
+      const toolCall = vi.fn();
+      const background = vi.fn();
+      bridge.on('responseBoundary', boundary);
+      bridge.on('toolCall', toolCall);
+      bridge.on('backgroundResponse', background);
+      Object.assign(bridge, {
+        ensureConnection: () => ({
+          prompt: async () => {
+            send({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Main final answer' },
+            });
+            discrete('background_notification', 'Agent completed');
+            tool();
+            send({ sessionUpdate: 'plan', entries: [] });
+            discrete(
+              'background_notification_response',
+              'Notification final answer',
+              { turnComplete: true },
+            );
+            discrete('background_notification_response', '', {
+              executionId: 'other-execution',
+              notificationComplete: true,
+              turnComplete: true,
+            });
+            tool();
+            expect(boundary).not.toHaveBeenCalled();
+            discrete('background_notification_response', '', {
+              notificationComplete: true,
+              turnComplete: true,
+            });
+            return { stopReason: 'end_turn' };
+          },
+        }),
       });
-    const tool = () =>
-      send({
-        sessionUpdate: 'tool_call',
-        toolCallId: 'tool-1',
-        kind: 'read',
-        title: 'Read',
-        status: 'pending',
-      });
-    const boundary = vi.fn();
-    const toolCall = vi.fn();
-    const background = vi.fn();
-    bridge.on('responseBoundary', boundary);
-    bridge.on('toolCall', toolCall);
-    bridge.on('backgroundResponse', background);
-    Object.assign(bridge, {
-      ensureConnection: () => ({
-        prompt: async () => {
-          send({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'Main final answer' },
-          });
-          discrete('background_notification', 'Agent completed');
-          tool();
-          send({ sessionUpdate: 'plan', entries: [] });
-          discrete(
-            'background_notification_response',
-            'Notification final answer',
-            { turnComplete: true },
-          );
-          discrete('background_notification_response', '', {
-            executionId: 'other-execution',
-            notificationComplete: true,
-            turnComplete: true,
-          });
-          tool();
-          expect(boundary).not.toHaveBeenCalled();
-          discrete('background_notification_response', '', {
-            notificationComplete: true,
-            turnComplete: true,
-          });
-          return { stopReason: 'end_turn' };
-        },
-      }),
-    });
-    await expect(bridge.prompt('s-1', 'Request')).resolves.toBe(
-      'Main final answer',
-    );
-    expect(boundary).not.toHaveBeenCalled();
-    expect(toolCall).toHaveBeenCalledTimes(2);
-    expect(background).toHaveBeenCalledWith(
-      's-1',
-      'Notification final answer',
-      expect.objectContaining({ executionId: 'execution-1' }),
-    );
-    tool();
-    expect(boundary).toHaveBeenCalledTimes(1);
-    discrete('background_notification', 'Agent completed');
-    bridge.stop();
-    tool();
-    expect(boundary).toHaveBeenCalledTimes(2);
-  });
+      await expect(bridge.prompt('s-1', 'Request')).resolves.toBe(
+        'Main final answer',
+      );
+      expect(boundary).not.toHaveBeenCalled();
+      expect(toolCall).toHaveBeenCalledTimes(2);
+      expect(background).toHaveBeenCalledWith(
+        's-1',
+        'Notification final answer',
+        expect.objectContaining({ taskId: `${kind}-1`, kind }),
+      );
+      tool();
+      expect(boundary).toHaveBeenCalledTimes(1);
+      discrete('background_notification', 'Agent completed');
+      bridge.stop();
+      tool();
+      expect(boundary).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('forwards execution ancestry and notification completion without main text', () => {
     const bridge = new AcpBridge({

@@ -129,7 +129,11 @@ The channel editor presents these options as **仅最终结果** and **过程与
 
 ```json
 {
-  "outputMode": "final_only"
+  "channels": {
+    "my-dingtalk": {
+      "outputMode": "final_only"
+    }
+  }
 }
 ```
 
