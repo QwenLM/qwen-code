@@ -201,6 +201,47 @@ describe('readTaskOutputTail', () => {
     });
   });
 
+  it('serves the real frame when a redraw erases it with a whitespace pad', () => {
+    // A child clearing a progress line by padding it with spaces leaves a
+    // final frame that is all whitespace: the pad is not the frame the
+    // redraw drew, so the collapse must keep the real frame. When the pad
+    // is the window's only content a length-only check returns undefined,
+    // reporting a task that produced output as a task that produced none.
+    const outputFile = makeOutputFile('working\r ');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'working',
+      truncated: false,
+    });
+  });
+
+  it('pins the multi-segment carriage-return collapse shape', () => {
+    // Two segments collapsing in one window: the first drops a real frame
+    // (truncated), the second ends on a lone CR and falls back to the
+    // frame it drew.
+    const outputFile = makeOutputFile('a\rb\r\nc\r');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'b\nc',
+      truncated: true,
+    });
+  });
+
+  it('drops the first line when the served window opens mid-escape', () => {
+    // The window opens one byte after an ESC, between the leader and its
+    // parameters: the residue has no ESC left for the stripper to match,
+    // so it would be served as the tail's first line. A sequence can
+    // never cross a line break, so the served text starts at the first
+    // line that begins inside the window.
+    const tail = '[31mBuild failed\n' + 'y'.repeat(60) + '\n';
+    const outputFile = makeOutputFile('pad\u001b' + tail);
+
+    expect(readTaskOutputTail(outputFile, Buffer.byteLength(tail))).toEqual({
+      text: 'y'.repeat(60),
+      truncated: true,
+    });
+  });
+
   it.skipIf(process.platform === 'win32')(
     'returns undefined instead of blocking when the output path is a FIFO',
     () => {

@@ -76,20 +76,40 @@ const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
-// The trailing escape sequence a pipe chunk can end in the middle of,
-// bounded by ECMA-48 byte classes so a string sequence can never cross a
-// control byte or a newline: an unterminated OSC holds only printable
-// bytes, so a lost BEL releases the hold at the next newline instead of
-// swallowing every real line that follows it; a CSI still waiting for
-// its final byte; an Fe escape (charset designation et al.) waiting for
-// its final byte; a lone ESC; an SS2/SS3 leader; or an in-flight
-// DCS/SOS/PM/APC — the whole sequence is held, not just its leader, so a
-// payload straddling chunks is stripped as one sequence instead of
-// leaking its remainder as text.
+// The trailing escape sequence a pipe chunk can end in the middle of:
+// a CSI waiting for its final byte; an Fe escape (charset designation et
+// al.) waiting for its final byte; a lone ESC; an SS2/SS3 leader; or an
+// in-flight OSC or DCS/SOS/PM/APC — the whole sequence is held, not just
+// its leader, so a payload straddling chunks is stripped as one sequence
+// instead of leaking its remainder as text. The string payload classes
+// mirror the capture stripper's own (anything but BEL, ESC, LF, CR), so
+// a lost BEL releases the hold at the next newline instead of swallowing
+// every real line that follows it, and a chunk boundary inside a UTF-8
+// window title or OSC 8 hyperlink cannot defeat the hold. A trailing
+// lone ESC is held with the sequence, so an ST split across the boundary
+// (ESC in one chunk, `\` in the next) reconstitutes instead of
+// persisting the backslash as text.
 /* eslint-disable no-control-regex */
 const TRAILING_PARTIAL_ESCAPE_REGEX =
-  /\x1b(?:\][\x20-\x7e]*|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NO]|[PX^_][^\x07\x1b\n\r]*)$/;
+  /\x1b(?:\][^\x07\x1b\n\r]*\x1b?|\[[\x30-\x3f]*[\x20-\x2f]*|[\x20-\x2f]*|[NO]|[PX^_][^\x07\x1b\n\r]*\x1b?)$/;
 /* eslint-enable no-control-regex */
+
+// Where normal processing resumes after discarding an over-cap string
+// sequence's payload, mirroring the capture stripper's own terminators:
+// BEL and ST (`ESC \`) are consumed, while a newline, CR, or a fresh ESC
+// is left in the stream. undefined when the whole chunk is still payload.
+function findStringPayloadEnd(text: string): number | undefined {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x07) return i + 1;
+    if (code === 0x1b) {
+      return text.charCodeAt(i + 1) === 0x5c ? i + 2 : i;
+    }
+    if (code === 0x0a || code === 0x0d) return i;
+  }
+  return undefined;
+}
+
 // The extra byte preserves readTaskOutputTail's `truncated` signal after the
 // capture starts discarding older output.
 const MAX_MONITOR_OUTPUT_CAPTURE_BYTES = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
@@ -524,11 +544,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const stdoutBuf = {
       value: '',
       heldEscape: '',
+      discardingStringPayload: false,
       decoder: new StringDecoder('utf8'),
     };
     const stderrBuf = {
       value: '',
       heldEscape: '',
+      discardingStringPayload: false,
       decoder: new StringDecoder('utf8'),
     };
     let tokenBucket = THROTTLE_BURST_SIZE;
@@ -580,9 +602,14 @@ class MonitorToolInvocation extends BaseToolInvocation<
       for (const buf of [stdoutBuf, stderrBuf]) {
         // Release the held-back partial escape and the decoder's trailing
         // bytes so a sequence or codepoint straddling the final chunk is
-        // still stripped and captured before the output file closes.
-        const rawTail = buf.heldEscape + buf.decoder.end();
+        // still stripped and captured before the output file closes. When
+        // the capture closed mid-discard, the decoder's trailing bytes are
+        // payload residue of the unterminated sequence, not text.
+        const rawTail = buf.discardingStringPayload
+          ? ''
+          : buf.heldEscape + buf.decoder.end();
         buf.heldEscape = '';
+        buf.discardingStringPayload = false;
         writeOutputCapture(stripOutputControlChars(rawTail));
         const tail = stripAnsi(rawTail);
         if (tail.length > 0) {
@@ -672,6 +699,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       buffer: {
         value: string;
         heldEscape: string;
+        discardingStringPayload: boolean;
         decoder: StringDecoder;
       },
       data: Buffer,
@@ -683,16 +711,50 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // replacements into the capture file; the streams share this
       // function, so each owns a decoder (a shared one would corrupt the
       // other stream's buffered trailing bytes).
-      const decoded = buffer.heldEscape + buffer.decoder.write(data);
+      let decoded = buffer.heldEscape + buffer.decoder.write(data);
+      buffer.heldEscape = '';
+
+      // An earlier chunk ended inside a string sequence too large to hold
+      // (a multi-KB OSC 52 clipboard write, an inline image): its payload
+      // is not output, so discard it until the sequence's terminator
+      // instead of persisting it as fabricated text.
+      if (buffer.discardingStringPayload) {
+        const resumeAt = findStringPayloadEnd(decoded);
+        if (resumeAt === undefined) return;
+        decoded = decoded.slice(resumeAt);
+        if (decoded === '\x1b') {
+          // The terminator straddles the chunk boundary: keep the ESC held
+          // and keep discarding — the next chunk's first byte decides
+          // whether this was the ST or the start of the next sequence.
+          buffer.heldEscape = '\x1b';
+          return;
+        }
+        buffer.discardingStringPayload = false;
+        if (decoded.length === 0) return;
+      }
+
       // Hold back a trailing incomplete escape sequence so the next chunk
       // reconstitutes it before the stripper runs; stripping a
       // chunk-final fragment would persist the reassembled sequence's
-      // payload as text.
+      // payload as text. A trailing string sequence that has outgrown the
+      // hold cap can no longer be held: it is dropped from this chunk and
+      // its remaining payload is discarded until its terminator.
       const holdMatch = TRAILING_PARTIAL_ESCAPE_REGEX.exec(decoded);
-      const held =
-        holdMatch !== null && holdMatch[0].length <= PARTIAL_LINE_BUFFER_CAP
-          ? holdMatch[0]
-          : '';
+      let held = holdMatch !== null ? holdMatch[0] : '';
+      if (holdMatch !== null && holdMatch[0].length > PARTIAL_LINE_BUFFER_CAP) {
+        held = '';
+        const leader = holdMatch[0][1];
+        if (
+          leader === ']' ||
+          leader === 'P' ||
+          leader === 'X' ||
+          leader === '^' ||
+          leader === '_'
+        ) {
+          buffer.discardingStringPayload = true;
+          decoded = decoded.slice(0, -holdMatch[0].length);
+        }
+      }
       buffer.heldEscape = held;
       const stable = held.length > 0 ? decoded.slice(0, -held.length) : decoded;
       // The capture file is plain text: it shares the served tail's own

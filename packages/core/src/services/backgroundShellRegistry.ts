@@ -50,15 +50,18 @@ export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 // unterminated leader whole, payload included, instead of leaking it as
 // text. In the terminator group `\x1b\\` must stay first: putting the
 // lookahead ahead of it matches at the ST's own ESC and leaks the
-// backslash as text. The Fe rule requires an intermediate byte: a bare
-// residual ESC falls to the per-character backstop, which deletes only
-// the ESC instead of eating the real byte after it.
+// backslash as text. The CSI and Fe rules also accept end-of-input as
+// a terminator, so a teardown chunk or served window ending mid-sequence
+// strips the fragment instead of persisting its bracket and parameters
+// as text. The Fe rule requires an intermediate byte: a bare residual
+// ESC falls to the per-character backstop, which deletes only the ESC
+// instead of eating the real byte after it.
 const TAIL_OSC_REGEX =
   /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
 const TAIL_STRING_REGEX =
   /\x1b[PX^_][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
-const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g;
-const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+[\x30-\x7e]/g;
+const TAIL_CSI_REGEX = /\x1b\[[\x30-\x3f]*[\x20-\x2f]*(?:[\x40-\x7e]|$)/g;
+const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+(?:[\x30-\x7e]|$)/g;
 /* eslint-enable no-control-regex */
 
 export function stripOutputControlChars(text: string): string {
@@ -92,10 +95,12 @@ export function stripOutputControlChars(text: string): string {
  * real newline and collapses to LF; a lone CR redraws the current line
  * (`npm --progress`, `curl -#`, pip), so each LF-delimited segment keeps
  * only the frame after its last CR — with a fallback to the latest
- * non-empty frame so a line that ends right after a redraw's final CR
- * still shows the frame it drew.
+ * non-blank frame so a line that ends right after a redraw's final CR
+ * still shows the frame it drew. A whitespace-only frame is an erase pad
+ * (a progress bar clearing its own line), not a drawn frame, so it is
+ * never kept and never counts as dropped.
  *
- * `droppedFrames` reports whether the collapse discarded any non-empty
+ * `droppedFrames` reports whether the collapse discarded any non-blank
  * frame. A redraw stream drops frames by design, but the same collapse
  * applied to CR-delimited records destroys whole records — nothing
  * separates the two shapes, so the loss is reported and folded into
@@ -115,7 +120,7 @@ function normalizeOutputCarriageReturns(text: string): {
       const frames = line.split('\r');
       let kept: string | undefined;
       for (let i = frames.length - 1; i >= 0; i--) {
-        if (frames[i]!.length === 0) continue;
+        if (frames[i]!.trim().length === 0) continue;
         if (kept === undefined) {
           kept = frames[i]!;
         } else {
@@ -148,12 +153,17 @@ export function readTaskOutputTail(
 
     const length = Math.min(stat.size, maxBytes, MAX_TASK_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
-    const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    // Peek one byte ahead of the window: a window that opens immediately
+    // after an ESC starts mid-sequence, and its first line is the
+    // sequence's leaderless residue, which the stripper cannot recognize
+    // without the ESC.
+    const peek = start > 0 ? 1 : 0;
+    const buffer = Buffer.allocUnsafe(length + peek);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, start - peek);
 
     // When the read offset lands mid-codepoint (truncated read), skip
     // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
-    let sliceOffset = 0;
+    let sliceOffset = peek;
     if (start > 0) {
       while (
         sliceOffset < bytesRead &&
@@ -163,10 +173,24 @@ export function readTaskOutputTail(
       }
     }
 
+    let windowText = buffer.subarray(sliceOffset, bytesRead).toString('utf8');
+    if (peek === 1 && bytesRead > peek && buffer[0] === 0x1b) {
+      // A sequence can never cross a line break, so everything up to the
+      // first one is residue: the served text starts at the first line
+      // that begins inside the window.
+      let firstBreak = -1;
+      for (let i = 0; i < windowText.length; i++) {
+        const code = windowText.charCodeAt(i);
+        if (code === 0x0a || code === 0x0d) {
+          firstBreak = i;
+          break;
+        }
+      }
+      windowText = firstBreak === -1 ? '' : windowText.slice(firstBreak + 1);
+    }
+
     const { text, droppedFrames } = normalizeOutputCarriageReturns(
-      stripOutputControlChars(
-        buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
-      ),
+      stripOutputControlChars(windowText),
     );
     const trimmed = text.trimEnd();
 
