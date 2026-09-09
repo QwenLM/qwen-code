@@ -218,6 +218,7 @@ async function start(
           address: string;
           ipcPath: string;
           previous: 'pending' | 'held';
+          ageMs: number;
         }
       | undefined;
     reassertSessionRecord?: () => Promise<void>;
@@ -296,6 +297,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
               address: 'docs-cd [ab12cd]',
               ipcPath: '/tmp/peer.sock',
               previous: 'pending',
+              ageMs: 0,
             }
           : undefined,
     });
@@ -350,6 +352,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         address: 'docs-cd',
         ipcPath: '/tmp/peer.sock',
         previous: 'pending',
+        ageMs: 0,
       }),
     });
 
@@ -374,6 +377,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         address: 'docs-cd',
         ipcPath: '/tmp/actual-peer.sock',
         previous: 'pending',
+        ageMs: 0,
       }),
     });
 
@@ -456,6 +460,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         address: 'docs-cd',
         ipcPath: '/tmp/peer.sock',
         previous: 'pending',
+        ageMs: 0,
       }),
     });
     const seen: unknown[] = [];
