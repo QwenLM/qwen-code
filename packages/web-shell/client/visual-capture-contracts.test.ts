@@ -103,41 +103,49 @@ describe('visual capture contracts', () => {
     }
   });
 
-  it('keeps every hover timestamp chip off the text and fully opaque', () => {
+  it('keeps every hover timestamp chip opaque, and `.tip` off the first line', () => {
     // The chips are `opacity: 0` until hover, and after the turn-error captures
     // were dropped no capture paints one -- so reverting an anchor to `top` or
     // restoring a translucent background keeps every suite green while
     // reintroducing the clipped-ascender bug this pins ("finished." rendering
     // as "finisheu.", the shape originally reported through a preview).
+    //
+    // Opacity is required of every chip: a glyph beneath a translucent overlay
+    // composites into it and reads as broken text. The bottom anchor is
+    // required only of `.tip`, whose row wraps and therefore has a ragged last
+    // line to move into. `.toolTimeTip`'s row cannot wrap and is about as tall
+    // as the chip, so it has no slack and stays where it is.
     const chips = [
-      ['components/MessageTimestamp.module.css', '.tip'],
+      ['components/MessageTimestamp.module.css', '.tip', true],
       [
         'components/messages/tools/SubAgentPanel.module.css',
         '.toolTimeRow > .toolTimeTip',
+        false,
       ],
     ] as const;
 
-    for (const [file, selector] of chips) {
+    for (const [file, selector, mustBeBottomAnchored] of chips) {
       const css = readFileSync(join(HERE, file), 'utf8');
       const start = css.indexOf(`${selector} {`);
       expect(start, `${file} must declare ${selector}`).toBeGreaterThan(-1);
       const block = css.slice(start, css.indexOf('}', start));
 
-      expect(
-        block,
-        `${selector} must not sit on the first line of the row`,
-      ).not.toMatch(/^\s*top:/m);
-      expect(block, `${selector} must be bottom-anchored`).toMatch(
-        /^\s*bottom:/m,
-      );
-      // A translucent overlay lets the glyph beneath bleed through, which reads
-      // as broken text rather than as a chip.
       expect(block, `${selector} needs an opaque background`).toMatch(
         /^\s*background:\s*var\(--background\);/m,
       );
       expect(block, `${selector} must not be translucent`).not.toMatch(
         /color-mix/,
       );
+
+      if (mustBeBottomAnchored) {
+        expect(
+          block,
+          `${selector} must not sit on the first line of the row`,
+        ).not.toMatch(/^\s*top:/m);
+        expect(block, `${selector} must be bottom-anchored`).toMatch(
+          /^\s*bottom:/m,
+        );
+      }
     }
   });
 });

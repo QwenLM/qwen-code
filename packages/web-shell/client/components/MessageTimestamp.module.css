@@ -32,10 +32,12 @@
  * Opacity still matters on its own: at 92% a glyph beneath any overlay bleeds
  * through it, which reads as broken text rather than as a chip. `.chatTip` and
  * `.copyButton` sit over content too (`.chatActions` pulls itself up by -24px)
- * and carry the same fix, as does `.toolTimeTip` in SubAgentPanel.module.css,
- * which mirrors this chip over a sub-tool line and had no `background` at all.
- * `visual-capture-contracts.test.ts` pins all four, because no test reads this
- * geometry: reverting the anchor or the background keeps every suite green.
+ * and carry the same fix. So does `.toolTimeTip` in SubAgentPanel.module.css,
+ * which mirrors this chip over a sub-tool line and had no `background` at all
+ * -- but only its background: that row cannot wrap and is about as tall as the
+ * chip, so it has no slack to move into. `visual-capture-contracts.test.ts`
+ * pins these, because no test reads this geometry: reverting the anchor or the
+ * background keeps every suite green.
  *
  * Overlap is now rare, not impossible -- a message whose last block is a
  * full-width code block or table still gets the chip in its corner. Reserving
