@@ -814,6 +814,9 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Per-session active-work observation. `idle` is emitted only from a
+   * fresh snapshot that covers every negotiated hold category. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
@@ -1302,6 +1305,8 @@ export interface BridgeDaemonSessionDiagnostic {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /** Selected execution policy while the session is in Plan. */
+  planExecutionMode?: string;
   /**
    * The session's EFFECTIVE live-journal caps right now — the configured
    * baseline, or higher when adaptive growth raised them mid-turn. One
@@ -2199,13 +2204,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionApprovalMode(
     sessionId: string,
     mode: ApprovalMode,
-    opts: { persist: boolean },
+    opts: { persist: boolean; planMode?: boolean },
     context?: BridgeClientRequestContext,
   ): Promise<{
     sessionId: string;
     mode: ApprovalMode;
     previous: ApprovalMode;
     persisted: boolean;
+    planExecutionMode?: ApprovalMode;
   }>;
 
   /**

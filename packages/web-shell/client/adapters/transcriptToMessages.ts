@@ -24,6 +24,7 @@ import type {
   DaemonUserMessage,
 } from './messageTypes.js';
 import {
+  isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
@@ -393,6 +394,7 @@ export function transcriptBlocksToDaemonMessages(
   // Subagent-owned assistant/thought/tool blocks are expected to carry
   // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
+  const serverStartTimes = new Map<string, number>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
   const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
@@ -708,6 +710,9 @@ export function transcriptBlocksToDaemonMessages(
           backgroundAgentUpdate?.endTime,
           safeToolProjection,
         );
+        if (toolBlock.serverTimestamp !== undefined) {
+          serverStartTimes.set(toolCall.callId, toolBlock.serverTimestamp);
+        }
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
           toolCall.title = permissionInfo.title;
@@ -829,6 +834,15 @@ export function transcriptBlocksToDaemonMessages(
           safeToolProjection,
         );
         if (!permissionToolCall) break;
+        if (
+          permBlock.serverTimestamp !== undefined &&
+          !serverStartTimes.has(permissionToolCall.callId)
+        ) {
+          serverStartTimes.set(
+            permissionToolCall.callId,
+            permBlock.serverTimestamp,
+          );
+        }
         const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
         // Pending permissions are rendered by the dedicated permission UI.
         if (!permBlock.resolved) {
@@ -1019,6 +1033,16 @@ export function transcriptBlocksToDaemonMessages(
 
       default:
         break;
+    }
+  }
+
+  for (const tool of toolsByCallId.values()) {
+    if (
+      isSubAgentToolCall(tool) &&
+      isActiveToolStatus(tool.status) &&
+      tool.endTime === undefined
+    ) {
+      tool.startTime = serverStartTimes.get(tool.callId) ?? tool.startTime;
     }
   }
 

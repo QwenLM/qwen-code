@@ -379,6 +379,10 @@ interface ChatEditorRenderProps {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
+  isRunning?: boolean;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
@@ -1018,6 +1022,33 @@ describe('ChatEditor context usage ring', () => {
 });
 
 describe('ChatEditor attachment reporting', () => {
+  it('renders attachments with a file icon, title, and type', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'report.html',
+          media_type: 'text/html',
+          text: '<h1>Report</h1>',
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(
+      attachments?.querySelector('[data-file-type-icon="html"]'),
+    ).not.toBeNull();
+    expect(
+      attachments?.querySelector('[title="report.html"]')?.textContent,
+    ).toBe('report.html');
+    expect(attachments?.querySelector('[title="HTML"]')?.textContent).toBe(
+      'HTML',
+    );
+    expect(
+      attachments?.querySelector('button[aria-label="Remove report.html"]'),
+    ).not.toBeNull();
+  });
+
   it('reports whether the composer has tags or pasted images', () => {
     const onEmptyAttachmentsChange = vi.fn();
     renderChatEditor({
@@ -1125,7 +1156,10 @@ describe('ChatEditor composer tag icons', () => {
 
     expect(
       container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      container.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('rejects unsafe custom icon URLs for top composer tags', () => {
@@ -1499,51 +1533,269 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Session Workflow mode rename', () => {
-  it('renames only the plan entry in the mode dropdown while enabled', () => {
-    const container = renderChatEditor({
-      visibleToolbarActions: ['approvalMode'],
-      sessionWorkflowEnabled: true,
-    });
+describe('ChatEditor Plan toggle', () => {
+  it('associates the Plan switch with its changing accessible description', () => {
+    const props = {
+      visibleToolbarActions: ['plan'] as const,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    for (const state of [
+      {
+        planMode: false,
+        currentMode: 'yolo',
+        description: 'Plan before executing',
+      },
+      {
+        planMode: true,
+        currentMode: 'yolo',
+        description:
+          'Planning; execute with Full Access after approval. Click to exit planning.',
+      },
+      {
+        planMode: true,
+        currentMode: 'auto-edit',
+        description:
+          'Planning; execute with Auto Edit after approval. Click to exit planning.',
+      },
+      {
+        planMode: false,
+        currentMode: 'auto-edit',
+        description: 'Plan before executing',
+      },
+    ]) {
+      rerenderChatEditor(container, { ...props, ...state });
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-plan-button]',
+      )!;
+      act(() => button.focus());
+      expect(button.getAttribute('aria-label')).toBe('Plan');
+      const descriptionIds = button.getAttribute('aria-describedby');
+      expect(descriptionIds).toBeTruthy();
+      const description = descriptionIds!
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+      expect(description).toBe(state.description);
+    }
+  });
 
-    act(() => {
+  it('closes an open permission dropdown when mode controls become disabled', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      onSelectMode: vi.fn(),
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    act(() =>
       container
         .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
-        ?.click();
-    });
-
-    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
-    expect(popover).not.toBeNull();
-    const labels = Array.from(popover?.querySelectorAll('button') ?? []).map(
-      (button) => button.textContent ?? '',
-    );
-    expect(labels.some((label) => label.includes('Plan & Review (plan)'))).toBe(
-      true,
+        ?.click(),
     );
     expect(
-      labels.some((label) => label.includes('Ask Approval (default)')),
-    ).toBe(true);
-    expect(labels.some((label) => label.includes('Plan (plan)'))).toBe(false);
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: true });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
   });
 
-  it('renames the active plan mode chip while enabled', () => {
-    const withWorkflow = renderChatEditor({
-      currentMode: 'plan',
-      sessionWorkflowEnabled: true,
+  it('omits Plan from permissions and retains every execution policy', () => {
+    const onSelectMode = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planMode: true,
+      currentMode: 'yolo',
+      onTogglePlan: vi.fn(),
+      onSelectMode,
     });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const buttons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    );
+    const labels = buttons.map((button) => button.textContent ?? '');
+    expect(labels.some((label) => label.includes('(plan)'))).toBe(false);
+    for (const mode of ['default', 'auto-edit', 'auto', 'yolo']) {
+      expect(labels.some((label) => label.includes(`(${mode})`))).toBe(true);
+    }
+    act(() =>
+      buttons
+        .find((button) => button.textContent?.includes('(auto-edit)'))
+        ?.click(),
+    );
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
     expect(
-      withWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(true);
-
-    const withoutWorkflow = renderChatEditor({ currentMode: 'plan' });
-    expect(
-      withoutWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(false);
+      container
+        .querySelector('[data-web-shell-plan-button]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('true');
   });
+
+  it('keeps permission and Plan controls operable while approval disables input', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      disabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes('(yolo)'));
+    expect(option).toBeDefined();
+    act(() => option!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-plan-button]')
+        ?.click(),
+    );
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('disables both controls during a plan handoff and restores them afterward', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      planMode: true,
+      modeControlsDisabled: true,
+      onSelectMode,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const mode = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    expect(mode.disabled).toBe(true);
+    expect(plan.disabled).toBe(true);
+    const planControl = plan.closest('[data-web-shell-plan-control]')!;
+    expect(planControl.hasAttribute('data-disabled')).toBe(true);
+    act(() => {
+      mode.click();
+      plan.click();
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(mode.disabled).toBe(false);
+    expect(plan.disabled).toBe(false);
+    expect(planControl.hasAttribute('data-disabled')).toBe(false);
+    act(() => plan.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('places the controlled toggle immediately after permission and allows use while running', () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan', 'model'] as const,
+      currentMode: 'yolo',
+      onTogglePlan,
+      isRunning: true,
+    };
+    const container = renderChatEditor(props);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(button)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(button.getAttribute('role')).toBe('switch');
+    expect(button.getAttribute('aria-label')).toBe('Plan');
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    act(() => button.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    rerenderChatEditor(container, { ...props, planMode: true });
+    expect(button.getAttribute('aria-checked')).toBe('true');
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    expect(
+      container.querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent,
+    ).toContain('Full Access');
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the Plan label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 54 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: ['approvalMode', 'plan'],
+          onTogglePlan: vi.fn(),
+        });
+        const button = container.querySelector('[data-web-shell-plan-button]')!;
+        const control = container.querySelector(
+          '[data-web-shell-plan-control]',
+        )!;
+        expect(control.textContent).toBe(label);
+        expect(control.querySelector('[aria-hidden="true"]') !== null).toBe(
+          label === '',
+        );
+        expect(
+          button.querySelector('[data-slot="switch-thumb"]'),
+        ).not.toBeNull();
+        expect(button.getAttribute('role')).toBe('switch');
+        expect(button.getAttribute('aria-label')).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it.each([undefined, [], ['approvalMode']] as const)(
+    'requires an explicit Plan toolbar action: %j',
+    (visibleToolbarActions) => {
+      const container = renderChatEditor({
+        visibleToolbarActions,
+        onTogglePlan: vi.fn(),
+      });
+      expect(
+        container.querySelector('[data-web-shell-plan-button]'),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('ChatEditor toolbar popovers', () => {
@@ -2231,10 +2483,28 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
-  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+  it('fileUploadEnabled={false} keeps attachment drag-and-drop enabled', () => {
     uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
     renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('disables attachment drag feedback when attachments are disabled', () => {
+    renderChatEditor({ attachmentsEnabled: false });
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('does not advertise upload for an attach-only drop preference', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'attach' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'dragenter',
+      ['Files'],
+    );
+    expect(container.querySelector('[data-upload-drag-active]')).toBeNull();
   });
 
   it('enables file drag-and-drop in the composer core by default', () => {
@@ -2243,7 +2513,7 @@ describe('ChatEditor file upload gating', () => {
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
   });
 
-  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+  it('fileUploadEnabled={false} routes drops to attachments without asking', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
@@ -2260,13 +2530,131 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['abc'], 'notes.txt')],
     );
-    // Cancelled so the browser cannot navigate to the dropped file, but no
-    // lane — upload or inline image/text — reacts.
     expect(drop.defaultPrevented).toBe(true);
-    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it.each([
+    ['upload', true],
+    ['attach', true],
+    [undefined, false],
+    ['attach', false],
+  ] as const)(
+    'routes default %s with attachments %s without asking',
+    async (fileDropAction, attachmentsEnabled) => {
+      const workspace = makeWorkspace(['workspace_file_upload']);
+      workspace.client.uploadWorkspaceFile.mockResolvedValue({
+        kind: 'file_upload',
+        path: 'uploads/notes.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({
+        attachmentsEnabled,
+        customization: { fileDropAction, fileUploadDirectory: 'uploads' },
+      });
+      const files = [new File(['abc'], 'notes.txt')];
+      const drop = dispatchDrag(
+        container.querySelector('[data-web-shell-composer-editor]')!,
+        'drop',
+        ['Files'],
+        files,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(drop.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-drop-choice-dialog]'),
+      ).toBeNull();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      if (fileDropAction === 'attach' && attachmentsEnabled) {
+        expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+        expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+      } else {
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            path: 'uploads/notes.txt',
+            data: files[0],
+          }),
+        );
+        expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('falls back to attachments when the preferred upload is unavailable', () => {
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'upload' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it('cancels drops when neither destination is available', () => {
+    const workspace = makeWorkspace([]);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      attachmentsEnabled: false,
+      customization: { fileDropAction: 'upload' },
+    });
+    const onDrop = vi.fn();
+    container.addEventListener('drop', onDrop);
+    const drop = dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    { attachmentsEnabled: false },
+    { customization: { fileDropAction: 'attach' as const } },
+  ])('closes a pending choice when routing changes: %j', (props) => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, props);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('asks whether dropped files should be referenced or uploaded', () => {
@@ -2911,6 +3299,9 @@ describe('ChatEditor file upload gating', () => {
       '[data-web-shell-upload-strip] [data-status="done"]',
     );
     expect(row?.textContent).toContain('Saved as report (1).txt');
+    expect(
+      row?.querySelector('[title="Saved as report (1).txt"]'),
+    ).not.toBeNull();
   });
 
   it('shows the plain Uploaded copy when the file kept its name', async () => {

@@ -655,6 +655,8 @@ const EN: Messages = {
     'Resolve the pending standalone conversation state before continuing.',
   'session.checkStatus': 'Check status',
   'session.retryCreation': 'Start a fresh conversation',
+  'session.writerBlocked':
+    'Another Qwen process or an unresolved writer lock may be blocking this conversation. Close it in other processes and try again. If it still fails, check local daemon diagnostics before recovery.',
   'session.directoryRecreated':
     'The transcript was recovered, but files from the previous private directory were not available.',
   'session.directoryMissing':
@@ -1119,6 +1121,15 @@ const EN: Messages = {
   'editor.noHistory': 'No matching history',
   'editor.placeholder': 'Type a message or @ file path',
   'history.loadingEarlier': 'Loading earlier messages…',
+  'history.openEarlier': 'Open earlier history',
+  'history.loadEarlier': 'Load earlier',
+  'history.loadNewer': 'Load newer',
+  'history.returnLatest': 'Return to latest',
+  'history.viewUnavailable':
+    'History is temporarily unavailable while the session reconnects or repairs its transcript.',
+  'history.snapshotView': 'Historical snapshot · read-only',
+  'history.viewError':
+    'This section could not be loaded. Move the reading position and retry, or return to latest.',
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
@@ -1617,7 +1628,7 @@ const EN: Messages = {
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
-    'A running session cannot be archived; archiving would end its turn',
+    'A running session cannot be archived; archiving would stop its work',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -1638,6 +1649,8 @@ const EN: Messages = {
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
+  'sidebar.activeWork': 'Active work',
+  'sidebar.activityUnknown': 'Background activity unknown',
   'sidebar.waitingForApproval': 'Waiting for approval',
   'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
@@ -2466,21 +2479,21 @@ const EN: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': 'Plan before executing',
+  'plan.toggle.off': (v) =>
+    `Planning; execute with ${v?.mode} after approval. Click to exit planning.`,
+  'approval.option.executePlan': (v) => `Approve and execute · ${v?.mode}`,
   'mode.label.plan': 'Plan',
-  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
-  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
-  'mode.desc.planReview':
-    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2489,6 +2502,8 @@ const EN: Messages = {
     'Evaluate tool risk automatically, run safe actions, and confirm risky ones',
   'mode.desc.yolo': 'Automatically approve all tool calls in trusted contexts',
   'mode.select': 'Approval Mode',
+  'mode.changePending':
+    'A mode change or plan confirmation is pending. Try again when it finishes.',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `Auto-approved: ${v.tool}`
@@ -2703,6 +2718,10 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'contextUsage.refresh': 'Refresh',
+  'contextUsage.retry': 'Retry',
+  'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
   'tokenUsage.input': 'Input',
@@ -3174,6 +3193,8 @@ const EN: Messages = {
   'splitView.outerApprovalPending':
     'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
+  'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'settings.title': 'Settings',
@@ -3384,6 +3405,9 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.instructions': 'Instructions',
+  'channels.editor.field.shared.instructions.description':
+    'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
@@ -3519,6 +3543,27 @@ const EN: Messages = {
     `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
+  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.description':
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.completed': 'This turn has completed.',
+  'browserNotifications.failed':
+    'This turn failed. Return to view the details.',
+  'browserNotifications.ended':
+    'This turn has ended. Return to check the result.',
+  'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enabled': 'Enabled.',
+  'browserNotifications.disabled': 'Disabled.',
+  'browserNotifications.waiting': 'Waiting for browser permission.',
+  'browserNotifications.denied':
+    'Notifications are blocked. Allow them in your browser site settings.',
+  'browserNotifications.unavailable':
+    'Notifications are unavailable in this browser or page context.',
+  'browserNotifications.requesting': 'Waiting for your permission…',
+  'browserNotifications.error':
+    'Unable to enable or show notifications. Check your browser and system settings.',
+  'browserNotifications.temporary':
+    'This setting is saved for the current page only.',
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
@@ -4213,6 +4258,8 @@ const ZH: Messages = {
     '请先处理待确认的 Standalone 会话状态，再继续操作。',
   'session.checkStatus': '检查状态',
   'session.retryCreation': '开始新会话',
+  'session.writerBlocked':
+    '其他 Qwen 进程或未解决的写入锁可能阻止该会话访问。请在其他进程中关闭它后重试；若仍失败，请先查看本地 daemon 诊断日志再进行恢复。',
   'session.directoryRecreated':
     '会话记录已恢复，但之前私有目录中的文件未能恢复。',
   'session.directoryMissing': '该会话的私有工作目录缺失，请修复后再发送消息。',
@@ -4647,6 +4694,14 @@ const ZH: Messages = {
   'editor.noHistory': '没有匹配的历史记录',
   'editor.placeholder': '输入消息或 @ 文件路径',
   'history.loadingEarlier': '正在加载更早消息…',
+  'history.openEarlier': '打开更早历史',
+  'history.loadEarlier': '加载更早记录',
+  'history.loadNewer': '加载较新记录',
+  'history.returnLatest': '返回最新',
+  'history.viewUnavailable': '会话正在重连或修复记录，历史暂时不可用。',
+  'history.snapshotView': '历史快照 · 只读',
+  'history.viewError':
+    '暂时无法加载此段记录。请移动阅读位置后重试，或返回最新。',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
   'history.retry': '重试',
@@ -5106,7 +5161,7 @@ const ZH: Messages = {
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
-    '不能归档运行中的会话，归档会终止其当前回合',
+    '不能归档运行中的会话，归档会终止其正在执行的工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -5126,6 +5181,8 @@ const ZH: Messages = {
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
+  'sidebar.activeWork': '有活动任务',
+  'sidebar.activityUnknown': '后台活动状态未知',
   'sidebar.waitingForApproval': '等待批准',
   'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
@@ -5880,25 +5937,26 @@ const ZH: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': '执行前先制定计划',
+  'plan.toggle.off': (v) => `规划中，批准后按${v?.mode}执行。点击退出规划。`,
+  'approval.option.executePlan': (v) => `批准并执行 · ${v?.mode}`,
   'mode.label.plan': '计划',
-  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
-  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
-  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
   'mode.desc.yolo': '自动批准所有工具调用，适合可信任务环境',
   'mode.select': '审批模式',
+  'mode.changePending': '模式切换或计划确认尚未完成，请稍后重试。',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `已自动批准：${v.tool}`
@@ -6101,6 +6159,10 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'contextUsage.refresh': '刷新',
+  'contextUsage.retry': '重试',
+  'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
   'tokenUsage.input': '输入',
@@ -6546,6 +6608,8 @@ const ZH: Messages = {
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',
   'splitView.goToApproval': '前往处理',
+  'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
+  'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'settings.title': '设置',
@@ -6742,6 +6806,9 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.instructions': '指引',
+  'channels.editor.field.shared.instructions.description':
+    '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
@@ -6872,6 +6939,21 @@ const ZH: Messages = {
     `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
+  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.description':
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.completed': '本轮已完成。',
+  'browserNotifications.failed': '本轮执行失败，请返回查看。',
+  'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.allow': '允许通知',
+  'browserNotifications.enabled': '已开启。',
+  'browserNotifications.disabled': '未开启。',
+  'browserNotifications.waiting': '等待浏览器授权。',
+  'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
+  'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
+  'browserNotifications.requesting': '等待你的授权…',
+  'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
+  'browserNotifications.temporary': '设置仅在当前页面有效。',
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',

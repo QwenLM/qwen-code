@@ -361,6 +361,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -5712,6 +5717,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('updates DAC execution policy without restarting plan and reports it in context', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let approvalMode = 'default';
+    let selectedMode: string | undefined;
+    const dacConfig = Object.assign(innerConfig, {
+      getApprovalMode: vi.fn(() => approvalMode),
+      getPlanExecutionMode: vi.fn(() => selectedMode),
+      setPlanMode: vi.fn((enabled: boolean, mode: string) => {
+        approvalMode = enabled ? 'plan' : mode;
+        selectedMode = enabled ? mode : undefined;
+      }),
+      setDisabledTools: vi.fn(),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      for (const mode of ['yolo', 'default']) {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+            sessionId,
+            mode,
+            planMode: true,
+          }),
+        ).resolves.toMatchObject({ current: 'plan', planExecutionMode: mode });
+      }
+      expect(dacConfig.setPlanMode).toHaveBeenLastCalledWith(true, 'default');
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledOnce();
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContext, { sessionId }),
+      ).resolves.toMatchObject({
+        state: {
+          modes: {
+            currentModeId: 'plan',
+            _meta: { planExecutionMode: 'default' },
+          },
+        },
+      });
+      for (const params of [
+        { mode: 'plan', planMode: true },
+        { mode: 'default', planMode: 'true' },
+      ]) {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+            sessionId,
+            ...params,
+          }),
+        ).rejects.toThrow('planMode must be a boolean');
+      }
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+          sessionId,
+          mode: 'default',
+          planMode: false,
+        }),
+      ).resolves.toEqual({ previous: 'plan', current: 'default' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledTimes(2);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('clears Todo Stop Guard trust when approval mode enters plan', async () => {

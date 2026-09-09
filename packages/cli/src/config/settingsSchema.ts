@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -1159,7 +1160,7 @@ const SETTINGS_SCHEMA = {
             label: 'Screen Reader Mode',
             category: 'UI',
             requiresRestart: true,
-            default: undefined as boolean | undefined,
+            default: false,
             description:
               'Render output in plain-text to be more screen reader accessible',
             showInDialog: false,
@@ -1458,6 +1459,12 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
+        allowDynamicHeaderValues: {
+          description:
+            'SECURITY-RELEVANT. Allow `modelProviders[].generationConfig.customHeaders` values to contain runtime placeholders — currently `${session_id}` — expanded per request instead of frozen at client construction. Default false: a value containing a placeholder is dropped rather than sent. Enable when a gateway requires a stable per-conversation identifier (e.g. OpenCode Go requires `x-opencode-session`). Which hosts receive the value and what the header is called are decided by the provider entry you attach the header to; this switch only decides whether `${session_id}` may be expanded from live session state and does not identify which settings source supplied the header.',
+          type: 'boolean',
+          default: false,
+        },
       },
       additionalProperties: false,
     },
@@ -1633,6 +1640,18 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         description:
           'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
+        showInDialog: false,
+      },
+      goalCheckpointTimeoutSeconds: {
+        type: 'integer',
+        label: 'Goal Checkpoint Timeout (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        minimum: 1,
+        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        description:
+          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; a call that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The call is streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the call. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -2632,7 +2651,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2640,9 +2659,9 @@ const SETTINGS_SCHEMA = {
             label: 'Enable WebSearch',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: undefined as boolean | undefined,
             description:
-              'Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.',
+              'Set false to disable the built-in web_search tool. Automatic startup activation requires leaving enabled, model, and the env-only backend unset. Setting true permits automatic derivation only when the env-only backend is also unset; otherwise a model is required. Env override: ENABLE_WEB_SEARCH.',
             showInDialog: true,
           },
           model: {
@@ -2652,7 +2671,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as string | undefined,
             description:
-              'Model selector for the search side request, resolved against modelProviders like fastModel ("modelId" or "authType:modelId"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
+              'Model selector for the explicit search path ("modelId" or "authType:modelId"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
             showInDialog: true,
           },
           webExtractor: {
@@ -3188,7 +3207,7 @@ const SETTINGS_SCHEMA = {
             label: 'Use External Auth',
             category: 'Security',
             requiresRestart: true,
-            default: undefined as boolean | undefined,
+            default: false,
             description: 'Whether to use an external authentication flow.',
             showInDialog: false,
           },

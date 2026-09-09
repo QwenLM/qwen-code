@@ -17,6 +17,7 @@ import {
 } from './goal-protocol.js';
 import {
   createGoalCheckpointVerifier,
+  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
   GoalCheckpointVerifierInputTooLargeError,
   parseGoalCheckpointVerifierText,
 } from './goal-checkpoint-verifier.js';
@@ -99,6 +100,9 @@ describe('createGoalCheckpointVerifier', () => {
       model: 'fast-model',
       promptId: 'side-query:goal-checkpoint-verifier',
       maxAttempts: 1,
+      // Streamed, so the provider request timeout bounds only connect +
+      // first response and the armed ceiling stays reachable past it.
+      stream: true,
       config: {
         temperature: 0,
         responseMimeType: 'application/json',
@@ -145,8 +149,10 @@ describe('createGoalCheckpointVerifier', () => {
   });
 
   it('surfaces unusable model output as InvalidGoalCheckpointError', async () => {
-    // The stall breaker counts unusable results by error class, so every
-    // parse-level rejection must keep it, not degrade to a plain Error.
+    // Every parse-level rejection must keep its class and message rather
+    // than degrade to a plain Error the way a validate-hook failure would
+    // (runSideQuery re-wraps those): they are the diagnostic a stalled
+    // Goal's investigation gets to see.
     for (const reply of [
       JSON.stringify({ claims: [] }),
       'not json',
@@ -174,6 +180,12 @@ describe('createGoalCheckpointVerifier', () => {
     expect(generateText).not.toHaveBeenCalled();
   });
 
+  it('defaults to a timeout sized for a full claim list, not a short reply', () => {
+    // The previous 30 s default timed out on every checkpoint of an
+    // overflowing window and never wrote one; the floor is minutes.
+    expect(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS).toBe(180_000);
+  });
+
   it('aborts the side query when the verifier timeout fires', async () => {
     let captured: AbortSignal | undefined;
     const generateText = vi
@@ -197,14 +209,81 @@ describe('createGoalCheckpointVerifier', () => {
       getOutputLanguageFilePath: vi.fn(),
     } as unknown as Config;
 
+    const caller = new AbortController();
     await expect(
-      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
+      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(
+        input(),
+        caller.signal,
+      ),
     ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
     expect(generateText).toHaveBeenCalledOnce();
     // The abort signal is the only cancellation mechanism for the side
     // query, so the timeout must actually abort it.
     expect(captured?.aborted).toBe(true);
+    // ...but never the caller's signal: the runtime treats an aborted
+    // attempt signal as a user interrupt and drops the check entirely
+    // instead of counting it as a stall, so the timeout must not reach it.
+    expect(caller.signal.aborted).toBe(false);
   });
+
+  it.each([
+    ['the configured ceiling', 45_000, { timeoutMs: 45_000 }],
+    ['the built-in default', GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS, {}],
+  ] as const)(
+    'arms the abort timer with %s, not a shorter wait',
+    async (_label, armedMs, options) => {
+      // The ceiling is the whole point of the setting, and only the delay
+      // handed to setTimeout makes it real: asserting the constant, or the
+      // factory argument, leaves a clamp back to the old 30 s invisible.
+      // Fake timers are mandatory here -- vitest's testTimeout is far below
+      // the 180 s default, so the wait can only be advanced, never awaited.
+      vi.useFakeTimers();
+      try {
+        let captured: AbortSignal | undefined;
+        const generateText = vi
+          .fn()
+          .mockImplementation((request: { abortSignal?: AbortSignal }) => {
+            captured = request.abortSignal;
+            return new Promise((_resolve, reject) => {
+              request.abortSignal?.addEventListener('abort', () => {
+                reject(request.abortSignal?.reason);
+              });
+            });
+          });
+        const baseLlmClient = {
+          generateText,
+          generateJson: vi.fn(),
+        } as unknown as BaseLlmClient;
+        const config = {
+          getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
+          getFastModel: vi.fn().mockReturnValue('fast-model'),
+          getModel: vi.fn().mockReturnValue('main-model'),
+          getOutputLanguageFilePath: vi.fn(),
+        } as unknown as Config;
+
+        const pending = createGoalCheckpointVerifier(config, options)(input());
+        // Hold the rejection so advancing past the ceiling cannot surface as
+        // an unhandled rejection before it is asserted below.
+        let rejected = false;
+        pending.catch(() => {
+          rejected = true;
+        });
+
+        await vi.advanceTimersByTimeAsync(armedMs - 1);
+        expect(captured?.aborted).toBe(false);
+        expect(rejected).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(captured?.aborted).toBe(true);
+        await expect(pending).rejects.toThrow(
+          `Goal checkpoint verifier timed out after ${armedMs}ms`,
+        );
+      } finally {
+        // The neighbouring abort test arms a real 1 ms timer.
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('measures the claim limit after trimming, in code points', () => {
     // A max-length claim with trailing padding must parse the same way
