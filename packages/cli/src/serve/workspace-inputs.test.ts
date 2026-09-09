@@ -13,9 +13,14 @@ import {
   MissingWorkspaceInputError,
   MultipleWorkspaceInputError,
   NestedWorkspaceInputError,
+  MAX_REGISTERED_WORKSPACES,
   resolveSingleWorkspaceInput,
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
+
+vi.mock('@qwen-code/acp-bridge/channelControlTimeouts', () => ({
+  MAX_DAEMON_WORKSPACES: 256,
+}));
 
 let scratch: string | undefined;
 
@@ -118,6 +123,10 @@ describe('resolveSingleWorkspaceInput', () => {
 });
 
 describe('resolveWorkspaceInputs', () => {
+  it('keeps registration independent of the legacy channel-control capacity', () => {
+    expect(MAX_REGISTERED_WORKSPACES).toBe(25);
+  });
+
   it('keeps distinct non-nested explicit workspaces in input order', () => {
     const root = makeScratch();
     const primary = path.join(root, 'primary');
