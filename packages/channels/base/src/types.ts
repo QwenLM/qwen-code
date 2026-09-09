@@ -40,18 +40,6 @@ export interface GroupConfig {
   groupHistoryLimit?: number;
 }
 
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
-}
-
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -82,13 +70,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {

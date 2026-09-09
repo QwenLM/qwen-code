@@ -290,6 +290,59 @@ describe('WorkflowRunner', () => {
     ]);
   });
 
+  it('keeps a respawn diagnostic through final log replacement and telemetry', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    const runId = 'wf_respawned';
+    const key = deriveAgentKey(deriveArgsSeed(undefined), 'work', {
+      label: 'scout',
+    });
+    vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce({
+      results: new Map(),
+      started: new Map([[key, [{ type: 'started', key, agentId: 'agent-1' }]]]),
+      failed: new Set(),
+    });
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('work', { label: 'scout' });`,
+      args: undefined,
+      resumeFromRunId: runId,
+      dispatch: async () => {
+        throw new Error('provider failed before classification');
+      },
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    const line =
+      '[resume] respawning "scout": interrupted in a previous run (1 prior attempt)';
+    expect(registry.get(runId)).toMatchObject({
+      status: 'completed',
+      agentsRespawned: 1,
+      recentLogs: [line],
+    });
+    expect(
+      registry
+        .get(runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === line,
+        ),
+    ).toHaveLength(1);
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        agents_completed: 1,
+        agents_failed: 1,
+        agents_cached: 0,
+        agents_respawned: 1,
+      }),
+    );
+  });
+
   it('keeps sandbox and registry phase projections equal for normalization-colliding titles', async () => {
     const { config, registry } = configWithRegistry();
     const handle = await WorkflowRunner.start({
@@ -352,6 +405,7 @@ describe('WorkflowRunner', () => {
         [key, { type: 'result', key, agentId: 'agent-1', result: 'cached' }],
       ]),
       started: new Map(),
+      failed: new Set(),
     });
     vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
       false,
@@ -374,6 +428,15 @@ describe('WorkflowRunner', () => {
     expect(dispatch).not.toHaveBeenCalled();
     expect(handle.journalPath).toBeUndefined();
     expect(registry.get(runId)?.journalPath).toBeUndefined();
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        agents_completed: 1,
+        agents_failed: 0,
+        agents_cached: 1,
+        agents_respawned: 0,
+      }),
+    );
   });
 
   it('cancels a pending background resume before registration', async () => {
@@ -406,7 +469,11 @@ describe('WorkflowRunner', () => {
 
       await vi.waitFor(() => expect(resolveLoad).toBeDefined());
       registry.abortAll();
-      resolveLoad!({ results: new Map(), started: new Map() });
+      resolveLoad!({
+        results: new Map(),
+        started: new Map(),
+        failed: new Set(),
+      });
 
       await expect(start).rejects.toThrow('Workflow start was cancelled.');
       expect(registry.isStarting(runId)).toBe(false);
@@ -415,7 +482,11 @@ describe('WorkflowRunner', () => {
         fs.readdir(path.join(root, 'generated', 'inline')),
       ).rejects.toThrow();
     } finally {
-      resolveLoad?.({ results: new Map(), started: new Map() });
+      resolveLoad?.({
+        results: new Map(),
+        started: new Map(),
+        failed: new Set(),
+      });
       await start.catch(() => undefined);
       loadSpy.mockRestore();
     }
@@ -965,8 +1036,11 @@ describe('WorkflowRunner', () => {
     expect(settled).toBe(false);
 
     registry.resume(handle.runId);
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('keeps queued agents stopped while pausing and starts them after resume', async () => {
@@ -1286,7 +1360,7 @@ describe('WorkflowRunner', () => {
     );
   });
 
-  it('classifies a background failure after caller abort as failed', async () => {
+  it('settles a background agent failure to null after caller abort', async () => {
     const { config, registry } = configWithRegistry();
     const caller = new AbortController();
     let rejectDispatch: ((error: Error) => void) | undefined;
@@ -1306,8 +1380,11 @@ describe('WorkflowRunner', () => {
     caller.abort();
     rejectDispatch?.(new Error('background boom'));
 
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('routes registry cancellation through each live handle', async () => {
@@ -1356,6 +1433,33 @@ describe('WorkflowRunner', () => {
 
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledTimes(2);
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not journal a failed agent when the run handle aborts it', async () => {
+    const { config } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('work');`,
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+
+    handle.abort();
+    rejectDispatch?.(new Error('cancelled by run handle'));
+    await handle.completion;
+
+    const journalEntries = writeLineMock.mock.calls.map(
+      (call) => call[1] as { type: string },
+    );
+    expect(journalEntries.some((entry) => entry.type === 'started')).toBe(true);
+    expect(journalEntries.some((entry) => entry.type === 'failed')).toBe(false);
   });
 
   it('classifies the internal wall-clock timeout as failed', async () => {
