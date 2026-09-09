@@ -190,13 +190,17 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'slow_client_warning':
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: 'SSE stream is lagging',
-        },
-      ];
+      // The daemon reports this SSE subscriber's queue backing up — a
+      // transport diagnostic, not a user-facing failure. Surfacing it as a
+      // transcript status reads as a broken connection mid-turn, so log the
+      // queue watermarks to the console instead; `client_evicted` remains the
+      // real disconnect signal and flows through its own error path. Fires at
+      // most once per overflow episode (daemon-side hysteresis).
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
+        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+      }
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [

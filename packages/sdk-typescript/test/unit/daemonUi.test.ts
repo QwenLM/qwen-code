@@ -2436,14 +2436,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: { reason: 'slow' },
       }),
     ).toMatchObject([{ type: 'error', recoverable: true, text: 'slow' }]);
-    expect(
-      normalizeDaemonEvent({
-        id: 54,
-        v: 1,
-        type: 'slow_client_warning',
-        data: {},
-      }),
-    ).toMatchObject([{ type: 'status', text: 'SSE stream is lagging' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: { queueSize: 200, maxQueued: 256 },
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
+        queueSize: 200,
+        maxQueued: 256,
+      });
+    } finally {
+      warn.mockRestore();
+    }
     expect(
       normalizeDaemonEvent({
         id: 55,

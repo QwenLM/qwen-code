@@ -649,6 +649,19 @@ export interface OutboundCorrelationSettings {
    * Tracing + DashScope — for cross-process trace stitching.
    */
   propagateTraceContext?: boolean;
+  /**
+   * Allow `modelProviders[].generationConfig.customHeaders` values to
+   * carry runtime placeholders such as `${session_id}`, expanded per
+   * request. Default: disabled — a value with a placeholder is dropped
+   * rather than sent.
+   *
+   * This is the consent decision, and it is the only part of the feature
+   * that is global: *which* hosts may receive the value, and *what* the
+   * header is called, are already answered by the provider entry the
+   * header is attached to. It controls only `${session_id}` expansion and
+   * cannot recover a header's provenance after settings are merged.
+   */
+  allowDynamicHeaderValues?: boolean;
 }
 
 export interface OutputSettings {
@@ -1277,13 +1290,9 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
-   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
-   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
-   * is true and `model` resolves to a DashScope-compatible modelProviders
-   * entry carrying a direct API key — or, for environments that cannot write
-   * settings.json, when an env-declared backend is supplied (`baseUrl` from
-   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
-   * precedence over modelProviders resolution.
+   * Built-in WebSearch settings. `enabled: false` disables the tool; when the
+   * setting is omitted, the tool may derive a backend from the active provider
+   * at startup. An explicit model or env-declared backend takes precedence.
    */
   webSearch?: WebSearchSettings;
   /**
@@ -2679,6 +2688,8 @@ export class Config {
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
+      allowDynamicHeaderValues:
+        params.outboundCorrelation?.allowDynamicHeaderValues === true,
     };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
@@ -4930,6 +4941,20 @@ export class Config {
 
   getCurrentModelRegistryBaseUrl(): string | null | undefined {
     return this.modelsConfig.getCurrentRegistryBaseUrl();
+  }
+
+  /**
+   * The auth type of the currently selected model, read from `ModelsConfig`
+   * rather than the content generator config.
+   *
+   * Unlike {@link getAuthType}, this is usable before `refreshAuth` has run —
+   * the tool registry is built during `initialize()`, which happens first (the
+   * ACP bridge calls `initialize()` and only later `refreshAuth`). Callers that
+   * need the selected model's provider entry at registry-build time must use
+   * this.
+   */
+  getCurrentAuthType(): AuthType | undefined {
+    return this.modelsConfig.getCurrentAuthType();
   }
 
   /**
@@ -7592,6 +7617,15 @@ export class Config {
     return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
+  /**
+   * Whether `customHeaders` values may carry runtime placeholders. See
+   * {@link OutboundCorrelationSettings.allowDynamicHeaderValues}; consumed by
+   * `core/outbound-dynamic-headers.ts`.
+   */
+  getOutboundAllowDynamicHeaderValues(): boolean {
+    return this.outboundCorrelationSettings.allowDynamicHeaderValues ?? false;
+  }
+
   getTelemetryOutfile(): string | undefined {
     return this.telemetrySettings.outfile;
   }
@@ -9723,11 +9757,22 @@ export class Config {
         return new DisplayImageTool(this);
       });
     }
-    // WebSearch is opt-in: it registers only when explicitly enabled AND the
-    // configured search model resolves to a usable DashScope entry. A failed
-    // gate surfaces a one-time startup notice instead of a silently missing
-    // tool. Nothing is imported unless the feature is enabled.
-    if (this.webSearchSettings?.enabled) {
+    // WebSearch is opt-out: it registers whenever the gate can resolve a
+    // usable backend — either configured explicitly, or derived from the
+    // provider the main model runs on. `enabled: false` turns it off without
+    // importing anything. A gate failure surfaces a one-time startup notice
+    // only when the tool was actually asked for; a provider with no search
+    // backend fails silently (`gate.silent`), since warning about a feature
+    // the user never configured is noise.
+    const hasExplicitWebSearchBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      this.webSearchSettings?.enabled !== false &&
+      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
+    ) {
       const { evaluateWebSearchGate } = await import('../tools/web-search.js');
       const gate = evaluateWebSearchGate(this);
       if (gate.ok) {
@@ -9735,7 +9780,11 @@ export class Config {
           const { WebSearchTool } = await import('../tools/web-search.js');
           return new WebSearchTool(this);
         });
-      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+      } else if (
+        !gate.silent &&
+        !this.webSearchNoticeEmitted &&
+        !options?.forSubAgent
+      ) {
         this.webSearchNoticeEmitted = true;
         this.warnings.push(gate.notice);
       }

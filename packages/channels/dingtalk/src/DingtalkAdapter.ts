@@ -39,7 +39,6 @@ import {
   readValidatedFile,
   safeFileName,
   uploadDingTalkFile,
-  withFileUnavailableNotice,
   type ValidatedFile,
 } from './outbound-file.js';
 import {
@@ -59,7 +58,14 @@ import {
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
+import {
+  isChinesePresentationLanguage,
+  lifecyclePresentationPhase,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   BackgroundResponseContext,
@@ -69,6 +75,7 @@ import type {
   ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -603,9 +610,15 @@ const BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES = 3;
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
+const STATUS_EMOTION_ID = '34019';
+const STATUS_EMOTION_BG_ID = 'im_bg_6';
+const DONE_EMOTION_ID = '54054';
+const DONE_EMOTION_BG_ID = 'im_bg_5';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
+const EMOTION_FETCH_TIMEOUT_MS = 15_000;
+const EMOTION_FINISH_MAX_ATTEMPTS = 3;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -775,6 +788,58 @@ interface CardRunCorrelation {
   target: { chatId: string; isGroup: boolean };
   sender?: { senderName: string };
 }
+
+interface DingtalkEmotionTag {
+  name: string;
+  emotionId: string;
+  backgroundId: string;
+}
+
+interface DingtalkReactionState {
+  key: string;
+  messageId: string;
+  chatId: string;
+  sessionId?: string;
+  desiredStatusTag?: DingtalkEmotionTag;
+  statusTag?: DingtalkEmotionTag;
+  terminalTag?: DingtalkEmotionTag;
+  finishing: boolean;
+  drainScheduled: boolean;
+  eyeAttached: boolean;
+  /** Set when a finish attempt could not clear both transient tags; the
+   * state stays registered so a later finish trigger retries the cleanup. */
+  finishBlocked?: boolean;
+  /** Blocked finish attempts so far; at EMOTION_FINISH_MAX_ATTEMPTS the
+   * state is dropped so a permanently failing emotion API does not hold the
+   * entry for the process lifetime. */
+  finishAttempts?: number;
+  /** The last failed drain transition. Identical repeat requests are skipped
+   * so a failing emotion API is not re-hit once per streamed chunk. */
+  failedTransition?: { from: string | undefined; to: string };
+  revision: number;
+  tail: Promise<void>;
+}
+
+function statusEmotionTag(name: string): DingtalkEmotionTag {
+  return {
+    name,
+    emotionId: STATUS_EMOTION_ID,
+    backgroundId: STATUS_EMOTION_BG_ID,
+  };
+}
+
+const EYE_TAG: DingtalkEmotionTag = {
+  name: ACK_REACTION_NAME,
+  emotionId: ACK_EMOTION_ID,
+  backgroundId: ACK_EMOTION_BG_ID,
+};
+const DONE_TAG: DingtalkEmotionTag = {
+  name: '✅ Done',
+  emotionId: DONE_EMOTION_ID,
+  backgroundId: DONE_EMOTION_BG_ID,
+};
+const FAILED_TAG = statusEmotionTag('❌ Failed');
+const STOPPED_TAG = statusEmotionTag('⏹️ Stopped');
 
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
@@ -951,6 +1016,7 @@ class ReplyTextDeliveryError extends Error {
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
+  private readonly displayLanguage: string | undefined;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
@@ -961,11 +1027,14 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private activeReactionKeys = new Set<string>();
+  private reactionStates = new Map<string, DingtalkReactionState>();
   /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
   private sessionReactionKeys = new Map<
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
+  /** Settles when the reaction cleanup queued by disconnect() has run. */
+  private disconnectDrain: Promise<void> | undefined;
   /**
    * Real inbound message ids (insertion-ordered, size-capped). Unlike the
    * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
@@ -982,6 +1051,7 @@ export class DingtalkChannel extends ChannelBase {
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private permissionCardController?: PermissionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
@@ -993,17 +1063,6 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { sessionId: string; projector: OutboundFileProjector }
   >();
-  private readonly blockFileProjectors = new Map<
-    string,
-    { projector: OutboundFileProjector; reportedMarkers: number }
-  >();
-  // Sessions armed for block projection by onPromptStart and disarmed when
-  // the turn settles (or the session dies). A block send that finds NO
-  // projector state is only legitimate as a turn's FIRST block, which always
-  // lands while armed: late sends from an evicted (/clear) or dead session
-  // must be dropped, because recreating state would post the tail of a
-  // force-split [FILE: ...] marker verbatim.
-  private readonly blockProjectionArmed = new Set<string>();
   private readonly backgroundResponseAggregations = new Map<
     string,
     BackgroundResponseAggregation
@@ -1027,6 +1086,7 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    this.displayLanguage = options?.displayLanguage;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## DingTalk Channel',
@@ -1037,10 +1097,7 @@ export class DingtalkChannel extends ChannelBase {
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
     }
-    if (
-      config.blockStreaming !== 'on' &&
-      !this.config.instructions.includes('[FILE:')
-    ) {
+    if (!this.config.instructions.includes('[FILE:')) {
       this.config.instructions += FILE_INSTRUCTIONS;
     }
     this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
@@ -1089,15 +1146,15 @@ export class DingtalkChannel extends ChannelBase {
           }
         },
       });
-      if (
-        this.interactiveCardConfig.statusCard.enabled &&
-        config.blockStreaming !== 'on'
-      ) {
+      if (this.interactiveCardConfig.statusCard.enabled) {
         this.statusCardController = new StatusCardController({
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
           ...(config.model ? { model: config.model } : {}),
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
+            : {}),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
@@ -1120,21 +1177,34 @@ export class DingtalkChannel extends ChannelBase {
           },
         });
       }
-      if (this.statusCardController || this.questionCardController) {
+      if (this.interactiveCardConfig.permissionCard.enabled) {
+        this.permissionCardController = new PermissionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.permissionCard.timeoutMs,
+          locale: this.locale,
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (
+        this.statusCardController ||
+        this.questionCardController ||
+        this.permissionCardController
+      ) {
         this.interactionPresenter = new DingtalkInteractionPresenter({
           statusCards: this.statusCardController,
           questionCards: this.questionCardController,
-          ...(config.blockStreaming !== 'on'
-            ? {
-                sendFallback: (
-                  chatId: string,
-                  text: string,
-                  sessionId: string,
-                  sourceLabel?: string,
-                ) =>
-                  this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
-              }
+          permissionCards: this.permissionCardController,
+          ...(options?.displayLanguage
+            ? { language: options.displayLanguage }
             : {}),
+          sendFallback: (chatId, text, sessionId, sourceLabel) =>
+            this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
         });
       }
     }
@@ -1245,8 +1315,13 @@ export class DingtalkChannel extends ChannelBase {
         ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
+    const permissionResult = this.permissionCardController?.claim(callback);
+    if (permissionResult && permissionResult.kind !== 'ignored') {
+      return permissionResult;
+    }
     return (
-      this.questionCardController?.claim(callback) ?? {
+      this.questionCardController?.claim(callback) ??
+      permissionResult ?? {
         kind: 'ignored',
         actorId: callback.actorId,
       }
@@ -1537,15 +1612,6 @@ export class DingtalkChannel extends ChannelBase {
     if (projection.markerCount > 0 || streamedMarkers > 0) {
       process.stderr.write(
         `[DingTalk:${this.name}] file markers projected (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
-      );
-    }
-
-    if (
-      this.config.blockStreaming === 'on' &&
-      (projection.markerCount > 0 || streamedMarkers > 0)
-    ) {
-      return this.prepareOutgoingText(
-        withFileUnavailableNotice(projection.text),
       );
     }
 
@@ -1931,6 +1997,20 @@ export class DingtalkChannel extends ChannelBase {
     actorId: string,
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
+    const copy =
+      this.locale === 'zh'
+        ? {
+            title: '卡片操作',
+            group: '仅任务发起人可以操作这张卡片，本次操作未生效。',
+            direct: '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+          }
+        : {
+            title: 'Card interaction',
+            group:
+              'Only the task initiator can operate this card. This action had no effect.',
+            direct:
+              'You cannot operate this card. Only the task initiator can submit or stop it.',
+          };
     if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
@@ -1939,8 +2019,8 @@ export class DingtalkChannel extends ChannelBase {
           chatId: target.chatId,
           isGroup: true,
         },
-        '卡片操作',
-        '仅任务发起人可以操作这张卡片，本次操作未生效。',
+        copy.title,
+        copy.group,
         'card interaction feedback',
       );
     }
@@ -1951,8 +2031,8 @@ export class DingtalkChannel extends ChannelBase {
         chatId: actorId,
         isGroup: false,
       },
-      '卡片操作',
-      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
+      copy.title,
+      copy.direct,
       'card interaction feedback',
     );
   }
@@ -2122,14 +2202,15 @@ export class DingtalkChannel extends ChannelBase {
     endpoint: 'reply' | 'recall',
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
+    tag: DingtalkEmotionTag,
+  ): Promise<boolean> {
     const robotCode = this.config.clientId;
-    if (!robotCode || !msgId || !conversationId) return;
+    if (!robotCode || !msgId || !conversationId) return false;
     try {
       const token = this.config.clientSecret
         ? await this.getProactiveToken()
         : this.getAccessToken();
-      if (!token) return;
+      if (!token) return false;
       for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
         const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
           method: 'POST',
@@ -2142,16 +2223,17 @@ export class DingtalkChannel extends ChannelBase {
             openMsgId: msgId,
             openConversationId: conversationId,
             emotionType: 2,
-            emotionName: ACK_REACTION_NAME,
+            emotionName: tag.name,
             textEmotion: {
-              emotionId: ACK_EMOTION_ID,
-              emotionName: ACK_REACTION_NAME,
-              text: ACK_REACTION_NAME,
-              backgroundId: ACK_EMOTION_BG_ID,
+              emotionId: tag.emotionId,
+              emotionName: tag.name,
+              text: tag.name,
+              backgroundId: tag.backgroundId,
             },
           }),
+          signal: AbortSignal.timeout(EMOTION_FETCH_TIMEOUT_MS),
         });
-        if (resp.ok) return;
+        if (resp.ok) return true;
 
         const isTransient = resp.status === 429 || resp.status >= 500;
         if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
@@ -2166,41 +2248,56 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
-        return;
+        return false;
       }
     } catch {
       // best-effort, don't break message flow
     }
+    return false;
   }
 
   private async attachReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('reply', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('reply', msgId, conversationId, tag);
   }
 
   private async recallReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('recall', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
   disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    const reactionStates = [...this.reactionStates.values()];
+    for (const state of reactionStates) {
+      this.finishReaction(state.chatId, state.messageId, state.sessionId);
+    }
     this.statusCardController?.dispose();
     this.drainBackgroundResponseAggregations();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
+    this.reactionStates.clear();
     if (this.connectionManager) {
       this.connectionManager.stop();
     } else {
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
+    this.disconnectDrain = Promise.allSettled(
+      reactionStates.map((state) => state.tail),
+    ).then(() => undefined);
+  }
+
+  override waitForDisconnect(): Promise<void> {
+    return this.disconnectDrain ?? Promise.resolve();
   }
 
   /** Stable API targets are conversation or user IDs, never webhook URLs. */
@@ -2210,6 +2307,164 @@ export class DingtalkChannel extends ChannelBase {
 
   private reactionKey(messageId: string, conversationId: string): string {
     return `${conversationId}:${messageId}`;
+  }
+
+  private forgetReactionState(state: DingtalkReactionState): void {
+    this.activeReactionKeys.delete(state.key);
+    if (this.reactionStates.get(state.key) === state) {
+      this.reactionStates.delete(state.key);
+    }
+    if (!state.sessionId) return;
+    const keys = this.sessionReactionKeys.get(state.sessionId);
+    keys?.delete(state.key);
+    if (keys?.size === 0) this.sessionReactionKeys.delete(state.sessionId);
+  }
+
+  private enqueueReaction(
+    state: DingtalkReactionState,
+    operation: () => Promise<void>,
+  ): void {
+    state.tail = state.tail.then(operation).catch((err) => {
+      this.logReactionFailure('lifecycle tag update', err);
+    });
+  }
+
+  private scheduleReactionDrain(state: DingtalkReactionState): void {
+    if (state.drainScheduled) return;
+    state.drainScheduled = true;
+    this.enqueueReaction(state, async () => {
+      try {
+        await this.drainReactionState(state);
+      } finally {
+        state.drainScheduled = false;
+        if (
+          this.reactionStates.get(state.key) === state &&
+          (state.finishing
+            ? !state.finishBlocked
+            : this.activeReactionKeys.has(state.key) &&
+              state.desiredStatusTag &&
+              state.desiredStatusTag.name !== state.statusTag?.name)
+        ) {
+          this.scheduleReactionDrain(state);
+        }
+      }
+    });
+  }
+
+  private async drainReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    while (true) {
+      if (state.finishing) {
+        await this.finishReactionState(state);
+        return;
+      }
+      if (
+        this.reactionStates.get(state.key) !== state ||
+        !this.activeReactionKeys.has(state.key)
+      ) {
+        return;
+      }
+
+      const desired = state.desiredStatusTag;
+      if (!desired || desired.name === state.statusTag?.name) return;
+      const latched = state.failedTransition;
+      if (state.statusTag) {
+        const from = state.statusTag.name;
+        if (latched && latched.from === from && latched.to === desired.name) {
+          // This exact replacement already failed; re-issuing it once per
+          // lifecycle event hammers a failing emotion API on every streamed
+          // chunk. A different desired tag retries the recall.
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        const revision = state.revision;
+        if (
+          (await this.recallReaction(
+            state.messageId,
+            state.chatId,
+            state.statusTag,
+          )) === false
+        ) {
+          state.failedTransition = { from, to: desired.name };
+          if (state.revision !== revision) continue;
+          state.desiredStatusTag = state.statusTag;
+          return;
+        }
+        state.failedTransition = undefined;
+        state.statusTag = undefined;
+        continue;
+      }
+
+      if (
+        latched &&
+        latched.from === undefined &&
+        latched.to === desired.name
+      ) {
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      const revision = state.revision;
+      if (
+        (await this.attachReaction(state.messageId, state.chatId, desired)) ===
+        false
+      ) {
+        state.failedTransition = { from: undefined, to: desired.name };
+        if (state.revision !== revision) continue;
+        state.desiredStatusTag = undefined;
+        return;
+      }
+      state.failedTransition = undefined;
+      state.statusTag = desired;
+    }
+  }
+
+  private async finishReactionState(
+    state: DingtalkReactionState,
+  ): Promise<void> {
+    let statusCleared = true;
+    if (state.statusTag) {
+      statusCleared =
+        (await this.recallReaction(
+          state.messageId,
+          state.chatId,
+          state.statusTag,
+        )) !== false;
+      if (statusCleared) state.statusTag = undefined;
+    }
+    const eyeCleared =
+      !state.eyeAttached ||
+      (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
+        false;
+    if (eyeCleared) state.eyeAttached = false;
+    let terminalAttached = true;
+    if (state.terminalTag && statusCleared && eyeCleared) {
+      terminalAttached =
+        (await this.attachReaction(
+          state.messageId,
+          state.chatId,
+          state.terminalTag,
+        )) !== false;
+    }
+    if (!statusCleared || !eyeCleared || !terminalAttached) {
+      // Keep the state registered: forgetting it here would leave a stale
+      // phase tag nothing can ever recall. finishReaction re-arms the drain
+      // (disconnect, session death) so the cleanup gets a second chance.
+      state.finishAttempts = (state.finishAttempts ?? 0) + 1;
+      if (state.finishAttempts >= EMOTION_FINISH_MAX_ATTEMPTS) {
+        // A permanently failing emotion API (robot removed, expired token)
+        // would otherwise hold the entry for the process lifetime.
+        this.logReactionFailure(
+          'reaction cleanup',
+          `abandoned after ${state.finishAttempts} attempts`,
+        );
+        this.forgetReactionState(state);
+        return;
+      }
+      state.finishBlocked = true;
+      return;
+    }
+    this.forgetReactionState(state);
   }
 
   private rememberInboundMessageId(msgId: string): void {
@@ -2240,6 +2495,19 @@ export class DingtalkChannel extends ChannelBase {
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
+    const state: DingtalkReactionState = {
+      key,
+      messageId,
+      chatId,
+      ...(sessionId ? { sessionId } : {}),
+      desiredStatusTag: this.phaseReactionTag('thinking'),
+      finishing: false,
+      drainScheduled: false,
+      eyeAttached: false,
+      revision: 0,
+      tail: Promise.resolve(),
+    };
+    this.reactionStates.set(key, state);
     if (sessionId) {
       let keys = this.sessionReactionKeys.get(sessionId);
       if (!keys) {
@@ -2248,18 +2516,83 @@ export class DingtalkChannel extends ChannelBase {
       }
       keys.set(key, { messageId, chatId });
     }
-    this.attachReaction(messageId, chatId)
-      .then(() => {
-        if (!this.activeReactionKeys.has(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('late reaction recall', err);
-          });
+    this.enqueueReaction(state, async () => {
+      try {
+        if ((await this.attachReaction(messageId, chatId, EYE_TAG)) === false) {
+          this.forgetReactionState(state);
+          return;
         }
-      })
-      .catch((err) => {
-        this.activeReactionKeys.delete(key);
+        state.eyeAttached = true;
+        this.scheduleReactionDrain(state);
+      } catch (err) {
+        this.forgetReactionState(state);
         this.logReactionFailure('reaction attach', err);
-      });
+      }
+    });
+  }
+
+  private replaceStatusReaction(
+    chatId: string,
+    messageId: string | undefined,
+    tag: DingtalkEmotionTag,
+  ): void {
+    if (!messageId) return;
+    const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
+    if (!state || !this.activeReactionKeys.has(state.key)) return;
+    state.desiredStatusTag = tag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
+  }
+
+  private phaseReactionTag(
+    phase: DingtalkPresentationPhase,
+  ): DingtalkEmotionTag {
+    return statusEmotionTag(
+      presentationPhaseLabel(phase, this.displayLanguage),
+    );
+  }
+
+  private terminalReactionTag(
+    type: 'completed' | 'failed' | 'cancelled',
+  ): DingtalkEmotionTag {
+    if (!isChinesePresentationLanguage(this.displayLanguage)) {
+      return type === 'completed'
+        ? DONE_TAG
+        : type === 'failed'
+          ? FAILED_TAG
+          : STOPPED_TAG;
+    }
+    if (type === 'completed') {
+      return { ...DONE_TAG, name: '✅ 已完成' };
+    }
+    return statusEmotionTag(type === 'failed' ? '❌ 失败' : '⏹️ 已停止');
+  }
+
+  private finishReaction(
+    chatId: string,
+    messageId: string | undefined,
+    sessionId: string | undefined,
+    terminalTag?: DingtalkEmotionTag,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    const state = this.reactionStates.get(key);
+    if (!state) return;
+    if (state.finishing) {
+      // A finish is either draining or blocked on a failed recall; only the
+      // blocked case needs this trigger to retry the cleanup.
+      if (!state.finishBlocked) return;
+      state.finishBlocked = false;
+      if (terminalTag) state.terminalTag = terminalTag;
+      this.scheduleReactionDrain(state);
+      return;
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    state.finishing = true;
+    state.desiredStatusTag = undefined;
+    state.terminalTag = terminalTag;
+    state.revision++;
+    this.scheduleReactionDrain(state);
   }
 
   private stopReaction(
@@ -2267,25 +2600,11 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isStableTargetId(chatId)) return;
-    const key = this.reactionKey(messageId, chatId);
-    if (sessionId) {
-      const keys = this.sessionReactionKeys.get(sessionId);
-      if (keys) {
-        keys.delete(key);
-        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
-      }
-    }
-    if (!this.activeReactionKeys.delete(key)) return;
-    this.recallReaction(messageId, chatId).catch((err) => {
-      this.logReactionFailure('reaction recall', err);
-    });
+    this.finishReaction(chatId, messageId, sessionId);
   }
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    this.blockFileProjectors.delete(sessionId);
     for (const [runId, state] of this.fileProjectors) {
       if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
     }
@@ -2312,15 +2631,32 @@ export class DingtalkChannel extends ChannelBase {
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
-      for (const [key, { messageId, chatId }] of keys) {
-        if (this.activeReactionKeys.delete(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('session-death reaction recall', err);
-          });
-        }
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
       }
     }
     super.onSessionDied(sessionId);
+  }
+
+  /**
+   * A crashed standalone bridge never settles its in-flight turns, so their
+   * transient tags and ticking status cards would otherwise assert a live
+   * turn forever. Finish the tags without a terminal result and terminalize
+   * the cards as interrupted. Session state stays: crash recovery restores
+   * the sessions on a fresh bridge.
+   */
+  override onBridgeDisconnected(): void {
+    for (const [sessionId, keys] of this.sessionReactionKeys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
+      }
+    }
+    for (const [sessionId, runId] of this.cardRunBySession) {
+      this.cardRunBySession.delete(sessionId);
+      this.interactionPresenter?.terminalizeRun(runId, 'cancelled');
+      this.cardRuns.delete(runId);
+    }
   }
 
   protected override onSessionRetiring(sessionId: string): void {
@@ -2354,9 +2690,29 @@ export class DingtalkChannel extends ChannelBase {
       }
       return;
     }
+    const presentationPhase = lifecyclePresentationPhase(event);
+    if (event.runId && presentationPhase) {
+      this.interactionPresenter?.updateStatusCardPhase(
+        event.runId,
+        presentationPhase,
+      );
+    }
+    if (presentationPhase) {
+      this.replaceStatusReaction(
+        event.chatId,
+        event.messageId,
+        this.phaseReactionTag(presentationPhase),
+      );
+      return;
+    }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
-      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      this.finishReaction(
+        event.chatId,
+        event.messageId,
+        event.sessionId,
+        this.terminalReactionTag(event.type),
+      );
       if (event.runId) {
         this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
@@ -2429,7 +2785,6 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.blockProjectionArmed.add(sessionId);
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -2504,43 +2859,8 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.settleBlockFileProjector(chatId, sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
-  }
-
-  /**
-   * Turn end is the only point where the block projector's held state can be
-   * settled: ChannelBase drains the turn's queued block sends before calling
-   * onPromptEnd, so everything already appended belongs to this turn. Flush
-   * the held candidate bytes (a trailing `[FILE:` prefix the stream never
-   * completed) before deleting the entry — a later delete-without-settle
-   * would silently drop them from the delivered answer. Also disarm the
-   * session: /clear eviction and session death settle WITHOUT draining the
-   * turn's send chain, and any block that lands afterwards must be dropped
-   * rather than recreating projector state.
-   */
-  private settleBlockFileProjector(chatId: string, sessionId: string): void {
-    this.blockProjectionArmed.delete(sessionId);
-    const state = this.blockFileProjectors.get(sessionId);
-    if (!state) return;
-    this.blockFileProjectors.delete(sessionId);
-    const tail = state.projector.complete();
-    if (!tail.trim()) return;
-    // Deliberately fire-and-forget: complete() can only return a strict
-    // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
-    // is a stray fragment landing out of order with the next turn — not a
-    // leak — and blocking settle on a delivery that may hang is worse.
-    void this.sendReply(
-      chatId,
-      tail,
-      undefined,
-      this.getResponseSourceLabel(sessionId),
-    ).catch((err) => {
-      process.stderr.write(
-        `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    });
   }
 
   /** Deliver every Agent segment immediately unless aggregation is enabled. */
@@ -3369,9 +3689,12 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Out-of-turn one-shot sends (background responses) must not flow through
-   * the session's block-streaming projector: a second sender interleaving with
-   * mid-projection state can swallow the send or split a held marker.
+   * Body-identical to the base implementation — this override exists only to
+   * widen the signature, which the base seam does not declare. The background
+   * aggregation flush passes `prepared` so the body it already projected isn't
+   * projected a second time (that would re-upload its files), and
+   * `failOnHttpError` so a failed send throws instead of being swallowed,
+   * letting the flush capture the delivery plan for the next retry.
    */
   protected override async deliverBackgroundReply(
     chatId: string,
@@ -3381,20 +3704,10 @@ export class DingtalkChannel extends ChannelBase {
     prepared = false,
     failOnHttpError = false,
   ): Promise<void> {
-    if (this.config.blockStreaming !== 'on') {
-      return this.sendResponseMessage(
-        chatId,
-        text,
-        sessionId,
-        sourceLabel,
-        prepared,
-        failOnHttpError,
-      );
-    }
-    await this.sendReply(
+    await this.sendResponseMessage(
       chatId,
       text,
-      undefined,
+      sessionId,
       sourceLabel,
       prepared,
       failOnHttpError,
@@ -3409,55 +3722,18 @@ export class DingtalkChannel extends ChannelBase {
     prepared = false,
     failOnHttpError = false,
   ): Promise<void> {
-    let outgoingText = text;
-    let consumesMention = true;
-    if (this.config.blockStreaming === 'on') {
-      const projected = this.projectBlockStreamChunk(text, sessionId);
-      if (!projected.text.trim()) return;
-      outgoingText = projected.text;
-      // A notice-only block must not consume the prompt's mention target:
-      // the @mention belongs to the block carrying the actual answer.
-      consumesMention = projected.hasContent;
-    }
-    const atUserId =
-      consumesMention && this.atSender
-        ? this.sessionMentionTargets.get(sessionId)
-        : undefined;
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
     await this.sendReply(
       chatId,
-      outgoingText,
+      text,
       atUserId,
       sourceLabel ?? this.getResponseSourceLabel(sessionId),
       prepared,
       failOnHttpError,
     );
-  }
-
-  private projectBlockStreamChunk(
-    text: string,
-    sessionId: string,
-  ): { text: string; hasContent: boolean } {
-    let state = this.blockFileProjectors.get(sessionId);
-    if (!state) {
-      if (!this.blockProjectionArmed.has(sessionId)) {
-        return { text: '', hasContent: false };
-      }
-      state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
-      this.blockFileProjectors.set(sessionId, state);
-    }
-    const safe = state.projector.append(text);
-    const hasContent = safe.trim().length > 0;
-    const result = state.projector.result(safe);
-    let outgoingText = safe;
-    if (result.markerCount > state.reportedMarkers) {
-      outgoingText = withFileUnavailableNotice(safe);
-      state.reportedMarkers = result.markerCount;
-      process.stderr.write(
-        `[DingTalk:${this.name}] file markers redacted in block stream (session ${sessionId}, markers=${result.markerCount})\n`,
-      );
-    }
-    return { text: outgoingText, hasContent };
   }
 
   private async sendFallbackReply(
@@ -3559,6 +3835,19 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     return this.interactionPresenter.presentInput(context);
+  }
+
+  protected override async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (!this.permissionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
+    }
+    return this.interactionPresenter.presentPermission(context);
   }
 
   /**
