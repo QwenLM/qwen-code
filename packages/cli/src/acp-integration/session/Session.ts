@@ -5211,7 +5211,16 @@ export class Session implements SessionContext {
     // refuses to allow. Wrapping here means every prompt carries its own, and
     // a prompt with no agent-run metadata (a person typing into the session)
     // establishes none, so the thread tools correctly refuse.
-    const agentRun = parsePromptAgentRun(params);
+    // Belt and braces, not the only defence. The frame can only arrive on the
+    // trusted daemon channel, and with collaboration off the daemon never
+    // mounts the routes that dispatch, so in practice none is sent. Refusing to
+    // read one anyway means a daemon whose operator did not opt in cannot be
+    // talked into running an agent turn by a frame from any other source — and
+    // because every downstream consumer (mid-turn input, the thread tools)
+    // requires the frame this establishes, this one line shuts all of them.
+    const agentRun = this.config.isAgentCollaborationEnabled()
+      ? parsePromptAgentRun(params)
+      : undefined;
     const execute = () => {
       const inner = () =>
         runWithInvocationContext(invocationContext, () =>
@@ -5457,7 +5466,9 @@ export class Session implements SessionContext {
               } else {
                 recorder?.recordUserMessage(promptText);
               }
-              const agentRun = parsePromptAgentRun(params);
+              const agentRun = this.config.isAgentCollaborationEnabled()
+                ? parsePromptAgentRun(params)
+                : undefined;
               if (agentRun) {
                 try {
                   const thread = await readThread(

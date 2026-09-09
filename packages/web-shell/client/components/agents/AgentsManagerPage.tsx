@@ -12,6 +12,7 @@ import {
 import {
   DAEMON_APPROVAL_MODES,
   useAgents,
+  useWorkspace,
   type DaemonWorkspaceAgentDetail,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -25,6 +26,11 @@ import {
   type AgentLevelFilter,
 } from './agents-manager-logic';
 import { AgentCreatePage } from './AgentCreatePage';
+/**
+ * Advertised only while the daemon has the collaboration opt-in on; see
+ * `CONDITIONAL_SERVE_FEATURES` in packages/cli/src/serve/capabilities.ts.
+ */
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
 import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
 import {
   AlertDialog,
@@ -154,7 +160,23 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
-  const [agentsOpen, setAgentsOpen] = useState(() => !initialCreateScope);
+  // Shared threads are the collaboration surface, and the daemon only mounts
+  // its routes when `experimental.agentCollaboration` is on. Read the capability
+  // rather than rendering the entry and letting every call 404: the tag is
+  // absent precisely when the routes are, so this hides the door instead of
+  // leaving one that opens onto nothing. Definition CRUD below is unaffected —
+  // it is a different, unconditional feature.
+  const workspace = useWorkspace();
+  const collaborationAvailable =
+    workspace.capabilities?.features.includes(AGENT_COLLABORATION_FEATURE) ===
+    true;
+  const [agentsOpen, setAgentsOpen] = useState(
+    () => !initialCreateScope && collaborationAvailable,
+  );
+  // The daemon can answer late, or be replaced by one with a different answer.
+  useEffect(() => {
+    if (!collaborationAvailable) setAgentsOpen(false);
+  }, [collaborationAvailable]);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -320,7 +342,7 @@ export function AgentsManagerPage({
     standaloneNavigation
   );
 
-  if (agentsOpen) {
+  if (agentsOpen && collaborationAvailable) {
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
@@ -640,9 +662,11 @@ export function AgentsManagerPage({
             </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setAgentsOpen(true)}>
-              Shared threads
-            </Button>
+            {collaborationAvailable ? (
+              <Button variant="outline" onClick={() => setAgentsOpen(true)}>
+                Shared threads
+              </Button>
+            ) : null}
             <Button
               variant="outline"
               disabled={loading}
