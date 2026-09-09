@@ -92,6 +92,11 @@ function xtermTheme(theme: WebShellTheme) {
         background: '#ffffff',
         foreground: '#1a1a1a',
         cursor: '#1a1a1a',
+        // An unset selectionBackground defaults to white in xterm and blends
+        // into the white terminal background, leaving text selection with no
+        // visible highlight in the light theme. Pin the light-theme selection
+        // blue instead so selected terminal text stays visible.
+        selectionBackground: '#bdd8fe',
       }
     : {
         background: '#0a0a0a',

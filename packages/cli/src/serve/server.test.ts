@@ -4280,6 +4280,46 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('admits authenticated same-origin browser requests on a non-loopback bind without --allow-origin', async () => {
+      // Pins the remote same-origin middleware's MOUNT POSITION in the real
+      // app: moving installRemoteSelfOriginMiddleware below the CORS wall
+      // (or dropping it) turns the authed case back into 403 and kills the
+      // built-in remote Web Shell's mutations.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+        undefined,
+        { webShellDir },
+      );
+      const remoteHost = `192.168.1.2:${baseOpts.port}`;
+      const remoteOrigin = `http://${remoteHost}`;
+      const authed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      // Past the origin wall (not 403) AND past the bearer gate (not 401):
+      // the route's own 404/400 for the unknown session is the success shape.
+      expect(authed.status).not.toBe(403);
+      expect(authed.status).not.toBe(401);
+      const unauthed = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', remoteOrigin)
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(unauthed.status).toBe(401);
+      const crossOrigin = await request(app)
+        .post('/session/missing/prompt')
+        .set('Host', remoteHost)
+        .set('Origin', 'http://evil.example')
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send({});
+      expect(crossOrigin.status).toBe(403);
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to
@@ -4402,6 +4442,16 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('keeps the loopback Host gate ahead of pre-auth health', async () => {
+      // The DNS-rebinding defense must cover the pre-auth health route: a
+      // rebinding page probing /health with its own Host must be rejected,
+      // not answered 200 by the pre-auth handler.
+      const app = createServeApp(baseOpts);
+      const res = await request(app).get('/health').set('Host', 'evil.example');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Invalid Host header' });
     });
   });
 
@@ -32841,6 +32891,134 @@ describe('createServeApp', () => {
         }),
       );
     });
+
+    it('logs origin-wall and Host-gate rejects, not just auth rejects', async () => {
+      // The access log mounts ahead of hostAllowlist and the CORS wall, so
+      // their 403 short-circuits are recorded like every other reject; a
+      // mount below either gate would silently drop the audit trail for
+      // rebinding and cross-origin attempts.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      const wall = await request(app)
+        .post('/session')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Origin', 'http://evil.test')
+        .set('Authorization', 'Bearer secret')
+        .send({ cwd: WS_BOUND });
+      expect(wall.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'POST /session',
+          status: 403,
+        }),
+      );
+
+      // The primary Host gate is live on loopback binds (non-loopback binds
+      // pass it through by design and rely on the bearer gate), so the
+      // rebinding reject is pinned there.
+      vi.mocked(daemonLog.warn).mockClear();
+      const loopbackApp = createServeApp(
+        { ...baseOpts, token: 'secret' },
+        undefined,
+        { daemonLog },
+      );
+      const rebinding = await request(loopbackApp)
+        .get('/capabilities')
+        .set('Host', `evil.test:${baseOpts.port}`);
+      expect(rebinding.status).toBe(403);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'GET /capabilities',
+          status: 403,
+        }),
+      );
+    });
+
+    it('keeps operator lines logging through a wall-reject flood', async () => {
+      // Wall rejects draw from a separate small budget, so a credential-less
+      // host sustaining a reject flood can no longer starve the operator's
+      // own lines behind the aggregate warning.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      for (let i = 0; i < 100; i += 1) {
+        const flood = await request(app)
+          .post('/session')
+          .set('Host', `192.168.1.2:${baseOpts.port}`)
+          .set('Origin', 'http://evil.test')
+          .send({ cwd: WS_BOUND });
+        expect(flood.status).toBe(403);
+      }
+      const authed = await request(app)
+        .get('/capabilities')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(authed.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+      );
+      // Wall rejects are still individually logged — from their own budget.
+      expect(
+        vi
+          .mocked(daemonLog.warn)
+          .mock.calls.some(
+            ([message, ctx]) =>
+              message === 'request completed' &&
+              (ctx as { status?: number }).status === 403,
+          ),
+      ).toBe(true);
+    });
+
+    it('keeps operator lines logging through a null-origin flood', async () => {
+      // Same flood shape through the `Origin: null` arm — sandboxed iframes
+      // and cross-origin redirects send exactly this, so the marker must
+      // cover it too.
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', hostname: '0.0.0.0' },
+        undefined,
+        { daemonLog },
+      );
+
+      for (let i = 0; i < 65; i += 1) {
+        const flood = await request(app)
+          .post('/session')
+          .set('Host', `192.168.1.2:${baseOpts.port}`)
+          .set('Origin', 'null')
+          .send({ cwd: WS_BOUND });
+        expect(flood.status).toBe(403);
+      }
+      const authed = await request(app)
+        .get('/capabilities')
+        .set('Host', `192.168.1.2:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(authed.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({ route: 'GET /capabilities', status: 200 }),
+      );
+      expect(
+        vi
+          .mocked(daemonLog.warn)
+          .mock.calls.some(
+            ([message, ctx]) =>
+              message === 'request completed' &&
+              (ctx as { status?: number }).status === 403,
+          ),
+      ).toBe(true);
+    });
   });
 
   describe('payload-too-large handling (A-UsP)', () => {
@@ -34188,12 +34366,34 @@ describe('runQwenServe', () => {
     delete process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'];
   });
 
-  it('refuses to bind 0.0.0.0 without a token', async () => {
+  it('binds 0.0.0.0 without a token using a generated ephemeral bearer', async () => {
+    // Contract change (remote quickstart): a tokenless non-loopback bind no
+    // longer refuses; it generates a per-process bearer and gates every API
+    // route with it. The fail-closed half moved to the explicitly-empty case
+    // below — generation must never revive an operator's deliberate ''.
+    delete process.env['QWEN_SERVER_TOKEN'];
+    handle = await runQwenServe({
+      hostname: '0.0.0.0',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    expect(handle.resolvedToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: `Bearer ${handle.resolvedToken}` },
+    });
+    expect(withAuth.status).toBe(200);
+  });
+
+  it('refuses to bind 0.0.0.0 with an explicitly empty token', async () => {
     await expect(
       runQwenServe({
         hostname: '0.0.0.0',
         port: 0,
         mode: 'http-bridge',
+        token: '',
       }),
     ).rejects.toThrow(/Refusing to bind/);
   });
@@ -34720,6 +34920,18 @@ describe('runQwenServe', () => {
       mode: 'http-bridge',
     });
     expect(handle.url).toMatch(/^http:\/\/0\.0\.0\.0:\d+$/);
+    // Pin the env source end-to-end: an operator-supplied token must win
+    // over generation, and must be the credential the API authenticates
+    // against (a regression that dropped the env read would silently swap
+    // in a generated token and 401 every configured client).
+    expect(handle.resolvedToken).toBe('env-secret');
+    const port = (handle.server.address() as { port: number }).port;
+    const noAuth = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: 'Bearer env-secret' },
+    });
+    expect(withAuth.status).toBe(200);
   });
 
   it('starts on a loopback ephemeral port without a token', async () => {
