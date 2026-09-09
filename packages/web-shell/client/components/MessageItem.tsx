@@ -477,6 +477,7 @@ function areToolCallsEqual(
     prev.callId === next.callId &&
     prev.toolName === next.toolName &&
     prev.status === next.status &&
+    prev.subagentSessionReady === next.subagentSessionReady &&
     prev.title === next.title &&
     prev.kind === next.kind &&
     prev.startTime === next.startTime &&

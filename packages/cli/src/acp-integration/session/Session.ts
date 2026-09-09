@@ -10596,6 +10596,13 @@ export class Session implements SessionContext {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: params.modeId,
+        ...(approvalMode === ApprovalMode.PLAN
+          ? {
+              planExecutionMode:
+                this.config.getPlanExecutionMode?.() ??
+                this.config.getPrePlanMode?.(),
+            }
+          : {}),
       })
       .catch((error) => {
         // Advisory only; a failed notification must not fail the mode
@@ -10963,6 +10970,13 @@ export class Session implements SessionContext {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: newModeId,
+        ...(newModeId === ApprovalMode.PLAN
+          ? {
+              planExecutionMode:
+                this.config.getPlanExecutionMode?.() ??
+                this.config.getPrePlanMode?.(),
+            }
+          : {}),
         legacyFrameSent,
       });
     } catch (error) {
@@ -12870,6 +12884,7 @@ export class Session implements SessionContext {
 
               let output: RequestPermissionResponse & {
                 answers?: Record<string, string>;
+                expectedPlanExecutionMode?: string;
               };
               let outcome: ToolConfirmationOutcome;
               try {
@@ -12878,6 +12893,7 @@ export class Session implements SessionContext {
                   activeToolAbortSignal,
                 )) as RequestPermissionResponse & {
                   answers?: Record<string, string>;
+                  expectedPlanExecutionMode?: string;
                 };
                 const permissionRequestCancellation =
                   cancelBeforeExecutionIfAborted(toolName);
@@ -12950,6 +12966,12 @@ export class Session implements SessionContext {
 
               let confirmationPayload: ToolConfirmationPayload | undefined = {
                 answers: output.answers,
+                ...(output.expectedPlanExecutionMode !== undefined
+                  ? {
+                      expectedPlanExecutionMode:
+                        output.expectedPlanExecutionMode,
+                    }
+                  : {}),
               };
               if (planShellDecision.classification !== 'not-applicable') {
                 const approval = await validatePlanModeShellApproval({
@@ -13105,9 +13127,9 @@ export class Session implements SessionContext {
             }
           }
 
-          if (!didRequestPermission && !isTodoWriteTool) {
-            // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
-            // → emit tool_call start notification
+          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
+            // Approved agents also need the initial creating frame when the
+            // provider does not emit preparation updates.
             const startParams: ToolCallStartParams = {
               callId,
               toolName,
@@ -13287,10 +13309,31 @@ export class Session implements SessionContext {
           let toolSettled = false;
           let heartbeatCount = 0;
           let lastHeartbeat: ShellProgressData | undefined;
+          let subagentSessionReadySent = false;
           const onToolProgress = (chunk: ToolResultDisplay) => {
-            if (toolSettled || !isShellProgressData(chunk)) {
-              return;
+            if (toolSettled) return;
+            // Match ToolCallEmitter's initial false frame by callId so readiness
+            // updates the existing agent row before execution completes.
+            if (
+              isAgentTool &&
+              !subagentSessionReadySent &&
+              typeof chunk === 'object' &&
+              chunk !== null &&
+              'subagentSessionReady' in chunk &&
+              chunk.subagentSessionReady === true
+            ) {
+              subagentSessionReadySent = true;
+              void this.sendUpdate({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: callId,
+                _meta: { toolName, subagentSessionReady: true },
+              }).catch((err) => {
+                debugLogger.debug(
+                  `[Session.runTool] subagent readiness update failed for ${callId}: ${err}`,
+                );
+              });
             }
+            if (!isShellProgressData(chunk)) return;
             heartbeatCount++;
             lastHeartbeat = chunk;
             void this.sendUpdate({

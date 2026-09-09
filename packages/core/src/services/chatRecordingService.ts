@@ -307,6 +307,7 @@ export interface ChatRecord {
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'agent_retry'
+    | 'agent_session_ready'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
@@ -371,6 +372,7 @@ export interface ChatRecord {
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | AgentRetryRecordPayload
+    | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
@@ -467,6 +469,11 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
+}
+
+export interface AgentSessionReadyRecordPayload {
+  callId: string;
+  subagentSessionReady: boolean;
 }
 
 export interface AgentRetryRecordPayload {

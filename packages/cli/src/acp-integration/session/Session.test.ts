@@ -48,6 +48,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
@@ -5463,9 +5464,9 @@ describe('Session', () => {
   // `_meta.qwenTodoApproval` binding instead of poking the private
   // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
   // prompt describe block.
-  async function runExitPlanModeApprovalPrompt(): Promise<
-    Parameters<AgentSideConnection['requestPermission']>[0]
-  > {
+  async function runExitPlanModeApprovalPrompt(
+    onConfirm = vi.fn().mockResolvedValue(undefined),
+  ): Promise<Parameters<AgentSideConnection['requestPermission']>[0]> {
     let mode = ApprovalMode.PLAN;
     const hookSpy = vi
       .spyOn(core, 'firePermissionRequestHook')
@@ -5484,7 +5485,7 @@ describe('Session', () => {
         title: 'Approve plan',
         plan: 'Original plan',
         hideAlwaysAllow: true,
-        onConfirm: vi.fn().mockResolvedValue(undefined),
+        onConfirm,
       }),
       getDescription: vi.fn().mockReturnValue('Plan:'),
       toolLocations: vi.fn().mockReturnValue([]),
@@ -5534,6 +5535,156 @@ describe('Session', () => {
     expect(calls.length).toBeGreaterThan(0);
     return calls.at(-1)![0];
   }
+
+  it('forwards the expected Plan execution policy from permission response to confirmation', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+      async () => ({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        expectedPlanExecutionMode: 'yolo',
+      }),
+    );
+
+    await runExitPlanModeApprovalPrompt(onConfirm);
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      core.ToolConfirmationOutcome.ProceedOnce,
+      expect.objectContaining({ expectedPlanExecutionMode: 'yolo' }),
+    );
+  });
+
+  describe('DAC plan approval through Session', () => {
+    let mode: ApprovalMode;
+    let policy: ApprovalMode | undefined;
+    let revision: number;
+
+    beforeEach(() => {
+      mode = ApprovalMode.PLAN;
+      policy = ApprovalMode.YOLO;
+      revision = 1;
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.getPlanExecutionMode = vi.fn(() => policy);
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.DEFAULT);
+      mockConfig.getApprovalModeRevision = vi.fn(() => revision);
+      mockConfig.setApprovalMode = vi.fn((next) => {
+        mode = next;
+        policy = undefined;
+        revision++;
+      });
+      mockConfig.getTeamManager = vi.fn();
+      mockConfig.savePlan = vi.fn();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockToolRegistry.getTool.mockReturnValue(
+        new ExitPlanModeTool(mockConfig),
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-dac-plan',
+                  name: core.ToolNames.EXIT_PLAN_MODE,
+                  args: { plan: 'DAC plan' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+    });
+
+    it.each([undefined, ApprovalMode.YOLO])(
+      'consumes a missing or stale DAC policy (%s) as a tool error and keeps Plan',
+      async (expectedPlanExecutionMode) => {
+        vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+          async () => {
+            policy = ApprovalMode.AUTO_EDIT;
+            return {
+              outcome: { outcome: 'selected', optionId: 'restore_previous' },
+              ...(expectedPlanExecutionMode
+                ? { expectedPlanExecutionMode }
+                : {}),
+            };
+          },
+        );
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'approve the plan' }],
+        });
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-dac-plan',
+                response: {
+                  error: expect.stringContaining(
+                    'Execution permission changed',
+                  ),
+                },
+              }),
+            }),
+          ],
+          expect.objectContaining({
+            status: 'error',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          }),
+        );
+        expect(mode).toBe(ApprovalMode.PLAN);
+        expect(policy).toBe(ApprovalMode.AUTO_EDIT);
+        expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+        expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      },
+    );
+
+    it('settles an old approval after manual Plan exit without executing its plan', async () => {
+      let respond!: (response: RequestPermissionResponse) => void;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = resolve;
+          }),
+      );
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+
+      await session.setMode({ sessionId: 'test-session-id', modeId: 'yolo' });
+      expect(mode).toBe(ApprovalMode.YOLO);
+      respond({
+        outcome: { outcome: 'selected', optionId: 'restore_previous' },
+      });
+
+      expect((await prompt).stopReason).toBe('end_turn');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              id: 'call-dac-plan',
+              response: {
+                output: expect.stringContaining('Plan approval is stale'),
+              },
+            }),
+          }),
+        ],
+        expect.objectContaining({ status: 'success' }),
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledOnce();
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mode).toBe(ApprovalMode.YOLO);
+    });
+  });
 
   function enableSessionWorkflowRevisionContext(): void {
     let revision:
@@ -5816,6 +5967,22 @@ describe('Session', () => {
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
+    });
+
+    it('reports the execution policy when entering Plan', async () => {
+      mockConfig.getPrePlanMode = vi.fn(() => ApprovalMode.YOLO);
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          currentModeId: 'plan',
+          planExecutionMode: 'yolo',
+        }),
+      );
     });
 
     it('emits a current_mode_update extNotification after switching (A2)', async () => {
@@ -16031,23 +16198,37 @@ describe('Session', () => {
       });
     });
 
-    describe('shell heartbeat forwarding', () => {
-      const runShellToolCall = async (
+    describe('tool progress forwarding', () => {
+      const runProgressToolCall = async (
         execute: ReturnType<typeof vi.fn>,
+        toolName = 'run_shell_command',
+        requiresApproval = false,
       ): Promise<void> => {
         const tool = {
-          name: 'run_shell_command',
+          name: toolName,
           kind: core.Kind.Execute,
           build: vi.fn().mockReturnValue({
             params: { command: 'quiet-soak-test' },
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDefaultPermission: vi
+              .fn()
+              .mockResolvedValue(requiresApproval ? 'ask' : 'allow'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'info',
+              title: 'Launch agent?',
+              prompt: 'Review changes',
+              onConfirm: vi.fn(),
+            }),
             getDescription: vi.fn().mockReturnValue('quiet-soak-test'),
             toolLocations: vi.fn().mockReturnValue([]),
             execute,
           }),
         };
         mockToolRegistry.getTool.mockReturnValue(tool);
-        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(
+            requiresApproval ? ApprovalMode.DEFAULT : ApprovalMode.YOLO,
+          );
 
         await (
           session as unknown as {
@@ -16067,7 +16248,7 @@ describe('Session', () => {
         ).runToolCalls(
           new AbortController().signal,
           'prompt-heartbeat',
-          [{ id: 'shell_hb_1', name: 'run_shell_command', args: {} }],
+          [{ id: 'shell_hb_1', name: toolName, args: {} }],
           {
             totalToolCalls: 0,
             invalidToolParamErrors: new Map(),
@@ -16090,6 +16271,115 @@ describe('Session', () => {
                 ?.shellProgress !== undefined,
           );
 
+      it('forwards agent readiness before execution settles, once, and ignores late updates', async () => {
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const updates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) => update._meta?.['subagentSessionReady'] === true,
+            );
+        const running = runProgressToolCall(execute, 'agent');
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          const progress = {
+            type: 'task_execution',
+            subagentSessionReady: true,
+          };
+          emit?.({ ...progress, subagentSessionReady: false });
+          expect(updates()).toHaveLength(0);
+          emit?.(progress);
+          emit?.(progress);
+          await vi.waitFor(() => expect(updates()).toHaveLength(1));
+          expect(updates()[0]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+          expect(updates()[0]).not.toHaveProperty('rawOutput');
+        } finally {
+          finish();
+          await running;
+        }
+        emit?.({ type: 'task_execution', subagentSessionReady: true });
+        expect(updates()).toHaveLength(1);
+      });
+
+      it('starts an approved agent as creating before execution without preparation frames', async () => {
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        let emit: ((chunk: unknown) => void) | undefined;
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        const execute = vi.fn(
+          async (
+            _signal: AbortSignal,
+            updateOutput?: (chunk: unknown) => void,
+          ) => {
+            emit = updateOutput;
+            await finished;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          },
+        );
+        const readinessUpdates = () =>
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) =>
+                typeof update._meta?.['subagentSessionReady'] === 'boolean',
+            );
+        const running = runProgressToolCall(execute, 'agent', true);
+        try {
+          await vi.waitFor(() => expect(emit).toBeDefined());
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          expect(readinessUpdates()).toEqual([
+            expect.objectContaining({
+              sessionUpdate: 'tool_call',
+              toolCallId: 'shell_hb_1',
+              status: 'in_progress',
+              _meta: expect.objectContaining({ subagentSessionReady: false }),
+            }),
+          ]);
+          const updates = vi.mocked(mockClient.sessionUpdate).mock;
+          const startIndex = updates.calls.findIndex(
+            ([params]) =>
+              params.update._meta?.['subagentSessionReady'] === false,
+          );
+          expect(updates.invocationCallOrder[startIndex]).toBeLessThan(
+            execute.mock.invocationCallOrder[0],
+          );
+          emit?.({ type: 'task_execution', subagentSessionReady: true });
+          await vi.waitFor(() => expect(readinessUpdates()).toHaveLength(2));
+          expect(readinessUpdates()[1]).toMatchObject({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'shell_hb_1',
+            _meta: { toolName: 'agent', subagentSessionReady: true },
+          });
+        } finally {
+          finish();
+          await running;
+        }
+      });
+
       it('forwards shell heartbeats as meta-only in_progress updates', async () => {
         const heartbeat = {
           type: 'shell_progress' as const,
@@ -16108,7 +16398,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const updates = heartbeatUpdates();
         expect(updates).toHaveLength(1);
@@ -16137,7 +16427,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
         expect(heartbeatUpdates()).toHaveLength(0);
 
         // A heartbeat tick racing the settle path must not regress the
@@ -16167,7 +16457,7 @@ describe('Session', () => {
           },
         );
 
-        await runShellToolCall(execute);
+        await runProgressToolCall(execute);
 
         const spanCall = endSpanSpy.mock.calls.find(
           ([, meta]) =>

@@ -1203,6 +1203,10 @@ function mergeToolCall(
     target.args = source.args ?? target.args;
   }
   target.executionMode = source.executionMode ?? target.executionMode;
+  target.subagentSessionReady =
+    target.subagentSessionReady === true
+      ? true
+      : (source.subagentSessionReady ?? target.subagentSessionReady);
   target.locations = source.locations ?? target.locations;
 }
 
@@ -1294,6 +1298,7 @@ function daemonToolBlockToToolCall(
     executionMode: isTaskExecutionMode(executionMode)
       ? executionMode
       : undefined,
+    subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime:

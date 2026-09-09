@@ -82,6 +82,7 @@ import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider
 import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
   getCurrentMode,
+  getPlanExecutionMode,
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
@@ -593,6 +594,9 @@ function projectSubagentToolUpdate(
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
+        ...(typeof rawOutput['subagentSessionReady'] === 'boolean'
+          ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
+          : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
@@ -3023,8 +3027,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ?.contextWindow ??
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode =
-            getCurrentMode(context) ?? providerModelStatus.currentMode;
+          const currentMode = getCurrentMode(context);
 
           setConnection((current) => {
             if (
@@ -3070,7 +3073,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentModel: configSnapshotCurrent
                 ? (sessionCurrentModel ?? current.currentModel)
                 : current.currentModel,
-              currentMode: currentMode ?? current.currentMode,
+              currentMode: configSnapshotCurrent
+                ? (currentMode ??
+                  current.currentMode ??
+                  providerModelStatus.currentMode)
+                : current.currentMode,
+              planExecutionMode:
+                configSnapshotCurrent && currentMode !== undefined
+                  ? getPlanExecutionMode(context)
+                  : current.planExecutionMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
                   ? mapSessionContextReasoning(context)

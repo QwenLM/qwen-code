@@ -124,6 +124,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_bootstrap',
   'agent_launch_prompt',
   'agent_retry',
+  'agent_session_ready',
   'file_history_snapshot',
   'session_source',
   'session_model',

@@ -649,6 +649,8 @@ export interface AgentResultDisplay {
   taskDescription: string;
   taskPrompt: string;
   executionMode?: 'foreground' | 'background';
+  /** Whether the registered subagent session is available for inspection. */
+  subagentSessionReady?: boolean;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
@@ -962,6 +964,8 @@ export interface ToolEditConfirmationDetails {
 }
 
 export interface ToolConfirmationPayload {
+  /** Execution permission displayed when approving a DAC plan. */
+  expectedPlanExecutionMode?: string;
   // used to override `modifiedProposedContent` for modifiable tools in the
   // inline modify flow
   newContent?: string;
