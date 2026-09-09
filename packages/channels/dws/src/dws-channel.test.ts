@@ -557,6 +557,22 @@ class PolicyDwsChannel extends DwsChannel {
     return this.cursor.pendingImDeliveries ?? [];
   }
 
+  imResponseKindCount(): number {
+    return (
+      this as unknown as {
+        imResponseKinds: Map<string, boolean>;
+      }
+    ).imResponseKinds.size;
+  }
+
+  hasImResponseKind(conversationId: string, messageId: string): boolean {
+    return (
+      this as unknown as {
+        imResponseKinds: Map<string, boolean>;
+      }
+    ).imResponseKinds.has(`${conversationId}\0${messageId}`);
+  }
+
   seedPendingImDeliveries(count: number, due = false): void {
     this.cursor.pendingImDeliveries = Array.from(
       { length: count },
@@ -577,10 +593,6 @@ class PolicyDwsChannel extends DwsChannel {
     this.cursor.imTargets = this.cursor.imTargets.filter(
       (entry) => entry.conversationId !== conversationId,
     );
-  }
-
-  replaceAllowedUsers(users: string[]): void {
-    this.gate.replaceAllowedUsers(users);
   }
 
   queuedMessageCount(): number {
@@ -8623,29 +8635,38 @@ describe('DwsChannel', () => {
     try {
       vi.setSystemTime(new Date('2026-09-08T12:00:00Z'));
       const name = 'revoked-im-delivery-dws';
-      const client = new FakeDwsClient();
-      client.replyToImMessage.mockRejectedValueOnce(
+      const firstClient = new FakeDwsClient();
+      firstClient.replyToImMessage.mockRejectedValueOnce(
         new DwsCommandError('rate limited', 'unknown'),
       );
-      const { channel } = await readyPolicyChannel(
-        client,
+      const first = await readyPolicyChannel(
+        firstClient,
         makeConfig({
           senderPolicy: 'allowlist',
           allowedUsers: ['open-alice'],
         }),
         name,
       );
-      await client.emit(
+      await firstClient.emit(
         0,
         message('user_im_message_receive_at', 'revoked-reply', 'review this'),
       );
+      expect(first.channel.pendingImDeliveries()).toHaveLength(1);
+      first.channel.disconnect();
 
-      channel.replaceAllowedUsers([]);
       vi.advanceTimersByTime(5_000);
-      await channel.poll();
+      const restartedClient = new FakeDwsClient();
+      const restarted = await readyPolicyChannel(
+        restartedClient,
+        makeConfig({ senderPolicy: 'allowlist', allowedUsers: [] }),
+        name,
+      );
+      expect(restarted.channel.pendingImDeliveries()).toHaveLength(1);
+      stderr.mockClear();
+      await restarted.channel.poll();
 
-      expect(client.replyToImMessage).toHaveBeenCalledOnce();
-      expect(channel.pendingImDeliveries()).toEqual([]);
+      expect(restartedClient.replyToImMessage).not.toHaveBeenCalled();
+      expect(restarted.channel.pendingImDeliveries()).toEqual([]);
       expect(
         stderr.mock.calls.some(([text]) =>
           String(text).includes(
@@ -8654,16 +8675,13 @@ describe('DwsChannel', () => {
         ),
       ).toBe(true);
 
-      channel.disconnect();
-      const restartedClient = new FakeDwsClient();
-      const restarted = await readyPolicyChannel(
-        restartedClient,
+      restarted.channel.disconnect();
+      const final = await readyPolicyChannel(
+        new FakeDwsClient(),
         makeConfig({ senderPolicy: 'allowlist', allowedUsers: [] }),
         name,
       );
-      await restarted.channel.poll();
-      expect(restartedClient.replyToImMessage).not.toHaveBeenCalled();
-      expect(restarted.channel.pendingImDeliveries()).toEqual([]);
+      expect(final.channel.pendingImDeliveries()).toEqual([]);
     } finally {
       stderr.mockRestore();
       vi.useRealTimers();
@@ -8700,6 +8718,48 @@ describe('DwsChannel', () => {
     expect(client.replyToImMessage).toHaveBeenCalledOnce();
     expect(client.sendImMessage).not.toHaveBeenCalled();
     expect(channel.pendingImDeliveries()).toEqual([]);
+  });
+
+  it('cleans up response-kind state after a successful inbound turn', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    vi.mocked(bridge.prompt).mockImplementation(async () => {
+      expect(channel.hasImResponseKind('cid-1', 'response-kind-success')).toBe(
+        true,
+      );
+      return 'response';
+    });
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'response-kind-success', 'review'),
+    );
+
+    expect(channel.imResponseKindCount()).toBe(0);
+  });
+
+  it('cleans up response-kind state when the final failed turn is swallowed', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    vi.mocked(bridge.prompt).mockImplementation(async () => {
+      expect(channel.hasImResponseKind('cid-1', 'response-kind-failure')).toBe(
+        true,
+      );
+      throw new Error('agent unavailable');
+    });
+    const event = message(
+      'user_im_message_receive_at',
+      'response-kind-failure',
+      'review',
+    );
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(client.emit(0, event)).rejects.toThrow('agent unavailable');
+    }
+    await expect(client.emit(0, event)).resolves.toBeUndefined();
+
+    expect(bridge.prompt).toHaveBeenCalledTimes(5);
+    expect(channel.imResponseKindCount()).toBe(0);
   });
 
   it('defers a pairing-backed authorization miss until approval is readable again', async () => {
@@ -9039,28 +9099,56 @@ describe('DwsChannel', () => {
     expect(keys).toContain('parked-delivery-100');
   });
 
-  it('bounds the persisted content of a completed IM reply', async () => {
-    const client = new FakeDwsClient();
-    client.replyToImMessage.mockRejectedValueOnce(
-      new DwsCommandError('rate limited', 'unknown'),
-    );
-    const { channel, bridge } = await readyPolicyChannel(client);
-    vi.mocked(bridge.prompt).mockResolvedValue('x'.repeat(12_001));
+  it.each([
+    {
+      caseName: 'over the cap',
+      content: 'x'.repeat(12_001),
+      isTruncated: true,
+    },
+    {
+      caseName: 'at the cap',
+      content: 'x'.repeat(12_000),
+      isTruncated: false,
+    },
+    {
+      caseName: 'astral content below the code-point cap',
+      content: '\u{1F389}'.repeat(7_000),
+      isTruncated: false,
+    },
+  ])(
+    'bounds the persisted content of a completed IM reply $caseName',
+    async ({ content, isTruncated }) => {
+      const client = new FakeDwsClient();
+      client.replyToImMessage.mockRejectedValueOnce(
+        new DwsCommandError('rate limited', 'unknown'),
+      );
+      const { channel, bridge } = await readyPolicyChannel(client);
+      vi.mocked(bridge.prompt).mockResolvedValue(content);
 
-    await client.emit(
-      0,
-      message('user_im_message_receive_at', 'bounded-content', 'review this'),
-    );
+      await client.emit(
+        0,
+        message('user_im_message_receive_at', 'bounded-content', 'review this'),
+      );
 
-    const [delivery] = channel.pendingImDeliveries() as Array<{
-      content: string;
-    }>;
-    expect(Array.from(delivery!.content)).toHaveLength(12_000);
-    expect(delivery!.content).toMatch(
-      /\[Response truncated for DWS delivery\.\]$/u,
-    );
-    expect(client.replyToImMessage.mock.calls[0]?.[3]).toBe(delivery!.content);
-  });
+      const [delivery] = channel.pendingImDeliveries() as Array<{
+        content: string;
+      }>;
+      if (isTruncated) {
+        expect(Array.from(delivery!.content)).toHaveLength(12_000);
+        expect(delivery!.content).toMatch(
+          /\[Response truncated for DWS delivery\.\]$/u,
+        );
+      } else {
+        expect(delivery!.content).toBe(content);
+        expect(delivery!.content).not.toContain(
+          '[Response truncated for DWS delivery.]',
+        );
+      }
+      expect(client.replyToImMessage.mock.calls[0]?.[3]).toBe(
+        delivery!.content,
+      );
+    },
+  );
 
   it('bounds completed-reply replay work while still polling inbound history', async () => {
     const client = new FakeDwsClient();
