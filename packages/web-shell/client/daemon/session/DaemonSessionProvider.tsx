@@ -5297,8 +5297,12 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
 
   // Per-iteration "checking" events are deliberately not turned into
   // transcript cards: one card per stop-hook turn floods the transcript, and
-  // the active goal state is already visible in the status bar. Only terminal
-  // events and the initial "set" event above become cards.
+  // the active goal state is already visible in the status bar. Which kinds do
+  // become cards is decided by `normalizeGoalStatus` below, not here -- it
+  // admits `paused`, `cleared` and `usage_limited` as well as the terminal
+  // kinds, and dropping any of them regresses the bug recorded beside its
+  // `paused` entry. This return is only the fallthrough for an event that
+  // carried neither a status nor a terminal.
   return null;
 }
 
