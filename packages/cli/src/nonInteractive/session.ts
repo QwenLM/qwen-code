@@ -148,13 +148,18 @@ class Session {
    *
    * The counter is seeded from the resumed transcript on first use. Without
    * that seed a `--resume`/`--continue` chain restarts at 1 every process and
-   * re-mints promptIds the previous run already persisted, which is not just a
-   * cosmetic collision: `SessionService.loadSession` keeps only the LAST
-   * file-history snapshot per promptId, so the earlier run's snapshot for that
-   * turn is dropped and `/rewind` restores the wrong workspace state. Rewind's
-   * prompt-identity mapping also fails closed to a positional walk when ids
-   * repeat. Interactive mode seeds the same way (`seedPromptCount` in
-   * AppContainer), and ACP via `computeInitialTurnFromHistory`.
+   * re-mints promptIds the previous run already persisted, so one transcript
+   * carries several turns under a single id: the key the rewind mapping from
+   * #9466 anchors on (it fails closed to a positional walk when ids repeat),
+   * and the `prompt_id` on persisted `ui_telemetry` records, which is what
+   * the next resume reads back to seed from. File-history snapshots are not
+   * at stake on this path — checkpointing defaults off outside interactive
+   * sessions, so headless turns write none.
+   *
+   * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
+   * mode seeds too, but by its own inline count of resumed user turns
+   * (`seedPromptCount` in AppContainer), which ignores the turns the
+   * transcript actually claims.
    *
    * Seeding is lazy because resumed data only becomes authoritative after
    * `config.initialize()` re-reads the session file, which this class defers

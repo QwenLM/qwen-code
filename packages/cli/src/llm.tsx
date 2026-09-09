@@ -1501,21 +1501,30 @@ export async function main() {
 /**
  * Mints the single promptId a headless `-p` run uses for its one turn.
  *
- * A fresh session keeps the historical `########0`. A resumed one
- * (`--resume` / `--continue`) must continue past the turns the transcript
- * already claims: every process would otherwise mint `########0` again, and
- * `SessionService.loadSession` keeps only the LAST file-history snapshot per
- * promptId, so a repeated headless run silently drops the previous run's
- * `/rewind` target for that turn.
+ * A run that resumes nothing keeps the historical `########0`. A resumed one
+ * (`--resume` / `--continue`) reuses the previous session's id, so without a
+ * seed every process mints `########0` again and one transcript ends up with
+ * several turns under a single promptId — the key #9466's rewind mapping
+ * anchors on, and the `prompt_id` persisted on `ui_telemetry` records, which
+ * is itself what the next resume reads back to seed from.
+ *
+ * Seed from the highest turn the transcript claims and continue past it, the
+ * same rule `Session.getNextPromptId` applies, so the two headless paths
+ * cannot drift.
  */
 export function createNonInteractivePromptId(
   sessionId: string,
   resumedRecords?: readonly ChatRecord[],
 ): string {
+  // -1 for a run that resumes nothing, so the shared `+ 1` still yields the
+  // historical `########0`. Seeding from the helper's own 0 instead would
+  // re-mint a turn the transcript already claims in the case where it returns
+  // 0 for a non-empty transcript: highest claimed turn 0, and no record with
+  // non-blank user text for its fallback to count.
   const lastTurn = resumedRecords?.length
     ? computeInitialTurnFromHistory(resumedRecords, sessionId)
-    : 0;
-  return `${sessionId}########${lastTurn > 0 ? lastTurn + 1 : 0}`;
+    : -1;
+  return `${sessionId}########${lastTurn + 1}`;
 }
 
 /**
