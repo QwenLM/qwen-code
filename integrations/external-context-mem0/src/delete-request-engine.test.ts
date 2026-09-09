@@ -310,17 +310,16 @@ describe('Mem0 single-record deletion HTTP engine', () => {
   });
 
   it.each([
-    { message: 'Memory deleted successfully' },
     { message: 'Memory deleted successfully!' },
-    {
-      message: 'Memory deleted successfully!',
-      status: 'SUCCEEDED',
-      event: 'DELETE',
-      cascade_count: 0,
-      error: null,
-    },
+    { message: 'Memory memory:1 deleted successfully.' },
+    { message: 'ok' },
+    {},
+    null,
+    [],
+    { status: 'PENDING', event: 'DELETE', cascade_count: 0 },
+    { error: 'provider-specific response', status: 'FAILED', cascade_count: 1 },
   ])(
-    'requires absence after a recognized acknowledgement %j',
+    'confirms absence independently of DELETE JSON contents %j',
     async (payload) => {
       const fetcher = vi
         .fn<FetchLike>()
@@ -330,43 +329,63 @@ describe('Mem0 single-record deletion HTTP engine', () => {
       expect(
         await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
       ).toMatchObject({ status: 'deleted' });
-      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(calls(fetcher).map((call) => call.method)).toEqual([
+        'GET',
+        'DELETE',
+        'GET',
+      ]);
     },
   );
 
-  it.each([
-    {},
-    null,
-    [],
-    { message: 'ok' },
-    { status: 'PENDING' },
-    ...[
-      { error: '' },
-      { errors: [] },
-      { status: 'FAILED' },
-      { event: 'ADD' },
-      { cascade_count: 1 },
-      { cascade_count: '0' },
-      { cascade_count: null },
-    ].map((patch) => ({ message: 'Memory deleted successfully!', ...patch })),
-  ])('stops after unknown DELETE acknowledgement %j', async (payload) => {
-    const fetcher = vi
-      .fn<FetchLike>()
-      .mockResolvedValueOnce(Response.json(record()))
-      .mockResolvedValueOnce(Response.json(payload));
-    expect(
-      await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
-    ).toMatchObject({ status: 'unknown' });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([202, 204, 301, 400, 401, 403, 404, 429, 500])(
-    'does not treat DELETE HTTP %s as success or rollback',
+  it.each([201, 202])(
+    'verifies absence after HTTP %s with JSON',
     async (status) => {
       const fetcher = vi
         .fn<FetchLike>()
         .mockResolvedValueOnce(Response.json(record()))
-        .mockResolvedValueOnce(new Response(null, { status }));
+        .mockResolvedValueOnce(
+          Response.json({ message: 'accepted' }, { status }),
+        )
+        .mockResolvedValueOnce(Response.json(record()));
+      expect(
+        await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
+      ).toMatchObject({ status: 'unknown' });
+      expect(calls(fetcher).map((call) => call.method)).toEqual([
+        'GET',
+        'DELETE',
+        'GET',
+      ]);
+    },
+  );
+
+  it.each([201, 202])(
+    'reports deleted after HTTP %s when the follow-up GET confirms absence',
+    async (status) => {
+      const fetcher = vi
+        .fn<FetchLike>()
+        .mockResolvedValueOnce(Response.json(record()))
+        .mockResolvedValueOnce(
+          Response.json({ message: 'accepted' }, { status }),
+        )
+        .mockResolvedValueOnce(absent());
+      expect(
+        await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
+      ).toMatchObject({ status: 'deleted' });
+      expect(calls(fetcher).map((call) => call.method)).toEqual([
+        'GET',
+        'DELETE',
+        'GET',
+      ]);
+    },
+  );
+
+  it.each([301, 400, 401, 403, 404, 429, 500])(
+    'rejects non-success DELETE HTTP %s even with valid JSON',
+    async (status) => {
+      const fetcher = vi
+        .fn<FetchLike>()
+        .mockResolvedValueOnce(Response.json(record()))
+        .mockResolvedValueOnce(Response.json({ message: 'ok' }, { status }));
       expect(
         await createDeleteRequestEngine(runtime(), fetcher).forget(input()),
       ).toMatchObject({ status: 'unknown' });
@@ -393,6 +412,9 @@ describe('Mem0 single-record deletion HTTP engine', () => {
   });
 
   it.each([
+    () => new Response(null, { status: 200 }),
+    () => new Response(null, { status: 202 }),
+    () => new Response(null, { status: 204 }),
     () => new Response('{bad'),
     () => new Response(new Uint8Array([0x22, 0xff, 0x22])),
     () => new Response('x'.repeat(1024 * 1024 + 1)),

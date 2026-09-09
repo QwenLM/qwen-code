@@ -9,6 +9,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('GIT_BRANCHES');
 
 const execFileAsync = promisify(execFile);
 
@@ -458,6 +461,16 @@ export async function gitCreateBranch(
   const originalCommit = originalRef
     ? ''
     : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim();
+  // The commit the new branch starts from: the resolved startPoint when given,
+  // otherwise the current HEAD. Used on rollback to detect commits a failing
+  // post-checkout hook may have created on the new branch.
+  const startCommit = (
+    await runGit(
+      cwd,
+      ['rev-parse', '--verify', `${startPoint || 'HEAD'}^{commit}`],
+      env,
+    ).catch(() => '')
+  ).trim();
   try {
     await runGit(cwd, args, env);
   } catch (err) {
@@ -478,7 +491,22 @@ export async function gitCreateBranch(
           env,
         ).catch(() => {});
       }
-      await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
+      // A failing post-checkout hook may have created commits on the new
+      // branch (the ref points at them). Deleting the branch would discard
+      // those commits, so keep the branch when its HEAD has moved past the
+      // start commit instead of force-deleting it.
+      const newHead = (
+        await runGit(cwd, ['rev-parse', `refs/heads/${name}`], env).catch(
+          () => '',
+        )
+      ).trim();
+      if (newHead && newHead !== startCommit) {
+        debugLogger.warn(
+          `gitCreateBranch: keeping branch "${name}" because it contains commits created after checkout (likely by a failing post-checkout hook)`,
+        );
+      } else {
+        await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
+      }
     }
     throw err;
   }
