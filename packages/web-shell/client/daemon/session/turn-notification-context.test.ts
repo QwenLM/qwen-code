@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
-import { createTurnNotificationObserver } from './turn-notification-context';
+import type {
+  DaemonEvent,
+  DaemonTextTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import {
+  createTurnNotificationObserver,
+  getTurnNotificationContent,
+} from './turn-notification-context';
 
 function terminal(promptId = 'p', stopReason = 'end_turn'): DaemonEvent {
   return {
@@ -155,5 +161,130 @@ describe('turn notification observer', () => {
     });
     observer.retain('scope');
     expect(() => observer.observe('scope', 's', terminal())).not.toThrow();
+  });
+});
+
+describe('turn notification content', () => {
+  const block = (
+    text: string,
+    extra: Partial<DaemonTextTranscriptBlock> = {},
+  ): DaemonTextTranscriptBlock => ({
+    id: text,
+    kind: 'assistant',
+    text,
+    promptId: 'p',
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    ...extra,
+  });
+
+  it('selects the last main assistant response for the exact turn', () => {
+    const content = getTurnNotificationContent(
+      terminal(),
+      [
+        block('commentary'),
+        block('final response'),
+        block('thought', { kind: 'thought' }),
+        block('child', { parentToolCallId: 'tool' }),
+        block('background', { meta: { source: 'background_notification' } }),
+        block('vision', { meta: { source: 'vision_bridge_notice' } }),
+        block('another turn', { promptId: 'other' }),
+        block('unidentified', { promptId: undefined }),
+      ],
+      'Session title',
+    );
+    expect(content).toEqual({
+      sessionTitle: 'Session title',
+      responseText: 'final response',
+    });
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    observer.observe('scope', 's', terminal(), false, content);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining(content!));
+  });
+
+  it('uses this turn request when a new session has no title yet', () => {
+    const blocks = [
+      block('old request', { kind: 'user', promptId: 'old' }),
+      block('  Fix notifications\nMore context', { kind: 'user' }),
+      block('Done'),
+    ];
+    expect(getTurnNotificationContent(terminal(), blocks, undefined)).toEqual({
+      sessionTitle: 'Fix notifications',
+      responseText: 'Done',
+    });
+    expect(
+      getTurnNotificationContent(terminal(), blocks, 'Explicit title')
+        ?.sessionTitle,
+    ).toBe('Explicit title');
+  });
+
+  it('uses admitted labels when the local user block has no prompt id', () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    observer.admit('scope', 'old', 'Old request');
+    observer.admit('scope', 'p', '  Current request\nDetails');
+    const content = getTurnNotificationContent(
+      terminal(),
+      [
+        block('Current request', { kind: 'user', promptId: undefined }),
+        block('Done'),
+      ],
+      undefined,
+    );
+    observer.observe('scope', 's', terminal(), false, content);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionTitle: 'Current request',
+        responseText: 'Done',
+      }),
+    );
+    observer.admit('scope', 'named', 'Request fallback');
+    observer.observe('scope', 's', terminal('named'), false, {
+      sessionTitle: 'Explicit title',
+    });
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionTitle: 'Explicit title' }),
+    );
+  });
+
+  it('does not borrow old replies or expose partial failure replies and insight payloads', () => {
+    expect(
+      getTurnNotificationContent(
+        terminal('new'),
+        [block('old answer')],
+        undefined,
+      ),
+    ).toEqual({ sessionTitle: undefined });
+    expect(
+      getTurnNotificationContent(
+        {
+          type: 'turn_error',
+          data: { sessionId: 's', promptId: 'p', error: 'private error' },
+        },
+        [block('partial response')],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title' });
+    expect(
+      getTurnNotificationContent(
+        terminal(),
+        [
+          block('commentary'),
+          block('{"insight_ready":{"path":"/private/report.html"}}'),
+        ],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title' });
+    expect(
+      getTurnNotificationContent(
+        terminal(''),
+        [block('unidentified', { promptId: undefined })],
+        'Title',
+      ),
+    ).toEqual({ sessionTitle: 'Title' });
   });
 });

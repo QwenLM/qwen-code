@@ -12994,11 +12994,32 @@ export function App({
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
-    (sessionId: string, workspaceCwd?: string) => {
+    (
+      sessionId: string,
+      workspaceCwd?: string,
+      explicitContext?: DaemonProductSessionContext,
+    ) => {
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
       splitFoldedByShrinkRef.current = false;
       showChat();
+      const current = connectionRef.current;
+      if (
+        explicitContext &&
+        !pendingSessionContextRef.current &&
+        current.status === 'connected' &&
+        !current.loadingTranscript &&
+        !current.missingSession &&
+        !current.standaloneSession?.creationRecovery &&
+        current.sessionId === sessionId &&
+        current.sessionContext?.kind === explicitContext.kind &&
+        (explicitContext.kind !== 'workspace' ||
+          current.workspaceCwd === explicitContext.cwd)
+      ) {
+        closePanel();
+        closeMobileDrawer();
+        return;
+      }
       const currentContext =
         pendingSessionContextRef.current ??
         connectionRef.current.sessionContext;
@@ -13006,22 +13027,28 @@ export function App({
         workspaceCwd === undefined && currentContext?.kind !== 'workspace'
           ? currentContext
           : undefined;
-      void loadSidebarSession(sessionId, workspaceCwd, inheritedContext).catch(
-        (error: unknown) => {
-          reportError(error, 'Failed to open session');
-        },
-      );
+      void loadSidebarSession(
+        sessionId,
+        workspaceCwd,
+        explicitContext ?? inheritedContext,
+      ).catch((error: unknown) => {
+        reportError(error, 'Failed to open session');
+      });
     },
-    [loadSidebarSession, reportError, showChat],
+    [closeMobileDrawer, closePanel, loadSidebarSession, reportError, showChat],
   );
 
-  // Listen for `qwen:open-session` events dispatched by the markdown renderer
-  // when a `qwen-session://<id>` link is clicked. Navigate to the session.
+  // Markdown links and browser notifications share the session navigation path.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (
         e as CustomEvent<
-          string | { sessionId?: unknown; workspaceCwd?: unknown }
+          | string
+          | {
+              sessionId?: unknown;
+              workspaceCwd?: unknown;
+              sessionContext?: unknown;
+            }
         >
       ).detail;
       const sessionId = typeof detail === 'string' ? detail : detail?.sessionId;
@@ -13031,8 +13058,34 @@ export function App({
         typeof detail.workspaceCwd === 'string'
           ? detail.workspaceCwd
           : undefined;
-      if (typeof sessionId === 'string' && sessionId) {
-        handleOpenSessionFromOverview(sessionId, workspaceCwd);
+      let sessionContext: DaemonProductSessionContext | undefined;
+      if (
+        typeof detail === 'object' &&
+        detail !== null &&
+        'sessionContext' in detail
+      ) {
+        const context = detail.sessionContext;
+        if (
+          typeof context !== 'object' ||
+          context === null ||
+          !('kind' in context)
+        )
+          return;
+        if (context.kind === 'standalone' || context.kind === 'live') {
+          if (workspaceCwd) return;
+          sessionContext = { kind: context.kind };
+        } else if (
+          context.kind === 'workspace' &&
+          'cwd' in context &&
+          typeof context.cwd === 'string' &&
+          context.cwd.trim()
+        ) {
+          if (workspaceCwd && workspaceCwd !== context.cwd) return;
+          sessionContext = { kind: 'workspace', cwd: context.cwd };
+        } else return;
+      }
+      if (typeof sessionId === 'string' && sessionId.trim()) {
+        handleOpenSessionFromOverview(sessionId, workspaceCwd, sessionContext);
       }
     };
     window.addEventListener('qwen:open-session', handler);

@@ -134,6 +134,101 @@ describe('browser task notifications', () => {
     expect(notifications[0]?.options.tag).not.toContain('scope');
   });
 
+  it('shows a compact session title and a plain-text reply excerpt without storing them', async () => {
+    vi.stubGlobal('navigator', {
+      locks: { request: async (_name: string, action: () => void) => action() },
+    });
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture);
+    attach(capture);
+    await act(async () => {
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_complete',
+          data: {
+            sessionId: 'session',
+            promptId: 'content',
+            stopReason: 'end_turn',
+          },
+        },
+        false,
+        {
+          sessionTitle: '  Fix **notifications**\n in Chrome ',
+          responseText:
+            '# Result\n**Fixed** the [notification](https://example.com/private).\n- Added `tests`.',
+        },
+      );
+      await vi.waitFor(() => expect(notifications).toHaveLength(1));
+    });
+    expect(notifications[0]?.title).toBe(
+      'QwenCode · Fix notifications in Chrome',
+    );
+    expect(notifications[0]?.options.icon).toMatch(
+      /qwen-code-notification[^/]*\.png$/,
+    );
+    expect(notifications[0]?.options.body).toBe(
+      'This turn has completed.\nResult Fixed the notification. Added tests.',
+    );
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-notification-claims'),
+    ).not.toMatch(/Fix|Result|private/);
+  });
+
+  it('bounds Unicode titles and excerpts, and keeps status-only fallbacks', async () => {
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture);
+    attach(capture);
+    await act(async () => {
+      for (const [promptId, type, content] of [
+        [
+          'long',
+          'turn_complete',
+          { sessionTitle: '🔔'.repeat(80), responseText: '😀'.repeat(160) },
+        ],
+        [
+          'empty',
+          'turn_complete',
+          { sessionTitle: '  ', responseText: '<br>  ' },
+        ],
+        [
+          'failure',
+          'turn_error',
+          { sessionTitle: 'Failed task', responseText: 'partial answer' },
+        ],
+      ] as const) {
+        capture.observer!.observe(
+          'scope',
+          'session',
+          {
+            type,
+            data: { sessionId: 'session', promptId, stopReason: 'end_turn' },
+          },
+          false,
+          content,
+        );
+      }
+      await vi.waitFor(() => expect(notifications).toHaveLength(3));
+    });
+    const long = notifications.find((n) =>
+      n.title.startsWith('QwenCode · 🔔'),
+    )!;
+    expect(long.title).toBe('QwenCode · ' + '🔔'.repeat(59) + '…');
+    expect(long.options.body).toBe(
+      'This turn has completed.\n' + '😀'.repeat(119) + '…',
+    );
+    expect(
+      notifications.find((n) => n.title === 'QwenCode')?.options.body,
+    ).toBe('This turn has completed.');
+    expect(
+      notifications.find((n) => n.title === 'QwenCode · Failed task')?.options
+        .body,
+    ).toBe('This turn failed. Return to view the details.');
+  });
+
   it('requests permission only when the user enables and keeps a denied preference off', async () => {
     FakeNotification.permission = 'default';
     FakeNotification.requestPermission.mockImplementation(async () => {
@@ -188,6 +283,56 @@ describe('browser task notifications', () => {
     expect(focus).toHaveBeenCalledOnce();
     expect(notifications[0]?.close).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])(
+    'opens the captured target even if focus fails (%s)',
+    async (focusFails) => {
+      window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+      const capture: Capture = {};
+      render(capture);
+      attach(capture);
+      const target = {
+        sessionId: 'session',
+        sessionContext: {
+          kind: 'workspace' as const,
+          cwd: '/original/workspace',
+        },
+      };
+      const open = vi.fn();
+      window.addEventListener('qwen:open-session', open);
+      try {
+        await act(async () => {
+          capture.observer!.observe(
+            'scope',
+            'session',
+            {
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session',
+                promptId: 'click',
+                stopReason: 'end_turn',
+              },
+            },
+            false,
+            { target },
+          );
+          await vi.waitFor(() => expect(notifications).toHaveLength(1));
+        });
+        expect(open).not.toHaveBeenCalled();
+        capture.observer!.retain('another-scope');
+        const focus = vi.spyOn(window, 'focus').mockImplementation(() => {
+          if (focusFails) throw new Error('focus denied');
+        });
+        notifications[0]?.onclick?.();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(open).toHaveBeenCalledOnce();
+        expect((open.mock.calls[0]![0] as CustomEvent).detail).toEqual(target);
+        expect(notifications[0]?.close).toHaveBeenCalledOnce();
+      } finally {
+        window.removeEventListener('qwen:open-session', open);
+      }
+    },
+  );
 
   it('keeps preference but stops sending after permission is revoked', async () => {
     window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');

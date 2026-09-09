@@ -5,26 +5,38 @@
  */
 
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import type { DaemonEvent, DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type {
   DaemonConnectionState,
   DaemonProductSessionContext,
 } from './types.js';
 
-export interface TurnNotification {
+export interface TurnNotificationTarget {
+  sessionId: string;
+  sessionContext: DaemonProductSessionContext;
+}
+
+export interface TurnNotificationContent {
+  target?: TurnNotificationTarget;
+  sessionTitle?: string;
+  responseText?: string;
+}
+
+export interface TurnNotification extends TurnNotificationContent {
   key: string;
   outcome: 'completed' | 'failed' | 'ended' | 'cancelled';
 }
 
 export interface TurnNotificationObserver {
   retain(scope: string): () => void;
-  admit(scope: string, promptId: string): void;
+  admit(scope: string, promptId: string, label?: string): void;
   remove(scope: string, promptId: string): void;
   observe(
     scope: string,
     sessionId: string,
     event: DaemonEvent,
     replay?: boolean,
+    content?: TurnNotificationContent,
   ): void;
 }
 
@@ -56,7 +68,13 @@ export function useTurnNotificationBinding(
   const handlers = useMemo(() => {
     const owners = new WeakMap<
       NotificationOwner,
-      { scope: string; sessionId: string; kind: string; cwd: string }
+      {
+        scope: string;
+        sessionId: string;
+        kind: string;
+        cwd: string;
+        target: TurnNotificationTarget;
+      }
     >();
     const activate = (owner: NotificationOwner) => {
       const next = owners.get(owner);
@@ -86,22 +104,37 @@ export function useTurnNotificationBinding(
           sessionId: owner.sessionId,
           kind: context.kind,
           cwd,
+          target: {
+            sessionId: owner.sessionId,
+            sessionContext:
+              context.kind === 'workspace'
+                ? { kind: 'workspace', cwd }
+                : { kind: context.kind },
+          },
         });
         return owner;
       },
       activate,
-      admit(owner: NotificationOwner, promptId: string) {
+      admit(owner: NotificationOwner, promptId: string, label?: string) {
         const scope = activate(owner);
-        if (scope) observer?.admit(scope, promptId);
+        if (scope) observer?.admit(scope, promptId, label);
       },
       remove(owner: NotificationOwner, promptId: string) {
         const scope = owners.get(owner)?.scope;
         if (scope) observer?.remove(scope, promptId);
       },
-      observe(owner: NotificationOwner, event: DaemonEvent, replay = false) {
-        const scope = owners.get(owner)?.scope;
-        if (scope && binding.current?.scope === scope)
-          observer?.observe(scope, owner.sessionId, event, replay);
+      observe(
+        owner: NotificationOwner,
+        event: DaemonEvent,
+        replay = false,
+        content?: TurnNotificationContent,
+      ) {
+        const source = owners.get(owner);
+        if (source && binding.current?.scope === source.scope)
+          observer?.observe(source.scope, owner.sessionId, event, replay, {
+            ...content,
+            target: source.target,
+          });
       },
     };
   }, [baseUrl, observer]);
@@ -138,6 +171,45 @@ export function useTurnNotificationBinding(
   return handlers;
 }
 
+export function getTurnNotificationContent(
+  event: DaemonEvent,
+  blocks: readonly DaemonTranscriptBlock[],
+  sessionTitle: string | undefined,
+): TurnNotificationContent | undefined {
+  if (event.type !== 'turn_complete' && event.type !== 'turn_error') return;
+  const content: TurnNotificationContent = { sessionTitle };
+  const promptId = (event.data as { promptId?: unknown } | undefined)?.promptId;
+  if (typeof promptId !== 'string' || !promptId.trim()) return content;
+  if (!sessionTitle?.trim()) {
+    const request = blocks.find(
+      (block) =>
+        block.kind === 'user' &&
+        block.promptId === promptId &&
+        block.parentToolCallId === undefined &&
+        block.text.trim(),
+    );
+    if (request?.kind === 'user')
+      content.sessionTitle = request.text.trim().split('\n')[0];
+  }
+  if (event.type === 'turn_error') return content;
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index];
+    if (
+      block?.kind === 'assistant' &&
+      block.promptId === promptId &&
+      block.parentToolCallId === undefined &&
+      block.meta?.source !== 'background_notification' &&
+      block.meta?.source !== 'vision_bridge_notice' &&
+      block.text.trim()
+    ) {
+      if (!/"insight_(?:progress|ready|error)"\s*:/.test(block.text))
+        content.responseText = block.text;
+      break;
+    }
+  }
+  return content;
+}
+
 const MAX_RECENT_TURNS = 1024;
 
 export function createTurnNotificationObserver(
@@ -145,7 +217,7 @@ export function createTurnNotificationObserver(
 ): TurnNotificationObserver {
   const scopes = new Map<
     string,
-    { references: number; pending: Set<string> }
+    { references: number; pending: Map<string, string | undefined> }
   >();
   const handled = new Set<string>();
   const keyFor = (scope: string, promptId: string) =>
@@ -163,7 +235,7 @@ export function createTurnNotificationObserver(
     retain(scope) {
       let state = scopes.get(scope);
       if (!state) {
-        state = { references: 0, pending: new Set() };
+        state = { references: 0, pending: new Map() };
         scopes.set(scope, state);
       }
       state.references++;
@@ -178,14 +250,14 @@ export function createTurnNotificationObserver(
         });
       };
     },
-    admit(scope, promptId) {
+    admit(scope, promptId, label) {
       if (promptId && !handled.has(keyFor(scope, promptId)))
-        scopes.get(scope)?.pending.add(promptId);
+        scopes.get(scope)?.pending.set(promptId, label?.trim().split('\n')[0]);
     },
     remove(scope, promptId) {
       if (scopes.has(scope) && promptId) consume(scope, promptId);
     },
-    observe(scope, sessionId, event, replay = false) {
+    observe(scope, sessionId, event, replay = false, content) {
       const state = scopes.get(scope);
       if (!state || state.references === 0) return;
       const data = event.data;
@@ -207,7 +279,16 @@ export function createTurnNotificationObserver(
         (event.type === 'pending_prompt_added' ||
           event.type === 'pending_prompt_started')
       ) {
-        if (!handled.has(keyFor(scope, promptId))) state.pending.add(promptId);
+        if (
+          !handled.has(keyFor(scope, promptId)) &&
+          !state.pending.has(promptId)
+        )
+          state.pending.set(
+            promptId,
+            typeof value['text'] === 'string'
+              ? value['text'].trim().split('\n')[0]
+              : undefined,
+          );
         return;
       }
       if (
@@ -224,9 +305,12 @@ export function createTurnNotificationObserver(
         typeof value['stopReason'] !== 'string'
       )
         return;
+      const sessionTitle = content?.sessionTitle || state.pending.get(promptId);
       if (!consume(scope, promptId)) return;
       try {
         notify({
+          ...content,
+          ...(sessionTitle ? { sessionTitle } : {}),
           key: keyFor(scope, promptId),
           outcome:
             event.type === 'turn_error'

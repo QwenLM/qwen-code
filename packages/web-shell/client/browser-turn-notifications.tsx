@@ -24,6 +24,10 @@ export const BROWSER_NOTIFICATIONS_STORAGE_KEY =
   'qwen-code-web-shell-browser-notifications';
 const CLAIMS_STORAGE_KEY = 'qwen-code-web-shell-notification-claims';
 const MAX_CLAIMS = 1024;
+const NOTIFICATION_ICON_URL = new URL(
+  './assets/qwen-code-notification.png',
+  import.meta.url,
+).href;
 
 type Permission = NotificationPermission | 'unavailable';
 
@@ -62,6 +66,21 @@ function readStoredPreference(): string | null | undefined {
 function readPreference() {
   const stored = readStoredPreference();
   return { enabled: stored === 'true', persistent: stored !== undefined };
+}
+
+function notificationExcerpt(text: string, limit: number): string {
+  const plain = text
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
+    .replace(/!?\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/<[^>]*>/g, '')
+    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+/gm, '')
+    .replace(/(\*\*|__|~~|`)(.*?)\1/g, '$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const chars = Array.from(plain);
+  return chars.length > limit
+    ? chars.slice(0, limit - 1).join('') + '…'
+    : plain;
 }
 
 export function BrowserTurnNotifications({
@@ -209,14 +228,33 @@ function StandaloneNotifications({
           }
         }
         const t = getTranslator(language);
-        const notification = new window.Notification('Qwen Code', {
-          body: t(`browserNotifications.${turn.outcome}`),
-          tag,
-          ...{ renotify: false },
-        });
+        const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
+        const excerpt =
+          turn.outcome === 'failed'
+            ? ''
+            : notificationExcerpt(turn.responseText ?? '', 120);
+        const status = t(`browserNotifications.${turn.outcome}`);
+        const notification = new window.Notification(
+          title ? `QwenCode · ${title}` : 'QwenCode',
+          {
+            body: excerpt ? `${status}\n${excerpt}` : status,
+            icon: NOTIFICATION_ICON_URL,
+            tag,
+            ...{ renotify: false },
+          },
+        );
         notification.onclick = () => {
           try {
             window.focus();
+          } catch {
+            // Browsers may deny focus even though the page can still navigate.
+          }
+          try {
+            if (turn.target) {
+              window.dispatchEvent(
+                new CustomEvent('qwen:open-session', { detail: turn.target }),
+              );
+            }
           } finally {
             notification.close();
           }

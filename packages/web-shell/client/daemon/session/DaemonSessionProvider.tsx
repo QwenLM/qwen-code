@@ -139,7 +139,10 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
-import { useTurnNotificationBinding } from './turn-notification-context.js';
+import {
+  getTurnNotificationContent,
+  useTurnNotificationBinding,
+} from './turn-notification-context.js';
 import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
 import {
   createDaemonTurnNavigationStore,
@@ -2813,7 +2816,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (sessionRef.current === activeSession) {
               for (const event of notificationReplayEvents) {
-                turnNotifications.observe(activeSession, event, true);
+                turnNotifications.observe(
+                  activeSession,
+                  event,
+                  true,
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    getSessionDisplayName(activeSession.state),
+                  ),
+                );
               }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
@@ -3495,7 +3507,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
-                turnNotifications.observe(activeSession, event);
+                turnNotifications.observe(
+                  activeSession,
+                  event,
+                  false,
+                  getTurnNotificationContent(
+                    event,
+                    store.getSnapshot().blocks,
+                    connectionRef.current.sessionId === activeSession.sessionId
+                      ? connectionRef.current.displayName
+                      : getSessionDisplayName(activeSession.state),
+                  ),
+                );
               }
               const pendingRepair = liveJournalRepairRef.current;
               if (
@@ -4431,7 +4454,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         },
         onPromptAdmitted: (owner, admission) => {
           if (sessionRef.current === owner)
-            turnNotifications.admit(owner, admission.promptId);
+            turnNotifications.admit(owner, admission.promptId, admission.label);
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId
