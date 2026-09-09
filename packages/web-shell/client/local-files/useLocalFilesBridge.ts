@@ -913,6 +913,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // generation. The granted arm clears the latch only after its stale
       // check, so a stale re-save of a peer's record still refuses here.
       const ownWrite =
+        current !== undefined &&
         connectSavedRef.current &&
         !foreignRecordRef.current &&
         current.name === connectBoundNameRef.current;
