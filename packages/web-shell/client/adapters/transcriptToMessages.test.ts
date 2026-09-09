@@ -185,6 +185,7 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    subagentSessionReady: overrides.subagentSessionReady,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -4414,6 +4415,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it.each([false, undefined])(
+    'keeps merged readiness true when a later block supplies %s',
+    (subagentSessionReady) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('ready', 'agent-1', 'in_progress', 10, {
+          toolName: 'agent',
+          subagentSessionReady: true,
+        }),
+        toolBlock('later', 'agent-1', 'in_progress', 20, {
+          toolName: 'agent',
+          subagentSessionReady,
+        }),
+      ]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-1', subagentSessionReady: true }],
+      });
+      if (messages[0].role === 'tool_group')
+        expect(messages[0].tools).toHaveLength(1);
+    },
+  );
+
   it('mergeToolCall updates fields from completion block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -5013,6 +5037,26 @@ it.each(['selected:allow', 'selected:cancel'])(
       } else {
         expect(tool?.startTime).toBe(blocks.includes(real) ? 2_000 : 1_000);
       }
+    }
+  },
+);
+
+it.each([true, false])(
+  'preserves subagent readiness with safeToolProjection=%s',
+  (safeToolProjection) => {
+    for (const subagentSessionReady of [false, true, undefined]) {
+      const messages = transcriptBlocksToDaemonMessages(
+        [
+          toolBlock('agent', 'agent-1', 'running', 1, {
+            toolName: 'agent',
+            subagentSessionReady,
+          }),
+        ],
+        { safeToolProjection },
+      );
+      expect(messages).toMatchObject([
+        { role: 'tool_group', tools: [{ subagentSessionReady }] },
+      ]);
     }
   },
 );
