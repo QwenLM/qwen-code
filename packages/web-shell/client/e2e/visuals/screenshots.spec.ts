@@ -145,6 +145,23 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
 
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
     test(`terminal turn error`, async ({ browser, page }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const scenario = createTerminalTurnErrorScenario(
@@ -168,14 +185,12 @@ for (const theme of THEMES) {
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
 
       await page.setViewportSize({ width: 720, height: 800 });
       await page.mouse.move(0, 0);
       await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
-      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
 
       const touchContext = await browser.newContext({
         ...devices['Pixel 7'],
@@ -208,10 +223,12 @@ for (const theme of THEMES) {
           touchErrorRow.locator('[data-web-shell-message-actions]'),
         ).toHaveCSS('opacity', '1');
         await expect(touchCopyButton).toBeVisible();
-        await captureScreenshot(
-          touchPage,
-          `terminal-turn-error-copy-touch-${theme}`,
-        );
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
       } finally {
         await touchContext.close();
       }

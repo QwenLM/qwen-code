@@ -58,6 +58,11 @@ import {
   clearSidechannelMidTurnInjected,
   getSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import {
+  createTurnNotificationObserver,
+  TurnNotificationContext,
+  type TurnNotificationObserver,
+} from './turn-notification-context.js';
 import { persistStableClientId } from './clientLifecycle.js';
 
 interface MockSession {
@@ -5372,6 +5377,142 @@ describe('DaemonSessionProvider', () => {
       ),
     ).toBe(false);
   });
+
+  it('preserves the Plan execution mode when prompt restart reuses metadata', async () => {
+    const turnComplete = createDeferred<void>();
+    const secondSubscriptionStarted = createDeferred<void>();
+    const turnEvents = createTurnCompleteEvents(turnComplete);
+    const events = vi.fn(async function* planEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 2) secondSubscriptionStarted.resolve();
+      yield* turnEvents(opts);
+    });
+    const session = createMockSession({
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {
+          modes: {
+            currentModeId: 'plan',
+            _meta: { planExecutionMode: 'yolo' },
+          },
+        },
+      })),
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      restartEventStreamOnPrompt: true,
+    });
+    expect(connection).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+    const contextCalls = vi.mocked(session.context).mock.calls.length;
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = requireActions(actions).sendPrompt('execute the plan');
+      await secondSubscriptionStarted.promise;
+    });
+    const connectionAfterRestart = connection;
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
+    expect(session.context).toHaveBeenCalledTimes(contextCalls);
+    turnComplete.resolve();
+    await act(async () => {
+      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+    expect(connectionAfterRestart).toMatchObject({
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+  });
+
+  it.each([
+    ['rejected', 'default'],
+    ['missing modes', 'plan'],
+  ])(
+    'preserves live Plan policy when context is %s and workspace mode is %s',
+    async (contextResult, workspaceMode) => {
+      sdkMocks.workspaceProviders.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        approvalMode: workspaceMode,
+        providers: [],
+      });
+      const restart = createDeferred<void>();
+      const reconnected = createDeferred<void>();
+      const idleEvents = createIdleEvents();
+      const events = vi.fn(async function* reconnectEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        if (events.mock.calls.length === 1) {
+          await restart.promise;
+          return;
+        }
+        reconnected.resolve();
+        yield* idleEvents(opts);
+      });
+      const session = createMockSession({ events });
+      vi.mocked(session.context).mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        workspaceCwd: session.workspaceCwd,
+        state: {
+          modes: {
+            currentModeId: 'plan',
+            _meta: { planExecutionMode: 'yolo' },
+          },
+        },
+      });
+      if (contextResult === 'rejected') {
+        vi.mocked(session.context).mockRejectedValue(
+          new Error('context failed'),
+        );
+      }
+      sdkMocks.sessions.push(session);
+      let connection: DaemonConnectionState | undefined;
+
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      expect(connection).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+      await act(async () => {
+        restart.resolve();
+        await reconnected.promise;
+      });
+      expect(session.context).toHaveBeenCalledTimes(2);
+      expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(2);
+      expect(connection).toMatchObject({
+        currentMode: 'plan',
+        planExecutionMode: 'yolo',
+      });
+    },
+  );
 
   it('restarts the event stream when aborting the subscription throws', async () => {
     const turnComplete = createDeferred<void>();
@@ -19443,9 +19584,150 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps initial history quiet and notifies once after a live terminal is projected', async () => {
+    const terminal: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'turn_complete',
+      data: {
+        sessionId: 'session-1',
+        promptId: 'live',
+        stopReason: 'end_turn',
+      },
+    };
+    const go = createDeferred<void>();
+    let store: DaemonTranscriptStore | undefined;
+    let snapshotAtNotification: unknown;
+    const notify = vi.fn(() => {
+      snapshotAtNotification = store?.getSnapshot();
+    });
+    const observer = createTurnNotificationObserver(notify);
+    sdkMocks.sessions.push(
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              ...terminal,
+              data: { ...(terminal.data as object), promptId: 'history' },
+            },
+          ],
+          liveJournal: [],
+        },
+        async *events(opts) {
+          await go.promise;
+          yield {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            promptId: 'live',
+            data: {
+              sessionId: 'session-1',
+              promptId: 'live',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'final answer' },
+              },
+            },
+          };
+          yield { ...terminal, id: 4 };
+          yield { ...terminal, id: 5 };
+          yield* createIdleEvents()(opts);
+        },
+      }),
+    );
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true }, observer);
+    expect(notify).not.toHaveBeenCalled();
+    await act(async () => {
+      go.resolve();
+      await flushPromises();
+    });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+    expect(JSON.stringify(snapshotAtNotification)).toContain('final answer');
+  });
+
+  it('retains a live admitted prompt across epoch reset and settles it from replay', async () => {
+    const reloaded = createDeferred<void>();
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    sdkMocks.sessions.push(
+      createMockSession({
+        hasActivePrompt: true,
+        async *events() {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'pending_prompt_started',
+            data: {
+              sessionId: 'session-1',
+              promptId: 'known',
+              text: 'request',
+            },
+          };
+          yield {
+            id: 2,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'epoch_reset' },
+          };
+        },
+      }),
+      createMockSession({
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 3,
+              v: 1,
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'unknown',
+                stopReason: 'end_turn',
+              },
+            },
+            {
+              id: 4,
+              v: 1,
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'known',
+                stopReason: 'end_turn',
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: createPendingEvents(reloaded),
+      }),
+    );
+    await renderWithProvider(
+      null,
+      { autoConnect: true, reconnectDelayMs: 1, maxReconnectDelayMs: 1 },
+      observer,
+    );
+    await act(async () => {
+      await reloaded.promise;
+      await flushPromises();
+    });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+    expect(notify.mock.calls[0]?.[0].key).toContain('known');
+    expect(notify.mock.calls[0]?.[0].key).not.toContain('unknown');
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
+    notifications?: TurnNotificationObserver,
   ) {
     const defaultSessionId =
       props.autoConnect === true &&
@@ -19458,16 +19740,25 @@ describe('DaemonSessionProvider', () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
+    const provider = (
+      <DaemonSessionProvider
+        baseUrl="http://127.0.0.1:4170"
+        autoConnect={false}
+        {...(defaultSessionId ? { sessionId: defaultSessionId } : {})}
+        {...props}
+      >
+        {children}
+      </DaemonSessionProvider>
+    );
     act(() => {
       root?.render(
-        <DaemonSessionProvider
-          baseUrl="http://127.0.0.1:4170"
-          autoConnect={false}
-          {...(defaultSessionId ? { sessionId: defaultSessionId } : {})}
-          {...props}
-        >
-          {children}
-        </DaemonSessionProvider>,
+        notifications ? (
+          <TurnNotificationContext.Provider value={notifications}>
+            {provider}
+          </TurnNotificationContext.Provider>
+        ) : (
+          provider
+        ),
       );
     });
     await act(async () => {

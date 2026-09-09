@@ -100,7 +100,9 @@ test('restores the split across a reload and isolates it per tab @smoke', async 
   await page2.setViewportSize({ width: 1440, height: 900 });
   await installScenario(page2, scenario, testInfo);
   await page2.goto(`/session/${MAIN_SESSION}`);
-  await expect(page2.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page2.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page2.locator('[data-testid="split-view"]')).toHaveCount(0);
 });
 
@@ -133,7 +135,9 @@ test('leaving the split clears storage so a refresh does not restore it', async 
 
   // A refresh now lands on the normal view, not the split.
   await page.reload();
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await expect(page.locator('[data-testid="split-view"]')).toHaveCount(0);
 });
 
