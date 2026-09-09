@@ -92,6 +92,19 @@ P2/P3 已有最小可见入口；此步只收束体验：原有新建对话、�
 
 门槛：用户不先建 Team、不另开任务 tab，也能发起一次本地加远程协作；能看谁在排队、谁需要回答、最终结果归谁。能力关闭后新增入口和后台请求消失，原有定义管理、聊天和 subagent 仍正常。
 
+## 3b. 本轮实际进度（2026-09-09 追加）
+
+以下按段记录，未通过项写未通过，不用百分比。三个审计脚本可复跑：`run-workspace-agents.mjs`(335)、`check-agent-collaboration-gate.mjs`(21)、`check-request-capture.mjs`(15)，全绿。
+
+- **P0 已完成。** 架构 §7 的十四行全部落点；新增 `experimental.agentCollaboration`（daemon 启动解析一次）、`agent_collaboration_v1` capability、服务器绑定反查、搁浅终态。观测发现两处读代码没发现的问题：门里的 `forSubAgent` 多余且有害；服务器绑定按原有顺序会把派发器自己锁死（`bindRunSession` 在 `port.start()` 之后）。**未做：** 带旧 roster/排队任务/Host 凭证、关闭启动时的文件访问、定时器与网络调用记录——需要真跑 daemon。web-shell 消费端无测试覆盖。
+- **P1 已完成。** 契约冻结在 `a2a-contract.ts`：协议 `1.0`、`JSONRPC`、`@a2a-js/sdk@1.1.0`；映射与不支持项见 [冻结契约](../design/2026-09-09-a2a-frozen-contract.md)。互通验收者定为 `a2a-sdk`(Python)。
+- **P2 服务端已完成，传输与网络未做。** 接单幂等、同键不同内容拒绝、按调用方限定读写、grant（按 caller×agent、作用域、过期、撤销、重发替换）、五个必需操作、按调用方生成的 Agent Card。**未做：** JSON-RPC 传输、公开发现 card、真实 A/B 部署。
+- **P3 的决定已落地，未接 Codex。** §5 的规则实现在 `codex-turn-result.ts`。**须你确认的后果：** 只读分析（正是计划首个对外任务）只产生 `agentMessage`，按此规则每次都落 `unclosed` 等人处置。
+- **P4 的核心已完成，通道未做。** 租约/attempt 核对在 `host-lease.ts`，可防旧 worker 覆盖新执行。**未做：** 出站长轮询取件与结果回传。
+- **P5 的视图逻辑已完成，页面未做。** `summariseWorkspaceWork` 回答三问。**未做：** 单一入口发起本地加远程协作——要等 P2/P3 可达。
+
+仍阻塞的人的决定：实际 A/B 环境与可达方式、首个开放 Agent 的执行权限、审批接收人；以及上面 P3 那条后果是否接受。
+
 ## 4. 接力清单
 
 下一棒先读架构 §6、§7，然后执行 P0，不直接接着旧 ten-step 或 H2 开始写远程派发。
