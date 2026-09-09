@@ -37,6 +37,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';

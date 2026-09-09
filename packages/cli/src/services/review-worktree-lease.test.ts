@@ -131,7 +131,7 @@ vi.mock('node:fs', async (importOriginal) => {
       return actual.renameSync(oldPath, newPath);
     }) as typeof actual.renameSync,
     rmSync: ((
-      path: PathOrFileDescriptor,
+      path: Parameters<typeof actual.rmSync>[0],
       options?: Parameters<typeof actual.rmSync>[1],
     ) => {
       if (
@@ -142,7 +142,7 @@ vi.mock('node:fs', async (importOriginal) => {
           code: 'EBUSY',
         });
       }
-      return actual.rmSync(path, options as never);
+      return actual.rmSync(path, options);
     }) as typeof actual.rmSync,
   };
 });
