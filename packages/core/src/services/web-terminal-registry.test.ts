@@ -342,6 +342,32 @@ describe('WebTerminalRegistry', () => {
     expect(kill).toHaveBeenCalledOnce();
   });
 
+  it('releases an exited session that never became ready through the deferred arm', async () => {
+    osPlatform.mockReturnValue('win32');
+    const registry = new WebTerminalRegistry();
+    await registry.create({
+      terminalId: 'terminal:release-exited-deferred',
+      workspaceCwd: '/workspace',
+    });
+    // The shell exits before its first output byte — COMSPEC resolving to a
+    // binary that quits immediately, or a releaseWorkspace drain racing pwsh
+    // startup. That is session.exited === true AND _isReady === false, so
+    // release()'s exited arm routes into releaseHost's deferred branch.
+    (spawn.mock.results[0].value as { _isReady?: boolean })._isReady = false;
+    onExit({ exitCode: 0 });
+
+    expect(registry.release('terminal:release-exited-deferred')).toBe(true);
+    // Nothing may signal an exited shell's possibly-recycled pid, and the
+    // native baton is already erased — so no kill and no native close on this
+    // arm. (Asserting the host WAS released is forbidden; see conpty-host.ts.)
+    expect(kill).not.toHaveBeenCalled();
+    expect(nativeKill).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    // The conout worker is still freed: the one resource node-pty strands on a
+    // natural exit, which is the whole point of the else branch in release().
+    expect(conoutDispose).toHaveBeenCalledOnce();
+  });
+
   it('does not double-close a live session whose kill already closed it', async () => {
     osPlatform.mockReturnValue('win32');
     // Model node-pty's real WindowsTerminal.kill(): when ready it closes the

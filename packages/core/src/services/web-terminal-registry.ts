@@ -305,15 +305,25 @@ export class WebTerminalRegistry {
           }
         },
         releaseHost: () => {
-          // node-pty's WindowsTerminal.kill() defers its whole teardown while
-          // `_isReady` is false, so a release before the shell's first output
-          // byte still has a kill() queued in `_deferreds`. That queued
-          // teardown runs the native ClosePseudoConsole when it fires (or the
-          // native exit-watcher erases the baton first if the shell exits), so
-          // closing the pseudo-console here would double-close the same HPCON.
-          // Dispose only the conout worker now — the one resource a deferred
-          // kill can strand, and an idempotent one — and leave the native close
-          // to the queued kill().
+          // Branches on `_isReady` alone, and release() reaches it from BOTH
+          // arms — the live one and the already-exited one — with a different
+          // reason on each.
+          //
+          // LIVE: node-pty's WindowsTerminal.kill() defers its whole teardown
+          // while `_isReady` is false, so killPtyTree has just queued a kill()
+          // in `_deferreds`. That queued teardown runs the native
+          // ClosePseudoConsole when it fires, so closing the pseudo-console
+          // here would double-close the same HPCON. Dispose only the conout
+          // worker now — the one resource a deferred kill can strand, and an
+          // idempotent one — and leave the native close to the queued kill().
+          //
+          // EXITED: no kill() ran and nothing is queued, because release() only
+          // calls killPtyTree on the live arm. The native exit-watcher has
+          // already erased the baton, so a native close here would no-op rather
+          // than double-close; the conout worker is still the one resource
+          // node-pty never releases on a natural exit, and this branch frees
+          // it. Same outcome releaseConPtyHost would have had on that arm,
+          // reached for a different reason.
           if ((spawned as { _isReady?: boolean })._isReady === false) {
             disposeConoutWorker(spawned);
             return;
