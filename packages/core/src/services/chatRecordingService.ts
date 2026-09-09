@@ -276,6 +276,8 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
 }
 
 export interface ChatRecord {
+  /** Daemon admission identity, distinct from CLI file-history prompt IDs. */
+  daemonPromptId?: string;
   /** Unique identifier for this logical message */
   uuid: string;
   /** UUID of the parent message; null for root (first message in session) */
@@ -308,6 +310,7 @@ export interface ChatRecord {
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'agent_retry'
+    | 'agent_session_ready'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
@@ -374,6 +377,7 @@ export interface ChatRecord {
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | AgentRetryRecordPayload
+    | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
@@ -470,6 +474,11 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
+}
+
+export interface AgentSessionReadyRecordPayload {
+  callId: string;
+  subagentSessionReady: boolean;
 }
 
 export interface AgentRetryRecordPayload {
@@ -1880,18 +1889,26 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    * @param goalContext Goal identity and turn that own this message
    * @param promptPayload User-authored display text and hook-context provenance
+   * @param promptId Identity of the turn this message opens. Rewind anchors
+   *   API-history entries to it (see `session-api-history.ts`), so it is the
+   *   caller's own prompt id rather than anything a transport supplied.
+   * @param daemonPromptId The daemon's prompt id from the invocation context,
+   *   which transcript replay hands back to it as `extra.promptId`. A daemon
+   *   turn carries both, and the two values are not the same.
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
     promptId?: string,
+    daemonPromptId?: string,
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),

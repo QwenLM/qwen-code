@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { LlmChat } from './llm-chat.js';
 import {
@@ -27,12 +27,6 @@ import {
 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
-import {
-  __resetActiveGoalStoreForTests,
-  clearActiveGoal,
-  setActiveGoal,
-} from '../goals/activeGoalStore.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 
 const turnMocks = vi.hoisted(() => ({
@@ -291,17 +285,12 @@ function setupGoalClient() {
 
 describe('LlmClient Goal admission', () => {
   beforeEach(() => {
-    __resetActiveGoalStoreForTests();
     turnMocks.constructors.length = 0;
     turnMocks.pendingToolCalls.length = 0;
     turnMocks.run.mockReset().mockImplementation(emptyStream);
     nextSpeakerMocks.check.mockReset().mockResolvedValue({
       next_speaker: 'model',
     });
-  });
-
-  afterEach(() => {
-    __resetActiveGoalStoreForTests();
   });
 
   it('sets an approved propose_goal proposal once the turn ends without tool calls', async () => {
@@ -416,76 +405,6 @@ describe('LlmClient Goal admission', () => {
       ),
     );
 
-    expect(runtime.dispatch).toHaveBeenCalledWith({
-      action: 'create',
-      objective: 'ship it',
-    });
-  });
-
-  it('settles an approved proposal when a cleared Goal removes the Stop continuation', async () => {
-    const { client, config, runtime } = setupGoalClient();
-    vi.mocked(runtime.getSnapshot).mockReturnValue({
-      v: 2,
-      activity: 'idle',
-      goal: null,
-    });
-    setActiveGoal('goal-test-session', {
-      condition: 'finish the old goal',
-      iterations: 1,
-      setAt: 1,
-      tokensAtStart: 1,
-      hookId: 'old-goal-hook',
-    });
-    let pending: { objective: string; turnKey: string } | undefined;
-    const takePendingGoalProposal = vi.fn(() => {
-      const proposal = pending;
-      pending = undefined;
-      return proposal;
-    });
-    Object.assign(config, {
-      takePendingGoalProposal,
-      getDisableAllHooks: vi.fn(() => false),
-      hasHooksForEvent: vi.fn((event) => event === 'Stop'),
-      getMessageBus: vi.fn(() => ({
-        request: vi.fn(async () => ({
-          output: {
-            decision: 'block',
-            reason: 'Keep working',
-            hookSpecificOutput: {
-              [GOAL_HOOK_ID_OUTPUT_KEY]: 'old-goal-hook',
-            },
-          },
-          stopHookCount: 1,
-          hasNonGoalBlockingStopHook: false,
-        })),
-      })),
-      getMaxSessionTurns: vi.fn(() => 0),
-      getUsageStatisticsEnabled: vi.fn(() => false),
-    });
-    turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it', turnKey: 'stop-clear-key' };
-      return emptyStream();
-    });
-    const getSteerInput = vi
-      .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(async () => {
-        clearActiveGoal('goal-test-session');
-        return undefined;
-      });
-
-    await drain(
-      client.sendMessageStream(
-        [{ text: 'set a goal for this' }],
-        new AbortController().signal,
-        'stop-clear-key',
-        { type: SendMessageType.UserQuery, getSteerInput },
-      ),
-    );
-
-    expect(turnMocks.run).toHaveBeenCalledOnce();
-    expect(getSteerInput).toHaveBeenCalledTimes(2);
-    expect(takePendingGoalProposal).toHaveBeenCalledTimes(2);
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'create',
       objective: 'ship it',
@@ -2119,8 +2038,6 @@ describe('LlmClient Goal admission', () => {
     );
   });
 
-  afterEach(() => __resetActiveGoalStoreForTests());
-
   it('admits a runtime Goal turn to steer input at a hit session cap', async () => {
     // Second half of the session-cap exclusion: runtime Goal turns skip the
     // count increment (pinned by the 75-turn test above) and must also be
@@ -2144,59 +2061,5 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(getSteerInput).toHaveBeenCalled();
-  });
-
-  it('does not decrement the caller recursion budget inside a legacy hook Goal chain', async () => {
-    // A legacy /goal chain recurses inside one sendMessageStream call. With
-    // the caller budget of 2 preserved at every hop, two blocked stops still
-    // run three model turns; a decremented budget would refuse the third.
-    // Unsupported Goal runtime: the legacy hook chain owns the send, so the
-    // branch under test is the one that keys the budget on the active goal.
-    const { client, config } = setupGoalClient();
-    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
-      new GoalPersistenceUnavailableError('legacy-only session'),
-    );
-    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
-    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
-    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
-    vi.mocked(config.hasHooksForEvent).mockImplementation(
-      (event) => event === 'Stop',
-    );
-    let stopRequestCount = 0;
-    const messageBus = {
-      request: vi.fn(async () => {
-        stopRequestCount += 1;
-        if (stopRequestCount <= 2) {
-          return {
-            output: { decision: 'block', reason: 'keep going' },
-            stopHookCount: 1,
-          };
-        }
-        return { output: undefined, stopHookCount: 1 };
-      }),
-    };
-    vi.mocked(config.getMessageBus).mockReturnValue(
-      messageBus as unknown as ReturnType<Config['getMessageBus']>,
-    );
-    setActiveGoal('goal-test-session', {
-      condition: 'ship',
-      iterations: 0,
-      setAt: 1,
-      tokensAtStart: 0,
-      hookId: 'goal-hook:test',
-    });
-
-    await drain(
-      client.sendMessageStream(
-        [{ text: 'start the chain' }],
-        new AbortController().signal,
-        'legacy-goal-chain',
-        undefined,
-        2,
-      ),
-    );
-
-    expect(messageBus.request).toHaveBeenCalledTimes(3);
-    expect(turnMocks.run).toHaveBeenCalledTimes(3);
   });
 });

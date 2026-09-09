@@ -984,7 +984,7 @@ describe('MessageList — compact mode', () => {
     ).toBeNull();
   });
 
-  it.each(['TodoWrite', 'AskUserQuestion'])(
+  it.each(['TodoWrite'])(
     'folds %s groups into the summary across hidden thinking',
     (toolName) => {
       const container = mount(
@@ -1011,7 +1011,6 @@ describe('MessageList — compact mode', () => {
 
   it.each([
     ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
-    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
     ['agent', agentMsg('special')],
   ])(
     'merges a leading %s group with later thinking and tools',
@@ -1037,6 +1036,49 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it.each([false, true])(
+    'keeps completed questions outside a collapsed mixed tool group (compact=%s)',
+    (compactMode) => {
+      const question = standaloneToolMsg('ask', 'AskUserQuestion').tools[0];
+      const c = mount(
+        [
+          userMsg('u1'),
+          thinkingMsg('thought'),
+          {
+            ...toolMsg('mixed'),
+            tools: [
+              toolMsg('before').tools[0],
+              question,
+              toolMsg('after').tools[0],
+            ],
+          },
+          asstMsg('a1'),
+        ],
+        undefined,
+        { compactMode },
+      );
+      expect(c.textContent).toContain('2 tool calls');
+      expect(c.textContent).not.toContain('3 tool calls');
+      const assertAnswerVisible = () => {
+        expect(c.querySelectorAll('[data-tool-ids="call-ask"]')).toHaveLength(
+          1,
+        );
+        expect(has(c, 'u1')).toBe(true);
+        expect(has(c, 'a1')).toBe(true);
+      };
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+      expect(c.querySelector('[data-tool-ids*="call-before"]')).not.toBeNull();
+      expect(c.querySelector('[data-tool-ids*="call-after"]')).not.toBeNull();
+      click(toggleRow(c, 'u1'));
+      assertAnswerVisible();
+    },
+  );
+
   it('gives prompt and collapse siblings distinct row identities for a shared source', () => {
     const c = mount(
       [
@@ -5115,8 +5157,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = mockMessageListWidth(1000);
+  it('hides the session timeline below the default content width', async () => {
+    const rectSpy = mockMessageListWidth(999);
 
     const c = mount(simpleTurns(4));
     await nextFrame();

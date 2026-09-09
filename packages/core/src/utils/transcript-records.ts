@@ -24,6 +24,7 @@ export interface TranscriptRecordInput {
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
+  readonly daemonPromptId?: string;
   readonly timestamp?: string;
   readonly type: TranscriptRecordType;
   readonly subtype?: string;
@@ -124,6 +125,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_bootstrap',
   'agent_launch_prompt',
   'agent_retry',
+  'agent_session_ready',
   'file_history_snapshot',
   'session_source',
   'session_model',
@@ -395,6 +397,11 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
+      daemonPromptId:
+        typeof value['daemonPromptId'] === 'string' &&
+        value['daemonPromptId'].trim().length > 0
+          ? value['daemonPromptId']
+          : undefined,
       type: type as TranscriptRecordType,
       ...(typeof subtype === 'string' ? { subtype } : { subtype: undefined }),
       ...(typeof timestamp === 'string' &&

@@ -23,6 +23,7 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import type { Content, Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
 import {
@@ -213,6 +214,7 @@ describe('ChatRecordingService', () => {
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
       expect(record.promptId).toBe('prompt-1');
+      expect(record.daemonPromptId).toBeUndefined();
     });
 
     it('preserves prompt identities in compression checkpoints', async () => {
@@ -235,6 +237,47 @@ describe('ChatRecordingService', () => {
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
+
+    it('persists the daemon prompt identity before any turn result', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'same prompt' }],
+        undefined,
+        undefined,
+        undefined,
+        'daemon-prompt-1',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+        type: 'user',
+        daemonPromptId: 'daemon-prompt-1',
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      });
+    });
+
+    it.each(['42', '9007199254740992'])(
+      'keeps daemon IDs ending in ########%s out of CLI turn recovery',
+      async (turn) => {
+        const daemonPromptId = `test-session-id########${turn}`;
+        chatRecordingService.recordUserMessage(
+          [{ text: 'same prompt' }],
+          undefined,
+          undefined,
+          undefined,
+          daemonPromptId,
+        );
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(record.daemonPromptId).toBe(daemonPromptId);
+        expect(record).not.toHaveProperty('promptId');
+        expect(computeInitialTurnFromHistory([record], 'test-session-id')).toBe(
+          1,
+        );
+      },
+    );
 
     it('preserves model-bound parts and records clean display text', async () => {
       const modelParts: Part[] = [
