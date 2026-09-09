@@ -61,6 +61,57 @@ function redactGitPaths(detail: string, cwd: string): string {
       '<workspace>',
     );
   }
+  // Inherited-scope config files git echoes by absolute path when one is
+  // malformed or unreadable (`fatal: bad config line N in file <path>`,
+  // `fatal: unable to access '<path>'`) — a config read sits on every
+  // route's path. GIT_CONFIG_GLOBAL/SYSTEM are stripped from the child
+  // env (gitEnv), so git always reads the default locations.
+  const home = process.env['HOME'];
+  if (home) {
+    message = message.split(path.join(home, '.gitconfig')).join('<home>');
+    // git concatenates verbatim (`%s/.gitconfig` % $HOME): a
+    // trailing-slash HOME echoes a double-slash spelling path.join
+    // normalizes away.
+    message = message.split(`${home}/.gitconfig`).join('<home>');
+  }
+  // git's xdg_config_home: a set-but-EMPTY $XDG_CONFIG_HOME falls back
+  // to ~/.config (not a relative 'git/config'), and $XDG_CONFIG_HOME is
+  // honored with no $HOME at all — mirror both, or the key either
+  // over-redacts every `.git/config` mention or never fires.
+  // The fallback is built verbatim from $HOME too (git does
+  // `%s/.config/git/config` % $HOME): path.join would normalize a
+  // trailing-slash HOME away from the double-slash echo.
+  const xdg =
+    process.env['XDG_CONFIG_HOME'] || (home ? `${home}/.config` : undefined);
+  if (xdg) {
+    message = message.split(path.join(xdg, 'git', 'config')).join('<home>');
+    // Same verbatim concatenation for the XDG spelling.
+    message = message.split(`${xdg}/git/config`).join('<home>');
+  }
+  // The system gitconfig path is a build-time setting (ETC_GITCONFIG):
+  // Homebrew git reads /opt/homebrew/etc/gitconfig, a source build may
+  // read /usr/local/etc/gitconfig — so redact any path ENDING in
+  // /etc/gitconfig, not just the literal. (\S* may absorb a leading
+  // quote from git's `unable to access '<path>'` form — harmless for
+  // redaction.)
+  message = message.replace(/\S*\/etc\/gitconfig\b/g, '<home>');
+  // include.path pulls config files from ARBITRARY absolute locations
+  // (a team-shared file under the user's home, say), and git echoes the
+  // target in these two shapes — redact the payload wherever it points.
+  // The `(?!<)` keeps the already-labeled `<home>` arms intact.
+  // The path is the message tail in this shape, unquoted — a
+  // space-bearing path would otherwise leak past the first space.
+  message = message.replace(
+    /(bad config line \d+ in file )(?!<)[^\n]+/g,
+    '$1<config>',
+  );
+  // `unable to access '<url>'` is also git's TRANSPORT error on every
+  // fetch/pull/push network failure — only an absolute filesystem path
+  // is a config target; a URL payload stays as-is.
+  message = message.replace(
+    /(unable to access ')(?!<)(\/[^']*)(')/g,
+    '$1<config>$3',
+  );
   return message;
 }
 
@@ -95,16 +146,22 @@ function gitExternalDirs(repoRoot: string): {
     // might parse, and over-redaction cannot leak.
     const m = /^gitdir:\s*(\S[^\n]*?)(?:\r?\n|$)/m.exec(head.text);
     if (!m) return out;
+    // git reads the target with C-string semantics — a NUL truncates it;
+    // Node's fs layer rejects NUL outright, so the redaction key must be
+    // the truncated form git will actually echo.
+    const target = m[1].split('\0')[0] ?? '';
     if (head.truncated && !m[0].endsWith('\n')) {
       // The gitdir line is cut at the head boundary: git echoes the
       // WHOLE target, so an exact partial key would leave the tail on
       // the wire (a multibyte cut could even end it in U+FFFD) — the
-      // prefix-token arm handles it.
-      const key = m[1].replace(/\uFFFD+$/, '');
+      // prefix-token arm handles it. Key on the NUL-truncated target:
+      // git's C-string read never echoes past a NUL, so a key built
+      // from the raw capture would never match.
+      const key = target.replace(/\uFFFD+$/, '');
       if (key) out.truncatedKeys.push(key);
       return out;
     }
-    const gitdir = path.resolve(path.dirname(dotgit), m[1]);
+    const gitdir = path.resolve(path.dirname(dotgit), target);
     const dirs: string[] = [];
     // git echoes the REALPATHED form of these paths (macOS /tmp ->
     // /private/tmp and any user-created symlink component), so redact
@@ -130,11 +187,15 @@ function gitExternalDirs(repoRoot: string): {
     // (a relocated admin dir has no worktrees-named parent).
     const common = readHead(path.join(canonical, 'commondir'), 4096);
     if (common !== null) {
-      if (common.truncated && !common.text.includes('\n')) {
-        const key = common.text.trim().replace(/\uFFFD+$/, '');
+      // Same C-string semantics as the gitdir target: git truncates the
+      // pointer at a NUL, so the redaction key must be the truncated
+      // form git will actually echo.
+      const commonText = common.text.split('\0')[0] ?? '';
+      if (common.truncated && !commonText.includes('\n')) {
+        const key = commonText.trim().replace(/\uFFFD+$/, '');
         if (key) out.truncatedKeys.push(key);
       } else {
-        const first = common.text.split('\n', 1)[0].trim();
+        const first = commonText.split('\n', 1)[0].trim();
         // git resolves the pointer against the gitdir it read; the echo
         // can carry either spelling (the literal the user configured, or
         // the canonical form git realpaths at setup).
@@ -258,6 +319,14 @@ export function sendGitError(
   // remote NAMED after this text must not be claimed by it.
   if (/^remote still configured after removal$/i.test(fullMessage)) {
     res.status(409).json({ error: 'remote_still_configured', message });
+    return;
+  }
+  // Our own remove pre-flight refusal (a plain Error, no git prefix):
+  // the section lives in an include.path'd file git's rm cannot write,
+  // and spawning rm would destroy the tracking refs and upstream keys
+  // before failing — so nothing was mutated.
+  if (/^remote section lives in an included config file$/i.test(fullMessage)) {
+    res.status(409).json({ error: 'remote_section_in_included_file', message });
     return;
   }
   // git dies parsing a configured fetch refspec before mutating anything:

@@ -138,11 +138,59 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     );
   });
 
+  it('fails the removal closed on a killed toplevel probe', async () => {
+    // A killed --show-toplevel is not a bare-repo answer: reading the
+    // origins against the wrong base would refuse every removal from a
+    // subdir cwd, so the kill must surface.
+    runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockRejectedValueOnce(killedDumpError()); // rev-parse --show-toplevel
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+  });
+
+  it('refuses a removal over an unknown-scope upstream survivor', async () => {
+    // Apple Git labels its runtime-prefix defaults file scope `unknown`:
+    // the records are real and git resolves them, so the survivor fold
+    // must see them — a record the fold drops would certify a dangling
+    // upstream this gate exists to refuse.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // listing read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // scope verification
+      .mockResolvedValueOnce('') // tracking-refs read (empty)
+      .mockResolvedValueOnce('') // tracking-refs re-verify (empty)
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // sweep re-verify
+      .mockResolvedValueOnce('unknown\u0000branch.main.remote\norigin\u0000'); // survivor read
+    await expect(gitRemoteRemove('/repo', 'origin')).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(runGit.mock.calls.length).toBe(calls + 14);
+  });
+
   it('fails the removal verification closed on a killed scope read', async () => {
     // pointing-branches snapshot ok → remove ok → probe ok → repo-scope
     // re-read lists nothing → the all-scope verification read is killed:
     // reject, never certify, and never leak the partial dump.
+    const calls = runGit.mock.calls.length;
     runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
@@ -156,11 +204,36 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
+    // The exact call count pins the sequencing: an added or removed read
+    // must not silently retarget the kill.
+    expect(runGit.mock.calls.length).toBe(calls + 9);
   });
 
   it('strips the dump from a killed pre-removal snapshot read', async () => {
     // The snapshot read precedes the mutation: a killed read must reject
     // stripped before `git remote remove` ever runs.
+    const calls = runGit.mock.calls.length;
+    runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockRejectedValueOnce(killedDumpError()); // snapshot read
+    const err = await gitRemoteRemove('/repo', 'origin').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+    expect(runGit.mock.calls.length).toBe(calls + 5);
+  });
+
+  it('strips the dump from a killed origin pre-flight read before rm runs', async () => {
+    // The include-origin pre-flight is the FIRST read of a removal: a
+    // killed dump must reject stripped, and `git remote remove` must
+    // never run on a blind answer.
     const calls = runGit.mock.calls.length;
     runGit.mockRejectedValueOnce(killedDumpError());
     const err = await gitRemoteRemove('/repo', 'origin').catch(
@@ -179,7 +252,12 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // listing empty → all-scope verification empty → tracking-refs read
     // empty → re-verify empty → the branch-key sweep read is killed
     // mid-dump: reject stripped, never certify past the guard.
+    const calls = runGit.mock.calls.length;
     runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce('worktree\u0000branch.feat.remote\norigin\u0000')
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
@@ -196,6 +274,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
+    expect(runGit.mock.calls.length).toBe(calls + 12);
   });
 
   it('strips the dump from a killed upstream-survivor read after cleanup', async () => {
@@ -204,7 +283,12 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // re-verify empty → worktree sweep read → worktree re-verify → the
     // upstream-survivor read is killed mid-dump: reject stripped, never
     // certify past the guard.
+    const calls = runGit.mock.calls.length;
     runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
@@ -218,6 +302,26 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     const err = await gitRemoteRemove('/repo', 'origin').catch(
       (e: unknown) => e,
     );
+    expect(err).toMatchObject({ killed: true });
+    expect((err as { stdout?: unknown }).stdout).toBe('');
+    expect((err as { stderr?: unknown }).stderr).toBe(
+      'fatal: unable to read config file',
+    );
+    expect(runGit.mock.calls.length).toBe(calls + 14);
+  });
+
+  it('fails the listing closed on a killed promisor badge read', async () => {
+    // A promisor-carrying section costs one extra read; a KILLED badge
+    // read is not a negative answer — the listing must reject rather
+    // than render the remote without the badge the remove confirm
+    // relies on, and the partial dump must not leave the module.
+    runGit
+      .mockResolvedValueOnce('.git\n') // rev-parse probe
+      .mockResolvedValueOnce(
+        'local\u0000remote.origin.url\nhttps://example.com/x.git\u0000local\u0000remote.origin.promisor\ntrue\u0000',
+      ) // listing dump: one promisor-carrying section
+      .mockRejectedValueOnce(killedDumpError()); // the badge read
+    const err = await fetchGitRemotes('/repo').catch((e: unknown) => e);
     expect(err).toMatchObject({ killed: true });
     expect((err as { stdout?: unknown }).stdout).toBe('');
     expect((err as { stderr?: unknown }).stderr).toBe(
@@ -268,7 +372,12 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // all-scope verification empty → the tracking-refs read is killed
     // mid-dump: reject stripped — "no refs" is not an answer a killed
     // read may produce.
+    const calls = runGit.mock.calls.length;
     runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
@@ -283,13 +392,19 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
+    expect(runGit.mock.calls.length).toBe(calls + 10);
   });
 
   it('strips the dump from a killed tracking-refs re-verification', async () => {
     // … tracking-refs read finds ONE ref → the delete runs → the
     // re-verify read is killed mid-dump: reject stripped, never certify
     // the phantom group as cleaned.
+    const calls = runGit.mock.calls.length;
     runGit
+      .mockResolvedValueOnce('local\u0000file:.git/config\u0000core.x\ny\u0000') // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('.git\n') // rev-parse probe
@@ -306,5 +421,6 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect((err as { stderr?: unknown }).stderr).toBe(
       'fatal: unable to read config file',
     );
+    expect(runGit.mock.calls.length).toBe(calls + 12);
   });
 });

@@ -18,9 +18,14 @@ import type {
 // settle under `act` in jsdom. Render the trigger and content inline instead
 // so the action wiring can be exercised directly.
 vi.mock('./ui/popover', async () => {
-  const { createElement, createContext, forwardRef, useContext } = await import(
-    'react'
-  );
+  const {
+    createElement,
+    createContext,
+    forwardRef,
+    useContext,
+    useEffect,
+    useRef,
+  } = await import('react');
   interface PopoverOpenState {
     open: boolean;
     onOpenChange?: (open: boolean) => void;
@@ -34,21 +39,32 @@ vi.mock('./ui/popover', async () => {
     }
   >(({ children, onEscapeKeyDown }, ref) => {
     // Like Radix, the content unmounts when the popover closes.
-    const openContext = useContext(OpenContext);
-    if (!openContext.open) return null;
+    const { open: popoverOpen, onOpenChange } = useContext(OpenContext);
+    const escapeHandlerRef = useRef(onEscapeKeyDown);
+    escapeHandlerRef.current = onEscapeKeyDown;
+    // Like Radix's DismissableLayer (react-use-escape-keydown): Escape is
+    // handled on the owner document in the CAPTURE phase — ahead of any
+    // handler on the focused input — and only `event.key` is checked (no
+    // IME guard), so the component's preserveImeEscape mask is exercised
+    // exactly the way the real layer sees it. An un-prevented Escape
+    // dismisses the popover.
+    useEffect(() => {
+      if (!popoverOpen) return;
+      const handler = (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        escapeHandlerRef.current?.(e);
+        if (!e.defaultPrevented) onOpenChange?.(false);
+      };
+      document.addEventListener('keydown', handler, { capture: true });
+      return () =>
+        document.removeEventListener('keydown', handler, { capture: true });
+    }, [popoverOpen, onOpenChange]);
+    if (!popoverOpen) return null;
     return createElement(
       'div',
       {
         'data-test-popover-content': '',
         ref,
-        onKeyDown: (e: KeyboardEvent) => {
-          if (e.key === 'Escape') {
-            onEscapeKeyDown?.(e);
-            // Like Radix's DismissableLayer: an un-prevented Escape
-            // dismisses the popover.
-            if (!e.defaultPrevented) openContext.onOpenChange?.(false);
-          }
-        },
       },
       children,
     );
@@ -3837,6 +3853,68 @@ describe('BranchPickerPopover remotes view', () => {
     ).toBeNull();
     // The view tier prevented it too: still no popover dismissal.
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('lets an IME-owned Escape cancel the composition without tearing down the view', async () => {
+    const onOpenChange = vi.fn();
+    await openRemotesView({ onOpenChange });
+    setInput('remote-add-name', 'shangyou');
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-name"]',
+    );
+    // A composition-cancelling Escape (isComposing) must be masked from
+    // the capture-phase dismiss layer: no view teardown, no dismissal,
+    // and the native composition cancel is not suppressed. The mask
+    // restores the key before the event reaches the focused input.
+    const composing = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(composing);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(composing.defaultPrevented).toBe(false);
+    expect(composing.key).toBe('Escape');
+    expect(nameInput?.value).toBe('shangyou');
+    // The WebKit shape: keyCode 229 with isComposing already false.
+    const webkit = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(webkit);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(webkit.defaultPrevented).toBe(false);
+    // A plain Escape still takes the view tier — the mask only covers
+    // IME-owned keydowns.
+    const plain = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      nameInput?.dispatchEvent(plain);
+    });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    ).toBeNull();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(plain.defaultPrevented).toBe(true);
   });
 
   it('dismisses the popover on an un-prevented Escape from the branches view', async () => {

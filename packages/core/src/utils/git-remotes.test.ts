@@ -755,6 +755,12 @@ describe('fetchGitRemotes config parsing', () => {
     expect(remotes[0]?.fetchUrl).toContain('remote.fake.url');
   });
 
+  // The promisor value is resolved by the host git itself
+  // (`--type=bool`), so these rows only pin the DELEGATION — a spelling
+  // whose truth is stable across git's grammar versions. Boundary
+  // integers belong to git's own tests: the maybe_bool bound differs
+  // across git versions and builds, so `2147483648` and `2g` have no
+  // host-stable expectation.
   it.each([
     ['0', false],
     ['no', false],
@@ -765,34 +771,16 @@ describe('fetchGitRemotes config parsing', () => {
     ['yes', true],
     ['on', true],
     ['ON', true],
-    // git's integer grammar includes hex and k/m/g unit factors; `1e1`,
-    // invalid octals and quoted trailing padding make git die at read
-    // time, so the listing certifies neither. strtoimax skips LEADING
-    // whitespace, and the maybe_bool bound is [INT_MIN, INT_MAX].
+    ['1', true],
     ['0x1', true],
     ['0x0', false],
     ['1k', true],
+    // Invalid-octal / trailing-content spellings die in git's parser, so
+    // the per-key read errors and the badge stays false.
     ['08', false],
     ['1e1', false],
-    [' 1', true],
     [' true ', false],
-    [' 1 ', false],
-    // strtoimax skips leading whitespace but takes the sign ATTACHED to
-    // the digits; uppercase hex/unit forms; maybe_bool bounds to
-    // [INT_MIN, INT_MAX]. Anything its parser does not consume dies in
-    // git, so the listing certifies neither for those spellings.
     ['+ 1', false],
-    ['- 1', false],
-    ['+1', true],
-    ['\u00a01', false],
-    ['1K', true],
-    ['0X1', true],
-    ['2147483647', true],
-    ['2147483648', false],
-    ['-2147483648', true],
-    ['-2147483649', false],
-    ['1g', true],
-    ['2g', false],
   ])('reads promisor=%j as %s', async (value, expected) => {
     const dir = makeRepo();
     git(dir, 'config', 'remote.origin.url', 'https://example.com/o/r.git');
@@ -822,6 +810,34 @@ describe('fetchGitRemotes config parsing', () => {
     git(dir, 'config', 'remote.origin.promisor', '');
     const remotes = await fetchGitRemotes(dir, fixtureEnv);
     expect(remotes[0]?.promisor).toBe(false);
+  });
+
+  it('reads a multi-valued promisor additively, like git', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', 'remote.origin.url', 'https://example.com/o/r.git');
+    // git registers a promisor remote on ANY true record — a
+    // `[true, false]` pair still lazy-fetches — so the badge must not
+    // take the last value.
+    git(dir, 'config', '--add', 'remote.origin.promisor', 'true');
+    git(dir, 'config', '--add', 'remote.origin.promisor', 'false');
+    const remotes = await fetchGitRemotes(dir, fixtureEnv);
+    expect(remotes[0]?.promisor).toBe(true);
+    git(dir, 'config', '--unset-all', 'remote.origin.promisor');
+    git(dir, 'config', '--add', 'remote.origin.promisor', 'false');
+    git(dir, 'config', '--add', 'remote.origin.promisor', '0');
+    const allFalse = await fetchGitRemotes(dir, fixtureEnv);
+    expect(allFalse[0]?.promisor).toBe(false);
+  });
+
+  it('badges a remote whose promisor key lives only in the global config', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', 'remote.origin.url', 'https://example.com/o/r.git');
+    // git registers promisor remotes cross-scope; the badge read
+    // resolves the same way, so an inherited promisor key on a listed
+    // (repository-scope) remote must still mark it.
+    git(dir, 'config', '--global', 'remote.origin.promisor', 'true');
+    const remotes = await fetchGitRemotes(dir, fixtureEnv);
+    expect(remotes[0]?.promisor).toBe(true);
   });
 
   it('does not certify an unparseable promisor value as true', async () => {
@@ -862,7 +878,7 @@ describe('fetchGitRemotes repository scope', () => {
     );
   });
 
-  it('refuses success when an included half of a split section survives', async () => {
+  it('refuses a split section before git rm can destroy anything', async () => {
     const dir = makeRepo();
     const inc = path.join(dir, 'included.gitconfig');
     fs.writeFileSync(
@@ -871,15 +887,69 @@ describe('fetchGitRemotes repository scope', () => {
     );
     git(dir, 'config', 'include.path', inc);
     git(dir, 'config', 'remote.dup.url', 'https://example.com/from-local.git');
-    // `git remote remove` edits only .git/config and exits 0 here, leaving
-    // the included half live: the verification re-read must catch it.
-    const err = await gitRemoteRemove(dir, 'dup', fixtureEnv).catch(
-      (e: unknown) => e,
+    git(dir, 'branch', 'feat');
+    git(dir, 'config', 'branch.feat.remote', 'dup');
+    git(dir, 'update-ref', 'refs/remotes/dup/main', 'HEAD');
+    // git's rm would edit only .git/config, leaving the included half
+    // live — and it deletes the tracking refs and the branch keys BEFORE
+    // the section write it cannot complete, so the refusal must come
+    // before rm runs at all.
+    // The refusal is a pure pre-flight: a second attempt answers the
+    // same way, with the state still intact.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const err = await gitRemoteRemove(dir, 'dup', fixtureEnv).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(
+        /^remote section lives in an included config file$/,
+      );
+    }
+    // Nothing was destroyed: the section (both halves), the tracking ref
+    // and the branch key all survive a refused removal.
+    expect(git(dir, 'config', '--get-all', 'remote.dup.url')).toBe(
+      'https://example.com/from-include.git\nhttps://example.com/from-local.git\n',
     );
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(
-      /remote still configured after removal/,
+    expect(git(dir, 'config', '--get', 'branch.feat.remote')).toBe('dup\n');
+    expect(git(dir, 'for-each-ref', 'refs/remotes/dup')).toBe(
+      `${git(dir, 'rev-parse', 'HEAD').trim()} commit\trefs/remotes/dup/main\n`,
     );
+  });
+
+  it('refuses an include-held section before rm, and the retry refuses identically', async () => {
+    const dir = makeRepo();
+    const inc = path.join(dir, 'included.gitconfig');
+    fs.writeFileSync(
+      inc,
+      '[remote "inc"]\n\turl = https://example.com/inc.git\n\tfetch = +refs/heads/*:refs/remotes/inc/*\n',
+    );
+    git(dir, 'config', 'include.path', inc);
+    git(dir, 'branch', 'feat');
+    git(dir, 'config', 'branch.feat.remote', 'inc');
+    git(dir, 'config', 'branch.feat.merge', 'refs/heads/main');
+    git(dir, 'update-ref', 'refs/remotes/inc/main', 'HEAD');
+    // git's rm deletes the tracking refs and the branch keys BEFORE it
+    // fails renaming a section it cannot write, and the row stays listed
+    // (the include file is intact), so every retry would repeat the
+    // destruction. The pre-flight must refuse before rm runs — leaving
+    // the repository untouched, and a retry must answer the same way.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const err = await gitRemoteRemove(dir, 'inc', fixtureEnv).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe(
+        'remote section lives in an included config file',
+      );
+    }
+    expect(git(dir, 'config', '--get', 'branch.feat.remote')).toBe('inc\n');
+    expect(git(dir, 'config', '--get', 'branch.feat.merge')).toBe(
+      'refs/heads/main\n',
+    );
+    expect(git(dir, 'for-each-ref', 'refs/remotes/inc')).toContain(
+      'refs/remotes/inc/main',
+    );
+    expect(git(dir, 'remote')).toBe('inc\n');
   });
 
   it('lists a worktree-scope remote from the worktree only', async () => {
@@ -976,10 +1046,14 @@ describe('fetchGitRemotes repository scope', () => {
       'https://example.com/wt.git',
     );
     git(wt, 'branch', 'feat');
-    // git resolves the LAST value of a multi-valued key; both entries
-    // point at the removed remote, so both may go (a plain --unset exits
-    // 5 here).
-    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'wtonly');
+    // git resolves the LAST value of a multi-valued key — so the removed
+    // remote goes last and the branch stays fetch-pointed. The entries
+    // MUST differ: only a distinct surviving entry pins the
+    // `--fixed-value` half of the unset (a plain `--unset-all` would
+    // silently take the surviving remote's entry too). The surviving
+    // entry names a real remote, or the unmask gate refuses the removal.
+    git(wt, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'upstream');
     git(wt, 'config', '--worktree', '--add', 'branch.feat.remote', 'wtonly');
     git(
       wt,
@@ -999,8 +1073,12 @@ describe('fetchGitRemotes repository scope', () => {
     );
 
     const remotes = await gitRemoteRemove(wt, 'wtonly', fixtureEnv);
-    expect(remotes).toEqual([]);
-    expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    // The surviving remote's entry is kept — only the removed remote's
+    // entry was value-matched away.
+    expect(
+      git(wt, 'config', '--worktree', '--get-all', 'branch.feat.remote'),
+    ).toBe('upstream\n');
     expect(git(wt, 'config', '--list')).not.toContain('branch.feat.merge');
   });
 
@@ -1211,6 +1289,215 @@ describe('fetchGitRemotes repository scope', () => {
     expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
       'origin\n',
     );
+  });
+
+  it('sweeps the removed remote from a multi-valued local upstream key', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'branch', 'feat');
+    // branch.feat.remote = [upstream, origin]: the LAST value points at
+    // the removed remote, so the branch is pointed — but git's rm skips
+    // a multi-valued key with a warning, leaving every entry behind. The
+    // sweep must take only the removed remote's entries (--fixed-value):
+    // a plain --unset-all would cut the surviving remote's entry too.
+    git(dir, 'config', '--local', '--add', 'branch.feat.remote', 'upstream');
+    git(dir, 'config', '--local', '--add', 'branch.feat.remote', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['upstream']);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.feat.remote'),
+    ).toBe('upstream\n');
+  });
+
+  it('refuses when the removal unmasks an inherited upstream key naming a gone remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // The local record shadows a GLOBAL one naming a remote with no
+    // section anywhere: git's rm unsets the local half and the dangling
+    // inherited record surfaces — main's upstream now resolves to a
+    // ghost, which the removal must not certify either.
+    git(dir, 'config', '--global', 'branch.main.remote', 'ghost');
+    git(dir, 'config', '--local', 'branch.main.remote', 'upstream');
+    await expect(gitRemoteRemove(dir, 'upstream', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
+      'ghost\n',
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.main.remote',
+    );
+  });
+
+  it('refuses when the removal unmasks an inherited pushRemote naming a gone remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // The push half of the unmask gate: the local pushRemote shadows a
+    // GLOBAL one naming a remote with no section anywhere.
+    git(dir, 'config', '--global', 'branch.main.pushremote', 'ghost');
+    git(dir, 'config', '--local', 'branch.main.pushremote', 'upstream');
+    await expect(gitRemoteRemove(dir, 'upstream', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(
+      git(dir, 'config', '--global', '--get', 'branch.main.pushremote'),
+    ).toBe('ghost\n');
+  });
+
+  it('certifies an unmasked inherited upstream key naming a surviving remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // Same shape, but the surfaced record names a remote that still
+    // exists: git's own shadowing semantics, not a dangling upstream.
+    git(dir, 'config', '--global', 'branch.main.remote', 'origin');
+    git(dir, 'config', '--local', 'branch.main.remote', 'upstream');
+    const remotes = await gitRemoteRemove(dir, 'upstream', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['origin']);
+    expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe('origin\n');
+  });
+
+  it('certifies an unmasked local-repository pseudo-remote (.)', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // branch.main.remote = [., origin]: the sweep removes origin's
+    // entry, and git's `.` spelling — the local repository, needing no
+    // section — is a VALID surviving upstream, not a dangling one.
+    git(dir, 'config', '--local', '--add', 'branch.main.remote', '.');
+    git(dir, 'config', '--local', '--add', 'branch.main.remote', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.main.remote'),
+    ).toBe('.\n');
+  });
+
+  it('does not refuse a completed removal over an include-held inert merge key', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'branch', 'feat');
+    git(dir, 'config', 'branch.feat.remote', 'origin');
+    // The merge key lives in an include.path'd file: the sweep cannot
+    // edit it, and a merge-only survivor resolves to "." and is inert —
+    // the removal must certify, not refuse.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "feat"]\n\tmerge = refs/heads/main\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'config', '--get', 'branch.feat.merge')).toBe(
+      'refs/heads/main\n',
+    );
+  });
+
+  it('refuses when the removal unmasks an inherited pushDefault naming a gone remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The local pushDefault shadows a GLOBAL one naming a remote with no
+    // section anywhere: the sweep unsets the local copy and the dangling
+    // inherited record surfaces — every push without an explicit
+    // upstream would resolve to a ghost.
+    git(dir, 'config', '--global', 'remote.pushDefault', 'gone2');
+    git(dir, 'config', '--local', 'remote.pushDefault', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    expect(git(dir, 'config', '--global', '--get', 'remote.pushdefault')).toBe(
+      'gone2\n',
+    );
+  });
+
+  it('certifies an unmasked pushDefault naming a surviving remote', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // Same shape, but the surfaced value names a remote that exists.
+    git(dir, 'config', '--global', 'remote.pushDefault', 'origin');
+    git(dir, 'config', '--local', 'remote.pushDefault', 'upstream');
+    const remotes = await gitRemoteRemove(dir, 'upstream', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['origin']);
+    expect(git(dir, 'config', '--get', 'remote.pushdefault')).toBe('origin\n');
+  });
+
+  it('ignores a pre-existing dangling inherited pushDefault the removal never shadowed', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // The global pushDefault pointed at a ghost BEFORE the removal and
+    // no editable copy shadowed it — not this removal's doing.
+    git(dir, 'config', '--global', 'remote.pushDefault', 'ghost');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'config', '--global', '--get', 'remote.pushdefault')).toBe(
+      'ghost\n',
+    );
+  });
+
+  it('certifies an unmasked upstream naming a URL, not a section', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // git resolves a URL-valued branch.<b>.remote as an ANONYMOUS remote
+    // — no section needed — so the unmasked inherited URL is a valid
+    // upstream, not a dangling name.
+    git(
+      dir,
+      'config',
+      '--global',
+      'branch.main.remote',
+      'https://example.com/inherited/x.git',
+    );
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe(
+      'https://example.com/inherited/x.git\n',
+    );
+  });
+
+  it('certifies an unmasked upstream naming a local path, not a section', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // A path-valued branch.<b>.remote is git's third sectionless form:
+    // an anonymous remote naming a local repository.
+    git(dir, 'config', '--global', 'branch.main.remote', dir);
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    const remotes = await gitRemoteRemove(dir, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'config', '--get', 'branch.main.remote')).toBe(`${dir}\n`);
+  });
+
+  it('certifies an unmasked scp-like pushDefault', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'upstream', 'https://example.com/u/r.git');
+    // The scp-like `[user@]host:path` spelling resolves without a
+    // section the same way.
+    git(
+      dir,
+      'config',
+      '--global',
+      'remote.pushDefault',
+      'git@example.com:me/repo.git',
+    );
+    git(dir, 'config', '--local', 'remote.pushDefault', 'upstream');
+    const remotes = await gitRemoteRemove(dir, 'upstream', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'config', '--get', 'remote.pushdefault')).toBe(
+      'git@example.com:me/repo.git\n',
+    );
+  });
+
+  it('removes a remote from a subdirectory cwd of the worktree', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // git prints --show-origin paths relative to the worktree TOPLEVEL
+    // (it chdirs during setup), so a subdir cwd must not fail the
+    // editable-origin check — every removal would refuse otherwise.
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub);
+    const remotes = await gitRemoteRemove(sub, 'origin', fixtureEnv);
+    expect(remotes).toEqual([]);
+    expect(git(dir, 'remote')).toBe('');
   });
 
   it('sweeps orphaned tracking refs a refspec-less worktree removal leaves behind', async () => {

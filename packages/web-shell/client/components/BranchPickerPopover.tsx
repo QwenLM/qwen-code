@@ -587,6 +587,42 @@ export function BranchPickerPopover({
     void fetchBranches();
   }, [open, data, effectiveStatus, listingFetchedAt, fetchBranches]);
 
+  // Radix's dismiss layer listens for Escape on the owner document in the
+  // capture phase and checks only `event.key === 'Escape'` (no IME guard),
+  // so a composition-cancelling Escape in the search/add inputs would both
+  // tear down the view (or the popover) and — via the layer's
+  // preventDefault — swallow the native composition cancel. Mask the key
+  // from the capture-phase listener and restore it before the event
+  // reaches the focused input, mirroring DialogShell.preserveImeEscape.
+  useEffect(() => {
+    if (!open) return;
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, [open]);
+
   const showStatus = useCallback(
     (msg: string, type: 'info' | 'error' | 'success' | 'warning' = 'info') => {
       setStatusMsg(msg);
@@ -1868,21 +1904,31 @@ function RemotesView({
                   : escapeNameChars(r.pushUrl);
               const extras = remoteExtras(r, t);
               return (
-                <div key={r.name} className={styles.remoteRow}>
+                <div
+                  key={r.name}
+                  className={styles.remoteRow}
+                  data-testid="remote-row"
+                >
                   <GlobeIcon size={13} className={styles.itemIcon} />
                   <span
                     className={styles.remoteName}
                     title={escapedName ?? displayName}
+                    data-testid="remote-name"
                   >
                     {rowName}
                   </span>
                   {extras && (
-                    <span className={styles.remoteBadge} title={extras}>
+                    <span
+                      className={styles.remoteBadge}
+                      title={extras}
+                      data-testid="remote-badge"
+                    >
                       {extras}
                     </span>
                   )}
                   <span
                     className={styles.remoteUrl}
+                    data-testid="remote-url"
                     title={
                       r.pushUrl !== r.fetchUrl
                         ? `${t('branchPicker.remotes.urlTooltipFetch', { url: fetchTitle })}\n${t('branchPicker.remotes.urlTooltipPush', { url: pushTitle })}`
@@ -1927,7 +1973,7 @@ function RemotesView({
               );
             })
           )}
-          <div className={styles.addRemoteForm}>
+          <div className={styles.addRemoteForm} data-testid="remote-add-form">
             <input
               className={styles.inlineInputField}
               placeholder={t('branchPicker.remotes.namePlaceholder')}

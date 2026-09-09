@@ -475,6 +475,11 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
       ['remote still configured after removal', 409, 'remote_still_configured'],
       [
+        'remote section lives in an included config file',
+        409,
+        'remote_section_in_included_file',
+      ],
+      [
         'remote already configured in an inherited scope',
         409,
         'remote_shadows_inherited',
@@ -656,6 +661,234 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         expect(String(outAlias.body['message'])).toContain(
           '<workspace>/config',
         );
+
+        // Inherited config files git echoes by absolute path when one is
+        // malformed — the child env always reads the defaults (gitEnv
+        // strips the redirectors), so they are redacted too.
+        const home = process.env['HOME'];
+        expect(home).toBeTruthy();
+        const outCfg = classifyAt(
+          wt,
+          `fatal: bad config line 1 in file ${path.join(home!, '.gitconfig')}`,
+        );
+        // The unclassified fall-through carries the text in `error`.
+        const cfgText = String(outCfg.body['error'] ?? outCfg.body['message']);
+        expect(cfgText).not.toContain(home!);
+        expect(cfgText).toContain('<home>');
+
+        // A NUL byte in the gitdir target: git reads it with C-string
+        // semantics (truncated at the NUL), while Node's fs layer
+        // rejects NUL — the redaction key must be the truncated form
+        // git will actually echo.
+        fs.writeFileSync(
+          path.join(wt, '.git'),
+          Buffer.concat([
+            Buffer.from('gitdir: '),
+            Buffer.from(wtGit),
+            Buffer.from([0]),
+            Buffer.from('junk\n'),
+          ]),
+        );
+        const outNul = classifyAt(
+          wt,
+          `error: could not lock config file ${wtGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outNul.body['message'])).not.toContain(wtGit);
+        expect(String(outNul.body['message'])).toContain('<workspace>/config');
+
+        // The NUL-truncated target with the head cut mid-padding: the
+        // truncated-head arm must key on the NUL-normalized form too —
+        // git's C-string echo never contains the NUL a raw-capture key
+        // would require, so the prefix token would never match.
+        const padWt = path.join(root, 'pad-wt');
+        fs.mkdirSync(padWt, { recursive: true });
+        fs.writeFileSync(
+          path.join(padWt, '.git'),
+          Buffer.concat([
+            Buffer.from('gitdir: '),
+            Buffer.from(wtGit),
+            Buffer.from([0]),
+            Buffer.from('x'.repeat(16 * 1024)),
+          ]),
+        );
+        const outPad = classifyAt(
+          padWt,
+          `error: could not lock config file ${wtGit}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outPad.body['message'])).not.toContain(wtGit);
+        expect(String(outPad.body['message'])).toContain('<workspace>');
+
+        // The commondir pointer gets the same C-string NUL truncation:
+        // a NUL-bearing pointer to a sibling outside the worktrees
+        // heuristic must still redact the path git resolves.
+        const gd = path.join(root, 'gd');
+        fs.mkdirSync(gd, { recursive: true });
+        fs.writeFileSync(
+          path.join(gd, 'commondir'),
+          Buffer.concat([
+            Buffer.from('../main2'),
+            Buffer.from([0]),
+            Buffer.from('junk\n'),
+          ]),
+        );
+        const nulCommonWt = path.join(root, 'nul-common-wt');
+        fs.mkdirSync(nulCommonWt, { recursive: true });
+        fs.writeFileSync(path.join(nulCommonWt, '.git'), `gitdir: ${gd}\n`);
+        const outCommon = classifyAt(
+          nulCommonWt,
+          `error: could not lock config file ${path.join(root, 'main2')}/config\nerror: Could not remove config section 'remote.origin'`,
+        );
+        expect(String(outCommon.body['message'])).not.toContain('main2');
+        expect(String(outCommon.body['message'])).toContain(
+          '<workspace>/config',
+        );
+
+        // git's xdg_config_home resolution: a set-but-EMPTY
+        // $XDG_CONFIG_HOME falls back to ~/.config (it is not a relative
+        // 'git/config'), and $XDG_CONFIG_HOME is honored with no $HOME
+        // at all — the redaction must mirror both.
+        const prevHome = process.env['HOME'];
+        const prevXdg = process.env['XDG_CONFIG_HOME'];
+        try {
+          process.env['XDG_CONFIG_HOME'] = '';
+          const xdgFallback = path.join(home!, '.config', 'git', 'config');
+          const outEmpty = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${xdgFallback}`,
+          );
+          const emptyText = String(
+            outEmpty.body['error'] ?? outEmpty.body['message'],
+          );
+          expect(emptyText).toContain('<home>');
+          expect(emptyText).not.toContain(home!);
+
+          process.env['XDG_CONFIG_HOME'] = path.join(root, 'xdg');
+          delete process.env['HOME'];
+          const xdgOnly = path.join(root, 'xdg', 'git', 'config');
+          const outXdg = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${xdgOnly}`,
+          );
+          const xdgText = String(
+            outXdg.body['error'] ?? outXdg.body['message'],
+          );
+          expect(xdgText).toContain('<home>');
+          expect(xdgText).not.toContain(path.join(root, 'xdg'));
+
+          // git concatenates HOME/XDG verbatim (`%s/.gitconfig` % $HOME):
+          // a trailing-slash value echoes a double-slash spelling that a
+          // path.join'd key never matches.
+          const fakeHome = path.join(root, 'home');
+          process.env['HOME'] = `${fakeHome}/`;
+          delete process.env['XDG_CONFIG_HOME'];
+          const outSlash = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeHome}//.gitconfig`,
+          );
+          const slashText = String(
+            outSlash.body['error'] ?? outSlash.body['message'],
+          );
+          expect(slashText).toContain('<home>');
+          expect(slashText).not.toContain(fakeHome);
+
+          // The XDG fallback keeps the verbatim junction too: git builds
+          // it as `%s/.config/git/config` % $HOME, double slash and all.
+          const outFallback = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeHome}//.config/git/config`,
+          );
+          const fallbackText = String(
+            outFallback.body['error'] ?? outFallback.body['message'],
+          );
+          expect(fallbackText).toContain('<home>');
+          expect(fallbackText).not.toContain(fakeHome);
+
+          const fakeXdg = path.join(root, 'xdg2');
+          process.env['XDG_CONFIG_HOME'] = `${fakeXdg}/`;
+          const outXdgSlash = classifyAt(
+            wt,
+            `fatal: bad config line 1 in file ${fakeXdg}//git/config`,
+          );
+          const xdgSlashText = String(
+            outXdgSlash.body['error'] ?? outXdgSlash.body['message'],
+          );
+          expect(xdgSlashText).toContain('<home>');
+          expect(xdgSlashText).not.toContain(fakeXdg);
+        } finally {
+          if (prevHome === undefined) delete process.env['HOME'];
+          else process.env['HOME'] = prevHome;
+          if (prevXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
+          else process.env['XDG_CONFIG_HOME'] = prevXdg;
+        }
+
+        // include.path pulls config files from arbitrary locations, and
+        // git echoes those targets in the same two shapes — redact the
+        // payload wherever it points (the default locations keep their
+        // <home> label: the shape arms run after them and skip '<').
+        const shared = path.join(root, 'team', 'company.gitconfig');
+        const outInclude = classifyAt(
+          wt,
+          `fatal: bad config line 3 in file ${shared}`,
+        );
+        const includeText = String(
+          outInclude.body['error'] ?? outInclude.body['message'],
+        );
+        expect(includeText).toContain('<config>');
+        expect(includeText).not.toContain(root);
+        const outAccess = classifyAt(
+          wt,
+          `fatal: unable to access '${shared}': Permission denied`,
+        );
+        const accessText = String(
+          outAccess.body['error'] ?? outAccess.body['message'],
+        );
+        expect(accessText).toContain('<config>');
+        expect(accessText).not.toContain(root);
+
+        // git echoes the config path UNQUOTED in the bad-config-line
+        // shape — a space-bearing path must redact whole, not to the
+        // first space.
+        const spaced = path.join(root, 'team dir', 'company.gitconfig');
+        const outSpaced = classifyAt(
+          wt,
+          `fatal: bad config line 3 in file ${spaced}`,
+        );
+        const spacedText = String(
+          outSpaced.body['error'] ?? outSpaced.body['message'],
+        );
+        // The whole path goes, tail included.
+        expect(spacedText).toBe('fatal: bad config line 3 in file <config>');
+
+        // The unable-to-access shape is also git's TRANSPORT error: a
+        // remote URL is not a config target and must survive verbatim.
+        const outUrl = classifyAt(
+          wt,
+          "fatal: unable to access 'https://example.invalid/org/repo.git/': Could not resolve host",
+        );
+        const urlText = String(outUrl.body['error'] ?? outUrl.body['message']);
+        expect(urlText).toContain('https://example.invalid/org/repo.git/');
+        expect(urlText).not.toContain('<config>');
+
+        // The system gitconfig path is build-time (ETC_GITCONFIG) —
+        // Homebrew git reads /opt/homebrew/etc/gitconfig — so any path
+        // ENDING in /etc/gitconfig redacts, prefix included.
+        const outEtc = classifyAt(
+          wt,
+          'fatal: bad config line 1 in file /etc/gitconfig',
+        );
+        const etcText = String(outEtc.body['error'] ?? outEtc.body['message']);
+        expect(etcText).toContain('<home>');
+        expect(etcText).not.toContain('/etc/gitconfig');
+        const outBrew = classifyAt(
+          wt,
+          'fatal: bad config line 1 in file /opt/homebrew/etc/gitconfig',
+        );
+        const brewText = String(
+          outBrew.body['error'] ?? outBrew.body['message'],
+        );
+        expect(brewText).toContain('<home>');
+        expect(brewText).not.toContain('/opt/homebrew');
+        expect(brewText).not.toContain('etc/gitconfig');
 
         // A gitdir line longer than the read head: git echoes the WHOLE
         // target, so the truncated capture redacts as a prefix token —

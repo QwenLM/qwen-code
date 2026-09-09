@@ -110,7 +110,7 @@ test('remotes panel surfaces a duplicate add as an error', async ({
     popover.getByText('error: remote origin already exists.'),
   ).toBeVisible();
   // The failed add changed nothing: still exactly one remote row.
-  await expect(popover.locator('[class*="remoteRow"]')).toHaveCount(1);
+  await expect(popover.locator('[data-testid="remote-row"]')).toHaveCount(1);
   await expect
     .poll(async () =>
       page.evaluate(
@@ -155,15 +155,15 @@ test('remotes panel search filters by name and URL', async ({
   await page.goto('/');
 
   const popover = await openRemotesPanel(page);
-  await expect(popover.locator('[class*="remoteRow"]')).toHaveCount(2);
+  await expect(popover.locator('[data-testid="remote-row"]')).toHaveCount(2);
 
-  await popover.locator('input[placeholder="Search remotes"]').fill('upstream');
-  await expect(popover.locator('[class*="remoteRow"]')).toHaveCount(1);
+  await popover.locator('[data-testid="remotes-search"]').fill('upstream');
+  await expect(popover.locator('[data-testid="remote-row"]')).toHaveCount(1);
   await expect(popover.getByText('upstream')).toBeVisible();
 
   // A URL substring matches too.
-  await popover.locator('input[placeholder="Search remotes"]').fill('o/r.git');
-  await expect(popover.locator('[class*="remoteRow"]')).toHaveCount(1);
+  await popover.locator('[data-testid="remotes-search"]').fill('o/r.git');
+  await expect(popover.locator('[data-testid="remote-row"]')).toHaveCount(1);
   await expect(popover.getByText('origin')).toBeVisible();
 });
 
@@ -180,7 +180,7 @@ test('the add form fits inside the popover clip', async ({
   // Geometry, not fill()/click(): Playwright scrolls the overflow container
   // into place before interacting, so an off-clip Add button still passes a
   // click-based assertion.
-  const form = popover.locator('[class*="addRemoteForm"]');
+  const form = popover.locator('[data-testid="remote-add-form"]');
   const formBox = await form.boundingBox();
   const popBox = await popover.boundingBox();
   expect(formBox).toBeTruthy();
@@ -228,20 +228,23 @@ test('the remotes list keeps rows and chrome inside the clip while scrolled', as
 
   const popover = await openRemotesPanel(page);
 
-  const rows = popover.locator('[class*="remoteRow"]');
+  const rows = popover.locator('[data-testid="remote-row"]');
   await expect(rows).toHaveCount(15);
   // Preconditions of the shrink witness: row 0's badge is what makes the
   // row overflow, and its name is what gets clipped.
-  await expect(rows.nth(0).locator('[class*="remoteBadge"]')).toBeVisible();
+  await expect(
+    rows.nth(0).locator('[data-testid="remote-badge"]'),
+  ).toBeVisible();
   expect(
     await rows
       .nth(0)
-      .locator('[class*="remoteName"]')
+      .locator('[data-testid="remote-name"]')
       .evaluate((el) => el.scrollWidth > el.clientWidth),
   ).toBe(true);
   // The URL keeps a floor: shrink must not lay it out at zero width.
   expect(
-    (await rows.nth(0).locator('[class*="remoteUrl"]').boundingBox())!.width,
+    (await rows.nth(0).locator('[data-testid="remote-url"]').boundingBox())!
+      .width,
   ).toBeGreaterThan(0);
 
   // Measure the clip on the settled layout (rows rendered), not on the
@@ -266,10 +269,10 @@ test('the remotes list keeps rows and chrome inside the clip while scrolled', as
 
   // The sticky header and add form must stay pinned inside the clip at
   // both scroll extremes.
-  const list = popover.locator('[class*="addRemoteForm"]').locator('..');
+  const list = popover.locator('[data-testid="remote-add-form"]').locator('..');
   const chromeInClip = async () => {
     const formBox = await popover
-      .locator('[class*="addRemoteForm"]')
+      .locator('[data-testid="remote-add-form"]')
       .boundingBox();
     const backBox = await popover
       .locator('[data-testid="remotes-back"]')
@@ -300,7 +303,7 @@ test('the remotes list keeps rows and chrome inside the clip while scrolled', as
   await lastBtn.focus();
   const lastBox = await lastBtn.boundingBox();
   const formBox = await popover
-    .locator('[class*="addRemoteForm"]')
+    .locator('[data-testid="remote-add-form"]')
     .boundingBox();
   expect(lastBox).toBeTruthy();
   expect(formBox).toBeTruthy();
