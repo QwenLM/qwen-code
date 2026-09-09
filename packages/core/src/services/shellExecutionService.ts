@@ -1478,6 +1478,11 @@ export class ShellExecutionService {
       // This should not happen, but as a safeguard...
       throw new Error('PTY implementation not found');
     }
+    // Records whether pty.spawn returned. The catch at the end of this method
+    // needs it to tell a spawn-phase failure — no child exists yet, so handing
+    // the command to the child_process fallback cannot run it twice — from
+    // anything raised after the PTY is live.
+    let ptySpawned = false;
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
@@ -1515,16 +1520,21 @@ export class ShellExecutionService {
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
-        // Windows: the inbox ConPTY backend spawns one `conhost.exe
-        // --headless` per PTY, and a natural shell exit orphans it — the
-        // native exit watcher erases the pty baton before JS can reach
-        // ClosePseudoConsole (microsoft/node-pty#965), so the host lives
-        // until the CLI exits (#11303's `+7 conhost for 7 tool commands`).
-        // The bundled-ConPTY backend hosts the pseudo console in-process
-        // instead, leaving no conhost.exe to orphan. Off Windows the option
-        // is inert.
+        // Windows: with the inbox ConPTY backend a natural shell exit orphans
+        // the `conhost.exe --headless` that backend spawned — the native exit
+        // watcher erases the pty baton before JS can reach ClosePseudoConsole
+        // (microsoft/node-pty#965), so hosts accumulate until the CLI exits
+        // (#11303: `+7 conhost for 7 tool commands`). This option makes
+        // node-pty load the conpty.dll shipped with the package instead of the
+        // one built into Windows — that swap is all @lydell/node-pty documents
+        // the option as, and its typings mark it EXPERIMENTAL. #11303 measured
+        // the per-command host growth gone with
+        // @lydell/node-pty-win32-x64 1.2.0-beta.10 on Windows Server 2025 (30
+        // commands: 30 orphaned hosts before, 0 after). Off Windows the option
+        // is inert: `useConptyDll` appears nowhere in the POSIX prebuilds.
         useConptyDll: os.platform() === 'win32',
       });
+      ptySpawned = true;
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
         const headlessTerminal = new Terminal({
@@ -2437,6 +2447,23 @@ export class ShellExecutionService {
       return { pid: ptyProcess.pid, result };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && os.platform() === 'win32') {
+        // The bundled ConPTY backend (useConptyDll above) adds throw sites
+        // node-pty reaches synchronously out of spawn — the conpty.dll it
+        // ships being missing or unloadable among them — and none of those
+        // messages contain `posix_spawnp failed`. Resolving below would report
+        // exitCode 1 with empty output and skip the child_process fallback
+        // that execute() already has for a PTY that cannot start, so rethrow
+        // into it. Nothing was spawned, so the command cannot run twice. The
+        // sandbox warning below does not apply here: this is not a sandbox
+        // restriction, and it must not be worded as one.
+        debugLogger.warn(
+          `Windows PTY spawn failed, falling back to child_process: ${
+            error instanceof Error ? error.message : String(e)
+          }`,
+        );
+        throw e;
+      }
       if (error.message.includes('posix_spawnp failed')) {
         onOutputEvent({
           type: 'data',

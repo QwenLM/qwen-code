@@ -1842,9 +1842,10 @@ describe('ShellExecutionService', () => {
   });
 
   describe('Windows bundled ConPTY backend (#11303)', () => {
-    // The inbox ConPTY backend orphans one `conhost.exe --headless` per PTY on
-    // natural shell exit (microsoft/node-pty#965); the bundled backend hosts
-    // the pseudo console in-process, leaving nothing to orphan.
+    // With the inbox ConPTY backend a natural shell exit orphans the
+    // `conhost.exe --headless` it spawned (microsoft/node-pty#965); #11303
+    // measured that growth gone once node-pty loads the conpty.dll it ships
+    // instead of the one built into Windows.
 
     let capturedReplyListener: ((data: string) => void) | undefined;
 
@@ -1877,6 +1878,63 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('falls back to child_process when the bundled ConPTY spawn throws on Windows', async () => {
+      // node-pty throws synchronously out of spawn when the conpty.dll it
+      // ships is missing or cannot be loaded, and none of those messages
+      // contain `posix_spawnp failed`. Without the spawn-phase branch in
+      // executeWithPty's catch this resolved exitCode 1 / executionMethod
+      // 'none', so the child_process fallback in execute() never ran.
+      mockPlatform.mockReturnValue('win32');
+      mockPtySpawn.mockImplementationOnce(() => {
+        throw new Error('Failed to load conpty.dll, error code: 126');
+      });
+      const fallbackChild = new EventEmitter() as EventEmitter &
+        Partial<ChildProcess>;
+      fallbackChild.stdout = new EventEmitter() as Readable;
+      fallbackChild.stderr = new EventEmitter() as Readable;
+      fallbackChild.kill = vi.fn();
+      Object.defineProperty(fallbackChild, 'pid', {
+        value: 4242,
+        configurable: true,
+      });
+      mockCpSpawn.mockReturnValue(fallbackChild);
+
+      try {
+        const handle = await ShellExecutionService.execute(
+          'echo hi',
+          '/test/dir',
+          onOutputEventMock,
+          new AbortController().signal,
+          true,
+          shellExecutionConfig,
+        );
+
+        await new Promise((resolve) => process.nextTick(resolve));
+        fallbackChild.stdout?.emit('data', Buffer.from('FALLBACK_MARKER'));
+        fallbackChild.emit('exit', 0, null);
+        fallbackChild.emit('close', 0, null);
+        const result = await handle.result;
+
+        expect(mockCpSpawn).toHaveBeenCalled();
+        expect(result.executionMethod).toBe('child_process');
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain('FALLBACK_MARKER');
+        // The sandbox-specific PTY warning is POSIX wording and must not be
+        // emitted for a Windows DLL-load failure.
+        expect(
+          onOutputEventMock.mock.calls.some(
+            ([event]) =>
+              event.type === 'data' &&
+              String(event.chunk).includes('sandbox restrictions'),
+          ),
+        ).toBe(false);
+      } finally {
+        // vi.clearAllMocks() does not drop implementations, so restore the
+        // default (undefined) this describe block's other tests rely on.
+        mockCpSpawn.mockReturnValue(undefined);
+      }
+    });
+
     it('leaves the inbox ConPTY backend alone off Windows', async () => {
       // beforeEach pins the platform to linux.
       await simulateExecution('echo hi', (pty) => {
@@ -1903,6 +1961,28 @@ describe('ShellExecutionService', () => {
         expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?64;1;22c');
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
       });
+    });
+
+    it('drops a terminal query reply whose PTY write throws on Windows', async () => {
+      // A reply racing shell exit finds a dead PTY. The forwarder's try/catch
+      // has to contain that throw: deleting it lets the error escape the
+      // terminal's onData listener and this test goes red.
+      mockPlatform.mockReturnValue('win32');
+      mockLoadXtermHeadless.mockResolvedValueOnce({
+        Terminal: ReplyCapturingTerminal,
+      });
+      mockPtyProcess.write.mockImplementationOnce(() => {
+        throw new Error('pty gone');
+      });
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        capturedReplyListener!('\x1b[?64;1;22c');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?64;1;22c');
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
     });
 
     it('registers no terminal reply forwarder off Windows', async () => {
