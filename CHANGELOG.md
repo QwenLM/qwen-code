@@ -12,6 +12,73 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.23.2](https://github.com/QwenLM/qwen-code/releases/tag/v0.23.2) - 2026-09-09
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(web-shell): Improve split-view session navigation ([#11250](https://github.com/QwenLM/qwen-code/pull/11250)) by @wenshao
+- feat(goal): carry budget figures and progress guidance in the continuation prompt ([#11257](https://github.com/QwenLM/qwen-code/pull/11257)) by @qqqys
+- feat(workflows): journal failed agents and settle agent failures to null ([#11196](https://github.com/QwenLM/qwen-code/pull/11196)) by @qqqys
+- feat(core): enable the built-in web_search by default on ModelStudio Standard/Token Plan ([#11348](https://github.com/QwenLM/qwen-code/pull/11348)) by @qqqys
+- feat(web-shell): add opt-in browser task notifications ([#11398](https://github.com/QwenLM/qwen-code/pull/11398)) by @doudouOUC
+- feat(dingtalk): present tool permission requests with native interactive cards ([#10457](https://github.com/QwenLM/qwen-code/pull/10457)) by @BenGuanRan
+- feat(web-shell): separate Plan workflow from execution permissions ([#11423](https://github.com/QwenLM/qwen-code/pull/11423)) by @ytahdn
+- feat(serve): one-command remote start with a generated token, same-origin shell access, and a pairing QR ([#11172](https://github.com/QwenLM/qwen-code/pull/11172)) by @wenshao
+- feat(ipc): drop peer messages that arrive faster than a session can take, and tell the sender once ([#11277](https://github.com/QwenLM/qwen-code/pull/11277)) by @qqqys
+- feat: support GPT-5 and GPT-6 reasoning effort configuration ([#11295](https://github.com/QwenLM/qwen-code/pull/11295)) by @wenshao
+
+#### Bug Fixes
+
+- fix(ci): isolate subprocess-heavy E2E from fork pressure ([#11388](https://github.com/QwenLM/qwen-code/pull/11388)) by @yiliang114
+- fix(review): screen content filters at every rewrite the probe authorises (#9558) ([#10421](https://github.com/QwenLM/qwen-code/pull/10421)) by @wenshao
+- fix(web-shell): preserve history anchors during slow rendering ([#11366](https://github.com/QwenLM/qwen-code/pull/11366)) by @yiliang114
+- fix(core): keep branch commits made by a failing post-checkout hook ([#11300](https://github.com/QwenLM/qwen-code/pull/11300)) by @dvd233
+- fix(web-shell): Replace undefined mock in split rerender tests (#11404) ([#11406](https://github.com/QwenLM/qwen-code/pull/11406)) by @qwen-code-dev-bot
+- fix(web-shell): use renamed session-activity mock in split-view rerender test (#11409) ([#11412](https://github.com/QwenLM/qwen-code/pull/11412)) by @qwen-code-dev-bot
+- fix(ci): isolate serve route E2E from fork pressure (#11389) ([#11391](https://github.com/QwenLM/qwen-code/pull/11391)) by @qwen-code-dev-bot
+- fix(cli): guard channel pidfiles against PID reuse ([#10687](https://github.com/QwenLM/qwen-code/pull/10687)) by @BenGuanRan
+- fix(cli): cap the background-notification queue and tell the model what was dropped ([#11351](https://github.com/QwenLM/qwen-code/pull/11351)) by @qqqys
+- fix(ci): allow 90 minutes for ECS runner version resolution ([#10921](https://github.com/QwenLM/qwen-code/pull/10921)) by @yiliang114
+- fix(web-shell): restore transcript layout and navigation presentation ([#11430](https://github.com/QwenLM/qwen-code/pull/11430)) by @ytahdn
+- fix(deps): Bump sharp to 0.35.4 to resolve high-severity libheif CVE ([#11435](https://github.com/QwenLM/qwen-code/pull/11435)) by @yiliang114
+- fix(web-shell): make light-theme terminal text selection visible ([#11445](https://github.com/QwenLM/qwen-code/pull/11445)) by @ytahdn
+- fix(external-context): Align deletion responses with Mem0 SDK ([#11397](https://github.com/QwenLM/qwen-code/pull/11397)) by @doudouOUC
+- fix(core): use qwen3.8-flash for automatic web search ([#11450](https://github.com/QwenLM/qwen-code/pull/11450)) by @qqqys
+- fix(web-shell): show and wire composer quick keys on the mobile textarea backend ([#11454](https://github.com/QwenLM/qwen-code/pull/11454)) by @ytahdn
+- fix(web-shell): gate subagent details until session is ready ([#11434](https://github.com/QwenLM/qwen-code/pull/11434)) by @ytahdn
+- fix(web-shell): move the hover timestamp off the message text ([#11380](https://github.com/QwenLM/qwen-code/pull/11380)) by @yiliang114
+- fix(cli): seed headless promptIds from the resumed transcript ([#11441](https://github.com/QwenLM/qwen-code/pull/11441)) by @yiliang114
+- fix(core): omit parameterless OpenAI tool schemas ([#11431](https://github.com/QwenLM/qwen-code/pull/11431)) by @yiliang114
+- fix(cli): restore OpenTUI banner, footer, and loading states; fix the OSS mirror flavor ([#11437](https://github.com/QwenLM/qwen-code/pull/11437)) by @chiga0
+- fix(daemon): persist prompt identity for active transcript replay ([#11062](https://github.com/QwenLM/qwen-code/pull/11062)) by @XIQIXIQIXIQI
+
+#### Documentation
+
+- docs: require bilingual design documents ([#11419](https://github.com/QwenLM/qwen-code/pull/11419)) by @wenshao
+- docs(nav): stop hiding the developer examples section ([#11426](https://github.com/QwenLM/qwen-code/pull/11426)) by @yiliang114
+- docs(serve): state what --no-web actually removes ([#11446](https://github.com/QwenLM/qwen-code/pull/11446)) by @yiliang114
+
+#### Internal Changes
+
+- refactor(channels): remove obsolete block streaming ([#11381](https://github.com/QwenLM/qwen-code/pull/11381)) by @qqqys
+- refactor(serve): decouple workspace capacity policies ([#11428](https://github.com/QwenLM/qwen-code/pull/11428)) by @doudouOUC
+
+### New Contributors
+
+- @dvd233 made their first contribution in [#11300](https://github.com/QwenLM/qwen-code/pull/11300)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.23.1...v0.23.2
+
 ## [0.23.1](https://github.com/QwenLM/qwen-code/releases/tag/v0.23.1) - 2026-09-08
 
 ### Highlights

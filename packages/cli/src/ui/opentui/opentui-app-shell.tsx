@@ -69,6 +69,8 @@ import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import { OpenTuiBanner } from './opentui-header.js';
+import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiShellConfirmation,
@@ -751,6 +753,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       onError={(error) => onRenderError?.(error)}
     >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
+        <OpenTuiBanner config={config} settings={settings} />
         {renderMain ? renderMain() : null}
         {!dialog && !activeModal && !activeToolCall && updateNotice ? (
           <text>{updateNotice}</text>
@@ -796,26 +799,36 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             availableTerminalHeight={props.availableTerminalHeight}
           />
         ) : (
-          <OpenTuiInputPrompt
-            onSubmit={(text, imagePaths) => {
-              void onSubmit(text, imagePaths);
-            }}
-            userMessages={userMessages}
-            config={config}
-            focus
-            streaming={streaming}
-            onInterrupt={onInterrupt}
-            approvalMode={approvalMode}
-            queueLength={queueLength}
-            onPopQueue={onPopQueue}
-            composerHandle={props.composerHandle}
-            promptSuggestion={promptSuggestion}
-            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
-            onPromptSuggestionAbort={onPromptSuggestionAbort}
-            shellModeActive={shellModeActive}
-            onToggleShellMode={toggleShellMode}
-          />
+          <>
+            <OpenTuiLoadingIndicator streaming={Boolean(streaming)} />
+            <OpenTuiInputPrompt
+              onSubmit={(text, imagePaths) => {
+                void onSubmit(text, imagePaths);
+              }}
+              userMessages={userMessages}
+              config={config}
+              focus
+              streaming={streaming}
+              onInterrupt={onInterrupt}
+              approvalMode={approvalMode}
+              queueLength={queueLength}
+              onPopQueue={onPopQueue}
+              composerHandle={props.composerHandle}
+              promptSuggestion={promptSuggestion}
+              onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+              onPromptSuggestionAbort={onPromptSuggestionAbort}
+              shellModeActive={shellModeActive}
+              onToggleShellMode={toggleShellMode}
+            />
+          </>
         )}
+        <OpenTuiFooter
+          config={config}
+          streaming={Boolean(streaming)}
+          approvalMode={approvalMode}
+          queueLength={queueLength}
+          sessionName={host.sessionName}
+        />
       </box>
     </OpenTuiErrorBoundary>
   );
