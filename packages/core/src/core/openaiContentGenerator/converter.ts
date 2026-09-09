@@ -337,6 +337,20 @@ export function convertLlmToolParametersToOpenAI(
  */
 const grammarSchemaValidationCache = new WeakMap<object, boolean>();
 
+const PARAMETERLESS_SCHEMA_KEYS = new Set([
+  '$comment',
+  '$schema',
+  'additionalProperties',
+  'deprecated',
+  'description',
+  'examples',
+  'properties',
+  'readOnly',
+  'title',
+  'type',
+  'writeOnly',
+]);
+
 function isStrictlyValidSchema(schema: object): boolean {
   const cached = grammarSchemaValidationCache.get(schema);
   if (cached !== undefined) {
@@ -386,44 +400,34 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
-            const sourceSchema = func.parametersJsonSchema;
+            const sourceSchema =
+              typeof func.parametersJsonSchema === 'object' &&
+              func.parametersJsonSchema !== null &&
+              !Array.isArray(func.parametersJsonSchema)
+                ? (func.parametersJsonSchema as Record<string, unknown>)
+                : undefined;
             const canValidateLocally =
-              typeof sourceSchema === 'object' &&
-              sourceSchema !== null &&
-              !Array.isArray(sourceSchema) &&
+              sourceSchema !== undefined &&
               !('$id' in sourceSchema) &&
               isStrictlyValidSchema(sourceSchema);
-            const sourcePatternProperties = (
-              sourceSchema as Record<string, unknown> | undefined
-            )?.['patternProperties'];
-            const hasNoPatternProperties =
-              sourcePatternProperties === undefined ||
-              (typeof sourcePatternProperties === 'object' &&
-                sourcePatternProperties !== null &&
-                !Array.isArray(sourcePatternProperties) &&
-                Object.keys(sourcePatternProperties).length === 0);
-            const sourceProperties = (
-              sourceSchema as Record<string, unknown> | undefined
-            )?.['properties'];
-            const sourceAdditionalProperties = (
-              sourceSchema as Record<string, unknown> | undefined
-            )?.['additionalProperties'];
-            // The source has to DECLARE an empty argument list, not merely be
-            // closed. `properties: {}` is what a zero-argument tool writes,
-            // and MCP servers emit it without `additionalProperties: false` --
-            // gating on closedness alone left that shape, the common one once
-            // any MCP server is configured, still serialized as a bare
-            // `{ "type": "object" }` and still rejected (#11410). A schema
-            // with no `properties` key says nothing about its arguments, and
-            // an explicitly permissive `additionalProperties` says it accepts
-            // some; both keep `parameters`.
-            const declaresEmptyArgumentList =
+            const sourceProperties = sourceSchema?.['properties'];
+            const sourceAdditionalProperties =
+              sourceSchema?.['additionalProperties'];
+            const hasEmptyProperties =
               typeof sourceProperties === 'object' &&
               sourceProperties !== null &&
               !Array.isArray(sourceProperties) &&
-              Object.keys(sourceProperties).length === 0 &&
-              (sourceAdditionalProperties === false ||
-                sourceAdditionalProperties === undefined);
+              Object.keys(sourceProperties).length === 0;
+            const declaresEmptyArgumentList =
+              sourceSchema !== undefined &&
+              ((hasEmptyProperties &&
+                (sourceAdditionalProperties === false ||
+                  sourceAdditionalProperties === undefined)) ||
+                (sourceProperties === undefined &&
+                  sourceAdditionalProperties === false)) &&
+              Object.keys(sourceSchema).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              );
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -438,9 +442,10 @@ export async function convertLlmToolsToOpenAI(
             if (
               canValidateLocally &&
               declaresEmptyArgumentList &&
-              hasNoPatternProperties &&
               parameters['type'] === 'object' &&
-              Object.keys(parameters).length === 1
+              Object.keys(parameters).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              )
             ) {
               parameters = undefined;
             }

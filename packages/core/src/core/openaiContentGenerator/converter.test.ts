@@ -6159,6 +6159,36 @@ describe('OpenAIContentConverter', () => {
             { name: 'supported', parametersJsonSchema: supportedSchema },
             { name: 'open', parametersJsonSchema: openSchema },
             { name: 'draft_2020', parametersJsonSchema: draft2020Schema },
+            {
+              name: 'annotated',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                title: 'NoArgs',
+              },
+            },
+            {
+              name: 'closed',
+              parametersJsonSchema: {
+                type: 'object',
+                additionalProperties: false,
+              },
+            },
+            {
+              name: 'constrained',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                minProperties: 1,
+              },
+            },
+            {
+              name: 'nullable',
+              parametersJsonSchema: {
+                type: ['object', 'null'],
+                properties: {},
+              },
+            },
             { name: 'unspecified', parametersJsonSchema: unspecifiedSchema },
             { name: 'permissive', parametersJsonSchema: permissiveSchema },
             { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
@@ -6184,6 +6214,18 @@ describe('OpenAIContentConverter', () => {
         { name: 'supported', description: '' },
         { name: 'open', description: '' },
         { name: 'draft_2020', description: '' },
+        { name: 'annotated', description: '' },
+        { name: 'closed', description: '' },
+        {
+          name: 'constrained',
+          description: '',
+          parameters: { type: 'object', minProperties: 1 },
+        },
+        {
+          name: 'nullable',
+          description: '',
+          parameters: { type: ['object', 'null'] },
+        },
         {
           name: 'unspecified',
           description: '',
@@ -6218,6 +6260,7 @@ describe('OpenAIContentConverter', () => {
           },
         },
       ]);
+      expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters');
       expect(supportedSchema).toEqual({
         type: 'object',
         properties: {},
@@ -6232,7 +6275,7 @@ describe('OpenAIContentConverter', () => {
       ).toBe(false);
     });
 
-    it('does not omit parameters lost during OpenAPI 3.0 conversion', async () => {
+    it('does not omit constraints lost during OpenAPI 3.0 conversion', async () => {
       const parametersJsonSchema = {
         type: 'object',
         properties: {},
@@ -6241,7 +6284,24 @@ describe('OpenAIContentConverter', () => {
       };
       const tools = [
         {
-          functionDeclarations: [{ name: 'patterned', parametersJsonSchema }],
+          functionDeclarations: [
+            { name: 'patterned', parametersJsonSchema },
+            {
+              name: 'dependent',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {},
+                dependencies: { a: ['b'] },
+              },
+            },
+            {
+              name: 'nullable',
+              parametersJsonSchema: {
+                type: ['object', 'null'],
+                properties: {},
+              },
+            },
+          ],
         },
       ] as Tool[];
 
@@ -6250,11 +6310,23 @@ describe('OpenAIContentConverter', () => {
         'openapi_30',
       );
 
-      expect(result[0]?.function).toEqual({
-        name: 'patterned',
-        description: '',
-        parameters: { type: 'object' },
-      });
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        {
+          name: 'patterned',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        {
+          name: 'dependent',
+          description: '',
+          parameters: { type: 'object' },
+        },
+        {
+          name: 'nullable',
+          description: '',
+          parameters: { type: 'object', nullable: true },
+        },
+      ]);
     });
 
     it('keeps grammar constraints for schemas with a top-level $id', async () => {
