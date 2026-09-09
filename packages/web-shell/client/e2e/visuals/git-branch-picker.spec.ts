@@ -13,6 +13,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  FIXED_CAPTURE_TIME,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -51,7 +52,15 @@ test('branch picker, commit dialog, create PR form', async ({
       behind: 0,
       stashCount: 0,
       operation: null,
-      computedAt: Date.now(),
+      // Derived from the frozen capture instant per the harness rule: a value
+      // meant to be "now" must not come from Node's real clock. No behaviour
+      // rides on it either way -- BranchPickerPopover stamps
+      // `listingFetchedAt` from the frozen clock and returns early on
+      // `at <= listingFetchedAt`, which a real-clock value (months BELOW the
+      // future-dated constant) and this value (exact equality) both satisfy.
+      // Exercising the reconcile path would need an explicit
+      // `FIXED_CAPTURE_TIME.getTime() + 1`.
+      computedAt: FIXED_CAPTURE_TIME.getTime(),
     },
     events: [
       userTextEvent('Add a branch picker to the web shell', { id: 1 }),
