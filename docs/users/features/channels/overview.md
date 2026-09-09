@@ -524,7 +524,7 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. A daemon started without `--channel` does not load channel adapters or reserve the channel-service PID lease until the first `qwen channel set`.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. On a flagless boot, a trusted primary workspace's `serve.channels` setting is restored, which loads the channel adapters and reserves the channel-service PID lease. An explicit `--channel` selection takes precedence. Without either source, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`.
 
 `qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to a workspace registered by the daemon. In multi-workspace mode, a selection replacement keeps workers for workspaces whose ordered channel list did not change; `all` remains primary-workspace-only.
 

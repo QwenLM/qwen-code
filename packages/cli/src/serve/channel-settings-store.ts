@@ -452,11 +452,17 @@ function workspaceValues(workspaceCwd: string): {
   for (const [name, config] of Object.entries(rawChannels)) {
     if (isRecord(config)) channels[name] = config;
   }
-  const startupNames = Array.isArray(settings.serve?.channels)
+  const rawStartupNames = Array.isArray(settings.serve?.channels)
     ? settings.serve.channels.filter(
         (name): name is string => typeof name === 'string',
       )
     : [];
+  const normalizedStartupNames = [
+    ...new Set(rawStartupNames.map((name) => name.trim()).filter(Boolean)),
+  ];
+  const startupNames = normalizedStartupNames.some(isAllStartupName)
+    ? ['all']
+    : normalizedStartupNames;
   return { channels, startupNames };
 }
 

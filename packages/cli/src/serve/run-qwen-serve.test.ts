@@ -13,7 +13,15 @@ import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as tls from 'node:tls';
-import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
@@ -36,7 +44,10 @@ import {
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
 import * as localPathOpen from './local-path-open.js';
-import { loadServeFastPathEnvironment } from './fast-path-settings.js';
+import {
+  loadServeFastPathEnvironment,
+  resetServeFastPathHomeEnvBootstrapForTesting,
+} from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
@@ -12426,6 +12437,8 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
 
 describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
+  let qwenHome: string | undefined;
+  let previousQwenHome: string | undefined;
   // Some CI containers disable IPv6 entirely; binding ::1 then fails with
   // EADDRNOTAVAIL.
   const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
@@ -12435,6 +12448,16 @@ describe('runQwenServe channel worker supervisor', () => {
       ),
   );
 
+  beforeEach(() => {
+    previousQwenHome = process.env['QWEN_HOME'];
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-test-home-')),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+  });
+
   afterEach(() => {
     mockChannelWorkerEnabledState.value = undefined;
     vi.restoreAllMocks();
@@ -12442,6 +12465,15 @@ describe('runQwenServe channel worker supervisor', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       tmpDir = undefined;
     }
+    if (qwenHome) {
+      fs.rmSync(qwenHome, { recursive: true, force: true });
+      qwenHome = undefined;
+    }
+    if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previousQwenHome;
+    previousQwenHome = undefined;
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
   });
 
   function makeFakeBridge(onShutdown?: () => void): HttpAcpBridge {
@@ -13748,6 +13780,216 @@ describe('runQwenServe channel worker supervisor', () => {
           selection: { mode: 'names', names: ['feishu'] },
         }),
       );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a bare daemon healthy when configured channels are invalid', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-invalid-startup-')),
+    );
+    const workerFactory = vi.fn();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['all', 'telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      expect(
+        stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+      ).toContain('serve.channels');
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('ignores unsafe configured channel names without writing control bytes', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-unsafe-startup-')),
+    );
+    const workerFactory = makeReadyWorkerFactory(
+      makeWorker({
+        enabled: true,
+        state: 'running',
+        channels: ['\u001b[31mRED', '--insecure'],
+        requestedChannels: ['\u001b[31mRED', '--insecure'],
+      }),
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: {
+          serve: { channels: ['\u001b[31mRED', '--insecure'] },
+        },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).not.toContain('\u001b');
+      expect(written).toContain('"\\u001b[31mRED"');
+      expect(written).toContain('"--insecure"');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a bare daemon healthy when configured channels are untrusted', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-untrusted-startup-')),
+    );
+    const workerFactory = vi.fn();
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        trustedWorkspace: false,
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a bare daemon healthy when the configured channel lease is busy', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-busy-startup-')),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 9988,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    const workerFactory = vi.fn();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: workerFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workerFactory).not.toHaveBeenCalled();
+      const health = await fetch(`${handle.url}/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('reports configured channel worker startup failure without stopping the daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-failed-startup-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: { telegram: { type: 'telegram' } },
+        serve: { channels: ['telegram'] },
+      }),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+      exitCode: 1,
+    });
+    worker.start.mockRejectedValueOnce(new Error('worker failed before ready'));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        bootSettings: { serve: { channels: ['telegram'] } },
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const response = await fetch(`${handle.url}/workspace/channels`, {
+        headers: { Authorization: 'Bearer secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        instances: {
+          telegram: {
+            startsWithServe: true,
+            runtime: {
+              state: 'error',
+              lastError: 'worker failed before ready',
+            },
+          },
+        },
+      });
     } finally {
       await handle.close();
     }

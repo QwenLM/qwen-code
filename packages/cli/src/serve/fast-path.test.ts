@@ -1666,6 +1666,32 @@ describe('serve fast path environment bootstrap', () => {
     });
   });
 
+  it('does not load startup channels from a workspace with unknown trust', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-unknown-trust-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({}),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toBeUndefined();
+  });
+
   it('ignores stale legacy keys in current-version settings files', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(

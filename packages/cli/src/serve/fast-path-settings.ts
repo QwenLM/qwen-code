@@ -733,9 +733,11 @@ export function loadServeFastPathSettings(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
   const initialTrustCheckSettings = mergeFastPathSettings(system, user);
-  const isTrusted =
-    isWorkspaceTrustedFastPath(initialTrustCheckSettings, realWorkspaceDir) ??
-    true;
+  const trustDecision = isWorkspaceTrustedFastPath(
+    initialTrustCheckSettings,
+    realWorkspaceDir,
+  );
+  const isTrusted = trustDecision ?? true;
   let realHomeDir = resolvedHomeDir;
   try {
     realHomeDir = fs.realpathSync(resolvedHomeDir);
@@ -755,8 +757,10 @@ export function loadServeFastPathSettings(
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
-  if (workspace.serve) {
-    merged.serve = { channels: [...(workspace.serve.channels ?? [])] };
+  if (trustDecision === true && workspaceFromDisk.serve) {
+    merged.serve = {
+      channels: [...(workspaceFromDisk.serve.channels ?? [])],
+    };
   } else {
     delete merged.serve;
   }

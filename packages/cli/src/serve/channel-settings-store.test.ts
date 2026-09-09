@@ -1829,6 +1829,17 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(store.snapshot().startupNames).toEqual([]);
   });
 
+  it('normalizes stored startup names before reporting them', () => {
+    writeWorkspaceSettings(`{
+  "channels": { "bot": { "type": "telegram" } },
+  "serve": { "channels": [" bot ", "bot"] }
+}\n`);
+
+    expect(
+      new WorkspaceChannelSettingsStore(workspace).snapshot().startupNames,
+    ).toEqual(['bot']);
+  });
+
   it('ignores invalid stored channel values in snapshots', () => {
     writeWorkspaceSettings(`{
   "channels": {

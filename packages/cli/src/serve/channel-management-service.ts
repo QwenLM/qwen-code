@@ -155,6 +155,7 @@ export interface CreateChannelManagementServiceOptions {
   workspaceCwd: string;
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
+  startupError?: string;
 }
 
 export class ChannelManagementError extends Error {
@@ -183,6 +184,17 @@ export function createChannelManagementService(
   opts: CreateChannelManagementServiceOptions,
 ): ChannelManagementService {
   const diagnostics = new Map<string, string>();
+  if (opts.startupError) {
+    const snapshot = opts.store.snapshot();
+    const startupNames = snapshot.startupNames.some(isAllChannelSelectionName)
+      ? Object.keys(snapshot.channels)
+      : snapshot.startupNames;
+    for (const name of startupNames) {
+      if (Object.hasOwn(snapshot.channels, name)) {
+        diagnostics.set(name, diagnostic(opts.startupError));
+      }
+    }
+  }
   let mutationTail = Promise.resolve();
 
   const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
