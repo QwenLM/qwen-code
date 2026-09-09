@@ -30650,6 +30650,7 @@ describe('Session', () => {
           modelPrompt?: string;
           retry?: boolean;
           metaRetry?: boolean;
+          channel?: boolean;
         }>([
           {
             name: 'text blocks without resource bodies',
@@ -30707,6 +30708,17 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'retry question' }],
             metaRetry: true,
           },
+          {
+            name: 'channel turn with display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            displayText: 'Issue assigned: broken build',
+            channel: true,
+          },
+          {
+            name: 'channel turn without display projection',
+            prompt: [{ type: 'text', text: 'composed channel wrapper' }],
+            channel: true,
+          },
         ])(
           'preserves submission provenance: $name',
           async ({
@@ -30716,6 +30728,7 @@ describe('Session', () => {
             modelPrompt,
             retry,
             metaRetry,
+            channel,
           }) => {
             const messageBus = {
               request: vi.fn().mockResolvedValue({ success: true, output: {} }),
@@ -30737,6 +30750,7 @@ describe('Session', () => {
                 prompt,
                 ...(retry ? { retry: true } : {}),
                 _meta: {
+                  ...(channel ? { [CHANNEL_PROMPT_META_KEY]: true } : {}),
                   ...(displayText !== undefined
                     ? { 'qwen.daemon.promptDisplayText': displayText }
                     : {}),

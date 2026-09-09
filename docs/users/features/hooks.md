@@ -617,11 +617,11 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 ```json
 {
   "prompt": "current model-bound prompt for this hook invocation",
-  "submitted_prompt": "optional user text captured at a supported interactive TUI submission boundary"
+  "submitted_prompt": "optional user text captured at a supported submission boundary"
 }
 ```
 
-`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
+`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported submission boundary to a fresh user turn: an interactive TUI submission, a first-turn headless `UserQuery`, or a fresh non-channel user turn on the ACP session path used by ACP clients, `serve`, and daemon hosts. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, teammate traffic, and channel-classified turns (loop jobs, webhook tasks, and adapter-synthesized events).
 
 Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
 
@@ -666,9 +666,8 @@ This two-field payload is written only for this kind of user-prompt record.
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
 context. For a supported interactive TUI submission it is the raw composer
-projection carried by `submitted_prompt`; ACP, headless, `serve`, SDK, remote
-input, and other paths without that provenance record the expanded pre-hook
-prompt instead.
+projection carried by `submitted_prompt`; paths without that provenance
+record the expanded pre-hook prompt instead.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released

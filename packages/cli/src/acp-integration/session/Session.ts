@@ -5609,6 +5609,13 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
+            // Channel turns are machine-relayed deliveries (loop jobs,
+            // webhook tasks, adapter-synthesized events): nothing crossed a
+            // submission boundary, and `submitted_prompt` presence alone
+            // gates Auto Recall's outbound provider search, so such a turn
+            // must not publish its display projection or composed wrapper
+            // text as submission provenance.
+            const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
             if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
@@ -5626,7 +5633,8 @@ export class Session implements SessionContext {
                   eventName: 'UserPromptSubmit',
                   input: {
                     prompt: promptText,
-                    ...(isFreshUserTurn && submittedPrompt.trim().length > 0
+                    ...(isUserSubmissionTurn &&
+                    submittedPrompt.trim().length > 0
                       ? { submitted_prompt: submittedPrompt }
                       : {}),
                   },

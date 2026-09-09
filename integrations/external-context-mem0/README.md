@@ -261,9 +261,10 @@ on-demand `context_search`, or the v3 Hook-only profile for Auto Recall, never
 both in one Qwen process.
 
 The Hook requires a non-empty `submitted_prompt` captured before prompt
-expansion. This includes supported interactive TUI submissions and headless
-CLI user turns (`qwen -p` and stream-json input, including SDK clients using
-that path). The field establishes prompt provenance, not a TUI-only origin.
+expansion. This includes supported interactive TUI submissions, headless CLI
+user turns (`qwen -p` and stream-json input, including SDK clients using that
+path), and fresh non-channel user turns on the ACP session path (daemon and
+`serve` hosts). The field establishes prompt provenance, not a TUI-only origin.
 The Hook never falls back to the expanded `prompt`; events without
 `submitted_prompt` do not trigger retrieval.
 

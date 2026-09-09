@@ -239,8 +239,11 @@ write. Cancellation therefore does not prove that no memory was created.
 
 Auto-recall sends a sanitized best-effort query to the external provider for
 each eligible ordinary interactive prompt. It requires a non-empty
-`submitted_prompt` captured by the supported interactive TUI before reminders,
-file and resource expansion, extension output, and vision expansion. It never
+`submitted_prompt` captured at a supported submission boundary — an
+interactive TUI submission, a first-turn headless `UserQuery`, or a fresh
+non-channel user turn on the ACP session path (daemon and `serve` hosts) —
+before reminders, file and resource expansion, extension output, and vision
+expansion. It never
 falls back to the legacy model-bound `prompt`. Missing or invalid provenance
 fails closed before configuration or credentials are read. Common credential
 shapes are removed from the submitted text, but this is not DLP.
