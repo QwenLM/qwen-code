@@ -10338,61 +10338,12 @@ describe('DaemonSessionProvider', () => {
     // arrives through the replay snapshot instead of the live stream. The
     // snapshot is released after injection and SSE resumes from `lastEventId`,
     // so the replay branch is the only place this settlement can be published.
-    const resyncGate = createDeferred<void>();
-    const reloaded = createDeferred<void>();
-    const firstSession = createMockSession({
+    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
       sessionId: 'session-settle-replay',
-      submitPrompt: vi.fn(async () => ({
-        promptId: 'prompt-1',
-        lastEventId: 9,
-      })),
-      events: async function* observedThenResync(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        await Promise.race([
-          resyncGate.promise,
-          new Promise<void>((resolve) =>
-            opts.signal?.addEventListener('abort', () => resolve(), {
-              once: true,
-            }),
-          ),
-        ]);
-        if (opts.signal?.aborted) return;
-        yield {
-          id: 10,
-          v: 1,
-          type: 'state_resync_required',
-          data: { reason: 'ring_evicted' },
-        } satisfies DaemonEvent;
-      },
+      reason: 'ring_evicted',
+      terminalStopReason: 'end_turn',
     });
-    const reloadedSession = createMockSession({
-      sessionId: 'session-settle-replay',
-      events: createPendingEvents(reloaded),
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 11,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'replayed answer' },
-              },
-            },
-          },
-          {
-            id: 12,
-            v: 1,
-            type: 'turn_complete',
-            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
-          },
-        ],
-        liveJournal: [],
-      },
-    });
-    sdkMocks.sessions.push(firstSession, reloadedSession);
+    sdkMocks.sessions.push(...sessions);
     const settlements: DaemonPromptSettledEvent[] = [];
     let actions: DaemonUiSessionActions | undefined;
 
@@ -10444,61 +10395,12 @@ describe('DaemonSessionProvider', () => {
     // `requestEpochResetReload` deletes the ActivePrompt before the reload, so
     // `settleActivePromptFromTurnEvent` returns false for the replayed
     // terminal; the admission-key gate must still publish it.
-    const resyncGate = createDeferred<void>();
-    const reloaded = createDeferred<void>();
-    const firstSession = createMockSession({
+    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
       sessionId: 'session-settle-epoch',
-      submitPrompt: vi.fn(async () => ({
-        promptId: 'prompt-1',
-        lastEventId: 9,
-      })),
-      events: async function* epochResetThenResync(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        await Promise.race([
-          resyncGate.promise,
-          new Promise<void>((resolve) =>
-            opts.signal?.addEventListener('abort', () => resolve(), {
-              once: true,
-            }),
-          ),
-        ]);
-        if (opts.signal?.aborted) return;
-        yield {
-          id: 10,
-          v: 1,
-          type: 'state_resync_required',
-          data: { reason: 'epoch_reset' },
-        } satisfies DaemonEvent;
-      },
+      reason: 'epoch_reset',
+      terminalStopReason: 'end_turn',
     });
-    const reloadedSession = createMockSession({
-      sessionId: 'session-settle-epoch',
-      events: createPendingEvents(reloaded),
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 11,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'replayed answer' },
-              },
-            },
-          },
-          {
-            id: 12,
-            v: 1,
-            type: 'turn_complete',
-            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
-          },
-        ],
-        liveJournal: [],
-      },
-    });
-    sdkMocks.sessions.push(firstSession, reloadedSession);
+    sdkMocks.sessions.push(...sessions);
     const settlements: DaemonPromptSettledEvent[] = [];
     let actions: DaemonUiSessionActions | undefined;
 
@@ -10554,56 +10456,11 @@ describe('DaemonSessionProvider', () => {
     // A cold restore emits only `session_update` chunks, never terminal
     // events. The admitted prompt's terminal is gone; the host must still hear
     // a `failed` settlement instead of waiting forever.
-    const resyncGate = createDeferred<void>();
-    const reloaded = createDeferred<void>();
-    const firstSession = createMockSession({
+    const { sessions, resyncGate, reloaded } = createResyncReplayFixture({
       sessionId: 'session-retire-epoch',
-      submitPrompt: vi.fn(async () => ({
-        promptId: 'prompt-1',
-        lastEventId: 9,
-      })),
-      events: async function* epochResetThenResync(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        await Promise.race([
-          resyncGate.promise,
-          new Promise<void>((resolve) =>
-            opts.signal?.addEventListener('abort', () => resolve(), {
-              once: true,
-            }),
-          ),
-        ]);
-        if (opts.signal?.aborted) return;
-        yield {
-          id: 10,
-          v: 1,
-          type: 'state_resync_required',
-          data: { reason: 'epoch_reset' },
-        } satisfies DaemonEvent;
-      },
+      reason: 'epoch_reset',
     });
-    const reloadedSession = createMockSession({
-      sessionId: 'session-retire-epoch',
-      hasActivePrompt: false,
-      events: createPendingEvents(reloaded),
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 11,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'answer before the crash' },
-              },
-            },
-          },
-        ],
-        liveJournal: [],
-      },
-    });
-    sdkMocks.sessions.push(firstSession, reloadedSession);
+    sdkMocks.sessions.push(...sessions);
     const settlements: DaemonPromptSettledEvent[] = [];
     let actions: DaemonUiSessionActions | undefined;
 
@@ -20336,6 +20193,79 @@ function createPendingEvents(
     });
     yield* [];
   };
+}
+
+// Shared fixture for the resync-then-replay settlement tests: one submit
+// bound to `prompt-1`, a live stream that reports `state_resync_required`
+// once `resyncGate` resolves, and a reload whose snapshot either carries the
+// replayed terminal or (cold restore) leaves the turn terminal-less so the
+// epoch-reset retirement fires. Returning the sessions and gates together
+// keeps the three settlement tests from re-inlining the snapshot literal, and
+// the submitter promise stays in the caller where it must be awaited.
+function createResyncReplayFixture(opts: {
+  sessionId: string;
+  reason: string;
+  terminalStopReason?: 'end_turn' | 'cancelled';
+}): {
+  sessions: MockSession[];
+  resyncGate: ReturnType<typeof createDeferred<void>>;
+  reloaded: ReturnType<typeof createDeferred<void>>;
+} {
+  const resyncGate = createDeferred<void>();
+  const reloaded = createDeferred<void>();
+  const firstSession = createMockSession({
+    sessionId: opts.sessionId,
+    submitPrompt: vi.fn(async () => ({
+      promptId: 'prompt-1',
+      lastEventId: 9,
+    })),
+    events: async function* resyncRequiredAfterGate(
+      eventOpts: { signal?: AbortSignal } = {},
+    ) {
+      await Promise.race([
+        resyncGate.promise,
+        new Promise<void>((resolve) =>
+          eventOpts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        ),
+      ]);
+      if (eventOpts.signal?.aborted) return;
+      yield {
+        id: 10,
+        v: 1,
+        type: 'state_resync_required',
+        data: { reason: opts.reason },
+      } satisfies DaemonEvent;
+    },
+  });
+  const compactedReplay: DaemonEvent[] = [
+    {
+      id: 11,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'replayed answer' },
+        },
+      },
+    },
+  ];
+  if (opts.terminalStopReason) {
+    compactedReplay.push({
+      id: 12,
+      v: 1,
+      type: 'turn_complete',
+      data: { promptId: 'prompt-1', stopReason: opts.terminalStopReason },
+    });
+  }
+  const reloadedSession = createMockSession({
+    sessionId: opts.sessionId,
+    events: createPendingEvents(reloaded),
+    replaySnapshot: { compactedReplay, liveJournal: [] },
+  });
+  return { sessions: [firstSession, reloadedSession], resyncGate, reloaded };
 }
 
 function createTurnCompleteEvents(
