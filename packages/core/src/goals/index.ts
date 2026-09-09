@@ -75,5 +75,10 @@ export { goalTurnContext } from './goal-turn-context.js';
 export {
   buildGoalContinuationParts,
   renderGoalContinuationPrompt,
+  renderGoalContinuationTurn,
 } from './goal-continuation-prompt.js';
-export type { GoalContinuationPromptInput } from './goal-continuation-prompt.js';
+export type {
+  GoalContinuationPromptInput,
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';
