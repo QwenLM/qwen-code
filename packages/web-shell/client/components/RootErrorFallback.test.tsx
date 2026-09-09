@@ -123,6 +123,19 @@ describe('RootErrorFallback', () => {
     expect(container.querySelector('button')?.textContent).toBe('Reload page');
   });
 
+  it('renders the zh-CN retry label in the default reset mode', () => {
+    // No retryMode: the embeddable call sites (index.tsx, WebShellTranscript)
+    // rely on the 'reset' default this cell pins.
+    const { container } = mount(
+      <RootErrorFallback
+        error={new Error('boom')}
+        onRetry={() => {}}
+        language="zh-CN"
+      />,
+    );
+    expect(container.querySelector('button')?.textContent).toBe('重试');
+  });
+
   it('recovers when the user clicks "Try again" after the cause is gone', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // External switch the child reads at render time. The boundary's reset()

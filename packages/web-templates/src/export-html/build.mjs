@@ -203,11 +203,9 @@ const documentBuildResult = await build({
   target: ['chrome120'],
   legalComments: 'none',
   loader: { '.css': 'css' },
-  // DaemonWorkspaceProvider.tsx reads import.meta.url (guarded) for its
-  // module-copy diagnostic id; esbuild lowers import.meta to {} under iife
-  // and warns per read. The read is deliberate, so silence the warning here
-  // and let the check below fail the build if it ever resurfaces.
-  logOverride: { 'empty-import-meta': 'silent' },
+  // Keep warnings out of the log but in result.warnings for the check below
+  // (logOverride 'silent' would discard them and make that check vacuous).
+  logLevel: 'error',
   define: {
     'process.env.NODE_ENV': '"production"',
     __EXPORT_TRANSCRIPT_RENDERER_VERSION__: JSON.stringify(
@@ -220,13 +218,25 @@ const documentBuildResult = await build({
   },
 });
 
-const emptyImportMetaWarnings = documentBuildResult.warnings.filter(
-  (warning) => warning.id === 'empty-import-meta',
+// DaemonWorkspaceProvider.tsx reads import.meta.url (guarded) for its
+// module-copy diagnostic id; esbuild lowers import.meta to {} under iife.
+// Tolerate exactly that read — it arrives through the prebuilt
+// packages/web-shell/dist/transcript.js, so esbuild never sees the .tsx
+// source — and fail on any other site: a new import.meta.env read would be
+// lowered to ({}).env and throw in every exported document at runtime.
+// (The separator class keeps the allowlist working where esbuild reports
+// Windows-style paths.)
+const unexpectedImportMeta = documentBuildResult.warnings.filter(
+  (warning) =>
+    warning.id === 'empty-import-meta' &&
+    !/web-shell[/\\]dist[/\\]transcript\.js$/.test(
+      warning.location?.file ?? '',
+    ),
 );
-if (emptyImportMetaWarnings.length > 0) {
+if (unexpectedImportMeta.length > 0) {
   throw new Error(
-    'export-transcript-document build produced empty-import-meta warnings: ' +
-      'the logOverride silence is missing or a new import.meta use landed.',
+    'export-transcript-document build: unexpected import.meta use in ' +
+      unexpectedImportMeta.map((w) => w.location?.file).join(', '),
   );
 }
 

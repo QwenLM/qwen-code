@@ -143,27 +143,33 @@ describe('StandaloneApp', () => {
     window.history.replaceState(null, '', '/?theme=light&language=zh-CN');
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
-    // A session switch strips the one-shot params from the URL.
+    // Boot consumes the one-shot params, then strips them from the URL.
+    expect(window.location.search).not.toContain('theme=');
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(testState.props?.webShellProps.language).toBe('zh-CN');
+
     act(() => {
       testState.props?.webShellProps.onSessionIdChange?.(
         'session-1',
         'workspace-1',
       );
     });
-    expect(window.location.search).not.toContain('theme=');
 
     testState.throwOnRender = true;
-    const reload = vi.fn();
-    vi.stubGlobal('location', { ...window.location, reload });
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    const replaceState = vi.spyOn(window.history, 'replaceState');
-
     act(() => {
       testState.props?.webShellProps.onSessionIdChange?.(
         'session-2',
         'workspace-1',
       );
     });
+
+    // Stub after the last navigation so the snapshot href is current —
+    // the handler builds the reload URL from window.location.href.
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+
     const retry = container.querySelector('button');
     expect(retry?.textContent).toBe('重新加载');
 
@@ -175,6 +181,9 @@ describe('StandaloneApp', () => {
     const reloadUrl = String(replaceState.mock.calls.at(-1)?.[2]);
     expect(reloadUrl).toContain('theme=light');
     expect(reloadUrl).toContain('language=zh-CN');
+    // The reload must land on the live session URL, not a stale snapshot.
+    expect(reloadUrl).toContain('session-2');
+    expect(reloadUrl).toContain('workspace=workspace-1');
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {

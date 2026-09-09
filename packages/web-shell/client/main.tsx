@@ -152,6 +152,20 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     DaemonProductSessionContext | undefined
   >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  // One-shot ?theme=/?language=/?lang= params are consumed by the useState
+  // initializers above; strip them once mounted so a bookmarked URL cannot
+  // keep overriding stored preferences on later loads. (The reload retry
+  // re-adds the live values, which the next boot consumes and strips again.)
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const before = url.search;
+    url.searchParams.delete('theme');
+    url.searchParams.delete('language');
+    url.searchParams.delete('lang');
+    if (url.search !== before) {
+      window.history.replaceState(null, '', url);
+    }
+  }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the React theme so mobile status bars / overscroll backgrounds stay
   // consistent when the user toggles or when ?theme= lands via URL.
