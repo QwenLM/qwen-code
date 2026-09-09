@@ -53,7 +53,10 @@ import {
   getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
 } from '../goals/goalHook.js';
-import { applyPendingGoalProposal } from '../goals/goal-tools.js';
+import {
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+} from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
@@ -934,9 +937,7 @@ export class LlmClient {
     }
     if (!result.applied) {
       debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
-      reportFailure?.(
-        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
-      );
+      reportFailure?.(formatProposeGoalRecoveryFailed(proposal.objective));
     }
   }
 
@@ -2909,7 +2910,7 @@ export class LlmClient {
     const pendingGoalSettlementMessages: ServerLlmStreamEvent[] = [];
     const reportGoalSettlementFailure = (message: string) => {
       pendingGoalSettlementMessages.push({
-        type: LlmEventType.HookSystemMessage,
+        type: LlmEventType.GoalSettlementFailed,
         value: message,
       });
     };

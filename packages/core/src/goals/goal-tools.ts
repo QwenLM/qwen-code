@@ -624,6 +624,12 @@ function summarizeCatalog(
  */
 export const PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS = 1500;
 
+export const formatProposeGoalRecoveryNotStarted = (objective: string) =>
+  `The approved Goal was not started because the turn did not finish normally. Run /goal set ${objective} if you still want to start it.`;
+
+export const formatProposeGoalRecoveryFailed = (objective: string) =>
+  `The approved Goal could not be started. Check /goal before trying again, or run /goal set ${objective}.`;
+
 export interface ProposeGoalToolParams {
   objective: string;
 }

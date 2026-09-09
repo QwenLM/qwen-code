@@ -408,9 +408,19 @@ describe('ToolRegistry', () => {
       expect(
         registry.getFunctionDeclarations().map((tool) => tool.name),
       ).toEqual(['other_tool']);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['other_tool', 'propose_goal'])
+          .map((tool) => tool.name),
+      ).toEqual(['other_tool']);
       acpConfig.setGoalProposalTurnKey('user-turn');
       expect(
         registry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toEqual(['other_tool', 'propose_goal']);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['other_tool', 'propose_goal'])
+          .map((tool) => tool.name),
       ).toEqual(['other_tool', 'propose_goal']);
       acpConfig.setGoalProposalTurnKey(undefined);
       expect(
@@ -830,6 +840,28 @@ describe('ToolRegistry', () => {
 
       const summary = registry.getDeferredToolSummary();
       expect(summary).toEqual([{ name: 'beta', description: 'b' }]);
+    });
+
+    it('excludes unavailable Goal proposals from the deferred summary', () => {
+      const acpConfig = new Config({
+        ...baseConfigParams,
+        experimentalZedIntegration: true,
+      });
+      acpConfig.setGoalProposalHostSupported(true);
+      const registry = new ToolRegistry(acpConfig);
+      registry.registerTool(
+        new MockTool({
+          name: 'propose_goal',
+          description: 'propose a Goal',
+          shouldDefer: true,
+        }),
+      );
+
+      expect(registry.getDeferredToolSummary()).toEqual([]);
+      acpConfig.setGoalProposalTurnKey('user-turn');
+      expect(registry.getDeferredToolSummary()).toEqual([
+        { name: 'propose_goal', description: 'propose a Goal' },
+      ]);
     });
 
     it('visibleTools has no effect on non-deferred tools', () => {

@@ -187,6 +187,8 @@ import {
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
   goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
@@ -4947,7 +4949,7 @@ export class Session implements SessionContext {
       }
       const completedResult: PromptResponse = branchPoint
         ? {
-            ...result,
+            stopReason: result.stopReason,
             _meta: {
               ...result._meta,
               'qwen.branchPoint': {
@@ -4956,7 +4958,10 @@ export class Session implements SessionContext {
               },
             },
           }
-        : result;
+        : {
+            stopReason: result.stopReason,
+            ...(result._meta ? { _meta: result._meta } : {}),
+          };
       promptResult = completedResult;
       const proposalTurn = responseCapture.goalProposalTurn;
       if (proposalTurn) {
@@ -5285,7 +5290,7 @@ export class Session implements SessionContext {
     if (!ownsTurn()) {
       if (!this.disposed && !this.closing) {
         await this.messageEmitter.emitAgentMessage(
-          'The approved Goal was not started because the turn did not finish normally. Run `/goal set <objective>` if you still want to start it.',
+          formatProposeGoalRecoveryNotStarted(proposal.objective),
         );
       }
       return;
@@ -5295,7 +5300,7 @@ export class Session implements SessionContext {
       if (!ownsTurn()) {
         if (!this.disposed && !this.closing) {
           await this.messageEmitter.emitAgentMessage(
-            'The approved Goal was not started because the turn did not finish normally. Run `/goal set <objective>` if you still want to start it.',
+            formatProposeGoalRecoveryNotStarted(proposal.objective),
           );
         }
         return;
@@ -5335,14 +5340,17 @@ export class Session implements SessionContext {
           }
         }
       } else if (!result.applied) {
+        debugLogger.debug(
+          `Dropping an approved Goal proposal: ${result.reason}`,
+        );
         await this.messageEmitter.emitAgentMessage(
-          'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
+          formatProposeGoalRecoveryFailed(proposal.objective),
         );
       }
     } catch (error) {
       debugLogger.warn('Failed to apply an approved Goal proposal', error);
       await this.messageEmitter.emitAgentMessage(
-        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
+        formatProposeGoalRecoveryFailed(proposal.objective),
       );
     }
   }
@@ -6449,7 +6457,12 @@ export class Session implements SessionContext {
                 responseCapture,
                 isFreshUserTurn,
               );
-              return { stopReason: result.stopReason };
+              return {
+                stopReason: result.stopReason,
+                ...(result.loopProtectionStopped
+                  ? { loopProtectionStopped: true }
+                  : {}),
+              };
             } finally {
               logConversationFinishedEvent(
                 this.config,

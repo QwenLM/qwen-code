@@ -70,6 +70,7 @@ import {
   createReplayCumulativeUsage,
 } from './history-replay-page.js';
 import { createRepeatedToolFailureGuardState } from './repeated-tool-failure-guard.js';
+import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -32266,18 +32267,22 @@ describe('Session', () => {
       ]);
     }
 
-    function prompt() {
-      return session.prompt({
-        sessionId: 'test-session-id',
-        _meta: { 'qwen.goalProposalApproval': true },
-        prompt: [
-          { type: 'text', text: 'Draft a Goal to make the tests pass.' },
-        ],
-      });
+    function prompt(invocationContext?: core.InvocationContextV1) {
+      return session.prompt(
+        {
+          sessionId: 'test-session-id',
+          _meta: { 'qwen.goalProposalApproval': true },
+          prompt: [
+            { type: 'text', text: 'Draft a Goal to make the tests pass.' },
+          ],
+        },
+        invocationContext,
+      );
     }
 
     beforeEach(() => {
       pending = undefined;
+      mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
       mockConfig.hasPendingGoalProposal = vi.fn(() => pending !== undefined);
       mockConfig.setPendingGoalProposal = vi.fn((proposal) => {
         if (pending) return false;
@@ -32495,6 +32500,10 @@ describe('Session', () => {
       expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       expect(pending).toBeUndefined();
+      expect(mockConfig.setGoalProposalTurnKey).toHaveBeenLastCalledWith(
+        undefined,
+      );
+      expect(mockLlmClient.setTools).toHaveBeenCalled();
     });
 
     it('discards approval on cancellation before acknowledgement ends', async () => {
@@ -32528,18 +32537,21 @@ describe('Session', () => {
         finishRuntimeLoad = () =>
           resolve(mockGoalRuntime as unknown as core.GoalRuntime);
       });
-      vi.mocked(mockConfig.getGoalRuntimeReady).mockReturnValueOnce(
-        runtimeLoad,
-      );
+      vi.mocked(mockConfig.getGoalRuntimeReady)
+        .mockReset()
+        .mockResolvedValueOnce(mockGoalRuntime as unknown as core.GoalRuntime)
+        .mockResolvedValueOnce(mockGoalRuntime as unknown as core.GoalRuntime)
+        .mockReturnValueOnce(runtimeLoad);
 
       const result = prompt();
       await vi.waitFor(() =>
-        expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalledOnce(),
+        expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalledTimes(3),
       );
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
       await session.cancelPendingPrompt();
       finishRuntimeLoad();
 
-      await expect(result).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(result).resolves.toEqual({ stopReason: 'end_turn' });
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       expect(pending).toBeUndefined();
     });
@@ -32623,12 +32635,28 @@ describe('Session', () => {
       await prompt();
 
       expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'The Goal changed after the proposal was shown',
+        ),
+      );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
         expect.objectContaining({
           update: expect.objectContaining({
             sessionUpdate: 'agent_message_chunk',
             content: expect.objectContaining({
-              text: expect.stringContaining('/goal set'),
+              text: expect.stringContaining(
+                'The approved Goal could not be started',
+              ),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
             }),
           }),
         }),
@@ -32642,12 +32670,22 @@ describe('Session', () => {
 
       await prompt();
 
+      expect(mockGoalRuntime.dispatch).toHaveBeenCalledOnce();
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
         expect.objectContaining({
           update: expect.objectContaining({
             sessionUpdate: 'agent_message_chunk',
             content: expect.objectContaining({
-              text: expect.stringContaining('/goal set'),
+              text: expect.stringContaining('Check /goal before trying again'),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
             }),
           }),
         }),
@@ -32725,6 +32763,18 @@ describe('Session', () => {
         'goal-runtime:cancelled-start',
         { requeue: false },
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: expect.objectContaining({
+              text: expect.stringContaining(
+                'Automatic Goal execution is still held',
+              ),
+            }),
+          }),
+        }),
+      );
 
       const paused = {
         ...snapshot,
@@ -32795,6 +32845,88 @@ describe('Session', () => {
           }),
         }),
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('does not start a Goal when a queued prompt takes priority', async () => {
+      const internals = session as unknown as {
+        todoStopGuardQueuedPromptPriority: boolean;
+      };
+      mockConfig.setPendingGoalProposal = vi.fn((proposal) => {
+        pending = proposal;
+        internals.todoStopGuardQueuedPromptPriority = true;
+        return true;
+      });
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+    });
+
+    it('does not start a Goal when an empty drain yields to a queued prompt', async () => {
+      const internals = session as unknown as {
+        todoStopGuard: DaemonTodoStopGuard;
+      };
+      Object.defineProperty(internals.todoStopGuard, 'needsStopInspection', {
+        configurable: true,
+        get: () => true,
+      });
+      vi.mocked(mockClient.extMethod).mockImplementation(async (method) => {
+        if (method === 'craft/drainMidTurnQueue') {
+          return { messages: [], hasQueuedPrompt: true };
+        }
+        if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+          return { claimed: false, hasQueuedPrompt: true };
+        }
+        return {};
+      });
+
+      await expect(
+        prompt({
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'queued-prompt-owner',
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
+    });
+
+    it('does not start a Goal when the Todo Stop Guard is exhausted', async () => {
+      const internals = session as unknown as {
+        todoStopGuard: {
+          decide: () => {
+            kind: 'exhausted';
+            attempt: number;
+            maxAttempts: number;
+            unfinishedCount: number;
+          };
+        };
+      };
+      vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+        kind: 'exhausted',
+        attempt: 2,
+        maxAttempts: 2,
+        unfinishedCount: 1,
+      });
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockConfig.setPendingGoalProposal).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+      expect(pending).toBeUndefined();
     });
 
     it('discards approval when new user input is injected after the tool result', async () => {
@@ -32819,6 +32951,15 @@ describe('Session', () => {
             sessionUpdate: 'agent_message_chunk',
             content: expect.objectContaining({
               text: expect.stringContaining('/goal set'),
+            }),
+          }),
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining(objective),
             }),
           }),
         }),

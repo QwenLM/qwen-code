@@ -925,6 +925,7 @@ export class ToolRegistry {
       if (
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
+        this.isToolDeclared(tool.name) &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
         summary.push({

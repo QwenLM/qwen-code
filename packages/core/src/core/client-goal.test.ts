@@ -376,9 +376,9 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(events).toContainEqual({
-      type: LlmEventType.HookSystemMessage,
+      type: LlmEventType.GoalSettlementFailed,
       value:
-        'The approved Goal could not be started. Check /goal before trying again, or run `/goal set <objective>`.',
+        'The approved Goal could not be started. Check /goal before trying again, or run /goal set ship it.',
     });
   });
 
@@ -472,6 +472,55 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'create',
       objective: 'ship it',
+    });
+  });
+
+  it('reports a failed proposal settlement from the Stop-hook-cap exit', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+    const store = pendingGoalProposalStore();
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getDisableAllHooks: vi.fn(() => false),
+      hasHooksForEvent: vi.fn((event) => event === 'Stop'),
+      getMessageBus: vi.fn(() => ({
+        request: vi.fn(async () => ({
+          output: { decision: 'block', reason: 'Keep working' },
+          stopHookCount: 1,
+        })),
+      })),
+      getStopHookBlockingCap: vi.fn(() => 1),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+    turnMocks.run.mockImplementationOnce(() => {
+      store.set({
+        objective: 'ship it',
+        turnKey: 'stop-cap-failure-key',
+        reviewedGoal: null,
+      });
+      return emptyStream();
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'set a goal for this' }],
+        new AbortController().signal,
+        'stop-cap-failure-key',
+        { type: SendMessageType.UserQuery },
+      ),
+    );
+
+    expect(events).toContainEqual({
+      type: LlmEventType.GoalSettlementFailed,
+      value:
+        'The approved Goal could not be started. Check /goal before trying again, or run /goal set ship it.',
     });
   });
 
@@ -647,6 +696,50 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'create',
       objective: 'ship it',
+    });
+  });
+
+  it('reports a failed proposal settlement from the ToolResult exit', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    vi.mocked(runtime.dispatch).mockResolvedValueOnce({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+    const store = pendingGoalProposalStore({
+      objective: 'ship it',
+      turnKey: 'tool-result-failure-key',
+      reviewedGoal: null,
+    });
+    Object.assign(config, {
+      takePendingGoalProposal: store.take,
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+
+    const events = await collect(
+      client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'tool-result-failure-key',
+        { type: SendMessageType.ToolResult },
+      ),
+    );
+
+    expect(events).toContainEqual({
+      type: LlmEventType.GoalSettlementFailed,
+      value:
+        'The approved Goal could not be started. Check /goal before trying again, or run /goal set ship it.',
     });
   });
 
