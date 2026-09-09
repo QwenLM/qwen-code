@@ -310,6 +310,7 @@ import {
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -2117,6 +2118,7 @@ export function createServeApp(
   // enrolled Host is exactly the outbound execution path the opt-in governs.
   if (agentCollaborationEnabled) {
     registerAgentHostTransportRoutes(app, workspaceRegistry);
+    registerA2ATransportRoutes(app, workspaceRegistry);
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control

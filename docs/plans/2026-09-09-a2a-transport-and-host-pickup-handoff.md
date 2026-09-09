@@ -1,8 +1,10 @@
 # 交接：A2A 传输层与 Host 出站取件
 
-状态：两项均未开始。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。基线 `c976e5e2a0`（分支 `codex/multi-agent-mesh-foundation`，PR #11206）。
+状态：任务 1 已完成并通过独立 Python SDK 互通；任务 2 在写代码前发现 Host 授权/放置语义缺失，等待人决定。上游状态见[实施计划 §3b](./2026-09-09-agent-service-collaboration-plan.md)。基线 `c976e5e2a0`（分支 `codex/multi-agent-mesh-foundation`，PR #11206）。
 
-两项都**只差传输**：语义、存储与授权已落地并有断言覆盖，可用 `node scripts/audit/run-workspace-agents.mjs`（335 passed）复跑。**不要重新实现这些语义**，接上去即可；下面每条“已有”都是不该再造一遍的东西。
+A2A 的语义、存储与授权已落地，任务 1 只需接传输。任务 2 的租约语义已落地，但 Host 凭证目前只按 workspace 鉴权，没有 Host→Agent/任务授权或远程放置关系；直接接取件会违反“Host 凭证不能领取他人的任务”。不要用 `WorkspaceAgent.runtimeId` 代替 Host id：架构明确两者不是同一职责。先决定最小授权/放置模型，再接传输。既有断言可用 `node scripts/audit/run-workspace-agents.mjs`（335 passed）复跑。
+
+任务 1 实测（Python `a2a-sdk==1.1.2`）：公开 card 的 skills 为 0，认证 card 为 1；接单返回一个 Task，同 `messageId` 重发仍为同一 Task，列举为 1；第二调用方读取失败；同键异内容错误携带原 Task id；取消返回 `TASK_STATE_CANCELED`。`SendStreamingMessage` 返回 `-32004`，未宣传且未支持。关闭协作开关的真实 daemon app 中，公开 card 为 404，普通 `/health` 为 200。
 
 两项文件不重叠，可并行。
 
