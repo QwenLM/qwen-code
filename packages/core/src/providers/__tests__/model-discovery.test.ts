@@ -119,6 +119,26 @@ describe('discoverProviderModels', () => {
     ]);
   });
 
+  it('preserves provider order when creation dates are invalid', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'string-dated', created: '100' },
+          { id: 'newest-model', created: 300 },
+          { id: 'null-dated', created: null },
+          { id: 'negative-dated', created: -1 },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'string-dated' },
+      { id: 'newest-model' },
+      { id: 'null-dated' },
+      { id: 'negative-dated' },
+    ]);
+  });
+
   it.each([
     [{ id: 'model-a' }],
     { data: ['model-a'] },

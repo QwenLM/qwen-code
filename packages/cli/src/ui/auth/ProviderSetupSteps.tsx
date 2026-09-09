@@ -242,17 +242,32 @@ function mergeModelIds(
   ]);
 }
 
+function orderSelectedModelKeys(
+  selectedKeys: Iterable<string>,
+  modelOptions: ModelOption[],
+  builtInModelIds: string[],
+): string[] {
+  const selected = new Set(selectedKeys);
+  const builtIns = builtInModelIds.filter((id) => selected.has(id));
+  const builtInSet = new Set(builtIns);
+  return [
+    ...builtIns,
+    ...modelOptions
+      .map((item) => item.key)
+      .filter((id) => selected.has(id) && !builtInSet.has(id)),
+  ];
+}
+
 function getRecommendedSelections(
   selectedModelIds: string[],
   modelOptions: ModelOption[],
-  builtInModelIds: Set<string>,
+  builtInModelIds: string[],
 ): string[] {
   const selectedSet = new Set(selectedModelIds);
-  return modelOptions
-    .filter(
-      (item) => selectedSet.has(item.key) && builtInModelIds.has(item.key),
-    )
-    .map((item) => item.key);
+  const servedIds = new Set(modelOptions.map((item) => item.key));
+  return builtInModelIds.filter(
+    (id) => selectedSet.has(id) && servedIds.has(id),
+  );
 }
 
 function getCustomModelIdsText(
@@ -294,7 +309,7 @@ function ModelIdsStep({
     [models],
   );
   const builtInModelIds = useMemo(
-    () => new Set(config.models?.map((model) => model.id) ?? []),
+    () => config.models?.map((model) => model.id) ?? [],
     [config.models],
   );
   const [focusedModelIndex, setFocusedModelIndex] = useState(
@@ -374,15 +389,18 @@ function ModelIdsStep({
       } else {
         nextSet.add(item.key);
       }
-      const nextKeys = modelOptions
-        .filter((option) => nextSet.has(option.key))
-        .map((option) => option.key);
+      const nextKeys = orderSelectedModelKeys(
+        nextSet,
+        modelOptions,
+        builtInModelIds,
+      );
       setSelectedRecommendationKeys(nextKeys);
       syncModelIds(customModelIdsText, nextKeys);
     },
     [
       customModelIdsText,
       filteredModelOptions,
+      builtInModelIds,
       modelOptions,
       selectedRecommendationKeys,
       syncModelIds,
@@ -466,7 +484,9 @@ function ModelIdsStep({
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
             {recommendationSource === 'provider'
-              ? t('Models · from the provider')
+              ? t('Models · from the provider · {{count}} checked', {
+                  count: String(selectedRecommendationKeys.length),
+                })
               : t('Recommended models')}
             {recommendationSource === 'fallback' &&
               t(' · provider list unavailable, showing built-ins')}

@@ -356,6 +356,23 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('shows the fallback empty state when no recommended model matches', async () => {
+    const flow = createModelIdsFlow();
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('z', 'z');
+    });
+
+    expect(lastFrame()).toContain('No recommended models match.');
+    unmount();
+  });
+
   it('keeps recommended selections out of the free-form model input', () => {
     const flow = createModelIdsFlow({
       modelIds: 'custom-model, MiniMax-M3, MiniMax-M2.7',
@@ -529,6 +546,80 @@ describe('ProviderSetupSteps', () => {
     expect(frame).not.toContain('Other models from the provider');
     expect(frame).toMatch(/○\uFE0E\s+served-unknown-a/);
     expect(frame).toMatch(/○\uFE0E\s+served-unknown-b/);
+    unmount();
+  });
+
+  it('shows selected models in curated order while rendering provider order', async () => {
+    discoverProviderModelsMock.mockResolvedValue([
+      { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
+      {
+        id: 'MiniMax-M3',
+        contextWindowSize: 1000000,
+        modalities: { image: true, video: true },
+      },
+    ]);
+    const submitModelIds = vi.fn();
+    const flow = createModelIdsFlow({ submitModelIds });
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Models · from the provider · 2 checked');
+    expect(frame.indexOf('MiniMax-M2.7')).toBeLessThan(
+      frame.indexOf('MiniMax-M3'),
+    );
+
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
+  it('reports selected models that begin below the provider window', async () => {
+    discoverProviderModelsMock.mockResolvedValue([
+      ...Array.from({ length: 8 }, (_, index) => ({
+        id: `new-model-${index}`,
+      })),
+      { id: 'MiniMax-M3' },
+      { id: 'MiniMax-M2.7' },
+    ]);
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Models · from the provider · 2 checked');
+    expect(frame).not.toContain('MiniMax-M3');
+    expect(frame).not.toContain('MiniMax-M2.7');
+    unmount();
+  });
+
+  it('shows the provider empty state when no discovered model matches', async () => {
+    discoverProviderModelsMock.mockResolvedValue([{ id: 'served-model' }]);
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('z', 'z');
+    });
+
+    expect(lastFrame()).toContain('No models match.');
     unmount();
   });
 
