@@ -736,6 +736,39 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       temperature: 0.7,
     };
 
+    it.each([
+      ['gpt-5.4', 'high', 'high'],
+      ['gpt-5.4', 'max', 'xhigh'],
+      ['gpt-6-astra', 'max', 'max'],
+    ] as const)(
+      'maps %s effort %s to flat %s on an IdeaLab gateway',
+      (model, effort, expected) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+            model,
+            reasoning: { effort },
+            samplingParams: { max_completion_tokens: 1024 },
+          },
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort },
+            max_completion_tokens: 1024,
+          } as OpenAI.Chat.ChatCompletionCreateParams,
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['reasoning']).toBeUndefined();
+        expect(result['max_completion_tokens']).toBe(1024);
+      },
+    );
+
     it('should add cache control to system message only for non-streaming requests', () => {
       const request = { ...baseRequest, stream: false };
       const result = provider.buildRequest(request, 'test-prompt-id');

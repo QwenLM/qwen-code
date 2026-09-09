@@ -8,6 +8,7 @@ import type {
   ChannelMemoryEntry,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -104,6 +105,13 @@ class TestChannel extends ChannelBase {
   userInputPresentationHandler?: (
     context: ChannelUserInputRequestContext,
   ) => Promise<UserInputPresentationResult>;
+  permissionPresentations: ChannelPermissionRequestContext[] = [];
+  permissionPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  permissionPresentationHandler?: (
+    context: ChannelPermissionRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -149,6 +157,16 @@ class TestChannel extends ChannelBase {
       return this.userInputPresentationHandler(context);
     }
     return this.userInputPresentationResult;
+  }
+
+  protected async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.permissionPresentations.push(context);
+    if (this.permissionPresentationHandler) {
+      return this.permissionPresentationHandler(context);
+    }
+    return this.permissionPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -326,30 +344,6 @@ class ResponseTrackingChannel extends TestChannel {
   ): Promise<void> {
     this.responseDeliveries.push({ chatId, text, sessionId });
     await super.sendResponseMessage(chatId, text, sessionId);
-  }
-}
-
-class SlowBlockSendChannel extends TestChannel {
-  sendCompletions = 0;
-  completionsAtPromptEnd: number[] = [];
-
-  protected override async sendResponseMessage(
-    chatId: string,
-    text: string,
-    sessionId: string,
-  ): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    this.sendCompletions++;
-    await super.sendResponseMessage(chatId, text, sessionId);
-  }
-
-  protected override onPromptEnd(
-    chatId: string,
-    sessionId: string,
-    messageId?: string,
-  ): void {
-    this.completionsAtPromptEnd.push(this.sendCompletions);
-    super.onPromptEnd(chatId, sessionId, messageId);
   }
 }
 
@@ -1440,6 +1434,7 @@ describe('ChannelBase', () => {
         { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
         { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
       ],
+      title = `Run ${requestId}`,
     ): void {
       (bridge as unknown as EventEmitter).emit('permissionRequest', {
         requestId,
@@ -1448,7 +1443,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: `tool-${requestId}`,
             kind: 'shell',
-            title: `Run ${requestId}`,
+            title,
             rawInput: { command: 'echo secret-token' },
             _meta: { toolName: 'run_shell_command' },
           },
@@ -2059,6 +2054,306 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('presents an attended ordinary permission before text fallback', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      emitPermission(active.sessionId, 'req-native-permission');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        requestId: 'req-native-permission',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        title: 'Run req-native-permission',
+        decisions: [
+          { kind: 'allow_once', label: 'Allow' },
+          {
+            kind: 'allow_always',
+            label: 'Always Allow in project',
+          },
+          { kind: 'deny', label: 'Reject' },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('localizes stock permission decisions for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(
+        active.sessionId,
+        'req-native-permission-zh',
+        undefined,
+        '',
+      );
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        title: '工具调用',
+        decisions: [
+          { kind: 'allow_once', label: '仅允许本次' },
+          { kind: 'allow_always', label: '始终允许此项目' },
+          { kind: 'deny', label: '拒绝' },
+        ],
+      });
+
+      await active.finish();
+    });
+
+    it('keeps the scope suffix on localized always-allow labels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-scoped-project', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project: git status',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此项目：git status' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      emitPermission(active.sessionId, 'req-zh-scoped-user', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user: run_shell_command',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(2),
+      );
+      expect(ch.permissionPresentations[1]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此用户：run_shell_command' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('localizes a user-scope only always option for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-user-always', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此用户' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('keeps the scope suffix in the Chinese approve-always fallback', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-fallback-scoped', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project: git status',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain(
+        '/approve-always 始终允许此项目：git status',
+      );
+
+      await active.finish();
+    });
+
+    it('omits persistent permission decisions that were not advertised', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-once-only', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: 'Allow once' },
+        { kind: 'deny', label: 'Deny' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('falls back to permission commands when native presentation is unsupported', async () => {
+      const ch = createChannel();
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-native-fallback');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.permissionPresentations).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('/approve        Allow');
+      expect(ch.sent[0]!.text).toContain('/approve-always');
+      expect(ch.sent[0]!.text).toContain('/deny           Reject');
+
+      await active.finish();
+    });
+
+    it('uses Chinese text when native permission presentation is unsupported', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-native-fallback-zh');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain('运行工具需要授权');
+      expect(ch.sent[0]!.text).toContain('操作：');
+      expect(ch.sent[0]!.text).toContain('回复以下命令：');
+      expect(ch.sent[0]!.text).toContain('/approve        仅允许本次');
+      expect(ch.sent[0]!.text).toContain('/approve-always 始终允许此项目');
+      expect(ch.sent[0]!.text).toContain('/deny           拒绝');
+
+      await active.finish();
+    });
+
+    it('falls back when handled follows an unavailable native decision', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationHandler = async (context) => {
+        await context.respond('allow_always');
+        return { kind: 'handled' };
+      };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-invalid-native-decision', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain('/approve        Allow once');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('maps native permission decisions to original option ids exactly once', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitPermission(active.sessionId, 'req-native-response');
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      const context = ch.permissionPresentations[0]!;
+      respondToPermissionMock().mockImplementation(
+        async (requestId: string, response: { outcome: unknown }) => {
+          (bridge as unknown as EventEmitter).emit('permissionResolved', {
+            requestId,
+            outcome: response.outcome,
+          });
+          return true;
+        },
+      );
+
+      const first = context.respond('allow_always');
+      const second = context.respond('deny');
+
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(false);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-native-response',
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: 'proceed_always_project',
+          },
+        },
+      );
+
+      await active.finish();
+    });
+
+    it('lets owner text commands share the native permission response promise', async () => {
+      let presentation!: ChannelPermissionRequestContext;
+      const ch = createChannel();
+      ch.permissionPresentationHandler = async (context) => {
+        presentation = context;
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-card-command-race');
+      await vi.waitFor(() => expect(presentation).toBeDefined());
+
+      const cardResponse = presentation.respond('allow_once');
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-card-command-race',
+        }),
+      );
+
+      await expect(cardResponse).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-card-command-race',
+        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+      );
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission request is no longer pending.',
+      );
+
+      await active.finish();
+    });
+
     it('falls back when handled is returned without responding', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'handled' };
@@ -2160,7 +2455,7 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
-    it('uses one response promise and emits one typed user input settlement', async () => {
+    it('accepts one response and emits one typed user input settlement', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
       const active = await startActiveSession(ch);
@@ -2187,7 +2482,7 @@ describe('ChannelBase', () => {
       const second = context.respond(response);
 
       await expect(first).resolves.toBe(true);
-      await expect(second).resolves.toBe(true);
+      await expect(second).resolves.toBe(false);
       expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
       expect(settled).toHaveBeenCalledOnce();
       expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
@@ -2432,6 +2727,38 @@ describe('ChannelBase', () => {
       emitPermission(sessionId, 'req-other');
       await ch.handleInbound(envelope({ text: '/approve' }));
       expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
+    });
+
+    it('localizes empty permission label fallbacks for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const sessionId = await startSession(ch);
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-empty-zh-labels',
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-empty-zh-labels',
+            kind: 'shell',
+            title: 'Run tool',
+            rawInput: {},
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: '\u0000\n',
+            },
+            {
+              optionId: 'cancel',
+              kind: 'reject_once',
+              name: '\u0000\n',
+            },
+          ],
+        },
+      });
+
+      expect(ch.sent.at(-1)?.text).toContain('/approve        仅允许本次');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           拒绝');
     });
 
     it('summarizes permission parameters with shape markers and overflow', async () => {
@@ -9380,35 +9707,6 @@ describe('ChannelBase', () => {
       expect(maps.collectBuffers.has(sid)).toBe(false);
     });
 
-    it('/clear stops streaming on the cancelled prompt (mirror /cancel), not just cancels it', async () => {
-      const ch = createChannel();
-      await ch.handleInbound(envelope({ text: 'hi' }));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Seed an in-flight prompt whose BlockStreamer is exposed via stopStreaming.
-      const stopStreaming = vi.fn();
-      const active = {
-        cancelled: false,
-        done: Promise.resolve(),
-        resolve: () => {},
-        stopStreaming,
-      };
-      (
-        ch as unknown as { activePrompts: Map<string, typeof active> }
-      ).activePrompts.set(sid, active);
-
-      ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/clear' }));
-      expect(ch.sent[0]!.text).toContain('Session cleared');
-
-      // Must do BOTH: flip cancelled AND stop streaming. Cancelled alone only
-      // suppresses new chunks — text already buffered in the BlockStreamer still
-      // leaks out via the idle timer after the session is cleared unless stopped.
-      expect(active.cancelled).toBe(true);
-      expect(stopStreaming).toHaveBeenCalledTimes(1);
-    });
-
     it('/clear completes (does not hang) when a wedged turn never resolves active.done', async () => {
       const ch = createChannel({ instructions: 'Be brief.' });
       await ch.handleInbound(envelope({ text: 'hi' }));
@@ -14891,6 +15189,39 @@ describe('ChannelBase', () => {
   });
 
   describe('response delivery', () => {
+    it('keeps partial paragraphs in adapter updates until the final response', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolvePrompt!: (text: string) => void;
+        const pendingPrompt = new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        });
+        vi.mocked(bridge.prompt).mockReturnValue(pendingPrompt);
+        const ch = createChannel({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 2 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        } as unknown as Partial<ChannelConfig>);
+        const pending = ch.handleInbound(envelope());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+
+        const partial = 'First paragraph.\n\nSecond paragraph.\n\n';
+        (bridge as unknown as EventEmitter).emit('textChunk', 's-1', partial);
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(ch.sent).toEqual([]);
+        expect(ch.responseChunks).toContainEqual(
+          expect.objectContaining({ chunk: partial, sessionId: 's-1' }),
+        );
+
+        resolvePrompt('Final answer');
+        await pending;
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'Final answer' }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('sends agent response via sendMessage', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
@@ -15913,54 +16244,6 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('stops active streaming before emitting steer cancellation lifecycle', async () => {
-      let resolveFirst!: (value: string) => void;
-      const firstPrompt = new Promise<string>((resolve) => {
-        resolveFirst = resolve;
-      });
-      (bridge.prompt as ReturnType<typeof vi.fn>)
-        .mockReturnValueOnce(firstPrompt)
-        .mockResolvedValueOnce('second');
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
-        () => {
-          resolveFirst('late');
-          return Promise.resolve();
-        },
-      );
-      const ch = createChannel();
-      const order: string[] = [];
-      vi.spyOn(
-        ch as unknown as {
-          stopActiveStreaming: (
-            active: unknown,
-            sessionId: string,
-            reason: string,
-          ) => void;
-        },
-        'stopActiveStreaming',
-      ).mockImplementation(() => {
-        order.push('stop');
-      });
-      vi.spyOn(
-        ch as unknown as {
-          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
-        },
-        'onTaskLifecycle',
-      ).mockImplementation((event) => {
-        if (event.type === 'cancelled') {
-          order.push('cancelled');
-        }
-      });
-
-      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const second = ch.handleInbound(envelope({ text: 'replacement' }));
-      await first;
-      await second;
-
-      expect(order).toEqual(['stop', 'cancelled']);
-    });
-
     it('emits one cancellation lifecycle event for repeated steer messages before the active turn settles', async () => {
       let resolveFirst!: (value: string) => void;
       const firstPrompt = new Promise<string>((resolve) => {
@@ -16000,8 +16283,8 @@ describe('ChannelBase', () => {
     });
   });
 
-  describe('block streaming', () => {
-    it('passes the prompt session to block-streamed response delivery', async () => {
+  describe('final response delivery and held chunks', () => {
+    it('passes the prompt session to response delivery', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit('textChunk', sid, 'reply');
@@ -16010,11 +16293,7 @@ describe('ChannelBase', () => {
       );
       const ch = new ResponseTrackingChannel(
         'test-chan',
-        defaultConfig({
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 1, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
-        }),
+        defaultConfig({}),
         bridge,
       );
 
@@ -16025,59 +16304,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('settles turn cleanup only after queued block sends land', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
-        (sid: string) => {
-          (bridge as unknown as EventEmitter).emit(
-            'textChunk',
-            sid,
-            'first paragraph body\n\n',
-          );
-          return Promise.reject(new Error('agent boom'));
-        },
-      );
-      const ch = new SlowBlockSendChannel(
-        'test-chan',
-        defaultConfig({
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 5, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
-        }),
-        bridge,
-      );
-
-      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
-
-      // The failed turn's queued block send must have completed before
-      // onPromptEnd settled turn-scoped adapter state.
-      expect(ch.completionsAtPromptEnd).toEqual([1]);
-    });
-
-    it('uses block streamer when blockStreaming=on', async () => {
-      // The streamer sends blocks; onResponseComplete is NOT called
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (bridge.prompt as any).mockImplementation(
-        (sid: string, _text: string) => {
-          // Simulate streaming chunks
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (bridge as any).emit('textChunk', sid, 'Hello world! ');
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (bridge as any).emit('textChunk', sid, 'This is a test.');
-          return Promise.resolve('Hello world! This is a test.');
-        },
-      );
-
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 100 },
-        blockStreamingCoalesce: { idleMs: 0 },
-      });
-      await ch.handleInbound(envelope());
-      // BlockStreamer flush should have sent the accumulated text
-      expect(ch.sent.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('block-streams only the final slash-command response', async () => {
+    it('delivers only the final slash-command response', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit(
@@ -16093,11 +16320,7 @@ describe('ChannelBase', () => {
           return Promise.resolve('Context compressed.');
         },
       );
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
-      });
+      const ch = createChannel({});
 
       await ch.handleInbound(envelope());
 
@@ -16106,7 +16329,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('prefers model text over slash-command output when block streaming', async () => {
+    it('prefers model text over slash-command output', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit(
@@ -16122,18 +16345,14 @@ describe('ChannelBase', () => {
           return Promise.resolve('Model text');
         },
       );
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
-      });
+      const ch = createChannel({});
 
       await ch.handleInbound(envelope());
 
       expect(ch.sent.map((message) => message.text)).toEqual(['Model text']);
     });
 
-    it('drops buffered block stream text at response boundaries', async () => {
+    it('delivers the final response after response boundaries', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit(
@@ -16147,11 +16366,7 @@ describe('ChannelBase', () => {
         },
       );
 
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
-      });
+      const ch = createChannel({});
 
       await ch.handleInbound(envelope());
 
@@ -16209,83 +16424,72 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('does not emit buffered stream text after cancellation', async () => {
-      vi.useFakeTimers();
-      try {
-        let resolvePrompt!: (v: string) => void;
-        let resolveCancel!: () => void;
-        const pendingPrompt = new Promise<string>((resolve) => {
-          resolvePrompt = resolve;
-        });
-        const pendingCancel = new Promise<void>((resolve) => {
-          resolveCancel = resolve;
-        });
-        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
-          (sid: string) => {
-            (bridge as unknown as EventEmitter).emit(
-              'textChunk',
-              sid,
-              'partial response that should not leak',
-            );
-            return pendingPrompt;
-          },
-        );
-        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
-          pendingCancel,
-        );
+    it('does not emit stream chunks after cancellation', async () => {
+      let resolvePrompt!: (v: string) => void;
+      let resolveCancel!: () => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'partial response that should not leak',
+          );
+          return pendingPrompt;
+        },
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
 
-        const ch = createChannel({
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 5, maxChars: 1000 },
-          blockStreamingCoalesce: { idleMs: 500 },
-        });
-        ch.enableCancelCommand();
-        const prompt = ch.handleInbound(envelope({ text: 'long task' }));
-        for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
-          await Promise.resolve();
-        }
-        expect(ch.promptStarts).toHaveLength(1);
-
-        const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      const ch = createChannel({});
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
         await Promise.resolve();
-        resolveCancel();
-        await cancel;
-
-        (bridge as unknown as EventEmitter).emit(
-          'textChunk',
-          's-1',
-          'late chunk after cancel',
-        );
-        await vi.advanceTimersByTimeAsync(500);
-
-        resolvePrompt('late full response');
-        await prompt;
-
-        expect(ch.sent).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ text: 'Cancelled current request.' }),
-          ]),
-        );
-        expect(ch.sent).not.toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              text: 'partial response that should not leak',
-            }),
-          ]),
-        );
-        expect(ch.sent).not.toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              text: 'late chunk after cancel',
-            }),
-          ]),
-        );
-      } finally {
-        vi.useRealTimers();
       }
+      expect(ch.promptStarts).toHaveLength(1);
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      resolveCancel();
+      await cancel;
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'late chunk after cancel',
+      );
+      resolvePrompt('late full response');
+      await prompt;
+
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.responseChunks).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chunk: 'late chunk after cancel',
+          }),
+        ]),
+      );
+      expect(
+        ch.taskEvents.filter(
+          (event) =>
+            event.type === 'text_chunk' &&
+            event.chunk === 'late chunk after cancel',
+        ),
+      ).toEqual([]);
     });
 
-    it('keeps block-streaming chunks emitted while a failed cancel is pending', async () => {
+    it('keeps chunks emitted while a failed cancel is pending', async () => {
       let resolvePrompt!: (v: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
         resolvePrompt = resolve;
@@ -16302,11 +16506,7 @@ describe('ChannelBase', () => {
       );
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 500 },
-      });
+      const ch = createChannel({});
       ch.enableCancelCommand();
       const prompt = ch.handleInbound(envelope({ text: 'long task' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
@@ -16378,7 +16578,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('never sends held block-streaming chunks when the pending cancel succeeds', async () => {
+    it('never sends held chunks when the pending cancel succeeds', async () => {
       let resolvePrompt!: (v: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
         resolvePrompt = resolve;
@@ -16394,19 +16594,13 @@ describe('ChannelBase', () => {
         pendingCancel,
       );
 
-      const ch = createChannel({
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 10 },
-        blockStreamingCoalesce: { idleMs: 500 },
-      });
+      const ch = createChannel({});
       ch.enableCancelCommand();
       const prompt = ch.handleInbound(envelope({ text: 'long task' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
 
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
-      // Far past every send threshold — pushing this into the BlockStreamer
-      // during the pending window would emit a block the cancel can't recall.
       (bridge as unknown as EventEmitter).emit(
         'textChunk',
         's-1',
@@ -17882,135 +18076,6 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'steered response' }),
         ]),
       );
-    });
-
-    it("steer: best-effort cancel stops the running turn's streamer (stopStreaming called)", async () => {
-      // The steered turn must STOP the wedged turn's BlockStreamer, not just flip
-      // `cancelled` — otherwise text already buffered in the old turn's streamer
-      // can still flush out via its idle timer after the new turn has started.
-      // Mutation check: removing `active.stopStreaming?.()` from the steer path
-      // leaves the spy uncalled and fails the assertion below.
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? promiseA : Promise.resolve('steered response');
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-
-      // Turn A starts and stays in-flight (don't await it — it can't settle yet).
-      const pA = ch.handleInbound(envelope({ text: 'A' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Replace stopStreaming on the SAME active-prompt object the steer path reads
-      // from activePrompts, so we observe steer's best-effort cancel invoking it.
-      const active = (
-        ch as unknown as {
-          activePrompts: Map<string, { stopStreaming?: () => void }>;
-        }
-      ).activePrompts.get(sid)!;
-      const stopStreaming = vi.fn();
-      active.stopStreaming = stopStreaming;
-
-      // Turn B steers in: it best-effort cancels A (which must stop A's streamer)
-      // and chains behind A's tail.
-      const pB = ch.handleInbound(envelope({ text: 'B' }));
-
-      // A completes → B dequeues and runs.
-      resolveA('A (cancelled, never sent)');
-      await pA;
-      await pB;
-
-      expect(stopStreaming).toHaveBeenCalledTimes(1);
-    });
-
-    it('steer: logs and continues if stopStreaming throws', async () => {
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? promiseA : Promise.resolve('steered response');
-      });
-      const stderr = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        const ch = createChannel({ dispatchMode: 'steer' });
-        const pA = ch.handleInbound(envelope({ text: 'A' }));
-        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0][0] as string;
-        const active = (
-          ch as unknown as {
-            activePrompts: Map<string, { stopStreaming?: () => void }>;
-          }
-        ).activePrompts.get(sid)!;
-        active.stopStreaming = () => {
-          throw new Error('stop failed');
-        };
-
-        const pB = ch.handleInbound(envelope({ text: 'B' }));
-        resolveA('A (cancelled, never sent)');
-        await pA;
-        await pB;
-
-        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
-        expect(logged).toContain('stopStreaming threw during steer');
-        expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
-      } finally {
-        stderr.mockRestore();
-      }
-    });
-
-    it('/clear logs and continues if stopStreaming throws', async () => {
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(promiseA);
-      const stderr = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        const ch = createChannel();
-        const pA = ch.handleInbound(envelope({ text: 'A' }));
-        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0][0] as string;
-        const active = (
-          ch as unknown as {
-            activePrompts: Map<string, { stopStreaming?: () => void }>;
-          }
-        ).activePrompts.get(sid)!;
-        active.stopStreaming = () => {
-          throw new Error('stop failed');
-        };
-
-        const pClear = ch.handleInbound(envelope({ text: '/clear' }));
-        resolveA('A (cancelled, never sent)');
-        await pA;
-        await pClear;
-
-        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
-        expect(logged).toContain('stopStreaming threw during cancel');
-        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
-          true,
-        );
-      } finally {
-        stderr.mockRestore();
-      }
     });
 
     it('steer: waits for the running turn to finish before starting the new turn (no concurrent bridge.prompt)', async () => {

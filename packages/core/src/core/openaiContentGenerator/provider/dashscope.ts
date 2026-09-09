@@ -529,6 +529,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       dropped.add(key);
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
+    this.flattenGptReasoningEffort(merged);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
