@@ -4036,6 +4036,7 @@ async function runQwenServeImpl(
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
+          workspaceCwd: boundWorkspace,
         });
       } else if (
         configuredChannels.length !== bootSettings.serve.channels.length
@@ -9588,7 +9589,9 @@ async function runQwenServeImpl(
         }
         if (opts.channelSelection?.mode === 'all') {
           writeStderrLine(
-            'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
+            channelSelectionFromSettings
+              ? 'qwen serve: workspace serve.channels selection "all" is primary-workspace only; non-primary workspace channels are not hosted.'
+              : 'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
           );
         }
       }
