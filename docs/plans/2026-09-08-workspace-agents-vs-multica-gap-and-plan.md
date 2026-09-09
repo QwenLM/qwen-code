@@ -748,6 +748,11 @@ three kinds, and the distinction matters more than the number:
   not assumed — but a single field check can be disabled with every suite
   still green. That is a real if minor gap.
 
+Retired 2026-09-09 per the successor plan §1: `run-workspace-agents-concurrency.mjs`,
+`run-workspace-agents-crash.mjs` and `fuzz-workspace-agents.mjs`. Their results above
+stand as recorded; the questions they answered were one-time. The orphan sweep, the
+two tsconfigs and `run-workspace-agents.mjs` remain.
+
 What none of it covers: the vitest suites, which are larger and still need CI;
 partial-write recovery, since the file lock means two writers never touch one
 file and killing an idle holder never interrupts a write (`store.test.ts`
