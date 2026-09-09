@@ -63,6 +63,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
+  getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
   ApprovalMode,
   CompressionStatus,
   isCompressionFailureStatus,
@@ -355,9 +357,11 @@ import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getDefaultReasoningConfig,
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NONE,
   type ReasoningSelection,
 } from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -5261,6 +5265,7 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        const daemonPromptId = getInvocationContext()?.promptId;
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
         const continuesCurrentWorkChain =
@@ -5451,17 +5456,18 @@ export class Session implements SessionContext {
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined || attachmentReferences) {
-                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText ?? promptText,
-                  hookContext: '',
-                  ...(attachmentReferences ? { attachmentReferences } : {}),
-                });
-              } else if (goalTurn) {
-                recorder?.recordUserMessage(promptText, goalTurn.permit);
-              } else {
-                recorder?.recordUserMessage(promptText);
-              }
+              recorder?.recordUserMessage(
+                promptText,
+                goalTurn?.permit,
+                promptDisplayText !== undefined || attachmentReferences
+                  ? {
+                      displayText: promptDisplayText ?? promptText,
+                      hookContext: '',
+                      ...(attachmentReferences ? { attachmentReferences } : {}),
+                    }
+                  : undefined,
+                daemonPromptId,
+              );
             }
 
             if (
@@ -5541,16 +5547,14 @@ export class Session implements SessionContext {
                 !isRetry
               ) {
                 const recorder = this.config.getChatRecordingService();
-                if (promptDisplayText !== undefined) {
-                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                    displayText: promptDisplayText,
-                    hookContext: '',
-                  });
-                } else if (goalTurn) {
-                  recorder?.recordUserMessage(promptText, goalTurn.permit);
-                } else {
-                  recorder?.recordUserMessage(promptText);
-                }
+                recorder?.recordUserMessage(
+                  promptText,
+                  goalTurn?.permit,
+                  promptDisplayText !== undefined
+                    ? { displayText: promptDisplayText, hookContext: '' }
+                    : undefined,
+                  daemonPromptId,
+                );
               }
 
               try {
@@ -10811,22 +10815,7 @@ export class Session implements SessionContext {
   }
 
   getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
-    // Runtime snapshots already include the persisted selection, not its defaults.
-    const authType = this.config.getAuthType?.();
-    const model =
-      authType && !this.config.getActiveRuntimeModelSnapshot?.()
-        ? this.config.getResolvedModelConfig?.(
-            authType,
-            this.config.getModel(),
-            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
-          )
-        : undefined;
-    if (model) return model.generationConfig.reasoning;
-    return (
-      this.settings.merged.model?.generationConfig as
-        | Partial<ContentGeneratorConfig>
-        | undefined
-    )?.reasoning;
+    return getDefaultReasoningConfig(this.config, this.settings);
   }
 
   reloadReasoningSelection(): void {
@@ -10914,15 +10903,20 @@ export class Session implements SessionContext {
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    let supported =
-      selection !== undefined &&
-      selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(
-        modelId,
-        selection,
-        thinkingMandatory,
-        modelReasoning,
-      );
+    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
+    const gptModel = gptCapabilities !== undefined && !configuredReasoning;
+    const supportsPreference = (value: ReasoningSelection | undefined) =>
+      value !== undefined &&
+      value !== REASONING_EFFORT_DEFAULT &&
+      ((gptModel && value !== REASONING_EFFORT_NONE) ||
+        isReasoningSelectionSupported(
+          modelId,
+          value,
+          thinkingMandatory,
+          modelReasoning,
+        ));
+    let supported = supportsPreference(selection);
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10930,20 +10924,17 @@ export class Session implements SessionContext {
       this.sessionReasoningSelection = undefined;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
-      supported =
-        selection !== undefined &&
-        selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(
-          modelId,
-          selection,
-          thinkingMandatory,
-          modelReasoning,
-        );
+      supported = supportsPreference(selection);
     }
     if (
       !hasSessionSelection &&
       rawSelection !== undefined &&
       !supported &&
+      !(
+        selection === REASONING_EFFORT_NONE &&
+        gptCapabilities !== undefined &&
+        configuredReasoning?.canDisable !== false
+      ) &&
       options.persist
     ) {
       try {
@@ -13180,9 +13171,9 @@ export class Session implements SessionContext {
             }
           }
 
-          if (!didRequestPermission && !isTodoWriteTool) {
-            // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
-            // → emit tool_call start notification
+          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
+            // Approved agents also need the initial creating frame when the
+            // provider does not emit preparation updates.
             const startParams: ToolCallStartParams = {
               callId,
               toolName,
@@ -13362,10 +13353,31 @@ export class Session implements SessionContext {
           let toolSettled = false;
           let heartbeatCount = 0;
           let lastHeartbeat: ShellProgressData | undefined;
+          let subagentSessionReadySent = false;
           const onToolProgress = (chunk: ToolResultDisplay) => {
-            if (toolSettled || !isShellProgressData(chunk)) {
-              return;
+            if (toolSettled) return;
+            // Match ToolCallEmitter's initial false frame by callId so readiness
+            // updates the existing agent row before execution completes.
+            if (
+              isAgentTool &&
+              !subagentSessionReadySent &&
+              typeof chunk === 'object' &&
+              chunk !== null &&
+              'subagentSessionReady' in chunk &&
+              chunk.subagentSessionReady === true
+            ) {
+              subagentSessionReadySent = true;
+              void this.sendUpdate({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: callId,
+                _meta: { toolName, subagentSessionReady: true },
+              }).catch((err) => {
+                debugLogger.debug(
+                  `[Session.runTool] subagent readiness update failed for ${callId}: ${err}`,
+                );
+              });
             }
+            if (!isShellProgressData(chunk)) return;
             heartbeatCount++;
             lastHeartbeat = chunk;
             void this.sendUpdate({

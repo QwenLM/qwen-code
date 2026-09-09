@@ -247,7 +247,10 @@ interface ChatEditorProps {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
-  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
+  onSelectReasoningEffort?: (
+    value: ReasoningSelection,
+    source?: 'toggle',
+  ) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -1089,16 +1092,20 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect?: (value: ReasoningSelection) => Promise<void> | void;
+  onSelect?: (
+    value: ReasoningSelection,
+    source?: 'toggle',
+  ) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
-  const select = async (value: ReasoningSelection) => {
+  const select = async (value: ReasoningSelection, source?: 'toggle') => {
     if (busy || !onSelect) return;
     setBusy(true);
     try {
-      await onSelect(value);
+      if (source) await onSelect(value, source);
+      else await onSelect(value);
     } catch {
       // The owning surface reports action errors.
     } finally {
@@ -1115,11 +1122,23 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy || !onSelect || reasoning.canDisable === false}
+          disabled={
+            busy ||
+            !onSelect ||
+            reasoning.canDisable === false ||
+            (!reasoning.enabled && reasoning.canEnable === false)
+          }
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? 'default' : 'none')
+            void select(
+              enabled
+                ? (reasoning.enableValue ??
+                    reasoning.defaultEffort ??
+                    'default')
+                : 'none',
+              'toggle',
+            )
           }
         />
       </div>
