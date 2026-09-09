@@ -14,6 +14,10 @@ import {
   MAX_STALL_ATTEMPTS,
   MAX_WORKFLOW_STALL_MS_ENV,
 } from './workflow-stall.js';
+import {
+  isWorkflowAgentFailedError,
+  type WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { DEFAULT_RETRY_OPTIONS } from '../../utils/retry.js';
 import { getRetryDelayMs } from '../../utils/retryPolicy.js';
 
@@ -249,6 +253,8 @@ describe('runStallResilient', () => {
       caught = e;
     }
     expect(calls).toBe(MAX_STALL_ATTEMPTS);
+    expect(isWorkflowAgentFailedError(caught)).toBe(true);
+    expect((caught as WorkflowAgentFailedError).kind).toBe('stalled');
     expect(String(caught)).toMatch(/stalled on all 3 attempts/);
   });
 
