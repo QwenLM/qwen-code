@@ -24,6 +24,7 @@ import {
   createThreadInTransaction,
   withAgentStoreTransaction,
 } from './store.js';
+import { isThreadTerminal } from './types.js';
 import { postMessageInTransaction } from './thread-actions.js';
 import { HUMAN_AUTHOR_ID } from './types.js';
 import type { ExternalIntake, Thread } from './types.js';
@@ -169,6 +170,66 @@ export async function listExternalThreadsForCaller(
   return threads.filter(
     (thread) => thread.externalIntake?.callerId === callerId,
   );
+}
+
+/**
+ * Withdraw one of this caller's tasks.
+ *
+ * Two writes are deliberately NOT collapsed into one here: this marks the
+ * thread terminal, which stops anything further being dispatched for it, but
+ * it does not claim the body has stopped. A run already executing keeps
+ * running until the dispatcher's own cancellation path reaches it, and the
+ * plan is explicit that a cancellation receipt and an actual stop are
+ * separately reported — a caller told "cancelled" while the work continues is
+ * the failure worth avoiding, so the receipt says what is true: no further
+ * work will be started.
+ *
+ * Returns `undefined` for a thread that is not this caller's, on the same
+ * reasoning as {@link getExternalThreadForCaller}: distinguishing "no such
+ * task" from "not yours" leaks another client's task ids.
+ */
+export async function cancelExternalThreadForCaller(
+  projectRoot: string,
+  callerId: string,
+  threadId: string,
+): Promise<{ thread: Thread; runsStillLive: number } | undefined> {
+  if (!callerId || !threadId) return undefined;
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    if (!thread || thread.externalIntake?.callerId !== callerId) {
+      return undefined;
+    }
+    const runsStillLive = thread.runs.filter(
+      (run) =>
+        run.status === 'running' ||
+        run.status === 'finishing' ||
+        run.status === 'cancelling',
+    ).length;
+    // Already terminal: report it rather than overwriting a `done` with a
+    // `cancelled`, which would rewrite how the work actually ended.
+    if (isThreadTerminal(thread.status)) {
+      return { thread, runsStillLive };
+    }
+    // Retires the runs the same way the "mark done" path does: a queued run
+    // that no selection will ever pick is still shown as pending work on a
+    // task its caller withdrew, and a live one has to be asked to stop rather
+    // than quietly relabelled. `cancelling` is a request, not a report — which
+    // is why `runsStillLive` is returned separately, so the receipt can say
+    // "no further work will start" without claiming the body has stopped.
+    const now = Date.now();
+    const next = await transaction.writeThread({
+      ...thread,
+      status: 'cancelled' as const,
+      runs: thread.runs.map((run) =>
+        run.status === 'queued'
+          ? { ...run, status: 'cancelled' as const, endedAt: now }
+          : run.status === 'running' || run.status === 'finishing'
+            ? { ...run, status: 'cancelling' as const }
+            : run,
+      ),
+    });
+    return { thread: next, runsStillLive };
+  });
 }
 
 /**

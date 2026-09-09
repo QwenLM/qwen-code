@@ -34,6 +34,7 @@ import {
   type WorkspaceAgent,
   type Thread,
   type ThreadMessage,
+  isThreadTerminal,
 } from './types.js';
 
 export type DispatchDecision =
@@ -114,8 +115,12 @@ export function decideDispatch(context: DispatchContext): DispatchDecision {
   }
 
   // A finished thread stops consuming model time. Reopening it is a
-  // deliberate act, not something a late post should do implicitly.
-  if (thread.status === 'done') return { kind: 'skip', reason: 'thread_done' };
+  // deliberate act, not something a late post should do implicitly. Cancelled
+  // counts: a caller that withdrew its task must not have it woken by a post
+  // that was already in flight.
+  if (isThreadTerminal(thread.status)) {
+    return { kind: 'skip', reason: 'thread_done' };
+  }
 
   // An agent's own post never wakes it. Without this, a single "I'm done"
   // message becomes an infinite self-conversation.

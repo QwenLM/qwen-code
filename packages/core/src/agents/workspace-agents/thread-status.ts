@@ -37,6 +37,7 @@ import type {
   ThreadRun,
   ThreadStatus,
 } from './types.js';
+import { isThreadTerminal } from './types.js';
 
 /** Run states that keep a thread `in_progress` regardless of any obligation. */
 export const LIVE_RUN_STATUSES = new Set([
@@ -161,10 +162,13 @@ export function resolveThreadStatus(
   const { thread } = input;
   const outstanding = outstandingCloseObligations(thread);
 
-  if (thread.status === 'done') {
+  if (isThreadTerminal(thread.status)) {
     return {
-      status: 'done',
-      reason: 'a person marked this thread done',
+      status: thread.status,
+      reason:
+        thread.status === 'cancelled'
+          ? 'this thread was cancelled'
+          : 'a person marked this thread done',
       outstanding,
     };
   }

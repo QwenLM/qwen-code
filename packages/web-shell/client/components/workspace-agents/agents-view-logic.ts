@@ -25,7 +25,7 @@
 export interface ThreadSummaryView {
   id: string;
   title: string;
-  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done';
+  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done' | 'cancelled';
   /** The resolver's own sentence. Rendered verbatim; never re-derived. */
   reason: string;
   updatedAt: number;
@@ -61,7 +61,12 @@ export function groupThreads(
   const done: ThreadSummaryView[] = [];
   for (const thread of threads) {
     if (thread.parentThreadId) continue;
-    if (thread.status === 'done') done.push(thread);
+    // Cancelled files with done rather than idle: both are over, and an idle
+    // group is a list of things still waiting for someone, which a withdrawn
+    // task is not.
+    if (thread.status === 'done' || thread.status === 'cancelled') {
+      done.push(thread);
+    }
     else if (thread.status === 'blocked' || thread.status === 'in_review') {
       needsYou.push(thread);
     } else if (thread.liveRunCount > 0) running.push(thread);

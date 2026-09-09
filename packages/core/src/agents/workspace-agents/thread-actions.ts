@@ -35,6 +35,7 @@ import {
   type ThreadMessage,
   type ThreadRun,
   type ThreadPriority,
+  isThreadTerminal,
 } from './types.js';
 
 export interface PostMessageInput {
@@ -474,7 +475,7 @@ export async function assignThread(
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(threadId);
     if (!thread) return { kind: 'thread_not_found' };
-    if (thread.status === 'done') return { kind: 'thread_done' };
+    if (isThreadTerminal(thread.status)) return { kind: 'thread_done' };
 
     if (!assigneeName) {
       if (!thread.assigneeAgentId) return { kind: 'updated', thread };

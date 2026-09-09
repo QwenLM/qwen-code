@@ -143,12 +143,11 @@ export const A2A_UNSUPPORTED = {
   idempotency: 'MAY, via client-minted Message.messageId; no scoping',
   /**
    * `TASK_STATE_REJECTED` (the agent declines the work) and
-   * `TASK_STATE_AUTH_REQUIRED` have no counterpart in the local thread model,
-   * and neither does a cancelled thread — `ThreadStatus` has no such member,
-   * only runs do. An inbound `cancelTask` therefore cannot be represented
-   * locally today; P2 must add it before claiming cancellation works.
+   * `TASK_STATE_AUTH_REQUIRED` have no counterpart in the local thread model.
+   * Thread-level cancellation was a third gap and is now closed — `cancelled`
+   * is a `ThreadStatus`, so an inbound `cancelTask` has something to become.
    */
-  localStateGaps: 'REJECTED, AUTH_REQUIRED and thread-level cancellation',
+  localStateGaps: 'REJECTED and AUTH_REQUIRED',
 } as const;
 
 /**
@@ -179,6 +178,8 @@ export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
       return 'TASK_STATE_INPUT_REQUIRED';
     case 'done':
       return 'TASK_STATE_COMPLETED';
+    case 'cancelled':
+      return 'TASK_STATE_CANCELED';
     default: {
       // Exhaustiveness: a new ThreadStatus must decide what it looks like to a
       // caller, rather than silently arriving as some default.

@@ -2375,6 +2375,164 @@ ok(
   M.toA2ATaskState(first.thread.status),
 );
 
+console.log('\n31. cancellation: a withdrawn task stops being dispatched');
+// P1 recorded thread-level cancellation as a local gap that blocked cancelTask.
+// This is that gap closed, and these are the properties that make it closed
+// rather than merely present.
+// Its own agent, with no other work anywhere. Sharing `ag_ext` made the
+// "nothing is dispatched" assertions pass for the wrong reason: that agent
+// already had a live run, so candidate selection skipped it on grounds of
+// business and never consulted the thread's status at all.
+await M.updateWorkspaceAgents(ROOT, (a) => [
+  ...a,
+  { id: 'ag_cancel', name: 'canceller', createdAt: 1 },
+]);
+const cancelSub = {
+  callerId: 'client-one',
+  targetAgentId: 'ag_cancel',
+  messageId: 'a2a-msg-cancel',
+  title: 'Work to withdraw',
+  body: 'Start this then change your mind',
+};
+const toCancel = await M.acceptExternalSubmission(ROOT, cancelSub);
+ok(
+  'the task starts non-terminal',
+  !M.isThreadTerminal(toCancel.thread.status),
+  toCancel.thread.status,
+);
+// Without this the next assertions could pass because there was nothing to
+// dispatch, rather than because the cancellation stopped it.
+ok(
+  'and holds a queued run that a dispatch tick would otherwise start',
+  toCancel.thread.runs.filter((r) => r.status === 'queued').length === 1,
+  JSON.stringify(toCancel.thread.runs.map((r) => r.status)),
+);
+ok(
+  'which its agent is free to take',
+  M.selectCandidates(
+    await M.readWorkspaceAgents(ROOT),
+    (await M.listThreads(ROOT)).threads,
+  ).some((c) => c.thread.id === toCancel.thread.id),
+);
+
+const cancelled = await M.cancelExternalThreadForCaller(
+  ROOT,
+  'client-one',
+  toCancel.thread.id,
+);
+ok('cancelling this caller\'s own task succeeds', cancelled !== undefined);
+ok(
+  'the thread is terminal afterwards',
+  M.isThreadTerminal(cancelled.thread.status) &&
+    cancelled.thread.status === 'cancelled',
+  cancelled.thread.status,
+);
+ok(
+  'its pending run is retired, not left showing as work still to do',
+  cancelled.thread.runs.every((r) => r.status !== 'queued'),
+  JSON.stringify(cancelled.thread.runs.map((r) => r.status)),
+);
+ok(
+  'and reports it to the caller as CANCELED, not as failure or completion',
+  M.toA2ATaskState(cancelled.thread.status) === 'TASK_STATE_CANCELED',
+  M.toA2ATaskState(cancelled.thread.status),
+);
+ok(
+  'which A2A counts as terminal, so a polling caller may stop',
+  M.isA2ATerminal(M.toA2ATaskState(cancelled.thread.status)),
+);
+
+// The point of the whole predicate refactor: every admission path must agree.
+let dispatchedAfterCancel = false;
+await M.dispatchOnce(ROOT, {
+  inspect: async () => ({ kind: 'absent' }),
+  cancel: async () => true,
+  start: async ({ threadId }) => {
+    if (threadId === toCancel.thread.id) dispatchedAfterCancel = true;
+    return { status: 'started', sessionId: 's', consumedOnStart: true };
+  },
+});
+ok(
+  'no queued run on a cancelled thread is ever started',
+  !dispatchedAfterCancel,
+);
+// A post already in flight must not resurrect it either. This needs its own
+// thread with nothing pending: a thread that still holds a queued run coalesces
+// the new message into it and short-circuits before admission ever consults the
+// thread's status, so the assertion would pass without testing anything.
+const drained = await M.acceptExternalSubmission(ROOT, {
+  ...cancelSub,
+  messageId: 'a2a-msg-cancel-drained',
+  title: 'Withdrawn after its run drained',
+});
+const drainedRun = drained.thread.runs[0];
+await M.claimRun(ROOT, { threadId: drained.thread.id, runId: drainedRun.id });
+await M.finishRun(ROOT, drained.thread.id, drainedRun.id, {
+  status: 'completed',
+});
+ok(
+  'the thread has no pending run before the late post',
+  (await M.readThread(ROOT, drained.thread.id)).runs.every(
+    (r) => r.status !== 'queued',
+  ),
+);
+await M.cancelExternalThreadForCaller(ROOT, 'client-one', drained.thread.id);
+const latePost = await M.postMessage(ROOT, drained.thread.id, {
+  from: M.HUMAN_AUTHOR_ID,
+  text: 'one more thing',
+});
+ok(
+  'and a late post books no new run on a cancelled thread',
+  latePost.dispatched.length === 0,
+  JSON.stringify(latePost.dispatched.map((r) => r.id)),
+);
+
+// Ownership, again — cancellation is a write, so it is the one that matters most.
+const otherCancel = await M.acceptExternalSubmission(ROOT, {
+  ...cancelSub,
+  callerId: 'client-two',
+  messageId: 'a2a-msg-cancel-2',
+});
+ok(
+  "one caller cannot cancel another's task",
+  (await M.cancelExternalThreadForCaller(
+    ROOT,
+    'client-one',
+    otherCancel.thread.id,
+  )) === undefined,
+);
+ok(
+  'and that task is still live',
+  !M.isThreadTerminal(
+    (await M.readThread(ROOT, otherCancel.thread.id)).status,
+  ),
+);
+
+// Cancelling something already finished must not rewrite how it ended.
+const cancelDoneThread = await M.createThread(ROOT, { title: 'Finished elsewhere' });
+await M.writeThread(ROOT, {
+  ...(await M.readThread(ROOT, cancelDoneThread.id)),
+  status: 'done',
+  externalIntake: {
+    key: 'k-done',
+    callerId: 'client-one',
+    targetAgentId: 'ag_ext',
+    messageId: 'm-done',
+    contentHash: 'h',
+    receivedAt: 1,
+  },
+});
+const reCancel = await M.cancelExternalThreadForCaller(
+  ROOT,
+  'client-one',
+  cancelDoneThread.id,
+);
+ok(
+  'cancelling a done task leaves it done, not rewritten as cancelled',
+  reCancel?.thread.status === 'done',
+  reCancel?.thread.status,
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

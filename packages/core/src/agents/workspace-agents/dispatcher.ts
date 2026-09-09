@@ -52,6 +52,7 @@ import type {
   ThreadRun,
 } from './types.js';
 import { threadPriorityRank } from './types.js';
+import { isThreadTerminal } from './types.js';
 
 /** What the runtime says about one agent's session on one thread. */
 export type AgentBodyState =
@@ -291,7 +292,7 @@ async function rebookUndeliveredTriggers(
       !thread ||
       !run ||
       run.attempts !== attempt ||
-      thread.status === 'done' ||
+      isThreadTerminal(thread.status) ||
       (run.status !== 'running' &&
         run.status !== 'finishing' &&
         run.status !== 'completed')
@@ -397,7 +398,7 @@ export function selectCandidates(
 
   const queued: Candidate[] = [];
   for (const thread of threads) {
-    if (thread.status === 'done') continue;
+    if (isThreadTerminal(thread.status)) continue;
     for (const run of thread.runs) {
       if (run.status !== 'queued') continue;
       const agent = agents.find((candidate) => candidate.id === run.agentId);

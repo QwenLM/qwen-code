@@ -65,6 +65,7 @@ import {
   type Thread,
   type ThreadRun,
   deliverNotifications,
+  isThreadTerminal,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
@@ -1501,7 +1502,7 @@ export function registerWorkspaceAgentRoutes(
             const parentNeedsDoneReport =
               parent !== undefined &&
               parent.status !== 'in_review' &&
-              parent.status !== 'done';
+              !isThreadTerminal(parent.status);
             const updated = await transaction.writeThread({
               ...target,
               status: 'done',

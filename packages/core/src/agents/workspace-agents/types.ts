@@ -170,7 +170,27 @@ export type ThreadStatus =
   | 'in_progress'
   | 'blocked'
   | 'in_review'
-  | 'done';
+  | 'done'
+  | 'cancelled';
+
+/**
+ * Statuses after which a thread takes no further work.
+ *
+ * A predicate rather than a comparison at each site because there are seven of
+ * them — dispatch admission, candidate selection, recovery, close handling,
+ * assignment and status resolution — and every one of them meant "this thread
+ * is over", not "someone pressed done". Adding `cancelled` as a second literal
+ * at each would have been seven chances to miss one, and the one missed would
+ * have kept dispatching work for a task its caller had already cancelled.
+ */
+export const TERMINAL_THREAD_STATUSES: ReadonlySet<ThreadStatus> = new Set([
+  'done',
+  'cancelled',
+]);
+
+export function isThreadTerminal(status: ThreadStatus): boolean {
+  return TERMINAL_THREAD_STATUSES.has(status);
+}
 
 /**
  * How urgently a thread wants a turn, highest first.

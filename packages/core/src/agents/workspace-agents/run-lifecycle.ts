@@ -33,6 +33,7 @@ import {
 } from './thread-status.js';
 import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
 import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
+import { isThreadTerminal } from './types.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
 export type RunCloseRequest =
@@ -259,10 +260,10 @@ export async function closeRunInTransaction(
     context,
     `thread_${input.request.kind}`,
   );
-  if (thread.status === 'done') {
+  if (isThreadTerminal(thread.status)) {
     throw new RunCloseRejectedError(
       'thread_done',
-      `Thread "${context.threadId}" is done; it accepts no further work.`,
+      `Thread "${context.threadId}" is ${thread.status}; it accepts no further work.`,
     );
   }
 

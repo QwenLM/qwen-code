@@ -45,7 +45,7 @@ export interface ThreadDetailView {
   priority?: 'urgent' | 'high' | 'normal' | 'low';
   parent?: { id: string; title: string };
   assigneeName?: string;
-  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done';
+  status: 'open' | 'in_progress' | 'blocked' | 'in_review' | 'done' | 'cancelled';
   /** The resolver's sentence. Rendered verbatim. */
   reason: string;
   posts: readonly ThreadPostView[];

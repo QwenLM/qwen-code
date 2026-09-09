@@ -224,6 +224,7 @@ const THREAD_STATUSES = new Set<ThreadStatus>([
   'blocked',
   'in_review',
   'done',
+  'cancelled',
 ]);
 
 const THREAD_PRIORITIES = new Set<ThreadPriority>(THREAD_PRIORITY_ORDER);
