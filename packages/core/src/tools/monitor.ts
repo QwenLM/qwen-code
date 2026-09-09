@@ -465,6 +465,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
       finishOutputCapture();
     };
 
+    // Teardown join handle: resolves when the capture is closed and its
+    // last in-flight write has drained, so removing the project tree can
+    // await it instead of racing a staged temp file into an rmSync walk.
+    registration.outputCaptureClosed = new Promise<void>((resolve) => {
+      outputCloseCallbacks.push(resolve);
+    });
+
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
     let child;

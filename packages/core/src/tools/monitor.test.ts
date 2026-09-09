@@ -245,7 +245,12 @@ describe('MonitorTool', () => {
 
   afterEach(async () => {
     monitorRegistry.abortAll();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Join in-flight capture writes before removing the tree: the capture
+    // writer stages its temp file inside it, so racing the removal loses
+    // to ENOTEMPTY on rmdir. The rmSync retry stays as belt-and-braces.
+    await Promise.all(
+      monitorRegistry.getAll().map((entry) => entry.outputCaptureClosed),
+    );
     rmSync(tempProjectDir, {
       recursive: true,
       force: true,
@@ -724,6 +729,22 @@ describe('MonitorTool', () => {
           'stdout line\nstderr line\n',
         );
       });
+    });
+
+    it('settles outputCaptureClosed only after in-flight capture writes drain', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      mockChild.stdout.emit('data', Buffer.from('final line\n'));
+      monitorRegistry.abortAll();
+
+      // The afterEach teardown joins on this promise before removing the
+      // project tree: it must stay pending while a capture write is in
+      // flight and settle only once the persisted tail is complete.
+      expect(task.outputCaptureClosed).toBeInstanceOf(Promise);
+      await task.outputCaptureClosed;
+      expect(readFileSync(task.outputFile, 'utf8')).toBe('final line\n');
     });
 
     it('decodes multi-byte UTF-8 split across stdout chunks intact', async () => {

@@ -92,6 +92,14 @@ export interface MonitorTask extends TaskBase {
    * Surfaced in the dialog's `MonitorDetailBody`.
    */
   error?: string;
+  /**
+   * Resolves once the output capture is closed and its last in-flight
+   * write has drained, so teardown can join pending writes instead of
+   * racing a staged temp file with `rmSync` (ENOTEMPTY). Runtime-only
+   * handle, like `abortController`; wire snapshots are built by
+   * field-picking serializers and never see it.
+   */
+  outputCaptureClosed?: Promise<void>;
 }
 
 /**
