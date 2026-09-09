@@ -250,8 +250,17 @@ export function resolveLocalFilesWorkspaceRoute(options: {
     return { kind: 'legacy' };
   }
   const list = options.workspaces ?? options.capabilities.workspaces;
-  // A daemon without a per-workspace registry is single-workspace: legacy.
-  if (list === undefined || list.length === 0) return { kind: 'legacy' };
+  // A daemon that advertises dynamic registration but has published no
+  // workspace entries yet is bootstrapping, not registry-less: its trust
+  // verdict has not landed, so withhold rather than answer eligible for a
+  // primary the bare mount would register without any trust check.
+  if (list === undefined || list.length === 0) {
+    return options.capabilities.features?.includes(
+      'dynamic_workspace_registration',
+    )
+      ? { kind: 'pending' }
+      : { kind: 'legacy' };
+  }
   if (options.workspaceCwd === undefined) return { kind: 'none' };
   const matches = list.filter((entry) => entry.cwd === options.workspaceCwd);
   if (matches.length > 1) return { kind: 'none' };

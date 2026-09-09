@@ -260,6 +260,7 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       resolveLocalFilesWorkspaceRoute({
         capabilities: {
           ...capabilities,
+          features: [],
           workspaces: undefined,
         } as unknown as DaemonCapabilities,
         workspaces: [],
@@ -267,6 +268,24 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
         sessionId: 'session-1',
       }),
     ).toEqual({ kind: 'legacy' });
+  });
+
+  it('withholds while a registration-advertising daemon bootstraps', () => {
+    // Bootstrap envelope: the features are advertised but the workspaces
+    // array has not been published yet, so the trust verdict has not landed
+    // and answering eligible would dial the bare mount without its check.
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities: {
+          ...capabilities,
+          features: ['dynamic_workspace_registration', 'client_mcp_over_ws'],
+          workspaces: undefined,
+        } as unknown as DaemonCapabilities,
+        workspaces: [],
+        workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toEqual({ kind: 'pending' });
   });
 });
 

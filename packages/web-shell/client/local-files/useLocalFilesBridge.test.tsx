@@ -1743,6 +1743,9 @@ describe('useLocalFilesBridge restore', () => {
     await hB.flush();
     releaseDelay();
     await hB.flush();
+    // Attempt 1 granted while the connect was in flight, so the revoke must
+    // be deferred, not run: nothing may have cleared at this point.
+    expect(store.clears).toBe(0);
     rejectPicker(new DOMException('user cancelled', 'AbortError'));
     await connecting;
     await disconnecting;
@@ -3412,6 +3415,25 @@ describe('useLocalFilesBridge restore', () => {
     await h.flush();
     expect(socket.closeCount).toBe(0);
     expect(h.get().status.phase).toBe('connected');
+
+    // When the verdict clears, restore and the rebind effect re-run: the
+    // live, correctly-routed bridge must survive that too, not just the
+    // verdict itself.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(socket.closeCount).toBe(0);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.get().status).toEqual({
+      phase: 'connected',
+      blocker: null,
+      rootName: 'ai_coding',
+      toolCount: 4,
+    });
 
     // A hard verdict still stops the same bridge.
     h.rerender({

@@ -67,6 +67,15 @@ export interface LocalFilesStatus {
 
 const IDLE: LocalFilesStatus = { phase: 'idle', blocker: null };
 
+/** Phases in which a bound bridge is live and correctly routed. */
+const LIVE_BRIDGE_PHASES: ReadonlySet<LocalFilesBridgeState['phase']> = new Set(
+  ['connecting', 'registering', 'connected', 'reconnecting'],
+);
+
+function selectorKeyOf(selector?: { kind: string; value: string }): string {
+  return selector === undefined ? '' : `${selector.kind}:${selector.value}`;
+}
+
 export interface UseLocalFilesBridgeOptions {
   /** The session the bridge binds to; undefined until one exists. */
   sessionId: string | undefined;
@@ -193,6 +202,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    * session switch left behind.
    */
   const bridgeSessionRef = useRef<string | undefined>(undefined);
+  const bridgeSelectorKeyRef = useRef<string>('');
+  const bridgeHandleNameRef = useRef<string | undefined>(undefined);
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   /**
    * True once this mount's current bridge reached a phase that only runs
@@ -300,6 +311,23 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
 
   const startBridge = useCallback(
     (handle: FileSystemDirectoryHandle) => {
+      // A transient verdict (a resolving blip that clears) re-runs restore
+      // and the rebind effect; tearing down a live, correctly-routed bridge
+      // for it would close the socket and unregister the MCP server mid-
+      // turn. Only a real session, selector, or handle change rebuilds; a
+      // dead bridge (failed/held-elsewhere) is not exempt, so a withheld
+      // verdict still reaches the panel through the blocker path.
+      const bound = bridgeRef.current;
+      if (
+        bound !== undefined &&
+        LIVE_BRIDGE_PHASES.has(bound.getState().phase) &&
+        bridgeSessionRef.current === optionsRef.current.sessionId &&
+        bridgeSelectorKeyRef.current ===
+          selectorKeyOf(optionsRef.current.workspaceSelector) &&
+        bridgeHandleNameRef.current === handle.name
+      ) {
+        return;
+      }
       stopBridge();
       // stopBridge() first: stopping afterwards would let the 'stopped' ->
       // idle mapping overwrite the unavailable status set here.
@@ -356,6 +384,8 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       });
       bridgeRef.current = bridge;
       bridgeSessionRef.current = targetSession;
+      bridgeSelectorKeyRef.current = selectorKeyOf(current.workspaceSelector);
+      bridgeHandleNameRef.current = handle.name;
       void bridge.start();
     },
     [stopBridge],
