@@ -18332,6 +18332,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         apiKey: 'sk-test',
         modelIds: ['deepseek-chat'],
       }),
+      settings.merged.modelProviders?.['openai'],
     );
     expect(applyProviderInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: 'deepseek' }),
@@ -18895,11 +18896,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({ apiKey: 'sk-existing' }),
+      settings.merged.modelProviders?.['openai'],
     );
 
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['IMAGE', 'VOICE'])(
+    'qwen/providers/connect reuses the stored %s credential without sharing it with new chat models',
+    async (purpose) => {
+      const baseUrl = 'https://media.example/v1';
+      const envKey = `QWEN_CUSTOM_API_KEY_openai_${baseUrl.replace(/[^A-Za-z0-9]/g, '_')}_${purpose}`;
+      const models = [
+        {
+          id: 'service',
+          baseUrl,
+          envKey,
+          ...(purpose === 'IMAGE' ? { imageOnly: true } : { voiceOnly: true }),
+        },
+      ];
+      const settings = {
+        ...makeSessionSettings(),
+        merged: {
+          mcpServers: {},
+          env: { [envKey]: 'stored-service-secret' },
+          modelProviders: { openai: models },
+        },
+      } as unknown as LoadedSettings;
+      const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            protocol: 'openai',
+            baseUrl,
+            modelIds: ['service'],
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(buildInstallPlan).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'custom-openai-compatible' }),
+          expect.objectContaining({ apiKey: 'stored-service-secret' }),
+          models,
+        );
+        vi.mocked(buildInstallPlan).mockClear();
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            protocol: 'openai',
+            baseUrl,
+            modelIds: ['service', 'new-chat'],
+          }),
+        ).rejects.toThrow('Invalid or missing apiKey');
+        expect(buildInstallPlan).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('qwen/providers/connect reuses the custom apiKey for the requested baseUrl only', async () => {
     const customEnvKey = (protocol: string, baseUrl: string) =>
@@ -18963,6 +19024,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         apiKey: 'sk-second',
         baseUrl: secondBaseUrl,
       }),
+      settings.merged.modelProviders?.['openai'],
     );
     expect(buildInstallPlan).not.toHaveBeenCalledWith(
       expect.anything(),

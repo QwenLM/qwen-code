@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ModelsConfig } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import {
+  getModelConfigurationKey,
   listModelConfigurations,
   updateModelContextWindow,
 } from './model-configuration.js';
@@ -159,6 +161,208 @@ describe('persisted model configuration', () => {
       /password|api_key|secret|private/,
     );
   });
+  it.each([
+    ['QWEN_CODE_SYSTEM_SETTINGS_PATH', false],
+    ['QWEN_CODE_SYSTEM_DEFAULTS_PATH', true],
+  ] as const)(
+    'only edits user entries when not overridden by %s',
+    (variable, editable) => {
+      const filename = path.join(temp, 'system-models.json');
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({
+          $version: 4,
+          modelProviders: {
+            openai: [
+              { ...models[0], generationConfig: { contextWindowSize: 65536 } },
+            ],
+          },
+        }),
+      );
+      vi.stubEnv(variable, filename);
+      try {
+        const loaded = load();
+        expect(
+          loaded.merged.modelProviders?.['openai']?.[0]?.generationConfig
+            ?.contextWindowSize,
+        ).toBe(editable ? 8192 : 65536);
+        expect(listModelConfigurations(loaded)).toHaveLength(editable ? 3 : 0);
+        expect(
+          Boolean(
+            getModelConfigurationKey(
+              loaded,
+              'openai',
+              'shared',
+              models[0]!.baseUrl,
+            ),
+          ),
+        ).toBe(editable);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([
+    ['QWEN_CODE_SYSTEM_SETTINGS_PATH', 'openai'],
+    ['QWEN_CODE_SYSTEM_DEFAULTS_PATH', 'managed'],
+  ] as const)(
+    'does not pair a writable alias with a read-only route from %s',
+    (variable, provider) => {
+      const model = { ...models[0], supportsImageGeneration: true };
+      fs.writeFileSync(
+        path.join(temp, 'settings.json'),
+        JSON.stringify({
+          providerProtocol: { gateway: 'openai', managed: 'openai' },
+          modelProviders: { openai: [], gateway: [model] },
+        }),
+      );
+      const filename = path.join(temp, 'system-models.json');
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({
+          $version: 4,
+          modelProviders: {
+            [provider]: [
+              { ...model, generationConfig: { contextWindowSize: 32768 } },
+            ],
+          },
+        }),
+      );
+      vi.stubEnv(variable, filename);
+      try {
+        const loaded = load();
+        const registry = new ModelsConfig({
+          modelProvidersConfig: loaded.merged.modelProviders,
+          providerProtocolConfig: loaded.merged.providerProtocol,
+        });
+        const configured = registry
+          .getAllConfiguredModels()
+          .filter((entry) => entry.id === model.id);
+        expect(configured).toHaveLength(1);
+        expect(configured[0]?.contextWindowSize).toBe(32768);
+        expect(
+          getModelConfigurationKey(loaded, 'openai', model.id, model.baseUrl),
+        ).toBeUndefined();
+        const configs = listModelConfigurations(loaded);
+        expect(configs).toHaveLength(1);
+        expect(configs[0]?.contextWindowSize).toBe(8192);
+        expect(configs[0]?.advisorModel).toBeUndefined();
+        expect(configs[0]?.imageModel).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([{}, { gemini: [{ id: 'gem' }] }])(
+    'edits inherited provider buckets in their own scope (%j)',
+    (workspaceProviders) => {
+      fs.mkdirSync(path.join(temp, '.qwen'));
+      const filename = path.join(temp, '.qwen/settings.json');
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({ modelProviders: workspaceProviders }),
+      );
+      load();
+      const before = fs.readFileSync(filename, 'utf8');
+      const configs = listModelConfigurations(load());
+      const key = getModelConfigurationKey(
+        load(),
+        'openai',
+        'shared',
+        models[0]!.baseUrl,
+      );
+      expect(key).toBe(
+        configs.find((model) => model.baseUrl === models[0]!.baseUrl)?.key,
+      );
+      expect(key).toBeDefined();
+      expect(updateModelContextWindow(load(), key!, 65536)).toBe('user');
+      expect(
+        read().modelProviders.openai[0].generationConfig.contextWindowSize,
+      ).toBe(65536);
+      expect(fs.readFileSync(filename, 'utf8')).toBe(before);
+    },
+  );
+
+  it.each(['user', 'workspace'])(
+    'preserves raw environment placeholders when editing %s settings',
+    (scope) => {
+      process.env['MODEL_CONFIG_TEST_SECRET'] = 'resolved-test-secret';
+      const filename =
+        scope === 'user'
+          ? path.join(temp, 'settings.json')
+          : path.join(temp, '.qwen/settings.json');
+      fs.mkdirSync(path.dirname(filename), { recursive: true });
+      const model = {
+        id: 'private',
+        apiKey: '${MODEL_CONFIG_TEST_SECRET}',
+        generationConfig: {
+          customHeaders: { Authorization: '$MODEL_CONFIG_TEST_SECRET' },
+        },
+      };
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({
+          modelProviders: { openai: [model, { ...model, id: 'sibling' }] },
+        }),
+      );
+      try {
+        const key = listModelConfigurations(load())[0]!.key;
+        expect(updateModelContextWindow(load(), key, 65536)).toBe(scope);
+        const saved = JSON.parse(fs.readFileSync(filename, 'utf8'));
+        expect(saved.modelProviders.openai).toEqual([
+          {
+            ...model,
+            generationConfig: {
+              ...model.generationConfig,
+              contextWindowSize: 65536,
+            },
+          },
+          { ...model, id: 'sibling' },
+        ]);
+        expect(JSON.stringify(saved)).not.toContain('resolved-test-secret');
+      } finally {
+        delete process.env['MODEL_CONFIG_TEST_SECRET'];
+      }
+    },
+  );
+
+  it('offers exact advisor routes while excluding service and vision-only roles', () => {
+    fs.writeFileSync(
+      path.join(temp, 'settings.json'),
+      JSON.stringify({
+        modelProviders: {
+          openai: [
+            { id: 'implicit' },
+            { id: 'explicit', baseUrl: 'https://chat.example/v1' },
+            { id: 'vision', visionOnly: true },
+            { id: 'voice', voiceOnly: true },
+            {
+              id: 'image',
+              imageOnly: true,
+              baseUrl: 'http://image.example/v1',
+              envKey: 'IMAGE',
+            },
+            { id: 'fast', fastOnly: true },
+          ],
+        },
+      }),
+    );
+    const configs = listModelConfigurations(load());
+    expect(configs.map((model) => model.advisorModel)).toEqual([
+      'openai:implicit\0',
+      'openai:explicit\0https://chat.example/v1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(
+      configs.find((model) => model.modelId === 'image')?.imageModel,
+    ).toBeUndefined();
+  });
+
   it('edits the exact endpoint and resets only the window field', () => {
     const key = listModelConfigurations(load())[0]!.key;
     expect(updateModelContextWindow(load(), key, 65536)).toBe('user');

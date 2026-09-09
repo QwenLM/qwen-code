@@ -15,7 +15,12 @@ import type {
   ModelProvidersConfig,
   ProviderSettingsAdapter,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings, SettingScope } from './settings.js';
+import {
+  SettingScope,
+  getHomeEnvFallbackVars,
+  type LoadedSettings,
+} from './settings.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
 import {
   backupSettingsFile,
@@ -23,6 +28,46 @@ import {
   restoreSettingsFromBackup,
   getNestedProperty,
 } from './settingsUtils.js';
+
+function preservePlaceholders(
+  value: unknown,
+  resolved: unknown,
+  original: unknown,
+): unknown {
+  if (typeof original === 'string' && value === resolved) return original;
+  if (
+    Array.isArray(value) &&
+    Array.isArray(resolved) &&
+    Array.isArray(original)
+  ) {
+    return value.map((entry, index) =>
+      preservePlaceholders(entry, resolved[index], original[index]),
+    );
+  }
+  if (
+    value &&
+    resolved &&
+    original &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof resolved === 'object' &&
+    !Array.isArray(resolved) &&
+    typeof original === 'object' &&
+    !Array.isArray(original)
+  ) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        preservePlaceholders(
+          entry,
+          (resolved as Record<string, unknown>)[key],
+          (original as Record<string, unknown>)[key],
+        ),
+      ]),
+    );
+  }
+  return value;
+}
 
 export function createLoadedSettingsAdapter(
   settings: LoadedSettings,
@@ -57,7 +102,56 @@ export function createLoadedSettingsAdapter(
           );
         }
       }
-      settings.setValue(persistScope, key, value);
+      const provider =
+        key.startsWith('modelProviders.') && key.split('.').length === 2
+          ? key.slice('modelProviders.'.length)
+          : undefined;
+      if (!provider || !Array.isArray(value)) {
+        settings.setValue(persistScope, key, value);
+        return;
+      }
+      const previous = settings.merged.modelProviders?.[provider];
+      const source = [
+        SettingScope.System,
+        ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+        SettingScope.User,
+        SettingScope.SystemDefaults,
+      ]
+        .map(
+          (source) => settings.forScope(source).originalSettings.modelProviders,
+        )
+        .find((providers) => providers && Object.hasOwn(providers, provider));
+      const raw = source?.[provider];
+      const models = value as NonNullable<ModelProvidersConfig[string]>;
+      const persisted =
+        !Array.isArray(previous) || !Array.isArray(raw)
+          ? models
+          : (models.map((model) => {
+              if (!model) return model;
+              const matches = previous.flatMap((entry, index) =>
+                entry?.id === model.id && entry.baseUrl === model.baseUrl
+                  ? [index]
+                  : [],
+              );
+              if (
+                matches.length > 1 &&
+                JSON.stringify(previous) !== JSON.stringify(raw)
+              ) {
+                throw new Error(
+                  'Cannot preserve placeholders in an ambiguous model configuration. Remove duplicate model entries first.',
+                );
+              }
+              const index = matches[0];
+              return index === undefined
+                ? model
+                : preservePlaceholders(model, previous[index], raw[index]);
+            }) as typeof models);
+      settings.setValue(persistScope, key, persisted);
+      settingsFile.settings.modelProviders = {
+        ...settingsFile.settings.modelProviders,
+        [provider]: resolveEnvVarsInObject(persisted, getHomeEnvFallbackVars()),
+      };
+      settings.recomputeMerged();
     },
 
     getModelProviders(): ModelProvidersConfig {

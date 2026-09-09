@@ -17385,6 +17385,8 @@ export function App({
                           // flags, so it never runs for the approvalMode dialog
                           // and would leave a stale scope behind.
                           if (key === 'advisorModel' || key === 'imageModel') {
+                            void reloadModelConfigurations();
+                            if (key === 'advisorModel') void reloadProviders();
                             setModelSettingScope(scope);
                             setModelDialogMode(
                               key === 'advisorModel' ? 'advisor' : 'image',

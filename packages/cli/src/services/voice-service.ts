@@ -10,7 +10,7 @@ import {
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
-import { sanitizeProviderBaseUrl } from '../utils/acpModelUtils.js';
+import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import {
   isSelectableVoiceModel,
@@ -178,7 +178,7 @@ export function listAvailableVoiceModels(
       id: model.id,
       ...(model.label ? { name: model.label } : {}),
       ...(model.baseUrl
-        ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl).split(/[?#]/)[0] }
+        ? { baseUrl: publicProviderBaseUrl(model.baseUrl) }
         : {}),
       ...(model.contextWindowSize
         ? { contextWindow: model.contextWindowSize }

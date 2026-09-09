@@ -362,20 +362,23 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.thinkingMandatory).toBeUndefined();
     });
 
-    it('rejects image-only models for agent content generation', () => {
-      const config = createMockConfig(parentConfig, {
-        ...resolvedModel,
-        imageOnly: true,
-      });
+    it.each(['image', 'voice'] as const)(
+      'rejects %s-only models for agent content generation',
+      (purpose) => {
+        const config = createMockConfig(parentConfig, {
+          ...resolvedModel,
+          ...(purpose === 'image' ? { imageOnly: true } : { voiceOnly: true }),
+        });
 
-      expect(() =>
-        buildAgentContentGeneratorConfig(config, 'registry-model-id', {
-          authType: 'anthropic',
-        }),
-      ).toThrow(
-        "Image-only model 'registry-model-id' cannot be used for content generation",
-      );
-    });
+        expect(() =>
+          buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+            authType: 'anthropic',
+          }),
+        ).toThrow(
+          `${purpose === 'image' ? 'Image' : 'Voice'}-only model 'registry-model-id' cannot be used for content generation`,
+        );
+      },
+    );
 
     it('allows dual-role models for agent content generation', () => {
       const config = createMockConfig(parentConfig, {

@@ -441,6 +441,7 @@ test('keeps invalid values editable and preserves defaults on a failed save', as
   });
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => requests.length).toBe(1);
+  await expect(page.getByRole('alert')).toContainText('Test save failed');
   await expect(
     page.getByRole('button', { name: 'Save', exact: true }),
   ).toBeEnabled();
@@ -520,6 +521,38 @@ function roleSetting(page: Page, name: string) {
     has: page.locator('[data-slot="field-label"]').filter({ hasText: name }),
   });
 }
+
+test('retries role configurations after closing and reopening a failed picker', async ({
+  page,
+}, testInfo) => {
+  const { configurations } = await openModelSettings(page, testInfo);
+  let reads = 0;
+  await page.route('**/workspace/models', async (route) => {
+    reads += 1;
+    await route.fulfill(
+      reads === 1
+        ? {
+            status: 500,
+            json: { error: 'Temporary model configuration failure' },
+          }
+        : { json: { models: configurations } },
+    );
+  });
+  await roleSetting(page, 'Advisor Model').getByRole('button').click();
+  const picker = page.getByRole('listbox', { name: 'Set Advisor Model' });
+  await expect(picker.getByRole('alert')).toContainText(
+    'Temporary model configuration failure',
+  );
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await roleSetting(page, 'Advisor Model').getByRole('button').click();
+  await expect(
+    picker.getByRole('option', {
+      name: /Configured (Test Model|Second Endpoint)/,
+    }),
+  ).toHaveCount(2);
+  expect(reads).toBe(2);
+});
 
 test('selects Advisor defaults, endpoint-specific image routes, and voice-only ASR choices', async ({
   page,

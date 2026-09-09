@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
+import type { WorkspaceSettingsWrite } from '../workspace-service/types.js';
 import { registerWorkspaceModelsRoutes } from './workspace-models.js';
 import { updateModelContextWindow } from '../model-configuration.js';
 import { loadSettings } from '../../config/settings.js';
@@ -55,6 +56,8 @@ function makeApp(
     ) => string | undefined | null;
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    beforePersist?: () => Promise<void>;
+    trusted?: boolean;
     syncModelProvidersRuntime?: () => Promise<{
       status: 'applied' | 'deferred' | 'failed';
     }>;
@@ -72,19 +75,34 @@ function makeApp(
         next(),
   );
   // Real persistence: mirrors the daemon's batch persist (setValues).
-  const persistSettings = vi.fn(async (ws: string, writes) => {
-    const fresh = loadSettings(ws);
-    fresh.setValues(writes);
-    overrides.afterPersist?.();
-  });
+  const load = (ws: string) =>
+    loadSettings(ws, {
+      skipLoadEnvironment: true,
+      workspaceTrusted: overrides.trusted ?? true,
+      skipWorkspaceSettings: overrides.trusted === false,
+    });
+  const persistSettings = vi.fn(
+    async (
+      ws: string,
+      writes: WorkspaceSettingsWrite[],
+      assertOpen?: () => void,
+    ) => {
+      await overrides.beforePersist?.();
+      assertOpen?.();
+      const fresh = load(ws);
+      fresh.setValues(writes, undefined, assertOpen);
+      overrides.afterPersist?.();
+    },
+  );
   registerWorkspaceModelsRoutes(app, {
     boundWorkspace: workspace,
+    isWorkspaceTrusted: () => overrides.trusted ?? true,
     mutate,
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSettings,
     updateModelContextWindow: async (ws, key, size, assertOpen) =>
-      updateModelContextWindow(loadSettings(ws), key, size, assertOpen),
+      updateModelContextWindow(load(ws), key, size, assertOpen),
     broadcastSettingsChanged,
     parseAndValidateClientId:
       overrides.parseAndValidateClientId ?? (() => undefined),
@@ -153,6 +171,153 @@ describe('DELETE /workspace/models', () => {
       expect(remaining.body.models[0].key).toBe(keep.key);
     },
   );
+
+  it('rejects a stale deletion after another client saves a context window', async () => {
+    writeUserSettings({
+      modelProviders: {
+        openai: [
+          { id: 'keep', generationConfig: { contextWindowSize: 8192 } },
+          { id: 'remove' },
+        ],
+      },
+    });
+    let release!: () => void;
+    let reached!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { app, broadcastSettingsChanged } = makeApp({
+      beforePersist: async () => {
+        reached();
+        await barrier;
+      },
+    });
+    const listed = await request(app).get('/workspace/models');
+    const [keep, target] = listed.body.models;
+    const deletion = request(app)
+      .delete('/workspace/models')
+      .send(target)
+      .then((response) => response);
+    await parked;
+    try {
+      const patch = await request(app)
+        .patch('/workspace/models')
+        .send({ key: keep.key, contextWindowSize: 65536 });
+      expect(patch.status).toBe(200);
+    } finally {
+      release();
+    }
+    expect((await deletion).status).toBe(409);
+    expect(readUserSettings()['modelProviders']).toEqual({
+      openai: [
+        { id: 'keep', generationConfig: { contextWindowSize: 65536 } },
+        { id: 'remove' },
+      ],
+    });
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps raw placeholders when deleting another model', async () => {
+    vi.stubEnv('MODEL_DELETE_TEST_SECRET', 'resolved-test-secret');
+    try {
+      const sibling = { id: 'keep', apiKey: '${MODEL_DELETE_TEST_SECRET}' };
+      writeUserSettings({
+        modelProviders: { openai: [sibling, { id: 'remove' }] },
+      });
+      const { app } = makeApp();
+      const listed = await request(app).get('/workspace/models');
+      const response = await request(app)
+        .delete('/workspace/models')
+        .send(listed.body.models[1]);
+      expect(response.status).toBe(200);
+      expect(readUserSettings()['modelProviders']).toEqual({
+        openai: [sibling],
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('uses the configuration key for raw IDs that resemble display suffixes', async () => {
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'custom(openai)' }] },
+    });
+    const { app } = makeApp();
+    const listed = await request(app).get('/workspace/models');
+    const response = await request(app)
+      .delete('/workspace/models')
+      .send({ ...listed.body.models[0], modelId: 'custom' });
+    expect(response.status).toBe(200);
+    expect(readUserSettings()['modelProviders']).toEqual({ openai: [] });
+  });
+
+  it('clears deleted exact role selections across scopes but preserves another endpoint and bare voice ID', async () => {
+    const first = { id: 'shared', baseUrl: 'https://first.example/v1' };
+    const second = { id: 'shared', baseUrl: 'https://second.example/v1' };
+    writeUserSettings({
+      modelProviders: { openai: [first, second] },
+      imageModel: 'openai:shared\0https://first.example/v1',
+      advisorModel: 'openai:shared\0https://second.example/v1',
+      voiceModel: 'shared',
+    });
+    writeWorkspaceSettings({
+      modelProviders: { gemini: [{ id: 'gem' }] },
+      advisorModel: 'openai:shared\0https://first.example/v1',
+    });
+    const { app } = makeApp();
+    const listed = await request(app).get('/workspace/models');
+    const target = listed.body.models.find(
+      (model: { baseUrl?: string }) => model.baseUrl === first.baseUrl,
+    );
+    expect(
+      (await request(app).delete('/workspace/models').send(target)).status,
+    ).toBe(200);
+    expect(readUserSettings()).toMatchObject({
+      imageModel: '',
+      advisorModel: 'openai:shared\0https://second.example/v1',
+      voiceModel: 'shared',
+      modelProviders: { openai: [second] },
+    });
+    expect(readWorkspaceSettings()).toMatchObject({
+      advisorModel: '',
+      modelProviders: { gemini: [{ id: 'gem' }] },
+    });
+    const remaining = await request(app).get('/workspace/models');
+    const last = remaining.body.models.find(
+      (model: { modelId: string }) => model.modelId === 'shared',
+    );
+    expect(
+      (await request(app).delete('/workspace/models').send(last)).status,
+    ).toBe(200);
+    expect(readUserSettings()).toMatchObject({
+      advisorModel: '',
+      voiceModel: '',
+    });
+  });
+
+  it('does not expose or edit untrusted workspace model settings', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'user' }] } });
+    writeWorkspaceSettings({
+      modelProviders: { openai: [{ id: 'untrusted' }] },
+    });
+    const before = readWorkspaceSettings();
+    const { app } = makeApp({ trusted: false });
+    const listed = await request(app).get('/workspace/models');
+    expect(
+      listed.body.models.map((model: { modelId: string }) => model.modelId),
+    ).toEqual(['user']);
+    expect(
+      (
+        await request(app)
+          .patch('/workspace/models')
+          .send({ key: listed.body.models[0].key, contextWindowSize: 32768 })
+      ).status,
+    ).toBe(200);
+    expect(readWorkspaceSettings()).toEqual(before);
+  });
 
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });

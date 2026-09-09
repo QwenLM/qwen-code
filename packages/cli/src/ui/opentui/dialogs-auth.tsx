@@ -807,7 +807,13 @@ function AuthDialogFlow({
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
       const protocol = inputs.protocol ?? providerConfig.protocol;
       try {
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),

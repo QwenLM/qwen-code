@@ -344,7 +344,8 @@ export function parseAuthProviderInstallRequest(
   }
   if (
     purpose === 'image' &&
-    (!baseUrl?.startsWith('https://') ||
+    (!modelIds?.length ||
+      !baseUrl?.startsWith('https://') ||
       new URL(baseUrl).search ||
       new URL(baseUrl).hash)
   ) {

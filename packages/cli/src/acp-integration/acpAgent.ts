@@ -52,6 +52,7 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
+  resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -1686,7 +1687,17 @@ function readExistingProviderConfig(
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .filter(
+              (model) =>
+                model.baseUrl === firstModel?.baseUrl &&
+                model.envKey === firstModel?.envKey,
+            )
+            .map((model) => model.id),
+        }
+      : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -1699,9 +1710,34 @@ function resolveExistingProviderApiKey(
   settings: LoadedSettings,
   protocol: ProviderConfig['protocol'],
   baseUrl: string,
+  modelIds: string[],
 ): string | undefined {
-  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
-  return readSettingsEnv(settings, envKey);
+  const owns = resolveOwnsModel(config);
+  const models = (settings.merged.modelProviders?.[protocol] ?? []).filter(
+    (model) =>
+      owns?.(model) && model.baseUrl === baseUrl && modelIds.includes(model.id),
+  );
+  const conversation = models.filter(
+    (model) => !model.imageOnly && !model.voiceOnly,
+  );
+  if (
+    !conversation.length &&
+    modelIds.some((id) => !models.some((model) => model.id === id))
+  ) {
+    return readSettingsEnv(
+      settings,
+      resolveProviderEnvKey(config, protocol, baseUrl),
+    );
+  }
+  const keys = new Set(
+    (conversation.length ? conversation : models).map((model) => model.envKey),
+  );
+  if (keys.size === 1) return readSettingsEnv(settings, [...keys][0]);
+  if (keys.size > 1) return undefined;
+  return readSettingsEnv(
+    settings,
+    resolveProviderEnvKey(config, protocol, baseUrl),
+  );
 }
 
 function serializeProviderConfig(
@@ -1742,6 +1778,7 @@ function readProviderSetupInputs(
   resolveExistingApiKey?: (
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
+    modelIds: string[],
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
@@ -1772,19 +1809,6 @@ function readProviderSetupInputs(
     );
   }
 
-  // `apiKey` is optional on update: when the client omits it (e.g. it only
-  // received `hasApiKey` from the list response), fall back to the stored key.
-  const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ??
-    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
-  if (!apiKey) {
-    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
-  }
-  const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
-  if (apiKeyError) {
-    throw RequestError.invalidParams(undefined, apiKeyError);
-  }
-
   const defaultModelIds = getDefaultModelIds(config);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
   const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
@@ -1793,6 +1817,23 @@ function readProviderSetupInputs(
       undefined,
       `Invalid or missing modelIds for provider "${config.id}"`,
     );
+  }
+
+  // `apiKey` is optional on update: when the client omits it (e.g. it only
+  // received `hasApiKey` from the list response), fall back to the stored key.
+  const apiKey =
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(
+      protocol ?? config.protocol,
+      baseUrl,
+      resolvedModelIds,
+    );
+  if (!apiKey) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
+  }
+  const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
+  if (apiKeyError) {
+    throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
   const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
@@ -8595,16 +8636,23 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          (protocol, baseUrl) =>
+          (protocol, baseUrl, modelIds) =>
             resolveExistingProviderApiKey(
               providerConfig,
               this.settings,
               protocol,
               baseUrl,
+              modelIds,
             ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          this.settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         const adapter = createLoadedSettingsAdapter(
           this.settings,
           persistScope,

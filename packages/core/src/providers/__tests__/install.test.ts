@@ -19,6 +19,7 @@ import {
 } from '../index.js';
 
 function createAdapter(modelProviders: ModelProvidersConfig = {}) {
+  let snapshot = modelProviders;
   const adapter: ProviderSettingsAdapter & {
     setValue: ReturnType<typeof vi.fn>;
     persist: ReturnType<typeof vi.fn>;
@@ -27,11 +28,22 @@ function createAdapter(modelProviders: ModelProvidersConfig = {}) {
     cleanupBackup: ReturnType<typeof vi.fn>;
   } = {
     getValue: vi.fn(),
-    setValue: vi.fn(),
+    setValue: vi.fn((key: string, value: unknown) => {
+      if (key.startsWith('modelProviders.'))
+        modelProviders = {
+          ...modelProviders,
+          [key.slice('modelProviders.'.length)]:
+            value as ModelProvidersConfig[string],
+        };
+    }),
     getModelProviders: vi.fn(() => modelProviders),
     persist: vi.fn(),
-    backup: vi.fn(),
-    restore: vi.fn(),
+    backup: vi.fn(() => {
+      snapshot = modelProviders;
+    }),
+    restore: vi.fn(() => {
+      modelProviders = snapshot;
+    }),
     cleanupBackup: vi.fn(),
   };
   return adapter;
@@ -98,6 +110,197 @@ describe('applyProviderInstallPlan', () => {
       }
     },
   );
+
+  it.each([false, true])(
+    'installs beside null provider buckets (target null: %s)',
+    async (targetNull) => {
+      const providers = {
+        openai: targetNull ? null : [],
+        gemini: null,
+      } as unknown as ModelProvidersConfig;
+      const plan = buildInstallPlan(
+        customProvider,
+        {
+          baseUrl: 'https://new.example/v1',
+          apiKey: 'test',
+          modelIds: ['chat'],
+        },
+        providers['openai'],
+      );
+      const envKey = Object.keys(plan.env!)[0]!;
+      const previous = process.env[envKey];
+      try {
+        const result = await applyProviderInstallPlan(plan, {
+          settings: createAdapter(providers),
+        });
+        expect(result.updatedModelProviders['openai']).toEqual([
+          expect.objectContaining({ id: 'chat' }),
+        ]);
+        expect(result.updatedModelProviders['gemini']).toBeNull();
+      } finally {
+        if (previous === undefined) delete process.env[envKey];
+        else process.env[envKey] = previous;
+      }
+    },
+  );
+
+  it('replaces a same-identity custom image route with the preset credential', async () => {
+    const baseUrl = 'https://api.minimax.io/v1';
+    const adapter = createAdapter({
+      openai: [
+        {
+          id: 'image-01',
+          baseUrl,
+          envKey: `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_IMAGE`,
+          imageOnly: true,
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+    const plan = buildInstallPlan(minimaxProvider, {
+      baseUrl,
+      apiKey: 'test-preset-key',
+      modelIds: ['image-01'],
+    });
+    const previous = process.env['MINIMAX_API_KEY'];
+    try {
+      const result = await applyProviderInstallPlan(plan, {
+        settings: adapter,
+      });
+      expect(result.updatedModelProviders['openai']).toEqual([
+        expect.objectContaining({
+          id: 'image-01',
+          baseUrl,
+          envKey: 'MINIMAX_API_KEY',
+          imageOnly: true,
+        }),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env['MINIMAX_API_KEY'];
+      else process.env['MINIMAX_API_KEY'] = previous;
+    }
+  });
+
+  it.each([undefined, 'voice'] as const)(
+    'rejects a second endpoint for an existing voice ID before writing (%s)',
+    async (purpose) => {
+      const adapter = createAdapter({
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            baseUrl: 'https://first.example/v1',
+            voiceOnly: true,
+            envKey: 'FIRST',
+          },
+        ],
+      });
+      const plan = buildInstallPlan(customProvider, {
+        baseUrl: 'https://second.example/v1',
+        apiKey: 'unused',
+        modelIds: ['qwen3-asr-flash'],
+        ...(purpose ? { advancedConfig: { purpose } } : {}),
+      });
+      await expect(
+        applyProviderInstallPlan(plan, { settings: adapter }),
+      ).rejects.toMatchObject({ step: 'modelPurpose' });
+      expect(adapter.setValue).not.toHaveBeenCalled();
+      expect(adapter.backup).not.toHaveBeenCalled();
+      expect(adapter.persist).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['image', 'voice'] as const)(
+    'reconnects a mixed provider without losing the %s configuration or independent key',
+    async (purpose) => {
+      const baseUrl = 'https://media.example/v1';
+      const service = buildInstallPlan(customProvider, {
+        baseUrl,
+        apiKey: 'old-service',
+        modelIds: ['service'],
+        advancedConfig: { purpose, contextWindowSize: 65536 },
+      }).modelProviders![0]!.models[0]!;
+      const chatKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+      const existing = [
+        { id: 'chat', baseUrl, envKey: chatKey },
+        {
+          ...service,
+          name: 'My service',
+          generationConfig: {
+            ...service.generationConfig,
+            customHeaders: { 'X-Test': 'preserved' },
+          },
+        },
+      ];
+      const plan = buildInstallPlan(
+        customProvider,
+        { baseUrl, apiKey: 'new-chat', modelIds: ['chat', 'service'] },
+        existing,
+      );
+      const previous = process.env[chatKey];
+      try {
+        expect(plan.env).toEqual({ [chatKey]: 'new-chat' });
+        const result = await applyProviderInstallPlan(plan, {
+          settings: createAdapter({ openai: existing }),
+        });
+        expect(
+          result.updatedModelProviders['openai']?.find(
+            (model) => model.id === 'service',
+          ),
+        ).toEqual(existing[1]);
+        expect(plan.modelSelection?.modelId).toBe('chat');
+      } finally {
+        if (previous === undefined) delete process.env[chatKey];
+        else process.env[chatKey] = previous;
+      }
+    },
+  );
+
+  it.each(['image', 'voice'] as const)(
+    'rekeys a purpose-less %s reconnect at the original credential key',
+    (purpose) => {
+      const inputs = {
+        baseUrl: 'https://media.example/v1',
+        apiKey: 'old',
+        modelIds: ['service'],
+      };
+      const installed = buildInstallPlan(customProvider, {
+        ...inputs,
+        advancedConfig: { purpose },
+      });
+      const originalModels = installed.modelProviders![0]!.models;
+      const reconnect = buildInstallPlan(
+        customProvider,
+        { ...inputs, apiKey: 'new' },
+        originalModels,
+      );
+      expect(reconnect.env).toEqual({ [originalModels[0]!.envKey!]: 'new' });
+      expect(reconnect.modelProviders![0]!.models).toEqual(originalModels);
+      expect(reconnect.modelSelection).toBeUndefined();
+    },
+  );
+
+  it('rejects a single credential update for independently keyed image and voice models', () => {
+    const inputs = {
+      baseUrl: 'https://media.example/v1',
+      apiKey: 'unused',
+      modelIds: [] as string[],
+    };
+    const existing = (['image', 'voice'] as const).flatMap(
+      (purpose) =>
+        buildInstallPlan(customProvider, {
+          ...inputs,
+          modelIds: [purpose],
+          advancedConfig: { purpose },
+        }).modelProviders![0]!.models,
+    );
+    expect(() =>
+      buildInstallPlan(
+        customProvider,
+        { ...inputs, modelIds: ['image', 'voice'] },
+        existing,
+      ),
+    ).toThrow('separately');
+  });
 
   it.each([
     ['chat', 'image'],

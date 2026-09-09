@@ -20,6 +20,7 @@ import {
   computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
 vi.mock('../../config/settingsUtils.js', async (importOriginal) => {
@@ -56,7 +57,18 @@ describe('useProviderUpdates', () => {
     } as Record<string, unknown>,
     setValue: vi.fn(),
     setValues: vi.fn(),
-    forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
+    forScope: vi.fn(
+      (): {
+        path: string;
+        settings: Record<string, unknown>;
+        originalSettings: Record<string, unknown>;
+      } => ({
+        path: '/tmp/settings.json',
+        settings: mockSettings.merged,
+        originalSettings: structuredClone(mockSettings.merged),
+      }),
+    ),
+    recomputeMerged: vi.fn(),
     isTrusted: true,
     workspace: { settings: {} },
     user: { settings: {} },
@@ -82,6 +94,11 @@ describe('useProviderUpdates', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSettings.setValue.mockImplementation(
+      (_scope: unknown, key: string, value: unknown) => {
+        setNestedPropertySafe(mockSettings.merged, key, value);
+      },
+    );
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
     mockConfig.getContentGeneratorConfig.mockReturnValue({

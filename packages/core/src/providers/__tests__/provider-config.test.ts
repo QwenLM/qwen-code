@@ -16,6 +16,8 @@ import {
   resolveBaseUrl,
   shouldShowStep,
   providerMatchesCredentials,
+  customProvider,
+  generateCustomEnvKey,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -516,6 +518,24 @@ describe('shouldShowStep', () => {
 });
 
 describe('providerMatchesCredentials', () => {
+  it.each(['IMAGE', 'VOICE'])(
+    'recognizes custom %s credentials only at their own endpoint',
+    (purpose) => {
+      const baseUrl = 'https://media.example/v1';
+      const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_${purpose}`;
+      expect(providerMatchesCredentials(customProvider, baseUrl, envKey)).toBe(
+        true,
+      );
+      expect(
+        providerMatchesCredentials(
+          customProvider,
+          'https://other.example/v1',
+          envKey,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('matches by string envKey and string baseUrl', () => {
     const config = makeConfig();
     expect(

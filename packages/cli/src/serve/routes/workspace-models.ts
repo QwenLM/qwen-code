@@ -9,6 +9,7 @@ import {
   listModelConfigurations,
 } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
+import { resolveProviderProtocol } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   getModelProvidersOwnerScope,
@@ -266,6 +267,9 @@ export function registerWorkspaceModelsRoutes(
         }
       };
 
+      const conflict = new Error(
+        'Model settings changed. Reload and try again.',
+      );
       let writes: WorkspaceSettingsWrite[];
       try {
         const workspaceTrusted = deps.isWorkspaceTrusted?.();
@@ -274,17 +278,12 @@ export function registerWorkspaceModelsRoutes(
           skipWorkspaceSettings: workspaceTrusted === false,
           workspaceTrusted,
         });
-        const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
-        const modelProviders =
-          loaded.forScope(scope).settings.modelProviders ?? {};
         const configuration = parsed.key
           ? findModelConfiguration(loaded, parsed.key)
           : undefined;
         if (
           parsed.key &&
-          (!configuration ||
-            configuration.authType !== parsed.authType ||
-            configuration.model.id !== parsed.modelId)
+          (!configuration || configuration.authType !== parsed.authType)
         ) {
           res.status(409).json({
             error:
@@ -292,22 +291,46 @@ export function registerWorkspaceModelsRoutes(
           });
           return;
         }
-        const { next, removed, removedBaseUrl } = configuration
+        const scope =
+          configuration?.scope ??
+          getModelProvidersOwnerScope(loaded) ??
+          SettingScope.User;
+        const modelProviders =
+          loaded.forScope(scope).originalSettings.modelProviders ?? {};
+        const resolvedProviders =
+          loaded.forScope(scope).settings.modelProviders ?? {};
+        const removal = configuration
           ? {
-              next: {
-                ...modelProviders,
-                [configuration.provider]: modelProviders[
-                  configuration.provider
-                ]!.filter((_, index) => index !== configuration.index),
-              },
+              next: resolvedProviders,
               removed: true,
               removedBaseUrl: configuration.model.baseUrl,
             }
           : removeModelFromProviders(
-              modelProviders,
+              resolvedProviders,
               loaded.merged.providerProtocol,
               parsed,
             );
+        const { removed, removedBaseUrl } = removal;
+        const next = { ...modelProviders };
+        const remainingProviders = { ...loaded.merged.modelProviders };
+        if (configuration) {
+          next[configuration.provider] = modelProviders[
+            configuration.provider
+          ]!.filter((_, index) => index !== configuration.index);
+          remainingProviders[configuration.provider] = resolvedProviders[
+            configuration.provider
+          ]!.filter((_, index) => index !== configuration.index);
+        } else if (removed) {
+          for (const [provider, models] of Object.entries(resolvedProviders)) {
+            if (Array.isArray(models) && removal.next[provider] !== models) {
+              next[provider] = modelProviders[provider]!.filter((_, index) =>
+                removal.next[provider]!.includes(models[index]!),
+              );
+              remainingProviders[provider] = removal.next[provider]!;
+            }
+          }
+        }
+        const removedModelId = configuration?.model.id ?? parsed.modelId;
         if (!removed) {
           res.status(404).json({
             error: 'Model not found in configured providers',
@@ -328,7 +351,7 @@ export function registerWorkspaceModelsRoutes(
         // stored URL.
         const activeTarget: RemoveModelTarget = {
           authType: parsed.authType,
-          modelId: parsed.modelId,
+          modelId: removedModelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
         for (const activeScope of getWritableScopes(loaded)) {
@@ -356,11 +379,53 @@ export function registerWorkspaceModelsRoutes(
         // been intended for that other provider's variant). `modelFallbacks` is
         // scoped independently of `modelProviders`, so resolve and rewrite it in
         // its own owning scope.
-        const stillConfigured = Object.values(next).some(
-          (models) =>
-            Array.isArray(models) &&
-            models.some((model) => model?.id === parsed.modelId),
+        const remaining = Object.entries(remainingProviders).flatMap(
+          ([provider, models]) =>
+            Array.isArray(models)
+              ? models
+                  .filter((model) => model?.id === removedModelId)
+                  .map((model) => ({
+                    model,
+                    authType: resolveProviderProtocol(
+                      provider,
+                      loaded.merged.providerProtocol,
+                    ),
+                  }))
+              : [],
         );
+        const stillConfigured = remaining.length > 0;
+        for (const selectionScope of getWritableScopes(loaded)) {
+          const settings = loaded.forScope(selectionScope).settings;
+          if (settings.voiceModel === removedModelId && !stillConfigured) {
+            writes.push({
+              scope: selectionScope,
+              key: 'voiceModel',
+              value: '',
+            });
+          }
+          for (const key of ['imageModel', 'advisorModel'] as const) {
+            const value = settings[key];
+            if (!value) continue;
+            const separator = value.indexOf('\0');
+            const selector = separator < 0 ? value : value.slice(0, separator);
+            const endpoint =
+              separator < 0 ? undefined : value.slice(separator + 1);
+            if (
+              (selector === removedModelId ||
+                selector === `${parsed.authType}:${removedModelId}`) &&
+              (endpoint === undefined || endpoint === (removedBaseUrl ?? '')) &&
+              !remaining.some(
+                ({ model, authType }) =>
+                  (selector === removedModelId ||
+                    authType === parsed.authType) &&
+                  (endpoint === undefined ||
+                    endpoint === (model.baseUrl ?? '')),
+              )
+            ) {
+              writes.push({ scope: selectionScope, key, value: '' });
+            }
+          }
+        }
         const fallbacksScope = getOwnKeyScope(loaded, 'modelFallbacks');
         const fallbacks = fallbacksScope
           ? loaded.forScope(fallbacksScope).settings.modelFallbacks
@@ -375,7 +440,7 @@ export function registerWorkspaceModelsRoutes(
             .split(',')
             .map((entry) => entry.trim())
             .filter(Boolean);
-          const kept = original.filter((id) => id !== parsed.modelId);
+          const kept = original.filter((id) => id !== removedModelId);
           if (kept.length !== original.length) {
             writes.push({
               scope: fallbacksScope,
@@ -385,12 +450,32 @@ export function registerWorkspaceModelsRoutes(
           }
         }
 
+        const snapshots = getWritableScopes(loaded).map((scope) => ({
+          scope,
+          value: JSON.stringify(loaded.forScope(scope).originalSettings),
+        }));
+        let checked = false;
+        const assertCanPersist = () => {
+          assertGenerationOpen();
+          if (checked) return;
+          // The writer calls this inside its settings lock, before any scope commits.
+          const fresh = loadSettings(boundWorkspace, {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: workspaceTrusted === false,
+            workspaceTrusted,
+          });
+          if (
+            snapshots.some(
+              ({ scope, value }) =>
+                JSON.stringify(fresh.forScope(scope).originalSettings) !==
+                value,
+            )
+          )
+            throw conflict;
+          checked = true;
+        };
         try {
-          if (deps.captureGenerationAssertion) {
-            await persistSettings(boundWorkspace, writes, assertGenerationOpen);
-          } else {
-            await persistSettings(boundWorkspace, writes);
-          }
+          await persistSettings(boundWorkspace, writes, assertCanPersist);
         } catch (err) {
           // A multi-key write can fail after committing some keys — surface the
           // committed ones to live clients before reporting the failure.
@@ -401,6 +486,15 @@ export function registerWorkspaceModelsRoutes(
           throw err;
         }
       } catch (err) {
+        if (
+          err === conflict ||
+          (err instanceof WorkspaceSettingsPartialPersistError &&
+            err.committedWrites.length === 0 &&
+            err.cause === conflict)
+        ) {
+          res.status(409).json({ error: conflict.message });
+          return;
+        }
         if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: DELETE /workspace/models error (authType=${parsed.authType}, modelId=${parsed.modelId}): ${

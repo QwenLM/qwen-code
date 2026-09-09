@@ -276,6 +276,7 @@ describe('AuthMessage model configuration', () => {
     expect(container!.textContent).toContain('8192');
     expect(container!.textContent).toContain('https://models.example/v1');
     expect(container!.textContent).not.toContain('test-secret');
+    expect(container!.textContent).toContain('Set (hidden)');
     expect(container!.textContent).not.toContain('OPENAI_API_KEY');
     await clickButton('Save');
     expect(actions.installAuthProvider).toHaveBeenCalledWith({

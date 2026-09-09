@@ -49,7 +49,12 @@ voice routes receive voiceOnly and require the OpenAI protocol and a supported A
 model ID. Installing a service-only model preserves the current conversation model
 and auth selection, including service-only presets. New service routes follow
 existing conversation routes and custom service credentials use separate
-environment keys. Other preset setup behavior stays unchanged.
+environment keys. Reconnecting without an explicit purpose preserves the stored
+role, generation settings, and service credential key. ACP lists IDs grouped by
+endpoint and credential key; omitted credentials cannot reuse a service key for
+new conversation IDs. Image and voice groups with independent keys must reconnect
+separately. Installs reject new ambiguity for existing voice-only or selected voice
+IDs before writing. Other preset setup behavior stays unchanged.
 Reject service-only installs that would overwrite an existing conversation model
 through either identity replacement or preset ownership before any settings or
 environment write. Changing an existing identity to another purpose is rejected.
@@ -62,6 +67,10 @@ to restore model-ID inference. DELETE accepts the same opaque key for exact
 persisted targeting even when displayed URLs are redacted. The key includes scope, storage provider, model
 ID, and endpoint; missing or ambiguous targets fail without a fallback. A locked
 fresh read/modify/write preserves credentials and unrelated generation settings.
+PATCH writes the unresolved settings copy so environment placeholders remain
+placeholders on disk. DELETE checks its raw scope snapshots inside the writer
+lock and returns a conflict if another edit committed since its read. Removing a
+model clears role references only when the referenced route no longer exists.
 The model list attaches a small window-size editor to persisted rows; built-in and
 runtime-only models do not claim to support persistent editing. Window writes refresh
 the model registry for new sessions; existing sessions must restart to adopt the
@@ -71,9 +80,15 @@ new active generation limit, and the editor states this explicitly.
 
 The new model configuration routes, existing provider setup, and model management
 remain legacy-primary scoped. Settings role selections use their existing scope
-semantics. Voice continues to use the resolved selected runtime without falling
+semantics. Configuration keys follow each provider bucket’s actual writable
+scope, including user buckets inherited alongside unrelated workspace providers.
+Route uniqueness also includes read-only System and SystemDefaults buckets, so
+an alias cannot attach a writable key or role choice to a read-only model.
+Voice continues to use the resolved selected runtime without falling
 back to primary. Image configuration must reach live runtime configuration through
-the existing settings/model-provider refresh path. GET projects only safe fields;
+the existing settings/model-provider refresh path. Disabling image generation
+hides its cached tool and refreshes the current conversation’s tool declarations;
+re-enabling restores availability. GET projects only safe fields;
 settings-change broadcasts invalidate clients without sending model credentials.
 
 Production changes cover Web Shell components and translations, the daemon SDK,

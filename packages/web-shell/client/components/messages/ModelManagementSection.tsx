@@ -129,7 +129,7 @@ export function ModelManagementSection({
       configurationKey: config.key,
       modelId: config.key,
       baseModelId: config.modelId,
-      name: config.name ?? config.modelId,
+      name: config.name || config.modelId,
       baseUrl: config.baseUrl,
       envKey: config.envKey,
       contextLimit: config.contextWindowSize,
@@ -364,7 +364,7 @@ function ModelWindowEditor({
           size="sm"
           variant="outline"
           disabled={busy}
-          aria-label={`${t('settings.models.editWindow')} ${configuration.name ?? configuration.modelId}`}
+          aria-label={`${t('settings.models.editWindow')} ${configuration.name || configuration.modelId}`}
           onClick={() => {
             setValue(configuration.contextWindowSize?.toString() ?? '');
             setError('');
@@ -433,7 +433,7 @@ function ModelWindowEditor({
         <Button
           type="submit"
           size="sm"
-          aria-label={`${t('common.save')} ${configuration.name ?? configuration.modelId}`}
+          aria-label={`${t('common.save')} ${configuration.name || configuration.modelId}`}
           disabled={!valid || saving || busy}
         >
           {t('common.save')}
@@ -443,7 +443,7 @@ function ModelWindowEditor({
           variant="outline"
           size="sm"
           disabled={saving || busy}
-          aria-label={`${t('settings.models.cancel')} ${configuration.name ?? configuration.modelId}`}
+          aria-label={`${t('settings.models.cancel')} ${configuration.name || configuration.modelId}`}
           onClick={() => setEditing(false)}
         >
           {t('settings.models.cancel')}

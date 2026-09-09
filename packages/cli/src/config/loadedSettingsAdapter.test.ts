@@ -6,7 +6,17 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createLoadedSettingsAdapter } from './loadedSettingsAdapter.js';
-import { SettingScope } from './settings.js';
+import { SettingScope, loadSettings } from './settings.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  AuthType,
+  applyProviderInstallPlan,
+  buildInstallPlan,
+  customProvider,
+  generateCustomEnvKey,
+} from '@qwen-code/qwen-code-core';
 
 // settingsUtils makes real fs calls in backup/restore — stub them out so the
 // tests can focus on adapter behavior without touching disk.
@@ -89,6 +99,82 @@ function makeSettings(initial: SettingsShape = {}) {
 }
 
 describe('createLoadedSettingsAdapter', () => {
+  it.each([SettingScope.User, SettingScope.Workspace])(
+    'preserves placeholders on disk and resolved runtime values during service reconnect (%s)',
+    async (scope) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-raw-'));
+      const workspace = path.join(root, 'workspace');
+      const userHome = path.join(root, 'home');
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      fs.mkdirSync(userHome);
+      vi.stubEnv('QWEN_HOME', userHome);
+      vi.stubEnv('RECONNECT_TEST_TOKEN', 'resolved-private-token');
+      vi.stubEnv('RECONNECT_TEST_ID', 'image-model');
+      vi.stubEnv('RECONNECT_TEST_URL', 'https://media.example/v1');
+      const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, 'https://media.example/v1')}_IMAGE`;
+      vi.stubEnv(envKey, 'old-service-key');
+      const filename = path.join(
+        scope === SettingScope.User ? userHome : path.join(workspace, '.qwen'),
+        'settings.json',
+      );
+      const raw = {
+        id: '${RECONNECT_TEST_ID}',
+        baseUrl: '${RECONNECT_TEST_URL}',
+        envKey,
+        imageOnly: true,
+        generationConfig: {
+          contextWindowSize: 65536,
+          customHeaders: {
+            Authorization: '${RECONNECT_TEST_TOKEN}',
+            'X-Rotated': 'Bearer ${' + envKey + '}',
+          },
+        },
+      };
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({ $version: 4, modelProviders: { openai: [raw] } }),
+      );
+      try {
+        const loaded = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        });
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: 'https://media.example/v1',
+            apiKey: 'new-service-key',
+            modelIds: ['image-model'],
+          },
+          loaded.merged.modelProviders?.['openai'],
+        );
+        const result = await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(loaded, scope),
+        });
+        const saved = JSON.parse(fs.readFileSync(filename, 'utf8'));
+        expect(saved.modelProviders.openai[0]).toMatchObject(raw);
+        expect(JSON.stringify(saved)).not.toContain('resolved-private-token');
+        expect(saved.env[envKey]).toBe('new-service-key');
+        expect(loaded.merged.modelProviders?.['openai']?.[0]).toMatchObject({
+          id: 'image-model',
+          baseUrl: 'https://media.example/v1',
+          generationConfig: {
+            customHeaders: {
+              Authorization: 'resolved-private-token',
+              'X-Rotated': 'Bearer new-service-key',
+            },
+          },
+        });
+        expect(result.updatedModelProviders['openai']).toEqual(
+          loaded.merged.modelProviders?.['openai'],
+        );
+      } finally {
+        vi.unstubAllEnvs();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('forwards setValue to LoadedSettings.setValue with the resolved scope', () => {
     const { settings, setValue } = makeSettings();
     const adapter = createLoadedSettingsAdapter(

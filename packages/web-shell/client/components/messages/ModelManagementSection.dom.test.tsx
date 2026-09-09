@@ -132,6 +132,12 @@ describe('ModelManagementSection', () => {
         purpose: 'image',
       })),
     });
+    expect(
+      container.querySelector('[aria-label="Delete first"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Delete second"]'),
+    ).not.toBeNull();
     expect(container.textContent).toContain('Image generation');
     expect(
       Array.from(container.querySelectorAll('button')).filter(
@@ -154,6 +160,30 @@ describe('ModelManagementSection', () => {
     });
     expect(props.onSelectModel).not.toHaveBeenCalled();
   });
+  it.each([1, 2])(
+    'deduplicates %s occurrences of a persisted key and labels empty names with the model ID',
+    (count) => {
+      const configuration = {
+        key: 'same',
+        authType: 'openai',
+        modelId: 'image',
+        name: '',
+        purpose: 'image' as const,
+      };
+      const { container } = renderSection({
+        providers: [],
+        configurations: Array.from({ length: count }, () => configuration),
+        onUpdateContextWindow: vi.fn().mockResolvedValue(undefined),
+      });
+      expect(
+        container.querySelectorAll('[aria-label="Delete image"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelectorAll('[aria-label="Edit context window image"]'),
+      ).toHaveLength(count === 1 ? 1 : 0);
+    },
+  );
+
   it('shows model configuration metadata and only declared input capabilities', () => {
     const configured = providers();
     Object.assign(configured[0].models[0], {

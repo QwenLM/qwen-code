@@ -154,6 +154,35 @@ describe('ToolRegistry', () => {
     vi.restoreAllMocks();
   });
 
+  it('hides a loaded image tool while disabled and restores it when re-enabled', async () => {
+    const enabled = vi
+      .spyOn(config, 'isImageGenerationEnabled')
+      .mockReturnValue(true);
+    const tool = new MockTool({ name: 'image_gen', shouldDefer: true });
+    toolRegistry.registerTool(tool);
+    toolRegistry.revealDeferredTool('image_gen');
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+    enabled.mockReturnValue(false);
+    expect(
+      toolRegistry.getFunctionDeclarations({ includeDeferred: true }),
+    ).not.toContainEqual(tool.schema);
+    expect(toolRegistry.getFunctionDeclarationsFiltered(['image_gen'])).toEqual(
+      [],
+    );
+    expect(toolRegistry.getAllTools()).not.toContain(tool);
+    expect(toolRegistry.getAllToolNames()).not.toContain('image_gen');
+    expect(
+      toolRegistry
+        .getDeferredToolSummary()
+        .some((entry) => entry.name === 'image_gen'),
+    ).toBe(false);
+    expect(toolRegistry.getTool('image_gen')).toBeUndefined();
+    expect(await toolRegistry.ensureTool('image_gen')).toBeUndefined();
+    enabled.mockReturnValue(true);
+    expect(await toolRegistry.ensureTool('image_gen')).toBe(tool);
+    expect(toolRegistry.getFunctionDeclarations()).toContainEqual(tool.schema);
+  });
+
   describe('registerTool', () => {
     it('should register a new tool', () => {
       const tool = new MockTool({ name: 'mock-tool' });

@@ -30,6 +30,8 @@ describe('custom service model purpose', () => {
     },
   );
   it.each([
+    { modelIds: [], advancedConfig: { purpose: 'image' } },
+    { modelIds: undefined, advancedConfig: { purpose: 'image' } },
     { advancedConfig: { purpose: 'unknown' } },
     { providerId: 'minimax', advancedConfig: { purpose: 'image' } },
     { protocol: 'anthropic', advancedConfig: { purpose: 'voice' } },

@@ -5208,15 +5208,14 @@ export class Config {
    */
   async setImageModel(model: string | undefined): Promise<void> {
     this.imageModel = model || undefined;
-    if (
-      !this.initialized ||
-      !this.toolRegistry ||
-      !this.isImageGenerationEnabled()
-    ) {
+    if (!this.initialized || !this.toolRegistry) {
       return;
     }
-    await this.registerImageGenerationTool(this.toolRegistry);
-    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    if (this.isImageGenerationEnabled()) {
+      await this.registerImageGenerationTool(this.toolRegistry);
+      await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
+    }
+    await this.llmClient.setTools();
   }
 
   /**

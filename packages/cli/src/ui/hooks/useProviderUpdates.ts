@@ -265,11 +265,15 @@ export function useProviderUpdates(
         const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
           (id) => !defaultIds.includes(id),
         );
-        const installPlan = buildInstallPlan(providerCfg, {
-          baseUrl: resolved,
-          apiKey: '',
-          modelIds: [...defaultIds, ...customIds],
-        });
+        const installPlan = buildInstallPlan(
+          providerCfg,
+          {
+            baseUrl: resolved,
+            apiKey: '',
+            modelIds: [...defaultIds, ...customIds],
+          },
+          settings.merged.modelProviders?.[providerCfg.protocol],
+        );
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
         ]!['version'] = pending.currentVersion;

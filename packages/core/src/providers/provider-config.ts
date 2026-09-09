@@ -267,10 +267,74 @@ function resolveProviderState(
 export function buildInstallPlan(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
+  existingModels: readonly ProviderModelConfig[] = [],
 ): ProviderInstallPlan {
   const protocol = inputs.protocol ?? config.protocol;
-  const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  let envKey = resolveEnvKey(config, inputs);
+  const providerOwns = resolveOwnsModel(config);
+  let models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  if (existingModels?.length && !inputs.advancedConfig?.purpose) {
+    models = models.map((model) => {
+      const existing = existingModels.find(
+        (entry) =>
+          providerOwns?.(entry) &&
+          entry.id === model.id &&
+          entry.baseUrl === model.baseUrl,
+      );
+      if (!existing) return model;
+      const generationConfig =
+        existing?.generationConfig || model.generationConfig
+          ? {
+              ...existing?.generationConfig,
+              ...model.generationConfig,
+              ...(existing?.generationConfig?.samplingParams ||
+              model.generationConfig?.samplingParams
+                ? {
+                    samplingParams: {
+                      ...existing?.generationConfig?.samplingParams,
+                      ...model.generationConfig?.samplingParams,
+                    },
+                  }
+                : {}),
+              ...(existing?.generationConfig?.customHeaders ||
+              model.generationConfig?.customHeaders
+                ? {
+                    customHeaders: {
+                      ...existing?.generationConfig?.customHeaders,
+                      ...model.generationConfig?.customHeaders,
+                    },
+                  }
+                : {}),
+            }
+          : undefined;
+      return {
+        ...existing,
+        ...model,
+        name: existing?.name ?? model.name,
+        ...(generationConfig ? { generationConfig } : {}),
+        ...(existing?.supportsImageGeneration
+          ? { supportsImageGeneration: true }
+          : {}),
+        ...(existing?.imageOnly ? { imageOnly: true } : {}),
+        ...(existing?.voiceOnly ? { voiceOnly: true } : {}),
+        ...((existing?.imageOnly || existing?.voiceOnly) && existing.envKey
+          ? { envKey: existing.envKey }
+          : {}),
+      };
+    });
+  }
+  if (
+    models.length > 0 &&
+    models.every((model) => model.imageOnly || model.voiceOnly)
+  ) {
+    const keys = new Set(models.map((model) => model.envKey));
+    if (keys.size > 1) {
+      throw new Error(
+        'Reconnect image and voice models separately to preserve their independent API keys.',
+      );
+    }
+    if (keys.size === 1 && models[0]?.envKey) envKey = models[0].envKey;
+  }
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
@@ -474,8 +538,12 @@ export function providerMatchesCredentials(
     for (const proto of protocols) {
       try {
         const derived = config.envKey(proto, baseUrl);
-        if (derived === envKey) {
-          configEnvKey = derived;
+        if (
+          derived === envKey ||
+          (config.id === 'custom-openai-compatible' &&
+            (envKey === `${derived}_IMAGE` || envKey === `${derived}_VOICE`))
+        ) {
+          configEnvKey = envKey;
           break;
         }
       } catch (err) {

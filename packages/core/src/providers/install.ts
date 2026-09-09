@@ -5,7 +5,12 @@
  */
 
 import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
+import type {
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from '../models/types.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -160,7 +165,9 @@ export async function applyProviderInstallPlan(
         (model) =>
           isSameModelIdentity(existing, model) &&
           (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
-            Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly)),
+            Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
+            (isImageGenerationCapable(existing) &&
+              !isImageGenerationCapable(model))),
       ),
     );
     const removesConversation =
@@ -174,7 +181,51 @@ export async function applyProviderInstallPlan(
       );
     if (changesRole || removesConversation) {
       throw new ProviderInstallError(
-        'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+        removesConversation
+          ? 'This install would remove existing conversation models. Include them in the provider selection, or add the service model with Custom Provider.'
+          : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
+  }
+
+  const voiceIds = new Set(
+    [
+      ...Object.values(previousRuntimeProviders).flatMap((models) =>
+        Array.isArray(models) ? models : [],
+      ),
+      ...serviceOnly,
+    ]
+      .filter((model) => model?.voiceOnly)
+      .map((model) => model.id),
+  );
+  const selectedVoice = settings.getValue('voiceModel');
+  if (typeof selectedVoice === 'string' && selectedVoice)
+    voiceIds.add(selectedVoice);
+  const changedVoiceIds = [...voiceIds].filter((id) =>
+    plan.modelProviders?.some((patch) =>
+      patch.models.some((model) => model.id === id),
+    ),
+  );
+  if (changedVoiceIds.length) {
+    let prospective = previousRuntimeProviders;
+    for (const patch of plan.modelProviders ?? []) {
+      prospective = applyModelProvidersPatch(prospective, patch);
+    }
+    const configured = new ModelsConfig({
+      modelProvidersConfig: prospective,
+      providerProtocolConfig: settings.getValue('providerProtocol') as
+        | ProviderProtocolConfig
+        | undefined,
+    }).getAllConfiguredModels();
+    if (
+      changedVoiceIds.some(
+        (id) => configured.filter((entry) => entry.id === id).length > 1,
+      )
+    ) {
+      throw new ProviderInstallError(
+        'A voice model with this ID is already configured at another endpoint. Edit that model or use a different model ID.',
         'modelPurpose',
         plan.authType,
       );
@@ -237,7 +288,15 @@ export async function applyProviderInstallPlan(
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
         preserveSelection
-          ? { ...patch, mergeStrategy: 'replace-owned' }
+          ? {
+              ...patch,
+              mergeStrategy: 'replace-owned',
+              ownsModel: (existing) =>
+                (patch.ownsModel?.(existing) ?? false) ||
+                patch.models.some((model) =>
+                  isSameModelIdentity(existing, model),
+                ),
+            }
           : patch,
       );
       settings.setValue(
@@ -323,6 +382,7 @@ export async function applyProviderInstallPlan(
 
     // Reload runtime config
     currentStep = 'reloadModelProviders';
+    updatedModelProviders = settings.getModelProviders();
     reloadModelProviders?.(updatedModelProviders);
     if (effectiveModelSelection?.modelId) {
       currentStep = 'syncAuthState';

@@ -305,6 +305,25 @@ describe('voice service', () => {
     );
   });
 
+  it.each(['user:pass@voice.example/v1', 'https:/user:pass@voice.example/v1'])(
+    'omits malformed endpoint metadata (%s)',
+    (baseUrl) => {
+      const settings = makeSettings({
+        user: {
+          modelProviders: {
+            openai: [
+              { id: 'qwen3-asr-flash', baseUrl, envKey: 'DASHSCOPE_API_KEY' },
+            ],
+          },
+        },
+      });
+      const models = listAvailableVoiceModels(settings);
+      expect(models).toHaveLength(1);
+      expect(models[0]?.baseUrl).toBeUndefined();
+      expect(JSON.stringify(models)).not.toContain('pass@');
+    },
+  );
+
   it('rejects unknown, duplicate, and unsupported voice model selections', () => {
     const settings = makeSettings({
       user: {
