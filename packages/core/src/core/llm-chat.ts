@@ -47,7 +47,11 @@ import {
   isRetryableUpstreamError,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator, InputModalities } from './contentGenerator.js';
+import type {
+  ContentGenerator,
+  InputModalities,
+  PromptCacheSharingParameters,
+} from './contentGenerator.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -4655,15 +4659,20 @@ export class LlmChat {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
-    const apiCall = () =>
-      generator.generateContentStream(
-        {
-          model,
-          contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
-        },
-        prompt_id,
-      );
+    const apiCall = () => {
+      // A continuation attempt's replay gate is already shut by the
+      // accumulated prefix, so the pipeline must release a parked tool-call
+      // finish rather than withhold it for a replay that cannot happen.
+      const request: PromptCacheSharingParameters = {
+        model,
+        contents: requestContents,
+        config: { ...this.generationConfig, ...params.config },
+        ...(transportContinuationPrefix !== undefined && {
+          continuationInFlight: true,
+        }),
+      };
+      return generator.generateContentStream(request, prompt_id);
+    };
     const cgConfig = this.config.getContentGeneratorConfig();
     const authType = overrides?.retryAuthType ?? cgConfig?.authType;
     const extraRetryErrorCodes =

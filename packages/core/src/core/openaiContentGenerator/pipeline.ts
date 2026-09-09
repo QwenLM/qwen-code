@@ -555,7 +555,7 @@ export class ContentGenerationPipeline {
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
@@ -571,8 +571,14 @@ export class ContentGenerationPipeline {
     // Whether any user-visible content (a non-thought part) has been yielded
     // on this stream. The error-path flush below consults it before
     // withholding a parked tool-call finish: it must mirror LlmChat's
-    // delivered-content notion, which excludes thought parts.
-    let contentYielded = false;
+    // delivered-content notion, which excludes thought parts. Seeded from the
+    // caller's continuation marker because the replay gate the withhold
+    // protects is turn-scoped (LlmChat's transportContinuationText), which a
+    // fresh attempt's own yields cannot see: with a continuation in flight
+    // that gate is already shut by the accumulated prefix, and withholding
+    // would only strand the model's decided tool call into another prose
+    // continuation.
+    let contentYielded = request.continuationInFlight === true;
     let pendingFinishProtocolTagSanitized:
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;

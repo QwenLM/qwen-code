@@ -26,7 +26,11 @@ import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+  type PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
@@ -5328,6 +5332,84 @@ describe('ContentGenerationPipeline', () => {
       // The thought reached the caller but does not count as delivered
       // content, so the tool-call finish stays parked.
       expect(results).toEqual([thoughtResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a parked functionCall finish on a continuation attempt even when only thought content was delivered', async () => {
+      // Sibling of the thought-only withhold case above with the request
+      // marked as a transport-continuation attempt. The replay gate the
+      // withhold protects is turn-scoped (LlmChat's
+      // transportContinuationText), and with a continuation in flight it is
+      // already shut by the accumulated prefix — which a fresh stream's own
+      // yields cannot show. The delivered-content flag is seeded from the
+      // continuation marker, so the decided tool call is released instead of
+      // staying parked into another prose continuation.
+      const request: PromptCacheSharingParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        continuationInFlight: true,
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'thought-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me plan this out.' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const thoughtResponse = new GenerateContentResponse();
+      thoughtResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me plan this out.', thought: true }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(thoughtResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The thought reaches the caller, and so does the parked tool-call
+      // finish: the continuation marker means the replay gate the withhold
+      // would have protected is already shut.
+      expect(results).toEqual([thoughtResponse, finishResponse]);
       expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
     });
   });
