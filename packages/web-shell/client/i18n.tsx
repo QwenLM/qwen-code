@@ -376,6 +376,7 @@ const EN: Messages = {
   'subagent.tools': (v) => `Tools (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} tools`,
   'subagent.toggleStream': 'Toggle agent stream details',
+  'subagent.creating': 'Creating…',
   'subagent.pending': 'pending',
   'subagent.running': 'running',
   'subagent.background': 'background task',
@@ -2479,21 +2480,21 @@ const EN: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': 'Plan before executing',
+  'plan.toggle.off': (v) =>
+    `Planning; execute with ${v?.mode} after approval. Click to exit planning.`,
+  'approval.option.executePlan': (v) => `Approve and execute · ${v?.mode}`,
   'mode.label.plan': 'Plan',
-  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
-  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
-  'mode.desc.planReview':
-    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2502,6 +2503,8 @@ const EN: Messages = {
     'Evaluate tool risk automatically, run safe actions, and confirm risky ones',
   'mode.desc.yolo': 'Automatically approve all tool calls in trusted contexts',
   'mode.select': 'Approval Mode',
+  'mode.changePending':
+    'A mode change or plan confirmation is pending. Try again when it finishes.',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `Auto-approved: ${v.tool}`
@@ -3541,6 +3544,27 @@ const EN: Messages = {
     `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
+  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.description':
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.completed': 'This turn has completed.',
+  'browserNotifications.failed':
+    'This turn failed. Return to view the details.',
+  'browserNotifications.ended':
+    'This turn has ended. Return to check the result.',
+  'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enabled': 'Enabled.',
+  'browserNotifications.disabled': 'Disabled.',
+  'browserNotifications.waiting': 'Waiting for browser permission.',
+  'browserNotifications.denied':
+    'Notifications are blocked. Allow them in your browser site settings.',
+  'browserNotifications.unavailable':
+    'Notifications are unavailable in this browser or page context.',
+  'browserNotifications.requesting': 'Waiting for your permission…',
+  'browserNotifications.error':
+    'Unable to enable or show notifications. Check your browser and system settings.',
+  'browserNotifications.temporary':
+    'This setting is saved for the current page only.',
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
@@ -3971,6 +3995,7 @@ const ZH: Messages = {
   'subagent.tools': (v) => `工具 (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} 个工具`,
   'subagent.toggleStream': '展开/收起子智能体详情',
+  'subagent.creating': '创建中',
   'subagent.pending': '等待中',
   'subagent.running': '运行中',
   'subagent.background': '后台任务',
@@ -5914,25 +5939,26 @@ const ZH: Messages = {
   'mode.name.auto-edit': 'auto-edit',
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
+  'plan.toggle.on': '执行前先制定计划',
+  'plan.toggle.off': (v) => `规划中，批准后按${v?.mode}执行。点击退出规划。`,
+  'approval.option.executePlan': (v) => `批准并执行 · ${v?.mode}`,
   'mode.label.plan': '计划',
-  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
-  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
-  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
   'mode.desc.yolo': '自动批准所有工具调用，适合可信任务环境',
   'mode.select': '审批模式',
+  'mode.changePending': '模式切换或计划确认尚未完成，请稍后重试。',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `已自动批准：${v.tool}`
@@ -6915,6 +6941,21 @@ const ZH: Messages = {
     `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
+  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.description':
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.completed': '本轮已完成。',
+  'browserNotifications.failed': '本轮执行失败，请返回查看。',
+  'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.allow': '允许通知',
+  'browserNotifications.enabled': '已开启。',
+  'browserNotifications.disabled': '未开启。',
+  'browserNotifications.waiting': '等待浏览器授权。',
+  'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
+  'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
+  'browserNotifications.requesting': '等待你的授权…',
+  'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
+  'browserNotifications.temporary': '设置仅在当前页面有效。',
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',

@@ -6427,6 +6427,45 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('reasoning effort override', () => {
+    it('reports static overrides for the resolved configured tiered route', () => {
+      const config = new Config({ ...baseParams });
+      const cfg: ContentGeneratorConfig = {
+        model: 'qwen3.8-flash',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        extra_body: { thinking_budget: 4096 },
+      };
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue(cfg);
+      const resolve = vi
+        .spyOn(config, 'getResolvedModelConfig')
+        .mockReturnValue({
+          id: cfg.model,
+          name: cfg.model,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: cfg.baseUrl!,
+          generationConfig: {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              efforts: ['low', 'medium', 'xhigh'],
+              defaultEffort: 'xhigh',
+              disableField: 'reasoning_effort',
+            },
+          },
+        });
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      expect(resolve).toHaveBeenCalledWith(
+        cfg.authType,
+        cfg.model,
+        cfg.baseUrl,
+      );
+      resolve.mockReturnValue(undefined);
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -6599,6 +6638,45 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(LlmClient).toHaveBeenCalledWith(config);
     });
+
+    it.each([false, true])(
+      'preserves thinking off through repeated auth with mandatory thinking %s',
+      async (thinkingMandatory) => {
+        const config = new Config({
+          ...baseParams,
+          generationConfig: { reasoning: false },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          () => ({
+            config: {
+              model: 'kimi-k2.6',
+              authType: AuthType.USE_OPENAI,
+              thinkingMandatory,
+              reasoning: { effort: 'high' },
+            },
+            sources: {},
+          }),
+        );
+
+        for (const initial of [true, undefined]) {
+          await config.refreshAuth(AuthType.USE_OPENAI, initial);
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            thinkingMandatory ? { effort: 'high' } : false,
+          );
+        }
+        if (!thinkingMandatory) {
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            false,
+          );
+        }
+
+        config.getModelsConfig().getGenerationConfig().reasoning = undefined;
+        await config.refreshAuth(AuthType.USE_OPENAI);
+        expect(config.getContentGeneratorConfig().reasoning).toEqual({
+          effort: 'high',
+        });
+      },
+    );
 
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
       // Regression: the provider sync (applyResolvedModelDefaults) overwrites
@@ -11239,6 +11317,79 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  describe('DAC plan workflow', () => {
+    it.each([
+      ApprovalMode.DEFAULT,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+      ApprovalMode.YOLO,
+    ])('keeps planning while selecting %s for execution', (mode) => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const revision = config.getApprovalModeRevision();
+
+      config.setPlanMode(true, mode);
+
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(mode);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+      config.setPlanMode(false, mode);
+      expect(config.getApprovalMode()).toBe(mode);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+    });
+
+    it('clears the selected policy on approved or legacy exits', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.YOLO, {
+        fromApprovedPlanExit: true,
+      });
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+    });
+
+    it('rejects privileged policies before changing an untrusted config', () => {
+      const config = new Config(baseParams);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setPlanMode(true, ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+      expect(config.getPlanExecutionMode()).toBeUndefined();
+      config.setPlanMode(true, ApprovalMode.DEFAULT);
+      expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+        TrustGateError,
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('rejects Plan as an execution policy and isolates derived configs', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setPlanMode(true, ApprovalMode.PLAN)).toThrow(
+        'Plan is not an execution approval mode',
+      );
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      const child = deriveConfig(config);
+      expect(child.getPlanExecutionMode()).toBeUndefined();
+      expect(() => child.setPlanMode(false, ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change plan workflow mode',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPlanExecutionMode()).toBe(ApprovalMode.YOLO);
+    });
   });
 
   describe('prePlanMode tracking', () => {
