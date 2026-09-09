@@ -61,7 +61,6 @@ import {
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { WorkspaceDrainingError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
@@ -8946,22 +8945,26 @@ async function runQwenServeImpl(
       const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
         app: Application,
       ): void => {
-        if (shuttingDown) {
-          daemonLog.info(
-            'workspace runtime ensure after preheat skipped: shutting down',
-          );
-          return;
-        }
         if (runtimeStartupError !== undefined) {
           daemonLog.info(
             'workspace runtime ensure after preheat skipped: runtime startup failed',
           );
           return;
         }
+        if (shuttingDown) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: shutting down',
+          );
+          return;
+        }
         const registry = app.locals?.['workspaceRegistry'] as
           | WorkspaceRegistry
           | undefined;
-        const runtime = registry?.primaryEntry.current?.runtime;
+        const primaryEntry = registry?.primaryEntry;
+        const runtime =
+          primaryEntry?.state === 'active'
+            ? primaryEntry.current?.runtime
+            : undefined;
         if (!runtime) {
           daemonLog.info(
             'workspace runtime ensure after preheat skipped: no primary runtime',
@@ -8980,7 +8983,7 @@ async function runQwenServeImpl(
         void coordinator
           .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
           .catch((err) => {
-            if (err instanceof WorkspaceDrainingError) {
+            if (shuttingDown || runtimeStartupError !== undefined) {
               return;
             }
             daemonLog.warn(
