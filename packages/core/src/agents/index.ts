@@ -100,6 +100,15 @@ export {
   A2A_GRANT_SCOPES,
 } from './workspace-agents/a2a-grants.js';
 export {
+  acquireRunLease,
+  renewRunLease,
+  checkRunLease,
+  releaseRunLease,
+  DEFAULT_RUN_LEASE_MS,
+} from './workspace-agents/host-lease.js';
+export type { LeaseRefusal, LeaseResult } from './workspace-agents/host-lease.js';
+export type { RunLease } from './workspace-agents/types.js';
+export {
   classifyCodexTurn,
   codexOutcomeToCloseKind,
   CODEX_RESULT_ITEM_TYPES,

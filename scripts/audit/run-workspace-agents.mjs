@@ -50,6 +50,7 @@ export * from '${repo}/${src}/external-intake.js';
 export * from '${repo}/${src}/a2a-grants.js';
 export * from '${repo}/${src}/a2a-server.js';
 export * from '${repo}/${src}/codex-turn-result.js';
+export * from '${repo}/${src}/host-lease.js';
 export { deleteThread, enqueueThreadEvent } from '${repo}/${src}/store.js';
 export { ToolNames } from '${repo}/packages/core/src/tools/tool-names.js';
 `,
@@ -2830,6 +2831,154 @@ ok(
   ['review', 'unclosed'].every((kind) =>
     ['waiting', 'blocked', 'review', 'unclosed', 'stranded'].includes(kind),
   ),
+);
+
+console.log('\n34. Host leases: a vanished worker must not overwrite its successor (P4)');
+// A managed Host reaches out and nothing reaches in, so the daemon cannot tell
+// a Host that is thinking from one whose network died. Work it holds has to
+// become available again on its own — and the danger in that is the first Host
+// coming back to write over what a second has since done.
+const leaseThread = await startFor('Leased to a Host');
+const T0 = 1_000_000;
+
+const got = await M.acquireRunLease(
+  ROOT,
+  { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-a', ttlMs: 1000 },
+  T0,
+);
+ok('a Host can take a lease on live work', got.ok === true, JSON.stringify(got));
+ok('the lease names the attempt it is for', got.value.attempt === 1, String(got.value?.attempt));
+ok(
+  "a second Host is refused while the first's lease is live",
+  (await M.acquireRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-b' },
+    T0 + 500,
+  )).reason === 'held_by_other_host',
+);
+ok(
+  'and being refused does not disturb the holder',
+  (await M.checkRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
+    T0 + 500,
+  )).ok === true,
+);
+
+// Heartbeats extend a hold; they do not revive a lapsed one.
+const renewed = await M.renewRunLease(
+  ROOT,
+  { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId, ttlMs: 1000 },
+  T0 + 500,
+);
+ok('a live lease renews', renewed.ok === true);
+ok('and the window moves with it', renewed.value.expiresAt === T0 + 1500);
+ok(
+  'a lapsed lease does not renew — that is the case the window exists to notice',
+  (await M.renewRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
+    T0 + 99_999,
+  )).reason === 'stale_lease',
+);
+ok(
+  "and one Host cannot renew another's lease",
+  (await M.renewRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: 'someone-elses' },
+    T0 + 600,
+  )).reason === 'stale_lease',
+);
+
+// The whole point: reclaim, then refuse the ghost.
+const reclaimed = await M.acquireRunLease(
+  ROOT,
+  { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-b' },
+  T0 + 99_999,
+);
+ok('once it lapses, another Host may take the work', reclaimed.ok === true);
+ok(
+  'with a new lease id, never the old one',
+  reclaimed.value.leaseId !== got.value.leaseId,
+);
+ok(
+  "the vanished Host's write is now refused",
+  (await M.checkRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: got.value.leaseId },
+    T0 + 100_000,
+  )).reason === 'stale_lease',
+);
+ok(
+  'while the new holder may write',
+  (await M.checkRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
+    T0 + 100_000,
+  )).ok === true,
+);
+
+// The subtler case: same Host, run restarted. An id from the previous attempt
+// would otherwise still look current.
+const restarted = await M.readThread(ROOT, leaseThread.th.id);
+await M.writeThread(ROOT, {
+  ...restarted,
+  runs: restarted.runs.map((r) =>
+    r.id === leaseThread.runId ? { ...r, attempts: r.attempts + 1 } : r,
+  ),
+});
+ok(
+  'a lease from the previous attempt is refused even though its id matches',
+  (await M.checkRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
+    T0 + 100_000,
+  )).reason === 'attempt_moved_on',
+);
+ok(
+  'and it cannot be renewed back into currency either',
+  (await M.renewRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: reclaimed.value.leaseId },
+    T0 + 100_000,
+  )).reason === 'attempt_moved_on',
+);
+
+// Giving it back early, and only your own.
+const third = await M.acquireRunLease(
+  ROOT,
+  { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-c' },
+  T0 + 200_000,
+);
+ok(
+  "a Host cannot release a lease it does not hold",
+  (await M.releaseRunLease(ROOT, {
+    threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: 'not-mine',
+  })).reason === 'stale_lease',
+);
+ok(
+  'but can hand its own back before the window ends',
+  (await M.releaseRunLease(ROOT, {
+    threadId: leaseThread.th.id, runId: leaseThread.runId, leaseId: third.value.leaseId,
+  })).ok === true,
+);
+ok(
+  'after which the work is immediately available again',
+  (await M.acquireRunLease(
+    ROOT,
+    { threadId: leaseThread.th.id, runId: leaseThread.runId, hostId: 'host-d' },
+    T0 + 200_001,
+  )).ok === true,
+);
+
+// Terminal work is not leasable: a Host would do work nothing will accept.
+const finished = await startFor('Already finished');
+await M.finishRun(ROOT, finished.th.id, finished.runId, { status: 'completed' });
+ok(
+  'a terminal run cannot be leased',
+  (await M.acquireRunLease(ROOT, {
+    threadId: finished.th.id, runId: finished.runId, hostId: 'host-a',
+  })).reason === 'not_leasable',
 );
 
 await fs.rm(tmp, { recursive: true, force: true });

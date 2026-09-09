@@ -326,6 +326,10 @@ function isValidRun(value: unknown): value is ThreadRun {
     isOptionalNonNegativeInteger(value['transcriptEndOffset']) &&
     (value['closeKind'] === undefined ||
       CLOSE_KINDS.has(value['closeKind'] as RunCloseKind)) &&
+    // Malformed fails the record rather than being dropped: a dropped lease
+    // reads as "nobody holds this run", which is the one answer that lets two
+    // Hosts execute the same work.
+    (value['lease'] === undefined || isValidRunLease(value['lease'])) &&
     isOptionalNonNegativeInteger(value['closeAcknowledgedAtSequence']) &&
     (value['finalMessageId'] === undefined ||
       isValidId(value['finalMessageId'])) &&
@@ -472,6 +476,17 @@ function isValidNotifyTarget(value: unknown): boolean {
     isRecord(target) &&
     (target['type'] === 'user' || target['type'] === 'chat') &&
     isNonEmptyString(target['id'])
+  );
+}
+
+function isValidRunLease(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['hostId']) &&
+    isNonEmptyString(value['leaseId']) &&
+    isNonNegativeInteger(value['attempt']) &&
+    isFiniteTimestamp(value['expiresAt']) &&
+    isFiniteTimestamp(value['acquiredAt'])
   );
 }
 

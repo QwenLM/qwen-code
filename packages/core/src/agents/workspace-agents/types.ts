@@ -307,6 +307,17 @@ export type ThreadRunStatus =
  * treat it as a crash and revive it. A stranded run waits for a person, who
  * decides whether to re-raise the work or drop it — the system does neither.
  */
+/** One Host's temporary hold on a run. */
+export interface RunLease {
+  hostId: string;
+  /** Minted fresh on every acquisition; never reused across attempts. */
+  leaseId: string;
+  /** The run attempt this lease is for. A later attempt invalidates it. */
+  attempt: number;
+  expiresAt: number;
+  acquiredAt: number;
+}
+
 export type RunCloseKind =
   | 'waiting'
   | 'blocked'
@@ -354,6 +365,16 @@ export interface ThreadRun {
    */
   usageBaselineTokens?: number;
   failureStage?: string;
+  /**
+   * The outbound Host currently holding this run, if any.
+   *
+   * A lease rather than an assignment: a Host on the far side of a NAT can
+   * vanish without saying so, and work has to become available again without
+   * a person intervening. What makes that safe is that re-leasing mints a new
+   * `leaseId` and the attempt moves on, so the vanished worker's late write is
+   * refused rather than overwriting whoever picked the work up next.
+   */
+  lease?: RunLease;
   /** Workspace-wide FIFO key. */
   queueSequence: number;
   /**
