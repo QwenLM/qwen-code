@@ -66,7 +66,7 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** and the primary listener is trusted, so any local process that can reach the port can use the full operator API, including executing code as the daemon user. Route-specific workspace trust, session ownership, `X-Qwen-Client-Id`, permission, feature, validation, and resource checks still apply. The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
-For an API-only daemon, disable the Web Shell without narrowing the daemon's REST or SSE API:
+For an API-only daemon, disable the Web Shell. The session, prompt, workspace, permission and SSE routes are unchanged; the surfaces bound to the Web Shell go with it — Local Control enablement fails closed on every platform, and on macOS the `/live/*` routes and the `/live/host` WebSocket are not registered:
 
 ```bash
 qwen serve --no-web
