@@ -31,9 +31,12 @@ import {
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { INTERNAL_AGENT_VIEW_PTY_HOST_ARG } from './entry-flags.js';
 
-export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
-  '--internal-agent-view-pty-host';
+// The constant lives in entry-flags.ts so the CLI entry can scan for it
+// without importing this runtime module on every launch; re-exported so
+// existing import sites keep working.
+export { INTERNAL_AGENT_VIEW_PTY_HOST_ARG };
 
 // Wall budget ≈ 15 s once per-probe request timeouts are counted.
 const HOST_READY_RETRIES = 50;
