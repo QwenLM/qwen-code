@@ -25332,6 +25332,61 @@ describe('Session', () => {
         );
       });
 
+      it('carries the spend figures into the continuation prompt', async () => {
+        // `usage` is optional on both sides of the host hop, so a dropped
+        // copy typechecks and shows up only as a prompt that lost its budget
+        // line on this host.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-usage',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 4,
+            activeTimeMs: 0,
+            tokensUsed: 1_234,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-usage' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+          usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalled();
+        });
+        const request = (mockChat.sendMessageStream as ReturnType<typeof vi.fn>)
+          .mock.calls[0]?.[1] as { message: Array<Record<string, unknown>> };
+        expect(
+          request.message.some(
+            (part) =>
+              typeof part['text'] === 'string' &&
+              (part['text'] as string).includes(
+                'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+              ),
+          ),
+        ).toBe(true);
+      });
+
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
         // `prompt()` rejects ahead of the try whose finally settles the turn
         // when `assertCanStartTurn` throws — a session that began closing
