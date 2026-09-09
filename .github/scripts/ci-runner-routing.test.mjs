@@ -609,53 +609,59 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     );
   });
 
-  it('retries a failed checkout once, behind a workspace reset', () => {
-    // What the retry can and cannot fix, per the cited runs: a corrupt
-    // object in the reused workspace's .git (run 33851931669, #11016) is
-    // healed by the wipe below; a host whose egress to github.com is dead
-    // (runs 34088422718 and 34098892239 — one host each, while peer hosts
-    // checked out fine, both recovered by re-dispatch) is not, because
-    // the job's runner is fixed at pickup. The retry must stay bounded
-    // (one), gated on the primary's real outcome, and must be the step
-    // that fails the job when the failure is real.
+  it('fails a dead-egress host fast and wipes the workspace for the next job', () => {
+    // The shape this PR picks, per the cited runs: a host whose egress
+    // to github.com is dead (runs 34088422718 and 34098892239 — one host
+    // each while peer hosts checked out fine) recovered ONLY by
+    // re-dispatch to another host, and a job's runner is fixed at
+    // pickup, so no in-job retry can escape that class. The earlier
+    // tolerated-primary + same-host retry pair paid three more ~135s
+    // connect timeouts on the dead host (~16 of the job's 60 minutes,
+    // eating the 2100s shard-retry reserve run-e2e-tests.sh gates on)
+    // and still failed. What a retry COULD have healed — a corrupt
+    // object in the reused workspace's .git (run 33851931669, #11016) —
+    // the reset heals for the NEXT job on this runner instead: the
+    // failed checkout fails the job fast at ~8 minutes, and the guarded
+    // wipe leaves a clean workspace for the next occupant.
     const checkouts = job.steps.filter((s) =>
       String(s.uses || '').startsWith('actions/checkout'),
     );
-    assert.equal(checkouts.length, 2, 'exactly the primary and one retry');
-    const [primary, retry] = checkouts;
-    assert.equal(primary.id, 'checkout');
     assert.equal(
-      primary['continue-on-error'],
-      true,
-      'a failed primary must not pre-fail the job, or the retry could never run',
+      checkouts.length,
+      1,
+      'a same-host retry cannot escape dead egress — exactly one attempt',
     );
-    assert.equal(retry.if, "${{ steps.checkout.outcome == 'failure' }}");
+    const [primary] = checkouts;
+    assert.equal(
+      primary.id,
+      'checkout',
+      'the reset gate reads steps.checkout.outcome',
+    );
     assert.ok(
-      !('continue-on-error' in retry),
-      'a persistent failure must fail the job, not downgrade to a warning',
+      !('continue-on-error' in primary),
+      'a failed checkout must fail the job fast, not linger on a dead host',
     );
-    assert.equal(
-      primary.uses,
-      retry.uses,
-      'both attempts must pin the same actions/checkout revision',
-    );
-    // The equality check passes for ANY shared value, so a coordinated
-    // drift of both steps ships green; pin this lane's absolute revision
-    // (web-shell-browser-regression in this workflow pins another).
     assert.equal(
       primary.uses,
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10', // v6.0.3
     );
-    assert.deepEqual(
-      primary.with,
-      retry.with,
-      'both attempts must check out identically',
+    assert.ok(
+      !('with' in primary),
+      'no checkout inputs — an unpinned one would change the fetch unreviewed',
+    );
+    assert.ok(
+      !job.steps.some((s) => String(s.name).startsWith('Checkout (')),
+      'no same-host retry step',
     );
     const names = job.steps.map((s) => s.name);
     const reset = names.indexOf('Reset workspace after failed checkout');
     assert.ok(reset !== -1, 'the workspace reset must exist');
     const step = job.steps[reset];
-    assert.equal(step.if, "${{ steps.checkout.outcome == 'failure' }}");
+    assert.equal(
+      step.if,
+      "${{ runner.environment == 'self-hosted' && failure() && steps.checkout.outcome == 'failure' }}",
+      'pool-only (a hosted workspace dies with its VM), only once the job is already failing, and only on a CHECKOUT failure — after a test failure the workspace is not the suspect',
+    );
     // The reset aims a root-capable recursive delete at the shared pool
     // workspace, so it carries the pool-wipe guard set: the `:?` aborts
     // and the symlinked-component refusal from qwen-code-pr-review.yml's
@@ -672,16 +678,32 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       'a guard refusal must fail the job, not downgrade to a warning',
     );
     // The exec harness below reproduces `bash -e`, so the step must run
-    // under the default bash wrapper — a `shell:` override would change
-    // the lane the exec cases witness. scripts/tests/e2e-workflow.test.js
-    // pins the workflow- and job-level `defaults:` absence; the step's
-    // effective shell is pinned here by resolution.
+    // under the default bash wrapper. The resolution pins every level
+    // at once: a `shell:` or `defaults.run.shell:` override — step, job,
+    // or workflow — either resolves to a non-bash value and fails this
+    // assertion, or names bash and stays the lane the exec cases
+    // witness.
     const shell =
       step.shell ?? job.defaults?.run?.shell ?? e2eDoc.defaults?.run?.shell;
     assert.ok(
       shell === undefined || shell === 'bash',
       'the reset must run under the default bash wrapper the exec harness reproduces',
     );
+    // The exec cases build the script's environment themselves, so they
+    // cannot see an env override shadowing the pinned commands (PATH,
+    // BASH_ENV) or moving the containment boundary (GITHUB_WORKSPACE,
+    // RUNNER_WORKSPACE) — at step, job, or workflow level. The sibling
+    // wipe in serve-ab.yml carries the same pin.
+    for (const envMap of [step.env, job.env, e2eDoc.env]) {
+      assert.ok(
+        !envMap ||
+          (envMap.BASH_ENV === undefined &&
+            envMap.PATH === undefined &&
+            envMap.GITHUB_WORKSPACE === undefined &&
+            envMap.RUNNER_WORKSPACE === undefined),
+        'BASH_ENV, PATH, GITHUB_WORKSPACE, or RUNNER_WORKSPACE can shadow the pinned reset guards',
+      );
+    }
     // Contents-only, like the siblings: the runner owns the directory
     // node, so the wipe empties it in place and never removes the node
     // itself; the heal branch recreates the leaf only when it was a
@@ -701,11 +723,21 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
       /mkdir -p/,
       'only the heal branch may recreate the leaf, never a healthy node',
     );
-    const primaryIdx = job.steps.indexOf(primary);
-    const retryIdx = job.steps.indexOf(retry);
+    // No retry follows the wipe, so the warnings must say who inherits
+    // its outcome — a message still promising a retry describes a
+    // construct that is gone.
+    assert.match(
+      step.run,
+      /wiping the workspace so the next job on this runner starts clean/,
+    );
+    assert.doesNotMatch(
+      step.run,
+      /retrying once|checkout retry proceeds|retry runs against/,
+      'no retry follows the wipe — the warnings must not promise one',
+    );
     assert.ok(
-      primaryIdx < reset && reset < retryIdx,
-      'the reset must sit between the primary and the retry',
+      job.steps.indexOf(primary) < reset,
+      'the reset reads the checkout outcome, so it must follow the checkout',
     );
   });
 
@@ -713,10 +745,10 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
   // shell (`bash -e`) plus the pipefail the script sets for itself: the
   // implicit errexit is what would kill a heal step ending on a nonzero
   // status in production, so the exec tests reproduce it instead of
-  // asserting the script's shape. The shell premise has two pinned
-  // halves: the workflow- and job-level `defaults:` absence in
-  // scripts/tests/e2e-workflow.test.js, and this step's effective shell
-  // (unset or bash) in the test above.
+  // asserting the script's shape. The shell premise is pinned by the
+  // resolution in the test above: a `shell:` or `defaults.run.shell:`
+  // override at any level either fails its assertion or names bash, the
+  // lane these cases reproduce.
   const resetStep = job.steps.find(
     (s) => s.name === 'Reset workspace after failed checkout',
   );
@@ -754,22 +786,33 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         assert.ok(existsSync(ws), 'the wipe must keep the directory node');
         assert.deepEqual(readdirSync(ws), []);
         assert.match(r.stdout, /::warning::checkout failed on /);
+        assert.match(
+          r.stdout,
+          /next job on this runner starts clean/,
+          'no retry follows — the warning must say who inherits the wipe',
+        );
         assert.doesNotMatch(r.stdout, /workspace wipe left survivors/);
       } finally {
         rmSync(rws, { recursive: true, force: true });
       }
     }
-    // Heal: a previous job replaced the workspace leaf with a symlink.
-    // Refusing it removes nothing and wedges every later job on this
-    // runner (#9480), so the step unlinks and recreates the leaf — the
-    // link's target keeps its content — and wipes as usual.
+    // Heal: a previous job replaced the workspace leaf with a symlink —
+    // here pointing OUTSIDE the runner workspace while its parent stays
+    // inside. Refusing the leaf removes nothing and wedges every later
+    // job on this runner (#9480), and judging the canonicalized PARENT
+    // is what lets the heal proceed: resolving the leaf instead would
+    // follow the link and refuse the very repair that must succeed. The
+    // step unlinks and recreates the leaf; the foreign target keeps its
+    // content because rm -f never follows the link.
     {
       const { rws, ws } = makePool();
+      const outside = realpathSync(
+        mkdtempSync(join(tmpdir(), 'e2e-checkout-outside-')),
+      );
       try {
         rmSync(ws, { recursive: true });
-        mkdirSync(join(rws, 'target'));
-        writeFileSync(join(rws, 'target', 'keep.txt'), 'x');
-        symlinkSync(join(rws, 'target'), ws);
+        writeFileSync(join(outside, 'keep.txt'), 'x');
+        symlinkSync(outside, ws);
         const r = runReset({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: rws });
         assert.equal(r.status, 0, r.stderr);
         assert.ok(existsSync(ws), 'the heal must recreate the leaf');
@@ -781,11 +824,118 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
         assert.deepEqual(readdirSync(ws), []);
         assert.match(r.stdout, /::warning::healing workspace /);
         assert.ok(
-          existsSync(join(rws, 'target', 'keep.txt')),
+          existsSync(join(outside, 'keep.txt')),
           'rm -f on the link must never follow it',
         );
       } finally {
         rmSync(rws, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    }
+    // The link target is bytes a previous job on this shared pool chose,
+    // and the runner splits step stdout on \r as well as \n — an
+    // unflattened target would let the heal line spawn a forged
+    // workflow command, and an uncapped one floods the log. These two
+    // fixtures witness the flatten and the cap.
+    {
+      const { rws, ws } = makePool();
+      try {
+        rmSync(ws, { recursive: true });
+        const forged = join(rws, 'tgt\r::error::forged');
+        mkdirSync(forged);
+        symlinkSync(forged, ws);
+        const r = runReset({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: rws });
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, /::warning::healing workspace /);
+        assert.doesNotMatch(
+          r.stdout,
+          /\r/,
+          'the heal line must flatten CR as well as LF',
+        );
+        for (const line of r.stdout.split('\n')) {
+          assert.ok(
+            !line.startsWith('::error::'),
+            `a forged workflow command reached stdout: ${line}`,
+          );
+        }
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+      }
+    }
+    {
+      const { rws, ws } = makePool();
+      try {
+        rmSync(ws, { recursive: true });
+        const longTarget = join(rws, 'x'.repeat(250));
+        mkdirSync(longTarget);
+        symlinkSync(longTarget, ws);
+        const r = runReset({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: rws });
+        assert.equal(r.status, 0, r.stderr);
+        const healLine = r.stdout
+          .split('\n')
+          .find((l) => l.includes('pointed at'));
+        assert.ok(healLine, 'the heal must still report its target');
+        assert.equal(
+          healLine.split('pointed at ')[1].length,
+          200,
+          'the printed target is capped at 200 characters',
+        );
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+      }
+    }
+    // Heal: the other half of the predicate — a leftover regular file
+    // where the workspace should be wedges the step exactly the same
+    // way, and takes the non-symlink arm of the announce.
+    {
+      const { rws, ws } = makePool();
+      try {
+        rmSync(ws, { recursive: true });
+        writeFileSync(ws, 'not a directory');
+        const r = runReset({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: rws });
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, /it was not a directory/);
+        assert.ok(
+          lstatSync(ws).isDirectory(),
+          'the leaf must be recreated as a real directory',
+        );
+        assert.deepEqual(readdirSync(ws), []);
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+      }
+    }
+    // Refusal: the heal judges the canonicalized PARENT — a leaf that
+    // is a symlink UNDER a symlinked intermediate resolves to a parent
+    // outside the runner workspace, and the refusal must fire BEFORE
+    // the rm/mkdir, or the heal deletes and recreates a path on foreign
+    // storage (the mutation the guard exists for). The wipe guards
+    // below would still refuse afterwards, but a report is not a
+    // prevention.
+    {
+      const { rws, ws } = makePool();
+      const outside = realpathSync(
+        mkdtempSync(join(tmpdir(), 'e2e-checkout-outside-')),
+      );
+      try {
+        rmSync(ws, { recursive: true });
+        symlinkSync(outside, join(rws, 'link'));
+        symlinkSync('target-that-need-not-exist', join(outside, 'leaf'));
+        const r = runReset({
+          GITHUB_WORKSPACE: join(rws, 'link', 'leaf'),
+          RUNNER_WORKSPACE: rws,
+        });
+        assert.equal(r.status, 1, `expected a loud refusal: ${r.stdout}`);
+        assert.match(
+          r.stdout,
+          /::error::refusing to heal workspace outside the runner workspace/,
+        );
+        assert.ok(
+          lstatSync(join(outside, 'leaf')).isSymbolicLink(),
+          'the refusal precedes the rm/mkdir — the foreign leaf keeps its type',
+        );
+      } finally {
+        rmSync(rws, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
       }
     }
     // Refusal: a symlinked INTERMEDIATE path component redirects the
