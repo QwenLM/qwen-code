@@ -347,7 +347,6 @@ type ActivePrompt = {
   loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
-  stopStreaming?: () => void;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -1523,9 +1522,6 @@ export abstract class ChannelBase {
     this.config = {
       ...config,
       outputMode: config.outputMode ?? 'final_only',
-      ...(config.blockStreaming === 'on'
-        ? { blockStreaming: 'off' as const }
-        : {}),
     };
     this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
@@ -3006,7 +3002,6 @@ export abstract class ChannelBase {
           return false;
         }
         active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
@@ -6041,23 +6036,8 @@ export abstract class ChannelBase {
     return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
-  private stopActiveStreaming(
-    active: ActivePrompt,
-    sessionId: string,
-    reason: string,
-  ): void {
-    try {
-      active.stopStreaming?.();
-    } catch (err) {
-      process.stderr.write(
-        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
-  }
-
   /**
-   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
-   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * Cancel the active turn and wait (bounded) for it to wind down. Fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
    * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
@@ -6071,7 +6051,6 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -7225,7 +7204,6 @@ export abstract class ChannelBase {
             process.stderr.write(
               `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
             );
-            this.stopActiveStreaming(active, sessionId, 'steer');
             // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
             // best-effort cancel that fails isn't silently invisible to operators.
             void this.bridge.cancelSession(sessionId).catch((err) => {

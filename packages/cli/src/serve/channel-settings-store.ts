@@ -121,25 +121,6 @@ function assertStringRecord(
   }
 }
 
-function assertNumberRecord(
-  key: string,
-  value: unknown,
-  allowedKeys: ReadonlySet<string>,
-): void {
-  if (!isRecord(value)) {
-    throw invalidConfig(`Channel field "${key}" must be an object.`);
-  }
-  for (const [nestedKey, nestedValue] of Object.entries(value)) {
-    if (
-      !allowedKeys.has(nestedKey) ||
-      typeof nestedValue !== 'number' ||
-      !Number.isFinite(nestedValue)
-    ) {
-      throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
-    }
-  }
-}
-
 function assertSharedField(
   key: string,
   value: unknown,
@@ -158,7 +139,6 @@ function assertSharedField(
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     outputMode: new Set(['final_only', 'process_and_result']),
-    blockStreaming: new Set(['on', 'off']),
   };
   if (Object.hasOwn(enumValues, key)) {
     if (typeof value !== 'string' || !enumValues[key]!.has(value)) {
@@ -255,14 +235,6 @@ function assertSharedField(
       value,
       new Set(['id', 'displayName', 'description']),
     );
-    return true;
-  }
-  if (key === 'blockStreamingChunk') {
-    assertNumberRecord(key, value, new Set(['minChars', 'maxChars']));
-    return true;
-  }
-  if (key === 'blockStreamingCoalesce') {
-    assertNumberRecord(key, value, new Set(['idleMs']));
     return true;
   }
   if (key === 'memoryScope') {

@@ -1119,14 +1119,12 @@ describe('GithubChannel', () => {
       expect(channel.getAllowedUsersForTest()).toEqual(['alice']);
     });
 
-    it('forces final-only delivery and appends the publication policy', () => {
+    it('appends the publication policy', () => {
       const config = makeConfig({
-        blockStreaming: 'on',
         instructions: 'Respond in Chinese.',
       });
       new TestableGithubChannel('test-github', config, makeBridge());
 
-      expect(config.blockStreaming).toBe('off');
       expect(config.instructions).toContain('GitHub publication policy:');
       expect(config.instructions).toContain('<no-reply/>');
       expect(config.instructions).toContain('Respond in Chinese.');

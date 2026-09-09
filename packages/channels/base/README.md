@@ -89,7 +89,6 @@ Inbound:  Platform message
             → ChannelAgentBridge.prompt() → agent
 
 Outbound: Agent response
-            → BlockStreamer (if enabled: split into blocks at paragraph boundaries)
             → sendMessage() → platform
 ```
 
@@ -103,7 +102,6 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | --------------- | ------------------------------------------------------------------------------------ |
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
 | `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
-| `BlockStreamer` | Progressive multi-message delivery for block streaming                               |
 | `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
 | `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
 | `GroupGate`     | Group chat policy and @mention gating                                                |
@@ -366,10 +364,12 @@ interface Attachment {
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 
-## Block Streaming
+## Response delivery
 
-The legacy `blockStreaming`, `blockStreamingChunk`, and
-`blockStreamingCoalesce` fields remain accepted when reading existing settings.
+The obsolete `blockStreaming`, `blockStreamingChunk`, and
+`blockStreamingCoalesce` settings no longer affect response delivery. Existing
+stored values may be retained while editing unrelated settings, but new or
+changed values are rejected.
 Request result delivery now follows `outputMode`: the last complete
 assistant reply only, or one message per complete assistant output. It does not flush
 partial output based on paragraph size or an idle timer. Interactive adapters

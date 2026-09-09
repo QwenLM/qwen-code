@@ -355,7 +355,7 @@ class ResponseTrackingChannel extends TestChannel {
   }
 }
 
-class SlowBlockSendChannel extends TestChannel {
+class SlowResponseSendChannel extends TestChannel {
   sendCompletions = 0;
   completionsAtPromptEnd: number[] = [];
 
@@ -940,9 +940,6 @@ describe('ChannelBase', () => {
       async (detailed) => {
         const ch = createChannel({
           outputMode: detailed ? 'process_and_result' : 'final_only',
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 1, maxChars: 3 },
-          blockStreamingCoalesce: { idleMs: 0 },
         });
         const run = await begin(ch);
         ch.dispatchBackgroundTask(task('a'));
@@ -10031,35 +10028,6 @@ describe('ChannelBase', () => {
       expect(maps.collectBuffers.has(sid)).toBe(false);
     });
 
-    it('/clear stops streaming on the cancelled prompt (mirror /cancel), not just cancels it', async () => {
-      const ch = createChannel();
-      await ch.handleInbound(envelope({ text: 'hi' }));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Seed an in-flight prompt whose BlockStreamer is exposed via stopStreaming.
-      const stopStreaming = vi.fn();
-      const active = {
-        cancelled: false,
-        done: Promise.resolve(),
-        resolve: () => {},
-        stopStreaming,
-      };
-      (
-        ch as unknown as { activePrompts: Map<string, typeof active> }
-      ).activePrompts.set(sid, active);
-
-      ch.sent = [];
-      await ch.handleInbound(envelope({ text: '/clear' }));
-      expect(ch.sent[0]!.text).toContain('Session cleared');
-
-      // Must do BOTH: flip cancelled AND stop streaming. Cancelled alone only
-      // suppresses new chunks — text already buffered in the BlockStreamer still
-      // leaks out via the idle timer after the session is cleared unless stopped.
-      expect(active.cancelled).toBe(true);
-      expect(stopStreaming).toHaveBeenCalledTimes(1);
-    });
-
     it('/clear completes (does not hang) when a wedged turn never resolves active.done', async () => {
       const ch = createChannel({ instructions: 'Be brief.' });
       await ch.handleInbound(envelope({ text: 'hi' }));
@@ -16570,54 +16538,6 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('stops active streaming before emitting steer cancellation lifecycle', async () => {
-      let resolveFirst!: (value: string) => void;
-      const firstPrompt = new Promise<string>((resolve) => {
-        resolveFirst = resolve;
-      });
-      (bridge.prompt as ReturnType<typeof vi.fn>)
-        .mockReturnValueOnce(firstPrompt)
-        .mockResolvedValueOnce('second');
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
-        () => {
-          resolveFirst('late');
-          return Promise.resolve();
-        },
-      );
-      const ch = createChannel();
-      const order: string[] = [];
-      vi.spyOn(
-        ch as unknown as {
-          stopActiveStreaming: (
-            active: unknown,
-            sessionId: string,
-            reason: string,
-          ) => void;
-        },
-        'stopActiveStreaming',
-      ).mockImplementation(() => {
-        order.push('stop');
-      });
-      vi.spyOn(
-        ch as unknown as {
-          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
-        },
-        'onTaskLifecycle',
-      ).mockImplementation((event) => {
-        if (event.type === 'cancelled') {
-          order.push('cancelled');
-        }
-      });
-
-      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const second = ch.handleInbound(envelope({ text: 'replacement' }));
-      await first;
-      await second;
-
-      expect(order).toEqual(['stop', 'cancelled']);
-    });
-
     it('emits one cancellation lifecycle event for repeated steer messages before the active turn settles', async () => {
       let resolveFirst!: (value: string) => void;
       const firstPrompt = new Promise<string>((resolve) => {
@@ -16657,7 +16577,7 @@ describe('ChannelBase', () => {
     });
   });
 
-  describe('complete output delivery with legacy block streaming settings', () => {
+  describe('complete output delivery', () => {
     it('passes the prompt session to complete response delivery', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
@@ -16669,9 +16589,6 @@ describe('ChannelBase', () => {
         'test-chan',
         defaultConfig({
           outputMode: 'process_and_result',
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 1, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
         }),
         bridge,
       );
@@ -16694,13 +16611,10 @@ describe('ChannelBase', () => {
           return Promise.reject(new Error('agent boom'));
         },
       );
-      const ch = new SlowBlockSendChannel(
+      const ch = new SlowResponseSendChannel(
         'test-chan',
         defaultConfig({
           outputMode: 'process_and_result',
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 5, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
         }),
         bridge,
       );
@@ -16711,7 +16625,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([]);
     });
 
-    it('sends one complete output despite low block streaming thresholds', async () => {
+    it('sends one complete output after streamed chunks', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (bridge.prompt as any).mockImplementation(
         (sid: string, _text: string) => {
@@ -16726,9 +16640,6 @@ describe('ChannelBase', () => {
 
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 100 },
-        blockStreamingCoalesce: { idleMs: 0 },
       });
       await ch.handleInbound(envelope());
       expect(ch.sent.map(({ text }) => text)).toEqual([
@@ -16755,9 +16666,6 @@ describe('ChannelBase', () => {
       );
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
       });
 
       await ch.handleInbound(envelope());
@@ -16767,7 +16675,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('prefers model text over slash-command output with legacy settings', async () => {
+    it('prefers model text over slash-command output', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit(
@@ -16785,9 +16693,6 @@ describe('ChannelBase', () => {
       );
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
       });
 
       await ch.handleInbound(envelope());
@@ -16811,9 +16716,6 @@ describe('ChannelBase', () => {
 
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 100, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 0 },
       });
 
       await ch.handleInbound(envelope());
@@ -16903,9 +16805,6 @@ describe('ChannelBase', () => {
 
         const ch = createChannel({
           outputMode: 'process_and_result',
-          blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 5, maxChars: 1000 },
-          blockStreamingCoalesce: { idleMs: 500 },
         });
         ch.enableCancelCommand();
         const prompt = ch.handleInbound(envelope({ text: 'long task' }));
@@ -16972,9 +16871,6 @@ describe('ChannelBase', () => {
 
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 1000 },
-        blockStreamingCoalesce: { idleMs: 500 },
       });
       ch.enableCancelCommand();
       const prompt = ch.handleInbound(envelope({ text: 'long task' }));
@@ -17048,7 +16944,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('never sends held block-streaming chunks when the pending cancel succeeds', async () => {
+    it('never sends held chunks when the pending cancel succeeds', async () => {
       let resolvePrompt!: (v: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
         resolvePrompt = resolve;
@@ -17066,9 +16962,6 @@ describe('ChannelBase', () => {
 
       const ch = createChannel({
         outputMode: 'process_and_result',
-        blockStreaming: 'on',
-        blockStreamingChunk: { minChars: 5, maxChars: 10 },
-        blockStreamingCoalesce: { idleMs: 500 },
       });
       ch.enableCancelCommand();
       const prompt = ch.handleInbound(envelope({ text: 'long task' }));
@@ -17076,8 +16969,8 @@ describe('ChannelBase', () => {
 
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
-      // Far past every send threshold — pushing this into the BlockStreamer
-      // during the pending window would emit a block the cancel can't recall.
+      // Chunks arriving during the pending window must remain hidden until the
+      // cancellation outcome is known.
       (bridge as unknown as EventEmitter).emit(
         'textChunk',
         's-1',
@@ -18553,135 +18446,6 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'steered response' }),
         ]),
       );
-    });
-
-    it("steer: best-effort cancel stops the running turn's streamer (stopStreaming called)", async () => {
-      // The steered turn must STOP the wedged turn's BlockStreamer, not just flip
-      // `cancelled` — otherwise text already buffered in the old turn's streamer
-      // can still flush out via its idle timer after the new turn has started.
-      // Mutation check: removing `active.stopStreaming?.()` from the steer path
-      // leaves the spy uncalled and fails the assertion below.
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? promiseA : Promise.resolve('steered response');
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-
-      // Turn A starts and stays in-flight (don't await it — it can't settle yet).
-      const pA = ch.handleInbound(envelope({ text: 'A' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Replace stopStreaming on the SAME active-prompt object the steer path reads
-      // from activePrompts, so we observe steer's best-effort cancel invoking it.
-      const active = (
-        ch as unknown as {
-          activePrompts: Map<string, { stopStreaming?: () => void }>;
-        }
-      ).activePrompts.get(sid)!;
-      const stopStreaming = vi.fn();
-      active.stopStreaming = stopStreaming;
-
-      // Turn B steers in: it best-effort cancels A (which must stop A's streamer)
-      // and chains behind A's tail.
-      const pB = ch.handleInbound(envelope({ text: 'B' }));
-
-      // A completes → B dequeues and runs.
-      resolveA('A (cancelled, never sent)');
-      await pA;
-      await pB;
-
-      expect(stopStreaming).toHaveBeenCalledTimes(1);
-    });
-
-    it('steer: logs and continues if stopStreaming throws', async () => {
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? promiseA : Promise.resolve('steered response');
-      });
-      const stderr = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        const ch = createChannel({ dispatchMode: 'steer' });
-        const pA = ch.handleInbound(envelope({ text: 'A' }));
-        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0][0] as string;
-        const active = (
-          ch as unknown as {
-            activePrompts: Map<string, { stopStreaming?: () => void }>;
-          }
-        ).activePrompts.get(sid)!;
-        active.stopStreaming = () => {
-          throw new Error('stop failed');
-        };
-
-        const pB = ch.handleInbound(envelope({ text: 'B' }));
-        resolveA('A (cancelled, never sent)');
-        await pA;
-        await pB;
-
-        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
-        expect(logged).toContain('stopStreaming threw during steer');
-        expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
-      } finally {
-        stderr.mockRestore();
-      }
-    });
-
-    it('/clear logs and continues if stopStreaming throws', async () => {
-      let resolveA!: (v: string) => void;
-      const promiseA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(promiseA);
-      const stderr = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        const ch = createChannel();
-        const pA = ch.handleInbound(envelope({ text: 'A' }));
-        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0][0] as string;
-        const active = (
-          ch as unknown as {
-            activePrompts: Map<string, { stopStreaming?: () => void }>;
-          }
-        ).activePrompts.get(sid)!;
-        active.stopStreaming = () => {
-          throw new Error('stop failed');
-        };
-
-        const pClear = ch.handleInbound(envelope({ text: '/clear' }));
-        resolveA('A (cancelled, never sent)');
-        await pA;
-        await pClear;
-
-        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
-        expect(logged).toContain('stopStreaming threw during cancel');
-        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
-          true,
-        );
-      } finally {
-        stderr.mockRestore();
-      }
     });
 
     it('steer: waits for the running turn to finish before starting the new turn (no concurrent bridge.prompt)', async () => {
