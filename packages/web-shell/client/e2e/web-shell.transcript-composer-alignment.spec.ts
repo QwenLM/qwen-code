@@ -199,5 +199,17 @@ for (const navigation of [true, false]) {
       await page.mouse.move(500, 10);
       await expect(preview).toHaveCount(0);
     }
+    await test.step('docked environment panel preserves composer alignment', async () => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const toggle = page.locator('[data-web-shell-environment-toggle]');
+      const panel = page.getByTestId('environment-panel');
+      await toggle.click();
+      await expect(panel).toBeVisible();
+      await expect(panel).toHaveAttribute('data-floating', 'false');
+      await expectSameEdges(message, composer);
+      await toggle.click();
+      await expect(panel).toBeHidden();
+      await expectSameEdges(message, composer);
+    });
   });
 }
