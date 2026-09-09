@@ -696,7 +696,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     config.approvalMode ??= 'default';
 
     const userInstructions = config.instructions?.trim() || undefined;
-    config.blockStreaming = 'off';
     config.instructions = channelInstructions(userInstructions, profile);
     super(name, config, bridge, options);
     this.router.setChannelApprovalMode(name, config.approvalMode);

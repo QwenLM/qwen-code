@@ -118,6 +118,10 @@ export const tokenPlanProvider: ProviderConfig = {
         model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL)) ||
       (typeof model.name === 'string' &&
         model.name.startsWith('[ModelStudio Token Plan]'))),
+  // Same server-side search tools as the Standard endpoints, billed against
+  // the plan's quota (probe 2026-09-08: `web_search` + `web_extractor` both
+  // execute and are reported under `usage.x_tools`).
+  webSearch: { backend: 'dashscope' },
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };
