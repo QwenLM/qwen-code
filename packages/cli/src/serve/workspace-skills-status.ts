@@ -32,12 +32,13 @@
 
 import {
   ExtensionManager,
+  ExtensionStore,
   SkillManager,
   Storage,
   isSafeModeEnv,
   getExtensionDisplayName,
 } from '@qwen-code/qwen-code-core';
-import type { Config, SkillLevel } from '@qwen-code/qwen-code-core';
+import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
@@ -86,6 +87,7 @@ type SkillManagerConfigShim = Pick<
 interface WorkspaceSkillManagers {
   skillManager: SkillManager;
   extensionManager?: ExtensionManager;
+  extensionSkillStates: Map<Extension, Map<string, boolean>>;
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -146,6 +148,7 @@ async function buildWorkspaceSkillsStatus(
       const safeMode =
         (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
       let extensionManager: ExtensionManager | undefined;
+      const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
         const directory = Storage.getUserExtensionsDir();
         const entry = await fs
@@ -156,12 +159,35 @@ async function buildWorkspaceSkillsStatus(
           });
         if (entry) {
           await fs.readdir(directory);
+          const extensionStore = new ExtensionStore();
           extensionManager = new ExtensionManager({
+            extensionStore,
             workspaceDir: workspaceCwd,
             isWorkspaceTrusted: workspaceTrusted,
             locale,
           });
-          await extensionManager.refreshCache();
+          const snapshot = await extensionManager.refreshCacheWithSnapshot();
+          for (const extension of extensionManager.getLoadedExtensions()) {
+            const states = new Map<string, boolean>();
+            for (const skill of extension.skills ?? []) {
+              const name = skill.name.trim().toLowerCase();
+              const defaults = extension.config.skillStates;
+              const defaultEnabled =
+                defaults && Object.hasOwn(defaults, name)
+                  ? defaults[name]!
+                  : true;
+              states.set(
+                name,
+                extensionStore.getSkillWorkspaceOverride(
+                  snapshot,
+                  extension.id,
+                  workspaceCwd,
+                  name,
+                ) ?? defaultEnabled,
+              );
+            }
+            extensionSkillStates.set(extension, states);
+          }
         }
       }
       const shim: SkillManagerConfigShim = {
@@ -193,11 +219,11 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      cached = { skillManager, extensionManager };
+      cached = { skillManager, extensionManager, extensionSkillStates };
       managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
-    const { skillManager, extensionManager } = cached;
+    const { skillManager, extensionManager, extensionSkillStates } = cached;
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
     const skills = await skillManager.listSkills();
     const statuses = skills.map((skill) => {
@@ -205,10 +231,11 @@ async function buildWorkspaceSkillsStatus(
         skill.level === 'extension'
           ? extensions.find((e) => e.name === skill.extensionName)
           : undefined;
-      const state =
-        extensionManager && extension
-          ? extensionManager.getExtensionSkillState(extension.id, skill.name)
-          : undefined;
+      const enabled = extension
+        ? extensionSkillStates
+            .get(extension)
+            ?.get(skill.name.trim().toLowerCase())
+        : undefined;
       // Preserve missing display names; the helper otherwise falls back to the name.
       const localizedSkill =
         extension?.displayName !== undefined
@@ -219,9 +246,8 @@ async function buildWorkspaceSkillsStatus(
           : skill;
       return mapSkillConfigToStatus(localizedSkill, disablements, {
         enabled:
-          !state ||
           enabledNames.has(skill.name.trim().toLowerCase()) ||
-          (state.workspaceEnabled ?? state.defaultEnabled),
+          enabled !== false,
       });
     });
     for (const extension of extensions) {

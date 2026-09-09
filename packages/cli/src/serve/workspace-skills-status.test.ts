@@ -604,7 +604,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     async (mode) => {
       await writeExtension('suite', ['hidden']);
       if (mode === 'safe') vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
-      const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+      const refresh = vi.spyOn(
+        ExtensionManager.prototype,
+        'refreshCacheWithSnapshot',
+      );
       const status = await createWorkspaceSkillsStatusProvider({
         workspaceTrusted: mode !== 'untrusted' && mode !== 'inert-untrusted',
         includeUntrustedSkills: mode === 'inert-untrusted',
@@ -669,9 +672,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
 
   it('does not cache a failed store read as an initialized empty catalog', async () => {
     await writeExtension('suite', ['visible']);
-    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockRejectedValueOnce(
-      new Error('store unavailable'),
-    );
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    ).mockRejectedValueOnce(new Error('store unavailable'));
     const provider = createWorkspaceSkillsStatusProvider();
     expect(await provider(qwenHome)).toMatchObject({
       initialized: false,
@@ -743,7 +747,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       path.join(qwenHome, '.qwen', 'settings.json'),
       JSON.stringify({ skills: { disabledLevels: ['extension'] } }),
     );
-    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const refresh = vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    );
     const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
     expect(status.initialized).toBe(true);
     // Discovery is gated: no active extension Skill is listed as usable...
@@ -786,7 +793,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       path.join(workspace, '.qwen', 'settings.json'),
       JSON.stringify({ general: { language: 'en' } }),
     );
-    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const refresh = vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    );
     const provider = createWorkspaceSkillsStatusProvider();
     const readNames = async () =>
       (await provider(workspace)).skills
@@ -882,7 +892,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
   );
 
   it('does not create an extension store when no extensions directory exists', async () => {
-    const refresh = vi.spyOn(ExtensionManager.prototype, 'refreshCache');
+    const refresh = vi.spyOn(
+      ExtensionManager.prototype,
+      'refreshCacheWithSnapshot',
+    );
     const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
     expect(status.initialized).toBe(true);
     expect(status.skills.some((skill) => skill.name === 'review')).toBe(true);
@@ -923,4 +936,51 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       expect(status.errors?.[0]?.error).toContain('ENOENT');
     },
   );
+
+  it('preserves each manifest default and store override when extension ids collide', async () => {
+    for (const [name, type, source] of [
+      ['first', 'git', 'https://github.com/example/suite'],
+      ['second', 'github-release', 'https://github.com/example/suite.git'],
+    ]) {
+      const directory = await writeExtension(name!, [`${name}-skill`], {
+        [`${name}-skill`]: name !== 'second',
+      });
+      await fsp.writeFile(
+        path.join(directory, '.qwen-extension-install.json'),
+        JSON.stringify({ type, source }),
+      );
+    }
+    const manager = new ExtensionManager({
+      workspaceDir: qwenHome,
+      isWorkspaceTrusted: true,
+    });
+    await manager.refreshCache();
+    const [first, second] = manager.getLoadedExtensions();
+    expect(first!.id).toBe(second!.id);
+    const provider = createWorkspaceSkillsStatusProvider();
+    for (let i = 0; i < 2; i++) {
+      const status = await provider(qwenHome);
+      expect(status.initialized).toBe(true);
+      expect(
+        status.skills.filter((s) => s.level === 'extension'),
+      ).toMatchObject([
+        { name: 'first-skill', status: 'ok' },
+        { name: 'second-skill', status: 'disabled', disabledReason: 'default' },
+      ]);
+    }
+    const store = new ExtensionStore();
+    await store.setSkillWorkspaceOverrides(
+      second!,
+      qwenHome,
+      { 'first-skill': false, 'second-skill': true },
+      0,
+    );
+    provider.invalidate?.(qwenHome);
+    const status = await provider(qwenHome);
+    expect(status.initialized).toBe(true);
+    expect(status.skills.filter((s) => s.level === 'extension')).toMatchObject([
+      { name: 'first-skill', status: 'disabled', disabledReason: 'default' },
+      { name: 'second-skill', status: 'ok' },
+    ]);
+  });
 });
