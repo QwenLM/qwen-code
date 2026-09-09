@@ -2307,6 +2307,7 @@ bad`);
         });
         vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
           getResolvedModel: vi.fn().mockReturnValue(undefined),
+          getGenerationConfig: vi.fn().mockReturnValue({}),
         } as unknown as ReturnType<Config['getModelsConfig']>);
       });
 
