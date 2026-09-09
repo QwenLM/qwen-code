@@ -919,7 +919,8 @@ export class BackgroundTaskRegistry {
 
   failUnresponsive(agentId: string, error: string): void {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.status !== 'running' || entry.notified) return;
+    if (!entry || entry.notified) return;
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
 
     entry.status = 'failed';
     entry.endTime = Date.now();

@@ -15,6 +15,7 @@ import {
   type AgentTaskRegistration,
   type BackgroundApproval,
   type BackgroundTaskEntry,
+  type NotificationMeta,
   type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import {
@@ -290,6 +291,45 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledOnce();
     const [displayText] = callback.mock.calls[0] as [string, string];
     expect(displayText).toContain('failed');
+  });
+
+  it('retains the physical slot when the watchdog escalates a cancelled agent', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+
+    // task_stop wins the abort-grace race: the watchdog aborted first, but
+    // the user cancels before the five-second escalation fires. The
+    // abort-ignoring execution is still holding its physical slot, so the
+    // escalation must retain it and request runtime recycle even though the
+    // visible status became `cancelled`.
+    registry.cancel('test-1');
+    expect(registry.get('test-1')!.status).toBe('cancelled');
+
+    registry.failUnresponsive(
+      'test-1',
+      'Background agent made no model/control progress for 900000ms.',
+    );
+
+    const entry = registry.get('test-1')!;
+    expect(entry.status).toBe('failed');
+    expect(entry.retainsPhysicalSlot).toBe(true);
+    expect(callback).toHaveBeenCalledOnce();
+    const [, , meta] = callback.mock.calls[0] as [
+      string,
+      string,
+      NotificationMeta,
+    ];
+    expect(meta.recordOnly).toBe(true);
   });
 
   describe('resident background agents', () => {
