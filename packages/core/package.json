@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -153,6 +153,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
     "@types/minimatch": "^5.1.2",
+    "@types/node": "20.19.1",
     "@types/picomatch": "^4.0.1",
     "@types/prompts": "^2.4.9",
     "@types/tar": "^6.1.13",

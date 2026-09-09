@@ -78,7 +78,7 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
-  renderGoalContinuationPrompt,
+  renderGoalContinuationTurn,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -3711,14 +3711,7 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationPrompt({
-                      goalId: queuedGoal.permit.goalId,
-                      revision: queuedGoal.permit.revision,
-                      objective: queuedGoal.continuationContext,
-                      objectiveUpdated: queuedGoal.objectiveUpdated,
-                      windDown: queuedGoal.windDown,
-                      verifierFeedback: queuedGoal.verifierFeedback,
-                    }),
+                    queryToSend: renderGoalContinuationTurn(queuedGoal),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
@@ -5498,13 +5491,14 @@ export const useLlmStream = (
             if (
               status === 'complete' ||
               status === 'blocked' ||
+              status === 'paused' ||
               status === 'usage_limited'
             ) {
               addItem(
                 {
                   type: 'goal_state',
                   snapshot,
-                  cause: status,
+                  cause: status === 'paused' ? 'pause' : status,
                 },
                 Date.now(),
               );

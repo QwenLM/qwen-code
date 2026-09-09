@@ -1044,6 +1044,11 @@
   color: var(--success-color, #3fb950);
 }
 
+.sessionStatusUnknown {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
 .sessionSourceIcon {
   width: 18px;
   height: 18px;
@@ -1491,35 +1496,6 @@
   width: 100%;
   border-radius: 8px;
   cursor: pointer;
-}
-
-.manageWorkspacesRow {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.manageWorkspacesRow:hover,
-.manageWorkspacesRow:focus-visible {
-  background: var(--secondary);
-  color: var(--foreground);
-}
-
-.manageWorkspacesRow svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
 }
 
 .confirmContent {
